@@ -112,57 +112,77 @@ impl Bpb {
 
 /// In-memory FAT table cache
 struct FatTable {
-    /// FAT entries indexed by cluster number
+    /// FAT entries indexed by cluster number, as on disk: the top four bits
+    /// are reserved and kept on every write (Linux's `fat32_ent_put`).
     entries: Vec<u32>,
+    /// Free data clusters (2 and up), kept as entries change.
+    free: u32,
 }
+
+/// The 28 bits of a FAT32 entry that hold the cluster number.
+const FAT32_ENTRY_MASK: u32 = 0x0FFF_FFFF;
 
 impl FatTable {
     fn new(num_clusters: usize) -> Self {
-        Self {
-            entries: vec![0u32; num_clusters],
-        }
+        Self::from_raw(vec![0u32; num_clusters])
+    }
+
+    /// A table loaded from disk, counting its free clusters once.
+    fn from_raw(entries: Vec<u32>) -> Self {
+        let free = entries
+            .iter()
+            .skip(2)
+            .filter(|&&e| e & FAT32_ENTRY_MASK == FAT32_FREE)
+            .count() as u32;
+        Self { entries, free }
     }
 
     fn get(&self, cluster: u32) -> u32 {
         if (cluster as usize) < self.entries.len() {
-            self.entries[cluster as usize] & 0x0FFF_FFFF
+            self.entries[cluster as usize] & FAT32_ENTRY_MASK
         } else {
             FAT32_EOC
         }
     }
 
     fn set(&mut self, cluster: u32, value: u32) {
-        if (cluster as usize) < self.entries.len() {
-            self.entries[cluster as usize] = value & 0x0FFF_FFFF;
+        let Some(entry) = self.entries.get_mut(cluster as usize) else {
+            return;
+        };
+        let was_free = *entry & FAT32_ENTRY_MASK == FAT32_FREE;
+        *entry = (*entry & !FAT32_ENTRY_MASK) | (value & FAT32_ENTRY_MASK);
+        let is_free = value & FAT32_ENTRY_MASK == FAT32_FREE;
+        if cluster >= 2 {
+            match (was_free, is_free) {
+                (true, false) => self.free -= 1,
+                (false, true) => self.free += 1,
+                _ => {}
+            }
         }
+    }
+
+    /// Free data clusters.
+    fn free_clusters(&self) -> u32 {
+        self.free
     }
 
     /// Find a free cluster starting from `hint`
     fn alloc_cluster(&mut self, hint: u32) -> Option<u32> {
         let start = core::cmp::max(hint as usize, 2);
-        // Search from hint to end
-        for i in start..self.entries.len() {
-            if self.entries[i] == FAT32_FREE {
-                self.entries[i] = FAT32_EOC;
-                return Some(i as u32);
-            }
-        }
-        // Wrap around: search from 2 to hint
-        for i in 2..start {
-            if self.entries[i] == FAT32_FREE {
-                self.entries[i] = FAT32_EOC;
-                return Some(i as u32);
-            }
-        }
-        None
+        // Search from hint to end, then wrap around from 2 to hint.
+        let found = (start..self.entries.len())
+            .chain(2..start.min(self.entries.len()))
+            .find(|&i| self.entries[i] & FAT32_ENTRY_MASK == FAT32_FREE)?;
+        self.set(found as u32, FAT32_EOC);
+        Some(found as u32)
     }
 
     /// Free a cluster chain starting from `start`
     fn free_chain(&mut self, start: u32) {
         let mut current = start;
-        while (2..FAT32_EOC).contains(&current) {
+        while (2..FAT32_EOC).contains(&current) && (current as usize) < self.entries.len() {
             let next = self.get(current);
-            self.entries[current as usize] = FAT32_FREE;
+            self.set(current, FAT32_FREE);
             if next >= FAT32_EOC {
                 break;
             }
@@ -626,9 +646,7 @@ impl VfsNode for Fat32Node {
         st.block_size = state.bpb.cluster_size() as u64;
         let clusters = state.fat.entries.len() as u32;
         st.blocks = clusters.saturating_sub(2) as u64;
-        st.blocks_free = (2..clusters)
-            .filter(|&c| state.fat.get(c) == FAT32_FREE)
-            .count() as u64;
+        st.blocks_free = state.fat.free_clusters() as u64;
         st.blocks_avail = st.blocks_free;
         if state.readonly {
             st.flags = super::statfs::ST_RDONLY;
@@ -925,18 +943,14 @@ impl Fat32Fs {
         let total_data_sectors = bpb.total_sectors_32 as usize - bpb.data_start_sector() as usize;
         let total_clusters = total_data_sectors / bpb.sectors_per_cluster as usize + 2;
 
-        let mut fat = FatTable::new(total_clusters);
+        let mut raw = vec![0u32; total_clusters];
         if fat_start + fat_size_bytes <= image_data.len() {
             let fat_data = &image_data[fat_start..fat_start + fat_size_bytes];
-            for i in 0..core::cmp::min(total_clusters, fat_data.len() / 4) {
-                fat.entries[i] = u32::from_le_bytes([
-                    fat_data[i * 4],
-                    fat_data[i * 4 + 1],
-                    fat_data[i * 4 + 2],
-                    fat_data[i * 4 + 3],
-                ]);
+            for (entry, bytes) in raw.iter_mut().zip(fat_data.chunks_exact(4)) {
+                *entry = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
             }
         }
+        let fat = FatTable::from_raw(raw);
 
         // Load all sectors into cache
         let mut sector_cache = BTreeMap::new();
@@ -1201,6 +1215,38 @@ mod tests {
         // Free cluster 2
         fat.free_chain(2);
         assert_eq!(fat.get(2), FAT32_FREE);
+    }
+
+    /// An entry is free when its low 28 bits are zero; the top four are
+    /// reserved and kept on every write (Linux's `fat32_ent_put`). The free
+    /// count is kept as clusters are allocated and freed, so statfs does
+    /// not scan the table.
+    #[test]
+    fn fat_table_keeps_reserved_bits_and_counts_free_clusters() {
+        let mut raw = vec![0u32; 8];
+        raw[0] = 0x0FFF_FFF8;
+        raw[1] = 0xFFFF_FFFF;
+        raw[2] = 0xF000_0000; // free, reserved bits set
+        raw[3] = 0x1000_0004; // in use, points at 4
+        raw[4] = 0x0FFF_FFFF; // end of chain
+        let mut fat = FatTable::from_raw(raw);
+        assert_eq!(fat.free_clusters(), 4);
+        assert_eq!(fat.get(2), FAT32_FREE);
+        assert_eq!(fat.get(3), 4);
+        assert_eq!(fat.alloc_cluster(2), Some(2));
+        assert_eq!(fat.entries[2], 0xF000_0000 | (FAT32_EOC & 0x0FFF_FFFF));
+        assert_eq!(fat.free_clusters(), 3);
+        fat.free_chain(3);
+        assert_eq!(fat.entries[3], 0x1000_0000);
+        assert_eq!(fat.free_clusters(), 5);
+        fat.set(5, 6);
+        fat.set(5, 7);
+        assert_eq!(fat.free_clusters(), 4);
+        fat.set(5, FAT32_FREE);
+        assert_eq!(fat.free_clusters(), 5);
+        // Out of range is ignored.
+        fat.set(100, 1);
+        assert_eq!(fat.free_clusters(), 5);
     }
 
     #[test]

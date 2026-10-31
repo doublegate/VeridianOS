@@ -213,6 +213,19 @@
 
 ### Fixed
 
+- BlockFS on a read-only disk (QEMU's `readonly=on`) refuses every change with EROFS before it
+  starts, as Linux and the ext4 driver do; writes, creates, renames, chmod and the rest succeeded
+  in memory and failed only when the cache was written back.
+- `/proc` entries have one inode number each, the same in a directory listing and in stat (all
+  were 0, and getdents numbered entries by their position, so `find` and `ls -i` disagreed with
+  stat); the root is 1, as on Linux.
+- FAT32 keeps a count of free clusters, so statfs no longer scans the whole table, and keeps the
+  four reserved bits of each entry when it rewrites one; an entry whose low 28 bits are zero is
+  free even with those bits set (it was taken as in use).
+- An ext4 superblock with a block size above 64 KiB (`s_log_block_size` over 6) is refused as
+  Linux refuses it, instead of shifting the size out of range.
+- `veridian-elfctl` pads notes from the start of their segment, as the kernel reads them, so a
+  note segment whose file offset is not a multiple of its 8-byte alignment is read right.
 - A system call could read and write a `PROT_NONE` page that had been touched before `mprotect`
   (N-132 follow-up): such a page keeps its frame mapped for the kernel only, so the kernel's own
   copy did not fault and `write` from it or `read` into it succeeded where Linux returns EFAULT.

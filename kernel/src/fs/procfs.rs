@@ -52,6 +52,49 @@ impl ProcNode {
             node_type: ProcNodeType::SystemFile(name),
         }
     }
+
+    /// The node's path below /proc, which names it uniquely: "" for the
+    /// root, "sys/kernel" or "123" for a directory, "123/status" for a
+    /// process file. A system file's key is its internal name, unique too.
+    fn key(&self) -> String {
+        match &self.node_type {
+            ProcNodeType::Root => String::new(),
+            ProcNodeType::ProcessDir(pid) => format!("{}", pid),
+            ProcNodeType::ProcessFile(pid, name) => format!("{}/{}", pid, name),
+            ProcNodeType::SystemFile(name) => format!("file:{}", name),
+            ProcNodeType::SubDir(dir) => dir.clone(),
+            ProcNodeType::SelfExe => String::from("self/exe"),
+        }
+    }
+
+    /// One stable inode number per node, used by both stat and readdir:
+    /// 1 for the root (Linux's PROC_ROOT_INO), otherwise a 64-bit FNV-1a
+    /// hash of the node's key, kept above 1.
+    fn inode(&self) -> u64 {
+        if let ProcNodeType::Root = self.node_type {
+            return 1;
+        }
+        let hash = self.key().bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+            (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+        hash.max(2)
+    }
+
+    /// The inode of the directory holding this one.
+    fn parent_inode(&self) -> u64 {
+        match &self.node_type {
+            ProcNodeType::SubDir(dir) => match dir.rsplit_once('/') {
+                Some((parent, _)) => ProcNode {
+                    node_type: ProcNodeType::SubDir(String::from(parent)),
+                }
+                .inode(),
+                None => 1,
+            },
+            // The root's parent is outside procfs; Linux reports the mount
+            // point's, which procfs cannot see.
+            _ => 1,
+        }
+    }
 }
 
 impl VfsNode for ProcNode {
@@ -257,7 +300,7 @@ impl VfsNode for ProcNode {
             created: 0,
             modified: 0,
             accessed: 0,
-            inode: 0,
+            inode: self.inode(),
         })
     }
 
@@ -267,13 +310,13 @@ impl VfsNode for ProcNode {
         entries.push(DirEntry {
             name: String::from("."),
             node_type: NodeType::Directory,
-            inode: 0,
+            inode: self.inode(),
         });
 
         entries.push(DirEntry {
             name: String::from(".."),
             node_type: NodeType::Directory,
-            inode: 0,
+            inode: self.parent_inode(),
         });
 
         match &self.node_type {
@@ -321,7 +364,7 @@ impl VfsNode for ProcNode {
                         entries.push(DirEntry {
                             name: format!("{}", pid),
                             node_type: NodeType::Directory,
-                            inode: pid,
+                            inode: ProcNode::new_process_dir(pid).inode(),
                         });
                     }
                 } else {
@@ -329,7 +372,7 @@ impl VfsNode for ProcNode {
                     entries.push(DirEntry {
                         name: String::from("1"),
                         node_type: NodeType::Directory,
-                        inode: 1,
+                        inode: ProcNode::new_process_dir(1).inode(),
                     });
                 }
             }
@@ -373,6 +416,21 @@ impl VfsNode for ProcNode {
             _ => return Err(KernelError::FsError(FsError::NotADirectory)),
         }
 
+        // The rest are numbered as the node lookup returns, so a listing
+        // and a stat of the same name agree. Every listed name is found;
+        // should one not be, it still gets a stable nonzero number.
+        for entry in entries.iter_mut().filter(|e| e.inode == 0) {
+            entry.inode = self
+                .lookup(&entry.name)
+                .and_then(|node| node.metadata())
+                .map(|m| m.inode)
+                .unwrap_or_else(|_| {
+                    ProcNode {
+                        node_type: ProcNodeType::SubDir(format!("{}/{}", self.key(), entry.name)),
+                    }
+                    .inode()
+                });
+        }
         Ok(entries)
     }
 
@@ -830,6 +888,45 @@ mod tests {
             .metadata()
             .unwrap();
         assert_eq!(file.permissions, Permissions::from_mode(0o444));
+    }
+
+    /// Every /proc entry has one inode number, the same in a directory
+    /// listing and in stat (find and `ls -i` compare the two), nonzero and
+    /// distinct; the root is 1, Linux's PROC_ROOT_INO. They were all 0, and
+    /// getdents numbered entries by their position instead.
+    #[test]
+    fn inode_numbers_agree_between_readdir_and_stat() {
+        fn walk(dir: &dyn VfsNode, parent: u64, seen: &mut Vec<u64>) {
+            let ino = dir.metadata().unwrap().inode;
+            for e in dir.readdir().unwrap() {
+                match e.name.as_str() {
+                    "." => assert_eq!(e.inode, ino),
+                    ".." => assert_eq!(e.inode, parent),
+                    name => {
+                        let Ok(child) = dir.lookup(name) else {
+                            continue; // a process that is not in the table
+                        };
+                        let child_ino = child.metadata().unwrap().inode;
+                        assert_eq!(e.inode, child_ino, "{name}");
+                        assert!(child_ino > 1, "{name}");
+                        assert!(!seen.contains(&child_ino), "{name}");
+                        seen.push(child_ino);
+                        if e.node_type == NodeType::Directory {
+                            walk(child.as_ref(), ino, seen);
+                        }
+                    }
+                }
+            }
+        }
+        let root = ProcNode::new_root();
+        assert_eq!(root.metadata().unwrap().inode, 1);
+        let mut seen = Vec::new();
+        walk(&root, 1, &mut seen);
+        assert!(seen.len() >= 15, "{}", seen.len());
+        // The same file looked up twice is the same inode.
+        let a = root.lookup("uptime").unwrap().metadata().unwrap().inode;
+        let b = root.lookup("uptime").unwrap().metadata().unwrap().inode;
+        assert_eq!(a, b);
     }
 
     /// Status shows all four user and group IDs, filesystem ones last.

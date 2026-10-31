@@ -89,6 +89,13 @@ impl Ext4Superblock {
             return Err(KernelError::FsError(FsError::CorruptedData));
         }
 
+        // Blocks of 1 KiB (log 0) to 64 KiB (log 6), as Linux's
+        // `ext4_fill_super` (EXT4_MAX_BLOCK_LOG_SIZE - EXT4_MIN_BLOCK_LOG_SIZE).
+        let log_block_size = u32::from_le_bytes([data[0x18], data[0x19], data[0x1A], data[0x1B]]);
+        if log_block_size > 6 {
+            return Err(KernelError::FsError(FsError::CorruptedData));
+        }
+
         let desc_size_raw = u16::from_le_bytes([data[0xFE], data[0xFF]]);
         // desc_size is 0 for old ext2/ext3 (means 32 bytes)
         let desc_size = if desc_size_raw == 0 {
@@ -105,7 +112,7 @@ impl Ext4Superblock {
             ]),
             free_inodes_count: u32::from_le_bytes([data[0x10], data[0x11], data[0x12], data[0x13]]),
             first_data_block: u32::from_le_bytes([data[0x14], data[0x15], data[0x16], data[0x17]]),
-            log_block_size: u32::from_le_bytes([data[0x18], data[0x19], data[0x1A], data[0x1B]]),
+            log_block_size,
             blocks_per_group: u32::from_le_bytes([data[0x20], data[0x21], data[0x22], data[0x23]]),
             inodes_per_group: u32::from_le_bytes([data[0x28], data[0x29], data[0x2A], data[0x2B]]),
             magic,
@@ -1075,6 +1082,25 @@ mod tests {
         assert_eq!(sb.block_size(), 1024);
         assert_eq!(sb.inodes_count, 16);
         assert_eq!(sb.inode_size, 128);
+    }
+
+    /// Blocks of 1 KiB to 64 KiB, as Linux's `ext4_fill_super` allows: a
+    /// larger `s_log_block_size` is refused, not shifted out of range.
+    #[test]
+    fn superblock_bounds_the_block_size() {
+        let mut img = make_test_ext4_image();
+        let at = SUPERBLOCK_OFFSET + 0x18;
+        img[at..at + 4].copy_from_slice(&6u32.to_le_bytes());
+        let sb = Ext4Superblock::parse(&img[SUPERBLOCK_OFFSET..]).unwrap();
+        assert_eq!(sb.block_size(), 64 * 1024);
+        for log in [7u32, 22, 32, u32::MAX] {
+            img[at..at + 4].copy_from_slice(&log.to_le_bytes());
+            assert_eq!(
+                Ext4Superblock::parse(&img[SUPERBLOCK_OFFSET..]).map(|_| ()),
+                Err(KernelError::FsError(FsError::CorruptedData)),
+                "log_block_size {log}"
+            );
+        }
     }
 
     #[test]

@@ -560,6 +560,7 @@ impl BlockFsNode {
         op: impl FnOnce(&mut BlockFsInner) -> Result<R, KernelError>,
     ) -> Result<R, KernelError> {
         let mut fs = self.fs.write();
+        fs.check_writable()?;
         let result = op(&mut fs);
         fs.writeback_if_over_limit();
         let freed = core::mem::take(&mut fs.freed_special);
@@ -580,7 +581,7 @@ impl VfsNode for BlockFsNode {
         let fs = self.fs.read();
         let sb = &fs.superblock;
         let mut st = super::statfs::FsStats::simple(super::statfs::BLOCKFS_MAGIC);
-        if fs.disk.is_some() && !fs.disk_writable {
+        if fs.read_only() {
             st.flags = super::statfs::ST_RDONLY;
         }
         st.block_size = BLOCK_SIZE as u64;
@@ -713,11 +714,13 @@ impl VfsNode for BlockFsNode {
 
     fn chmod(&self, permissions: Permissions) -> Result<(), KernelError> {
         let mut fs = self.fs.write();
+        fs.check_writable()?;
         fs.chmod_inode(self.inode_num, permissions)
     }
 
     fn chown(&self, uid: Option<u32>, gid: Option<u32>) -> Result<(), KernelError> {
         let mut fs = self.fs.write();
+        fs.check_writable()?;
         fs.chown_inode(self.inode_num, uid, gid)
     }
 
@@ -727,6 +730,7 @@ impl VfsNode for BlockFsNode {
 
     fn set_times(&self, atime: Option<u64>, mtime: Option<u64>) -> Result<(), KernelError> {
         let mut fs = self.fs.write();
+        fs.check_writable()?;
         fs.set_times_inode(self.inode_num, atime, mtime)
     }
 
@@ -907,6 +911,21 @@ impl BlockFsInner {
         }
 
         fs
+    }
+
+    /// On a read-only disk (QEMU's `readonly=on`); a filesystem in memory
+    /// only is writable.
+    fn read_only(&self) -> bool {
+        self.disk.is_some() && !self.disk_writable
+    }
+
+    /// EROFS for any change to a filesystem on a read-only disk, checked
+    /// before the change starts, as Linux does.
+    fn check_writable(&self) -> Result<(), KernelError> {
+        if self.read_only() {
+            return Err(KernelError::FsError(FsError::ReadOnly));
+        }
+        Ok(())
     }
 
     fn allocate_inode(&mut self) -> Option<u32> {
@@ -3292,6 +3311,35 @@ mod tests {
             ro.root().statfs().unwrap().flags,
             crate::fs::statfs::ST_RDONLY
         );
+    }
+
+    /// Every change to a filesystem on a read-only disk is EROFS at once
+    /// (as on Linux, and as the ext4 driver does), rather than succeeding
+    /// in memory and failing at the next sync; reads still work.
+    #[test]
+    fn a_read_only_disk_refuses_every_change() {
+        let fs = BlockFs::format(128, 16).unwrap();
+        let f = fs.root().create("f", Permissions::default()).unwrap();
+        f.write(0, b"data").unwrap();
+        fs.set_disk_backend(Arc::new(Mutex::new(ReadOnly(MemDisk::new(128)))), false)
+            .unwrap();
+        let root = fs.root();
+        let erofs = || Err(KernelError::FsError(FsError::ReadOnly));
+        assert_eq!(f.write(0, b"x").map(|_| ()), erofs());
+        assert_eq!(f.truncate(0), erofs());
+        assert_eq!(f.chmod(Permissions::from_mode(0o600)), erofs());
+        assert_eq!(f.chown(Some(1), None), erofs());
+        assert_eq!(f.set_times(Some(1), Some(1)), erofs());
+        assert_eq!(f.fallocate(falloc(0, 0, BLOCK_SIZE)), erofs());
+        assert_eq!(
+            root.create("g", Permissions::default()).map(|_| ()),
+            erofs()
+        );
+        assert_eq!(root.mkdir("d", Permissions::default()).map(|_| ()), erofs());
+        assert_eq!(root.unlink("f"), erofs());
+        let mut buf = [0u8; 4];
+        assert_eq!(f.read(0, &mut buf).unwrap(), 4);
+        assert_eq!(&buf, b"data");
     }
 
     fn falloc(mode: u32, offset: usize, len: usize) -> crate::fs::falloc::Request {
