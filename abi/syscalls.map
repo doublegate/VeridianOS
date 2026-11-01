@@ -89,6 +89,8 @@ tgkill
 open
 openat
 openat2
+name_to_handle_at
+open_by_handle_at
 close
 read
 write

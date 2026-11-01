@@ -370,15 +370,19 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
   5. [ ] D leftovers: N-115, N-260, N-52/N-261, N-282; the native thread call (private 1064),
      whose thread is never started and keeps its process from finishing its exit: start it as
      `clone` does, with a runtime test that the process exits, or retire it (found in PR #33).
-  6. [ ] Decision point: cut v0.28.0 here (moving 7 to 13 to v0.29) or continue.
-  7. [ ] Sprint F (networking, storage), with `knetd` (N-69) and INET socket readiness.
-  8. [ ] Sprint G (hardening).
-  9. [ ] Sprint H (real hardware, the parts QEMU can check).
-  10. [ ] RISC-V boot: HR-02, HR-04 to HR-06, HR-11.
-  11. [ ] DL: KDE with shared libraries and its media backend.
-  12. [ ] MFA through PAM.
-  13. [ ] IPC redesign (N-79 to N-91); package signing keys (N-55 follow-up).
-  14. [ ] Release v0.28.0 (the tag and GitHub release need the maintainer's confirmation).
+  6. [ ] adjtimex frequency steering, before the cut decision (set 2026-11-01): ADJ_FREQUENCY and
+     the adjtime() slew change how fast CLOCK_REALTIME and CLOCK_MONOTONIC advance (as Linux's
+     `ntp_tick_length`), and STA_INS/STA_DEL insert or delete a leap second (LTP leapsec01); its own
+     commit or PR after group 3. KNOWN-LIMITATIONS "adjtimex and clock_adjtime".
+  7. [ ] Decision point: cut v0.28.0 here (moving 8 to 14 to v0.29) or continue.
+  8. [ ] Sprint F (networking, storage), with `knetd` (N-69) and INET socket readiness.
+  9. [ ] Sprint G (hardening).
+  10. [ ] Sprint H (real hardware, the parts QEMU can check).
+  11. [ ] RISC-V boot: HR-02, HR-04 to HR-06, HR-11.
+  12. [ ] DL: KDE with shared libraries and its media backend.
+  13. [ ] MFA through PAM.
+  14. [ ] IPC redesign (N-79 to N-91); package signing keys (N-55 follow-up).
+  15. [ ] Release v0.28.0 (the tag and GitHub release need the maintainer's confirmation).
   - Outside the groups: pin every workflow `uses:` to a commit SHA with Dependabot (one ci: pull
     request); delete merged branches once the maintainer agrees.
 - [ ] **v0.28.0:** first the items carried over from v0.27.0, which was cut early (2026-10-18):

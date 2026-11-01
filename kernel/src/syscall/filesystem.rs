@@ -203,12 +203,9 @@ fn open_path(
     const O_DIRECTORY: usize = 0x1_0000;
     #[cfg(not(target_arch = "aarch64"))]
     const O_NOFOLLOW: usize = 0x2_0000;
-    const O_CLOEXEC: usize = 0x8_0000;
     use crate::fs::NodeType;
 
-    let process = process::current_process().ok_or(SyscallError::InvalidState)?;
     let open_flags = OpenFlags::from_bits(flags as u32).ok_or(SyscallError::InvalidArgument)?;
-    let cloexec = flags & O_CLOEXEC != 0;
     let follow = flags & O_NOFOLLOW == 0;
     // O_CREAT with O_DIRECTORY is EINVAL whether the name exists or not,
     // as on Linux since 6.4: it made a regular file, then failed with
@@ -263,7 +260,43 @@ fn open_path(
         }
         Err(e) => return Err(map_resolve_err(e)),
     };
+    // The file records the canonical path of what it opened (in the whole
+    // tree) for fchdir and dirfd resolution: the path as written could be
+    // relative, and would be re-resolved against a later cwd (N-204).
+    let canonical = match canonical {
+        Some(c) => c,
+        None => view
+            .resolve_canonical(path, &view.get_cwd(), false)
+            .map(|(_, c)| c)
+            .unwrap_or_else(|_| alloc::string::String::from(path)),
+    };
+    open_node(node, created, canonical, flags, regular, follow)
+}
 
+/// The second half of an open, once the name is resolved: the checks on
+/// the node itself (Linux's do_open), then the new descriptor. `created`
+/// says this open made the file; `follow` is false when a final symlink was
+/// not followed, and then opening it is ELOOP. open_by_handle_at opens a
+/// decoded node here with `follow` false, as Linux opens it through
+/// file_open_root.
+pub(super) fn open_node(
+    node: alloc::sync::Arc<dyn crate::fs::VfsNode>,
+    created: bool,
+    canonical: alloc::string::String,
+    flags: usize,
+    regular: bool,
+    follow: bool,
+) -> SyscallResult {
+    #[cfg(target_arch = "aarch64")]
+    const O_DIRECTORY: usize = 0x4000;
+    #[cfg(not(target_arch = "aarch64"))]
+    const O_DIRECTORY: usize = 0x1_0000;
+    const O_CLOEXEC: usize = 0x8_0000;
+    use crate::fs::NodeType;
+
+    let process = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let open_flags = OpenFlags::from_bits(flags as u32).ok_or(SyscallError::InvalidArgument)?;
+    let cloexec = flags & O_CLOEXEC != 0;
     let node_type = node.node_type();
     // O_CREAT names a file: an existing directory is EISDIR even read-only.
     if open_flags.create && !created && node_type == NodeType::Directory {
@@ -302,16 +335,6 @@ fn open_path(
         node
     };
 
-    // The file records the canonical path of what it opened (in the whole
-    // tree) for fchdir and dirfd resolution: the path as written could be
-    // relative, and would be re-resolved against a later cwd (N-204).
-    let canonical = match canonical {
-        Some(c) => c,
-        None => view
-            .resolve_canonical(path, &view.get_cwd(), false)
-            .map(|(_, c)| c)
-            .unwrap_or_else(|_| alloc::string::String::from(path)),
-    };
     let file = crate::fs::file::File::new_with_path(node, open_flags, canonical);
     let file_table = process.file_table.lock();
     file_table

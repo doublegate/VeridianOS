@@ -6945,6 +6945,177 @@ static void test_execveat(void)
     report("execveat", f == 0, why);
 }
 
+#ifndef AT_HANDLE_FID
+#define AT_HANDLE_FID 0x200
+#endif
+#ifndef AT_HANDLE_MNT_ID_UNIQUE
+#define AT_HANDLE_MNT_ID_UNIQUE 0x1
+#endif
+#ifndef AT_HANDLE_CONNECTABLE
+#define AT_HANDLE_CONNECTABLE 0x2
+#endif
+
+/* A file handle with room for MAX_HANDLE_SZ bytes. */
+union fh_buf {
+    struct file_handle fh;
+    unsigned char bytes[sizeof(struct file_handle) + MAX_HANDLE_SZ];
+};
+
+/* name_to_handle_at into `b` with all the room there is. */
+static int fh_get(int dfd, const char *name, union fh_buf *b, int *mnt, int flags)
+{
+    b->fh.handle_bytes = MAX_HANDLE_SZ;
+    return name_to_handle_at(dfd, name, &b->fh, mnt, flags);
+}
+
+/* Whether a call returned -1 with errno `e`. */
+static int fails_with(long r, int e)
+{
+    return r == -1 && errno == e;
+}
+
+/*
+ * name_to_handle_at and open_by_handle_at (group 3 step D4): the size
+ * probe, a handle that opens the same file (by path, by AT_EMPTY_PATH on a
+ * descriptor, after following a symlink or not), the mount id statx
+ * reports, AT_HANDLE_FID on procfs, connectable handles below their anchor
+ * only, and the errors in Linux's order, EPERM without CAP_DAC_READ_SEARCH
+ * and ESTALE once the file is gone.
+ */
+static void test_fhandle(void)
+{
+    const char *dir = "/tmp/musl_fh", *file = "/tmp/musl_fh/f", *link_path = "/tmp/musl_fh/ln";
+    const char *other = "/tmp/musl_fh_other";
+    union fh_buf b, d, l, c;
+    char why[160], buf[8];
+    int f = 0, mnt = -1, mnt2 = -1;
+
+    mkdir(dir, 0755);
+    mkdir(other, 0755);
+    int wfd = open(file, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (wfd < 0 || write(wfd, "hi", 2) != 2) f |= 1;
+    close(wfd);
+    unlink(link_path);
+    if (symlink("f", link_path)) f |= 1;
+
+    /* The size probe: EOVERFLOW, with the size needed written back. */
+    struct file_handle probe = {0};
+    errno = 0;
+    if (!fails_with(name_to_handle_at(AT_FDCWD, file, &probe, &mnt, 0), EOVERFLOW) ||
+        probe.handle_bytes == 0 || probe.handle_bytes > MAX_HANDLE_SZ)
+        f |= 2;
+
+    /* The handle opens the same file; the mount id is statx's. */
+    struct statx sx;
+    struct stat st, ost;
+    if (fh_get(AT_FDCWD, file, &b, &mnt, 0) != 0 || b.fh.handle_bytes != probe.handle_bytes ||
+        statx(AT_FDCWD, file, 0, STATX_MNT_ID, &sx) != 0 || (unsigned)mnt != sx.stx_mnt_id)
+        f |= 4;
+    uint64_t umnt = 0;
+    if (fh_get(AT_FDCWD, file, &c, (int *)&umnt, AT_HANDLE_MNT_ID_UNIQUE) != 0 ||
+        umnt <= (1ULL << 31))
+        f |= 4;
+    int fd = open_by_handle_at(AT_FDCWD, &b.fh, O_RDONLY);
+    if (fd < 0 || read(fd, buf, sizeof(buf)) != 2 || memcmp(buf, "hi", 2) != 0 ||
+        fstat(fd, &ost) != 0 || stat(file, &st) != 0 || ost.st_ino != st.st_ino)
+        f |= 8;
+    close(fd);
+
+    /* AT_EMPTY_PATH on a directory descriptor, opened as a directory;
+     * writing a directory is EISDIR. */
+    int dfd = open(dir, O_RDONLY | O_DIRECTORY);
+    if (dfd < 0 || fh_get(dfd, "", &d, &mnt2, AT_EMPTY_PATH) != 0 || mnt2 != mnt) f |= 16;
+    fd = open_by_handle_at(dfd, &d.fh, O_RDONLY | O_DIRECTORY);
+    if (fd < 0 || fstat(fd, &ost) != 0 || !S_ISDIR(ost.st_mode)) f |= 16;
+    close(fd);
+    errno = 0;
+    if (!fails_with(open_by_handle_at(dfd, &d.fh, O_RDWR), EISDIR)) f |= 16;
+
+    /* A symlink's own handle opens as ELOOP; following it, the target. */
+    if (fh_get(AT_FDCWD, link_path, &l, &mnt, 0) != 0) f |= 32;
+    errno = 0;
+    if (!fails_with(open_by_handle_at(AT_FDCWD, &l.fh, O_RDONLY), ELOOP)) f |= 32;
+    if (fh_get(AT_FDCWD, link_path, &l, &mnt, AT_SYMLINK_FOLLOW) != 0 ||
+        l.fh.handle_type != b.fh.handle_type ||
+        memcmp(l.fh.f_handle, b.fh.f_handle, b.fh.handle_bytes) != 0)
+        f |= 32;
+
+    /* procfs cannot decode handles: EOPNOTSUPP, unless AT_HANDLE_FID. */
+    errno = 0;
+    if (!fails_with(fh_get(AT_FDCWD, "/proc/self/status", &c, &mnt, 0), EOPNOTSUPP) ||
+        fh_get(AT_FDCWD, "/proc/self/status", &c, &mnt, AT_HANDLE_FID) != 0)
+        f |= 64;
+
+    /* A connectable handle opens from its directory, not from elsewhere. */
+    int ofd = open(other, O_RDONLY | O_DIRECTORY);
+    if (fh_get(AT_FDCWD, file, &c, &mnt, AT_HANDLE_CONNECTABLE) != 0) f |= 128;
+    fd = open_by_handle_at(dfd, &c.fh, O_RDONLY);
+    if (fd < 0) f |= 128;
+    close(fd);
+    errno = 0;
+    if (ofd < 0 || !fails_with(open_by_handle_at(ofd, &c.fh, O_RDONLY), ESTALE)) f |= 128;
+
+    /* Errors: flags, then the name, then the lookup, then the header. */
+    struct file_handle big = {.handle_bytes = MAX_HANDLE_SZ + 1};
+    int bad_case = -1, bad_errno = 0;
+    int idx = 0;
+#define FH_CASE(call, e)                                   \
+    do {                                                   \
+        errno = 0;                                         \
+        long r_ = (call);                                  \
+        if (!fails_with(r_, e) && bad_case < 0) {          \
+            bad_case = idx;                                \
+            bad_errno = errno;                             \
+        }                                                  \
+        idx++;                                             \
+    } while (0)
+    FH_CASE(fh_get(AT_FDCWD, file, &c, &mnt, -1), EINVAL);
+    FH_CASE(fh_get(AT_FDCWD, file, &c, &mnt, AT_HANDLE_FID | AT_HANDLE_CONNECTABLE), EINVAL);
+    FH_CASE(fh_get(AT_FDCWD, "", &c, &mnt, 0), ENOENT);
+    FH_CASE(fh_get(-1, "f", &c, &mnt, 0), EBADF);
+    FH_CASE(fh_get(AT_FDCWD, (const char *)1, &c, &mnt, 0), EFAULT);
+    FH_CASE(name_to_handle_at(AT_FDCWD, file, (struct file_handle *)1, &mnt, 0), EFAULT);
+    FH_CASE(name_to_handle_at(AT_FDCWD, file, &big, &mnt, 0), EINVAL);
+    FH_CASE(fh_get(AT_FDCWD, file, &c, (int *)1, 0), EFAULT);
+    FH_CASE(open_by_handle_at(AT_FDCWD, (struct file_handle *)1, O_RDONLY), EFAULT);
+    FH_CASE(open_by_handle_at(AT_FDCWD, &big, O_RDONLY), EINVAL);
+    FH_CASE(open_by_handle_at(-1, &b.fh, O_RDONLY), EBADF);
+#undef FH_CASE
+    if (bad_case >= 0) f |= 256;
+
+    /* Without CAP_DAC_READ_SEARCH (an unprivileged child): EPERM. */
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (setuid(65534) != 0) _exit(2);
+        errno = 0;
+        _exit(fails_with(open_by_handle_at(AT_FDCWD, &b.fh, O_RDONLY), EPERM) ? 0 : 1);
+    }
+    int status = -1;
+    if (pid < 0 || waitpid(pid, &status, 0) != pid || !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 0)
+        f |= 512;
+
+    /* Gone, or decoded against a pipe: ESTALE. */
+    int p[2];
+    if (pipe(p) == 0) {
+        errno = 0;
+        if (!fails_with(open_by_handle_at(p[0], &b.fh, O_RDONLY), ESTALE)) f |= 1024;
+        close(p[0]);
+        close(p[1]);
+    }
+    unlink(link_path);
+    unlink(file);
+    errno = 0;
+    if (!fails_with(open_by_handle_at(AT_FDCWD, &b.fh, O_RDONLY), ESTALE)) f |= 1024;
+
+    close(dfd);
+    close(ofd);
+    rmdir(dir);
+    rmdir(other);
+    snprintf(why, sizeof(why), "f=0x%x case=%d errno=%d", f, bad_case, bad_errno);
+    report("fhandle", f == 0, why);
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
@@ -7050,6 +7221,7 @@ int main(int argc, char **argv)
     test_statx();
     test_openat2();
     test_execveat();
+    test_fhandle();
 #if defined(__x86_64__)
     test_ustat_sysfs();
 #endif

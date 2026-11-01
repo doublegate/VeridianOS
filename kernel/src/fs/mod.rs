@@ -875,6 +875,16 @@ pub trait Filesystem: Send + Sync {
 
     /// Sync filesystem to disk
     fn sync(&self) -> Result<(), KernelError>;
+
+    /// Whether a file handle can name this filesystem's files (Linux's
+    /// export operations): its inode numbers are unique among its files,
+    /// so open_by_handle_at can find one again by number
+    /// ([`Vfs::find_by_inode`]). Filesystems that make inode numbers up
+    /// (procfs, devfs) say no, and name_to_handle_at is EOPNOTSUPP there
+    /// unless AT_HANDLE_FID asks for a handle that is never opened.
+    fn exportable(&self) -> bool {
+        false
+    }
 }
 
 /// Mount point information
@@ -1709,6 +1719,79 @@ impl Vfs {
         let mount = table.mount_of(&path);
         let ids = table.ids.get(mount).copied().unwrap_or(PSEUDO_MOUNT);
         (ids, path == mount)
+    }
+
+    /// The filesystem serving `path`, a canonical path in the whole tree,
+    /// with its mount point; `None` before a root is mounted.
+    pub fn filesystem_of(&self, path: &str) -> Option<(String, Arc<dyn Filesystem>)> {
+        let path = normalize_path(path, "/");
+        let table = self.snapshot();
+        let mount = table.mount_of(&path);
+        let fs = match mount {
+            "/" => table.root_fs.clone(),
+            m => table.mounts.get(m).cloned(),
+        }?;
+        Some((String::from(mount), fs))
+    }
+
+    /// The file with inode number `ino` in the filesystem mounted at
+    /// `mount`, and a canonical path to it, for open_by_handle_at (Linux's
+    /// exportfs_decode_fh). The search walks that filesystem's directories
+    /// from its root, breadth first, and does not enter a directory another
+    /// mount covers, whose files cannot be reached by a path. A file that
+    /// is open but has no name left is not found (Linux finds it while its
+    /// inode is cached), and on a large filesystem the walk is slow; Linux
+    /// filesystems find an inode by number directly.
+    pub fn find_by_inode(&self, mount: &str, ino: u64) -> Option<(Arc<dyn VfsNode>, String)> {
+        let table = self.snapshot();
+        let fs = match mount {
+            "/" => table.root_fs.clone(),
+            m => table.mounts.get(m).cloned(),
+        }?;
+        let root = fs.root();
+        if root.metadata().ok()?.inode == ino {
+            return Some((root, String::from(mount)));
+        }
+        let join = |dir: &str, name: &str| {
+            if dir == "/" {
+                alloc::format!("/{}", name)
+            } else {
+                alloc::format!("{}/{}", dir, name)
+            }
+        };
+        let mut queue = alloc::collections::VecDeque::new();
+        queue.push_back((root, String::from(mount)));
+        while let Some((dir, dir_path)) = queue.pop_front() {
+            let Ok(entries) = dir.readdir() else {
+                continue;
+            };
+            for entry in entries {
+                if entry.name == "." || entry.name == ".." {
+                    continue;
+                }
+                let is_dir = entry.node_type == NodeType::Directory;
+                // Directory entries carry the inode number on every
+                // exportable filesystem; only a match or a directory is
+                // looked up.
+                if !is_dir && entry.inode != ino {
+                    continue;
+                }
+                let path = join(&dir_path, &entry.name);
+                if is_dir && table.mounts.contains_key(&path) {
+                    continue;
+                }
+                let Ok(node) = dir.lookup(&entry.name) else {
+                    continue;
+                };
+                if node.metadata().is_ok_and(|m| m.inode == ino) {
+                    return Some((node, path));
+                }
+                if is_dir {
+                    queue.push_back((node, path));
+                }
+            }
+        }
+        None
     }
 
     /// The mount point holding the directory entry `name` in `parent`, with
@@ -3514,6 +3597,62 @@ pub(crate) mod tests {
     #[test]
     fn without_a_root_everything_is_the_pseudo_mount() {
         assert_eq!(Vfs::new().mount_ids_of("/x"), (PSEUDO_MOUNT, false));
+    }
+
+    // --- File handles (group 3 step D4) ---
+
+    #[test]
+    fn find_by_inode_walks_one_filesystem() {
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        let b = root
+            .mkdir("a", Permissions::default())
+            .unwrap()
+            .mkdir("b", Permissions::default())
+            .unwrap();
+        let f = b.create("f", Permissions::default()).unwrap();
+        let f_ino = f.metadata().unwrap().inode;
+        // A file under a mount point is hidden by the mount.
+        let hidden = root
+            .mkdir("m", Permissions::default())
+            .unwrap()
+            .create("hidden", Permissions::default())
+            .unwrap();
+        let hidden_ino = hidden.metadata().unwrap().inode;
+        let tmp = Arc::new(tmpfs::TmpFs::new(1 << 20));
+        let g = tmp.root().create("g", Permissions::default()).unwrap();
+        let g_ino = g.metadata().unwrap().inode;
+        vfs.mount("/m".into(), tmp).unwrap();
+
+        let (node, path) = vfs.find_by_inode("/", f_ino).unwrap();
+        assert!(Arc::ptr_eq(&node, &f));
+        assert_eq!(path, "/a/b/f");
+        let (_, path) = vfs
+            .find_by_inode("/", root.metadata().unwrap().inode)
+            .unwrap();
+        assert_eq!(path, "/");
+        let (node, path) = vfs.find_by_inode("/m", g_ino).unwrap();
+        assert!(Arc::ptr_eq(&node, &g));
+        assert_eq!(path, "/m/g");
+        assert!(vfs
+            .find_by_inode("/", hidden_ino)
+            .is_none_or(|(n, _)| !Arc::ptr_eq(&n, &hidden)));
+        // Unlinked, the file has no name to be found by.
+        b.unlink("f").unwrap();
+        assert!(vfs.find_by_inode("/", f_ino).is_none());
+    }
+
+    #[test]
+    fn filesystem_of_names_the_serving_mount() {
+        let vfs = make_vfs_with_root();
+        vfs.mount("/m".into(), Arc::new(tmpfs::TmpFs::new(1 << 20)))
+            .unwrap();
+        let (mount, fs) = vfs.filesystem_of("/m/x/y").unwrap();
+        assert_eq!((mount.as_str(), fs.name()), ("/m", "tmpfs"));
+        let (mount, fs) = vfs.filesystem_of("/mx").unwrap();
+        assert_eq!((mount.as_str(), fs.name()), ("/", "ramfs"));
+        assert!(fs.exportable());
+        assert!(Vfs::new().filesystem_of("/").is_none());
     }
 
     // --- openat2 RESOLVE_* flags (group 3 step D3b) ---

@@ -3228,6 +3228,13 @@ impl Filesystem for BlockFs {
         false
     }
 
+    /// Inode numbers are the on-disk ones. A freed number is given to the
+    /// next new file, and handles carry no generation yet, so a handle to
+    /// a deleted file can open the file that took its number.
+    fn exportable(&self) -> bool {
+        true
+    }
+
     fn sync(&self) -> Result<(), KernelError> {
         let mut inner = self.inner.write();
         let synced = inner.sync_to_disk()?;

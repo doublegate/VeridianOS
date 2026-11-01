@@ -817,6 +817,11 @@ impl Filesystem for TmpFs {
         false
     }
 
+    /// Inode numbers come from one counter and are never reused.
+    fn exportable(&self) -> bool {
+        true
+    }
+
     fn sync(&self) -> Result<(), KernelError> {
         // tmpfs is memory-backed, nothing to sync
         Ok(())

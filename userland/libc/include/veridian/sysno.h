@@ -76,6 +76,8 @@
 #define SYS_open                         2
 #define SYS_openat                       257
 #define SYS_openat2                      437
+#define SYS_name_to_handle_at            303
+#define SYS_open_by_handle_at            304
 #define SYS_close                        3
 #define SYS_read                         0
 #define SYS_write                        1
@@ -414,6 +416,8 @@
 /* Files */
 #define SYS_openat                       56
 #define SYS_openat2                      437
+#define SYS_name_to_handle_at            264
+#define SYS_open_by_handle_at            265
 #define SYS_close                        57
 #define SYS_read                         63
 #define SYS_write                        64
@@ -718,6 +722,8 @@
 /* Files */
 #define SYS_openat                       56
 #define SYS_openat2                      437
+#define SYS_name_to_handle_at            264
+#define SYS_open_by_handle_at            265
 #define SYS_close                        57
 #define SYS_read                         63
 #define SYS_write                        64

@@ -661,6 +661,11 @@ impl Filesystem for RamFs {
         false
     }
 
+    /// Inode numbers come from one counter and are never reused.
+    fn exportable(&self) -> bool {
+        true
+    }
+
     fn sync(&self) -> Result<(), crate::error::KernelError> {
         // RAM filesystem doesn't need syncing
         Ok(())

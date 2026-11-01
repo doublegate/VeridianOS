@@ -369,6 +369,8 @@ mod xattr;
 mod file_calls;
 // sendfile, copy_file_range, splice, tee and vmsplice
 mod splice;
+// name_to_handle_at and open_by_handle_at
+mod fhandle;
 pub(crate) use filesystem::rename_paths;
 pub use futex::sys_futex_wake;
 
@@ -502,6 +504,9 @@ pub enum SyscallError {
     /// The wrong type of file for the operation, e.g. a directory for
     /// openat2's OPENAT2_REGULAR (EFTYPE, errno 134, new in Linux 7.3).
     WrongFileType = -136,
+    /// A file handle names no file any more, or not on that filesystem
+    /// (ESTALE, errno 116; open_by_handle_at).
+    Stale = -137,
     /// The call was interrupted and left a restart block (`restart`):
     /// Linux -ERESTART_RESTARTBLOCK, turned into EINTR or restart_syscall
     /// on the way back to user mode and never seen there.
@@ -1079,6 +1084,8 @@ fn handle_syscall(
         Syscall::Poll => sys_poll(arg1, arg2, arg3),
         Syscall::Openat => sys_openat(arg1, arg2, arg3, arg4),
         Syscall::Openat2 => sys_openat2(arg1, arg2, arg3, arg4),
+        Syscall::NameToHandleAt => fhandle::sys_name_to_handle_at(arg1, arg2, arg3, arg4, arg5),
+        Syscall::OpenByHandleAt => fhandle::sys_open_by_handle_at(arg1, arg2, arg3),
         Syscall::Newfstatat => sys_fstatat(arg1, arg2, arg3, arg4),
         Syscall::Unlinkat => sys_unlinkat(arg1, arg2, arg3),
         Syscall::Mkdirat => sys_mkdirat(arg1, arg2, arg3),

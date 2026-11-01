@@ -104,6 +104,16 @@
   descriptor sees `/dev/fd/N` or `/dev/fd/N/name` as AT_EXECFN and its file's own path in
   /proc/self/exe; a script run from a close-on-exec descriptor is ENOENT, since its interpreter
   could not open it.
+- name_to_handle_at and open_by_handle_at, following Linux 7.3's `fs/fhandle.c`. A handle is the
+  file's inode number (type FILEID_INO64_GEN, 12 bytes); open_by_handle_at looks for that number in
+  the filesystem of the given descriptor's mount (the cwd's for AT_FDCWD) and opens the file with
+  open(2)'s checks, a symlink being ELOOP. ramfs, tmpfs and BlockFS can decode handles; elsewhere
+  name_to_handle_at is EOPNOTSUPP unless AT_HANDLE_FID asks for one that is never opened. The
+  errors come in Linux's order (EINVAL for unknown flags or CONNECTABLE with FID or EMPTY_PATH,
+  then the lookup, EOPNOTSUPP, EFAULT, EINVAL for more than 128 bytes, and EOVERFLOW with the size
+  needed written back); AT_HANDLE_MNT_ID_UNIQUE reports statx's unique mount id; a connectable
+  handle opens only below its mount descriptor; open_by_handle_at needs CAP_DAC_READ_SEARCH
+  (EPERM) and is ESTALE for a file that is gone. New error: ESTALE.
 - execve of a relative name runs it from the working directory, as on Linux; it searched PATH,
   which is libc's job (execvp). Exec errors keep their errno (EACCES, ENOTDIR, ELOOP) instead of
   all being ENOENT, a script's interpreter is opened the same way, and an empty argv gets "" as
