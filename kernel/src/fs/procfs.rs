@@ -127,6 +127,11 @@ impl VfsNode for ProcNode {
         }
     }
 
+    /// /proc/self/exe names the executable, not a path.
+    fn is_magic_link(&self) -> bool {
+        matches!(self.node_type, ProcNodeType::SelfExe)
+    }
+
     fn read(&self, offset: usize, buffer: &mut [u8]) -> Result<usize, KernelError> {
         let content = match &self.node_type {
             ProcNodeType::SystemFile(name) => {

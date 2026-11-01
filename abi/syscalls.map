@@ -87,6 +87,7 @@ tgkill
 ## Files
 open
 openat
+openat2
 close
 read
 write

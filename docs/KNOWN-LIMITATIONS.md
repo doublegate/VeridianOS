@@ -71,6 +71,11 @@ exposed were fixed (N-182 to N-189); the rest are listed, with their targets, in
   STATX_ATTR_MOUNT_ROOT. The sync types are accepted and change nothing (every filesystem is
   local). Mount ids match no /proc/self/mountinfo, which does not exist yet, so LTP statx01's
   mount-id check cannot pass.
+- **openat2's resolve flags have no cache to work with.** RESOLVE_CACHED refuses what it must
+  (a creation or truncation is EAGAIN) but otherwise runs the whole walk, since there is no dentry
+  cache whose miss it could report. /proc/self/exe is the only magic link (there is no
+  /proc/<pid>/fd yet), so RESOLVE_NO_MAGICLINKS has one link to refuse. O_EMPTYPATH is accepted
+  but an empty name is still ENOENT; reopening a descriptor by it comes with O_PATH.
 - **splice and its relatives copy.** sendfile, copy_file_range, splice, tee and vmsplice move
   data through a kernel buffer, 64 KiB at a time; no page is moved or shared between a pipe and
   a file, SPLICE_F_MOVE and SPLICE_F_GIFT are accepted and change nothing, and copy_file_range

@@ -172,10 +172,12 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
         }
     }
 
-    open_path(path_str, flags, mode)
+    open_path(&vfs()?, path_str, flags, mode, false)
 }
 
-/// Open `path` with Linux `open(2)` semantics (shared by open and openat).
+/// Open `path` with Linux `open(2)` semantics (shared by open, openat and
+/// openat2), looked up in `view`. `regular` is openat2's OPENAT2_REGULAR:
+/// anything but a regular file is EFTYPE.
 ///
 /// - O_CREAT|O_EXCL fails with EEXIST if the name exists, and a lost create
 ///   race is EEXIST or a plain open, never ENOENT;
@@ -184,7 +186,13 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
 /// - O_NOFOLLOW refuses a final symlink (ELOOP), O_DIRECTORY anything but a
 ///   directory (ENOTDIR), and a directory cannot be opened for writing (EISDIR)
 ///   (N-116).
-fn open_path(path: &str, flags: usize, mode: usize) -> SyscallResult {
+fn open_path(
+    view: &crate::fs::CallerView<'_>,
+    path: &str,
+    flags: usize,
+    mode: usize,
+    regular: bool,
+) -> SyscallResult {
     // arm64 has its own values (its O_LARGEFILE, 0x2_0000, which musl adds
     // to every open, is x86_64's O_NOFOLLOW); riscv64 has x86_64's.
     #[cfg(target_arch = "aarch64")]
@@ -209,7 +217,7 @@ fn open_path(path: &str, flags: usize, mode: usize) -> SyscallResult {
         return Err(SyscallError::InvalidArgument);
     }
 
-    let (node, created, canonical) = match vfs()?.open_follow_canonical(path, open_flags, follow) {
+    let (node, created, canonical) = match view.open_follow_canonical(path, open_flags, follow) {
         Ok((node, canonical)) => {
             if open_flags.create && open_flags.exclusive {
                 return Err(SyscallError::FileExists);
@@ -227,7 +235,7 @@ fn open_path(path: &str, flags: usize, mode: usize) -> SyscallResult {
             let perms = creation_perms(mode);
             // One resolution of the parent for the MAC check, the permission
             // check and the creation, as mkdir and mknod do.
-            let made = vfs()?.mknod_checked(path, NodeType::File, perms, 0, |dir| {
+            let made = view.mknod_checked(path, NodeType::File, perms, 0, |dir| {
                 check_dir_write(dir).map_err(|_| crate::error::KernelError::PermissionDenied {
                     operation: "create directory entry",
                 })
@@ -241,7 +249,7 @@ fn open_path(path: &str, flags: usize, mode: usize) -> SyscallResult {
                 Err(crate::error::KernelError::FsError(crate::error::FsError::AlreadyExists))
                     if !open_flags.exclusive =>
                 {
-                    let (node, canonical) = vfs()?
+                    let (node, canonical) = view
                         .open_follow_canonical(path, open_flags, follow)
                         .map_err(map_resolve_err)?;
                     (node, false, Some(canonical))
@@ -263,6 +271,10 @@ fn open_path(path: &str, flags: usize, mode: usize) -> SyscallResult {
     }
     if !follow && node_type == NodeType::Symlink {
         return Err(SyscallError::SymlinkLoop);
+    }
+    // After EEXIST and EISDIR, before ENOTDIR, as Linux's do_open.
+    if regular && node_type != NodeType::File {
+        return Err(SyscallError::WrongFileType);
     }
     if flags & O_DIRECTORY != 0 && node_type != NodeType::Directory {
         return Err(SyscallError::NotADirectory);
@@ -295,8 +307,8 @@ fn open_path(path: &str, flags: usize, mode: usize) -> SyscallResult {
     // relative, and would be re-resolved against a later cwd (N-204).
     let canonical = match canonical {
         Some(c) => c,
-        None => vfs()?
-            .resolve_canonical(path, &vfs()?.get_cwd(), false)
+        None => view
+            .resolve_canonical(path, &view.get_cwd(), false)
             .map(|(_, c)| c)
             .unwrap_or_else(|_| alloc::string::String::from(path)),
     };
@@ -1320,6 +1332,9 @@ pub(crate) fn map_resolve_err(e: crate::error::KernelError) -> SyscallError {
         }
         crate::error::KernelError::FsError(crate::error::FsError::PermissionDenied) => {
             SyscallError::PermissionDenied
+        }
+        crate::error::KernelError::FsError(crate::error::FsError::CrossDevice) => {
+            SyscallError::CrossDevice
         }
         _ => SyscallError::ResourceNotFound,
     }
@@ -3264,7 +3279,133 @@ pub fn sys_openat(dirfd: usize, path_ptr: usize, flags: usize, mode: usize) -> S
         }
     }
 
-    open_path(&abs_path, flags, mode)
+    open_path(&vfs()?, &abs_path, flags, mode, false)
+}
+
+/// openat2's `struct open_how` (its first version, the only one).
+const OPEN_HOW_SIZE_VER0: usize = 24;
+/// openat2's own flag, outside open(2)'s 32 bits.
+const OPENAT2_REGULAR: u64 = 1 << 32;
+
+/// The open flags open(2) knows (Linux's VALID_OPEN_FLAGS, O_EMPTYPATH
+/// included). arm64 numbers four of them differently, the same four bits.
+const VALID_OPEN_FLAGS: u64 = 0x007f_ffc3 | O_EMPTYPATH;
+const O_EMPTYPATH: u64 = 1 << 26;
+const O_CREAT: u64 = 0x40;
+const O_TRUNC: u64 = 0x200;
+const O_CLOEXEC: u64 = 0x8_0000;
+const O_PATH: u64 = 0x20_0000;
+const O_TMPFILE_BIT: u64 = 0x40_0000;
+#[cfg(target_arch = "aarch64")]
+const O_DIRECTORY_64: u64 = 0x4000;
+#[cfg(target_arch = "aarch64")]
+const O_NOFOLLOW_64: u64 = 0x8000;
+#[cfg(not(target_arch = "aarch64"))]
+const O_DIRECTORY_64: u64 = 0x1_0000;
+#[cfg(not(target_arch = "aarch64"))]
+const O_NOFOLLOW_64: u64 = 0x2_0000;
+
+/// openat2's checks of `how`, in Linux's order (build_open_flags):
+/// unknown flags or resolve bits, both scopes, a mode without a create
+/// (or a wider one with it), O_DIRECTORY with O_CREAT, O_TMPFILE without
+/// O_DIRECTORY or write access, OPENAT2_REGULAR with O_DIRECTORY, O_PATH
+/// with other flags (EINVAL), RESOLVE_CACHED with a create or truncate
+/// (EAGAIN).
+fn check_open_how(flags: u64, mode: u64, resolve: u64) -> Result<(), SyscallError> {
+    use crate::fs::resolve_flags as r;
+    let flags = flags & !O_CLOEXEC;
+    if flags & !(VALID_OPEN_FLAGS | OPENAT2_REGULAR) != 0 || resolve & !u64::from(r::ALL) != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if resolve & u64::from(r::SCOPED) == u64::from(r::SCOPED) {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let will_create = flags & (O_CREAT | O_TMPFILE_BIT) != 0;
+    if (will_create && mode & !0o7777 != 0) || (!will_create && mode != 0) {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if flags & (O_DIRECTORY_64 | O_CREAT) == O_DIRECTORY_64 | O_CREAT {
+        return Err(SyscallError::InvalidArgument);
+    }
+    // ACC_MODE: access modes 1, 2 and 3 all ask for write.
+    if flags & O_TMPFILE_BIT != 0 && (flags & O_DIRECTORY_64 == 0 || flags & 3 == 0) {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if flags & (O_DIRECTORY_64 | OPENAT2_REGULAR) == O_DIRECTORY_64 | OPENAT2_REGULAR {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if flags & O_PATH != 0 && flags & !(O_DIRECTORY_64 | O_NOFOLLOW_64 | O_PATH | O_EMPTYPATH) != 0
+    {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if resolve & u64::from(r::CACHED) != 0 && flags & (O_TRUNC | O_CREAT | O_TMPFILE_BIT) != 0 {
+        return Err(SyscallError::WouldBlock);
+    }
+    Ok(())
+}
+
+/// openat2(dirfd, path, how, size) (Linux 7.3's fs/open.c): `how` is read
+/// as copy_struct_from_user reads an extensible struct (EINVAL below its
+/// first version, E2BIG above a page or for nonzero bytes past it,
+/// EFAULT), checked (`check_open_how`), then the name (EFAULT, ENOENT for
+/// an empty one) and the directory (EBADF, ENOTDIR). The open is openat's,
+/// with `how.resolve` applied to the walk (`fs::resolve_flags`).
+pub fn sys_openat2(dirfd: usize, path_ptr: usize, how: usize, size: usize) -> SyscallResult {
+    use crate::fs::resolve_flags as r;
+    if size < OPEN_HOW_SIZE_VER0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if size > 4096 {
+        return Err(SyscallError::ArgumentListTooLong);
+    }
+    // The bytes past the struct first, as check_zeroed_user.
+    if size > OPEN_HOW_SIZE_VER0 {
+        let mut tail = alloc::vec![0u8; size - OPEN_HOW_SIZE_VER0];
+        let past = how
+            .checked_add(OPEN_HOW_SIZE_VER0)
+            .ok_or(SyscallError::InvalidPointer)?;
+        super::userspace::read_user_bytes(past, &mut tail)?;
+        if tail.iter().any(|&b| b != 0) {
+            return Err(SyscallError::ArgumentListTooLong);
+        }
+    }
+    let mut raw = [0u8; OPEN_HOW_SIZE_VER0];
+    super::userspace::read_user_bytes(how, &mut raw)?;
+    let word = |at: usize| {
+        let mut b = [0u8; 8];
+        b.copy_from_slice(&raw[at..at + 8]);
+        u64::from_ne_bytes(b)
+    };
+    let (flags, mode, resolve) = (word(0), word(8), word(16));
+    check_open_how(flags, mode, resolve)?;
+    // The checks passed: every resolve bit is known.
+    let resolve = resolve as u32 & r::ALL;
+    let regular = flags & OPENAT2_REGULAR != 0;
+    let flags = (flags & VALID_OPEN_FLAGS) as usize;
+
+    let path = read_user_path(path_ptr)?;
+    if resolve == 0 {
+        let abs_path = resolve_at_path(dirfd, &path)?;
+        return open_path(&vfs()?, &abs_path, flags, mode as usize, regular);
+    }
+    // The walk starts at the directory; an absolute path that is not
+    // RESOLVE_IN_ROOT's starts at the root without looking at it.
+    let view = vfs()?;
+    let start = if (path.starts_with('/') && resolve & r::IN_ROOT == 0)
+        || dirfd as u32 as i32 == AT_FDCWD as u32 as i32
+    {
+        view.get_cwd()
+    } else {
+        let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+        let file = proc
+            .file_table
+            .lock()
+            .get(dirfd as u32 as usize)
+            .ok_or(SyscallError::BadFileDescriptor)?;
+        fd_directory_path(&file)?
+    };
+    let view = view.resolving(resolve, &start);
+    open_path(&view, &path, flags, mode as usize, regular)
 }
 
 /// newfstatat(dirfd, path, buf, flags) (N-196), and stat and lstat
@@ -3880,6 +4021,51 @@ mod tests {
         tests::{make_vfs_with_root, StuckCaps},
         xattr, Permissions, VfsNode,
     };
+
+    /// openat2's `how` checks, in build_open_flags' order.
+    #[test]
+    fn open_how_is_checked_as_linux_checks_it() {
+        use super::{
+            check_open_how as check, SyscallError, OPENAT2_REGULAR as REGULAR, O_CLOEXEC, O_CREAT,
+            O_DIRECTORY_64 as DIR, O_EMPTYPATH, O_NOFOLLOW_64 as NOFOLLOW, O_PATH,
+            O_TMPFILE_BIT as TMPFILE, O_TRUNC,
+        };
+        use crate::fs::resolve_flags as r;
+        let inval = Err(SyscallError::InvalidArgument);
+        assert_eq!(check(0, 0, 0), Ok(()));
+        assert_eq!(
+            check(O_CLOEXEC | 2, 0, u64::from(r::ALL & !r::IN_ROOT)),
+            Ok(())
+        );
+        // Unknown open and resolve bits; O_CLOEXEC is always allowed.
+        assert_eq!(check(1 << 31, 0, 0), inval);
+        assert_eq!(check(1 << 33, 0, 0), inval);
+        assert_eq!(check(0, 0, 0x40), inval);
+        assert_eq!(check(0, 0, u64::from(r::BENEATH | r::IN_ROOT)), inval);
+        // A mode only with a creation, and only permission bits.
+        assert_eq!(check(O_CREAT, 0o7777, 0), Ok(()));
+        assert_eq!(check(O_CREAT, 0o10000, 0), inval);
+        assert_eq!(check(0, 0o644, 0), inval);
+        assert_eq!(check(DIR | O_CREAT, 0, 0), inval);
+        // O_TMPFILE needs O_DIRECTORY (it includes it) and a write mode.
+        assert_eq!(check(TMPFILE | DIR | 2, 0o600, 0), Ok(()));
+        assert_eq!(check(TMPFILE | 2, 0, 0), inval);
+        assert_eq!(check(TMPFILE | DIR, 0, 0), inval);
+        assert_eq!(check(REGULAR, 0, 0), Ok(()));
+        assert_eq!(check(REGULAR | DIR, 0, 0), inval);
+        // O_PATH takes only O_DIRECTORY, O_NOFOLLOW, O_EMPTYPATH, O_CLOEXEC.
+        assert_eq!(
+            check(O_PATH | DIR | NOFOLLOW | O_EMPTYPATH | O_CLOEXEC, 0, 0),
+            Ok(())
+        );
+        assert_eq!(check(O_PATH | 2, 0, 0), inval);
+        // RESOLVE_CACHED cannot create or truncate: EAGAIN.
+        let cached = u64::from(r::CACHED);
+        assert_eq!(check(0, 0, cached), Ok(()));
+        for f in [O_TRUNC, O_CREAT, TMPFILE | DIR | 2] {
+            assert_eq!(check(f, 0, cached), Err(SyscallError::WouldBlock));
+        }
+    }
 
     /// open(O_TRUNC) reports why a truncate of an existing file failed: a
     /// memfd sealed against shrinking is EPERM, as Linux's shmem_setattr

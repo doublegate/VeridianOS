@@ -74,6 +74,7 @@
 /* Files */
 #define SYS_open                         2
 #define SYS_openat                       257
+#define SYS_openat2                      437
 #define SYS_close                        3
 #define SYS_read                         0
 #define SYS_write                        1
@@ -410,6 +411,7 @@
 #define SYS_tgkill                       131
 /* Files */
 #define SYS_openat                       56
+#define SYS_openat2                      437
 #define SYS_close                        57
 #define SYS_read                         63
 #define SYS_write                        64
@@ -712,6 +714,7 @@
 #define SYS_tgkill                       131
 /* Files */
 #define SYS_openat                       56
+#define SYS_openat2                      437
 #define SYS_close                        57
 #define SYS_read                         63
 #define SYS_write                        64

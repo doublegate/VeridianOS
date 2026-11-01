@@ -580,6 +580,13 @@ pub trait VfsNode: Send + Sync {
         })
     }
 
+    /// Whether this symlink is a procfs "magic link" (`/proc/self/exe`),
+    /// which names an object rather than a path: openat2's
+    /// RESOLVE_NO_MAGICLINKS refuses to follow one.
+    fn is_magic_link(&self) -> bool {
+        false
+    }
+
     /// Change permissions on this node
     fn chmod(&self, _permissions: Permissions) -> Result<(), KernelError> {
         Err(KernelError::NotImplemented { feature: "chmod" })
@@ -1068,7 +1075,7 @@ impl MountTable {
         symlink_depth: usize,
         creds: Option<crate::process::creds::Caller>,
     ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
-        self.resolve_in(path, cwd, "/", follow_last, symlink_depth, creds)
+        self.resolve_in(path, cwd, "/", follow_last, symlink_depth, creds, 0)
     }
 
     /// `resolve` under a root directory (chroot). `root` is a canonical
@@ -1077,6 +1084,17 @@ impl MountTable {
     /// the root and `..` stops there, so no lookup leaves it. The canonical
     /// path returned is in the whole tree (for MAC and mount checks); see
     /// `root_relative` for the process's view.
+    ///
+    /// `resolve` holds openat2's RESOLVE_* flags ([`resolve_flags`]), as
+    /// Linux's path walk applies them: the walk starts at `cwd` itself, so
+    /// the mounts on the way there are not crossings; RESOLVE_NO_XDEV
+    /// refuses entering or leaving (`..`) a mount and an absolute symlink
+    /// read on another mount than the root's (EXDEV); RESOLVE_BENEATH an
+    /// absolute path or symlink and `..` above the start (EXDEV);
+    /// RESOLVE_NO_SYMLINKS every symlink and RESOLVE_NO_MAGICLINKS a magic
+    /// link (ELOOP), which a scoped lookup cannot follow either (EXDEV).
+    /// RESOLVE_IN_ROOT is `root` itself, as a chroot.
+    #[allow(clippy::too_many_arguments)]
     fn resolve_in(
         &self,
         path: &str,
@@ -1085,6 +1103,7 @@ impl MountTable {
         follow_last: bool,
         symlink_depth: usize,
         creds: Option<crate::process::creds::Caller>,
+        resolve: u32,
     ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
         use alloc::collections::VecDeque;
 
@@ -1095,15 +1114,25 @@ impl MountTable {
                 .collect()
         };
 
+        let xdev = || KernelError::FsError(crate::error::FsError::CrossDevice);
+        let symlink_loop = || KernelError::FsError(crate::error::FsError::SymlinkLoop);
+        let root_canon: Vec<String> = split(root).into_iter().collect();
+        let mut canon: Vec<String> = root_canon.clone();
         let mut pending = if path.starts_with('/') {
+            if resolve & resolve_flags::BENEATH != 0 {
+                return Err(xdev());
+            }
+            split(path)
+        } else if resolve != 0 {
+            // The working directory is canonical: start in it, as Linux's
+            // path_init starts at the directory's dentry.
+            canon.extend(split(cwd));
             split(path)
         } else {
             let mut q = split(cwd);
             q.extend(split(path));
             q
         };
-        let root_canon: Vec<String> = split(root).into_iter().collect();
-        let mut canon: Vec<String> = root_canon.clone();
         let mut node = self.walk_canonical(&canon)?;
         let mut links = symlink_depth;
 
@@ -1123,7 +1152,14 @@ impl MountTable {
             if component == ".." {
                 // ".." of the root is the root itself.
                 if canon.len() > root_canon.len() {
+                    if resolve & resolve_flags::NO_XDEV != 0
+                        && self.mounts.contains_key(&join_components(&canon))
+                    {
+                        return Err(xdev());
+                    }
                     canon.pop();
+                } else if resolve & resolve_flags::BENEATH != 0 {
+                    return Err(xdev());
                 }
                 node = self.walk_canonical(&canon)?;
                 continue;
@@ -1131,6 +1167,7 @@ impl MountTable {
             canon.push(component);
             let canon_path = join_components(&canon);
             node = match self.mounts.get(&canon_path) {
+                Some(_) if resolve & resolve_flags::NO_XDEV != 0 => return Err(xdev()),
                 Some(fs) => fs.root(),
                 None => node.lookup(canon.last().map(String::as_str).unwrap_or(""))?,
             };
@@ -1138,14 +1175,39 @@ impl MountTable {
             let is_last = pending.is_empty();
             if node.node_type() == NodeType::Symlink && (!is_last || follow_last) {
                 links += 1;
-                if links > SYMLINK_MAX_DEPTH {
-                    return Err(KernelError::FsError(crate::error::FsError::SymlinkLoop));
+                if links > SYMLINK_MAX_DEPTH || resolve & resolve_flags::NO_SYMLINKS != 0 {
+                    return Err(symlink_loop());
                 }
                 let target = node.readlink()?;
                 // The target replaces the link: relative to the link's own
                 // directory, or to the root if absolute. Its components go
                 // in front of whatever was still pending.
                 canon.pop();
+                if resolve != 0 {
+                    let here = self.mount_of(&join_components(&canon));
+                    if node.is_magic_link() {
+                        // Linux's nd_jump_link.
+                        if resolve & resolve_flags::NO_MAGICLINKS != 0 {
+                            return Err(symlink_loop());
+                        }
+                        if resolve & resolve_flags::NO_XDEV != 0
+                            && here != self.mount_of(&normalize_path(&target, "/"))
+                        {
+                            return Err(xdev());
+                        }
+                        if resolve & resolve_flags::SCOPED != 0 {
+                            return Err(xdev());
+                        }
+                    } else if target.starts_with('/') {
+                        // Linux's nd_jump_root.
+                        if resolve & resolve_flags::BENEATH != 0
+                            || (resolve & resolve_flags::NO_XDEV != 0
+                                && here != self.mount_of(&join_components(&root_canon)))
+                        {
+                            return Err(xdev());
+                        }
+                    }
+                }
                 if target.starts_with('/') {
                     canon = root_canon.clone();
                 }
@@ -1217,6 +1279,31 @@ pub struct PathContext {
     pub creds: Option<crate::process::creds::Caller>,
     /// The process MAC policy is checked for (0: the kernel).
     pub pid: u64,
+    /// openat2's RESOLVE_* flags ([`resolve_flags`]); 0 for every other
+    /// lookup.
+    pub resolve: u32,
+}
+
+/// openat2's `how.resolve` flags, with Linux's values.
+pub mod resolve_flags {
+    /// No mount crossing, bind mounts included.
+    pub const NO_XDEV: u32 = 0x01;
+    /// No procfs magic links.
+    pub const NO_MAGICLINKS: u32 = 0x02;
+    /// No symlinks at all.
+    pub const NO_SYMLINKS: u32 = 0x04;
+    /// Nothing outside the starting directory: no `..` above it, no
+    /// absolute path or symlink.
+    pub const BENEATH: u32 = 0x08;
+    /// The starting directory is the root, as with chroot.
+    pub const IN_ROOT: u32 = 0x10;
+    /// Only a lookup the dentry cache could finish (there is none, so the
+    /// walk runs; only the open flags it refuses are checked).
+    pub const CACHED: u32 = 0x20;
+    /// The lookups scoped to the starting directory.
+    pub const SCOPED: u32 = BENEATH | IN_ROOT;
+    /// Every flag.
+    pub const ALL: u32 = 0x3f;
 }
 
 /// The VFS as the calling thread sees it (see [`PathContext`]). It does
@@ -1248,6 +1335,27 @@ impl<'a> CallerView<'a> {
     /// The caller's root, as a canonical path in the whole tree.
     pub fn get_root(&self) -> String {
         self.ctx.root.clone()
+    }
+
+    /// This view with openat2's `resolve` flags ([`resolve_flags`]),
+    /// relative paths starting at `start` (canonical, relative to the
+    /// caller's root). A scoped lookup (RESOLVE_BENEATH, RESOLVE_IN_ROOT)
+    /// has `start` as its root.
+    pub fn resolving(mut self, resolve: u32, start: &str) -> Self {
+        self.ctx.resolve = resolve;
+        if resolve & resolve_flags::SCOPED != 0 {
+            self.ctx.root = if self.ctx.root == "/" {
+                String::from(start)
+            } else if start == "/" {
+                self.ctx.root.clone()
+            } else {
+                format!("{}{}", self.ctx.root, start)
+            };
+            self.ctx.cwd = String::from("/");
+        } else {
+            self.ctx.cwd = String::from(start);
+        }
+        self
     }
 
     pub fn resolve_path(&self, path: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
@@ -1497,6 +1605,7 @@ impl Vfs {
             root: String::from("/"),
             creds: None,
             pid: 0,
+            resolve: 0,
         }
     }
 
@@ -1549,7 +1658,7 @@ impl Vfs {
         follow_last: bool,
     ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
         self.snapshot()
-            .resolve_in(path, cwd, &ctx.root, follow_last, 0, ctx.creds)
+            .resolve_in(path, cwd, &ctx.root, follow_last, 0, ctx.creds, ctx.resolve)
     }
 
     /// Resolve a path to a VFS node, following symlinks (including the
@@ -1768,14 +1877,32 @@ impl Vfs {
         // the path the directory is really created at. Normalizing also
         // removes trailing slashes, `.` and `..`, so the final name is
         // never one of those.
-        let path = normalize_path(path, &ctx.cwd);
-        if path == "/" {
-            return Err(KernelError::FsError(crate::error::FsError::AlreadyExists));
-        }
-        let pos = path.rfind('/').unwrap_or(0);
-        let (parent_path, name) = (&path[..pos.max(1)], &path[pos + 1..]);
-
-        let (parent, canonical_parent) = self.lookup(ctx, parent_path, "/", true)?;
+        //
+        // openat2's walk to the parent applies its RESOLVE_* flags, so the
+        // path is split as written and `..` in it is walked, not removed.
+        let (parent, canonical_parent, name) = if ctx.resolve != 0 {
+            let path = path.trim_end_matches('/');
+            let (parent_path, name) = match path.rfind('/') {
+                Some(0) => ("/", &path[1..]),
+                Some(pos) => (&path[..pos], &path[pos + 1..]),
+                None => (".", path),
+            };
+            if name.is_empty() || name == "." || name == ".." {
+                return Err(KernelError::FsError(crate::error::FsError::AlreadyExists));
+            }
+            let (parent, canonical) = self.lookup(ctx, parent_path, &ctx.cwd, true)?;
+            (parent, canonical, String::from(name))
+        } else {
+            let path = normalize_path(path, &ctx.cwd);
+            if path == "/" {
+                return Err(KernelError::FsError(crate::error::FsError::AlreadyExists));
+            }
+            let pos = path.rfind('/').unwrap_or(0);
+            let (parent_path, name) = (&path[..pos.max(1)], &path[pos + 1..]);
+            let (parent, canonical) = self.lookup(ctx, parent_path, "/", true)?;
+            (parent, canonical, String::from(name))
+        };
+        let name = name.as_str();
         let target = if canonical_parent == "/" {
             format!("/{}", name)
         } else {
@@ -2915,7 +3042,7 @@ pub(crate) mod tests {
         let table = vfs.snapshot();
         let r = |path: &str, cwd: &str| {
             table
-                .resolve_in(path, cwd, "/jail", true, 0, None)
+                .resolve_in(path, cwd, "/jail", true, 0, None, 0)
                 .map(|(_, canon)| canon)
         };
         assert_eq!(r("/etc/passwd", "/").unwrap(), "/jail/etc/passwd");
@@ -3066,6 +3193,7 @@ pub(crate) mod tests {
                 root: String::from("/jail"),
                 creds: None,
                 pid: 0,
+                resolve: 0,
             },
         }
     }
@@ -3388,6 +3516,265 @@ pub(crate) mod tests {
         assert_eq!(Vfs::new().mount_ids_of("/x"), (PSEUDO_MOUNT, false));
     }
 
+    // --- openat2 RESOLVE_* flags (group 3 step D3b) ---
+
+    /// A procfs stand-in: delegates to a ramfs node, and its child `exe`
+    /// is a magic link, as /proc/self/exe.
+    struct Magic(Arc<dyn VfsNode>);
+
+    impl VfsNode for Magic {
+        fn node_type(&self) -> NodeType {
+            self.0.node_type()
+        }
+        fn read(&self, o: usize, b: &mut [u8]) -> Result<usize, KernelError> {
+            self.0.read(o, b)
+        }
+        fn write(&self, o: usize, d: &[u8]) -> Result<usize, KernelError> {
+            self.0.write(o, d)
+        }
+        fn metadata(&self) -> Result<Metadata, KernelError> {
+            self.0.metadata()
+        }
+        fn readdir(&self) -> Result<Vec<DirEntry>, KernelError> {
+            self.0.readdir()
+        }
+        fn lookup(&self, n: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
+            self.0
+                .lookup(n)
+                .map(|c| Arc::new(Magic(c)) as Arc<dyn VfsNode>)
+        }
+        fn create(&self, n: &str, p: Permissions) -> Result<Arc<dyn VfsNode>, KernelError> {
+            self.0.create(n, p)
+        }
+        fn mkdir(&self, n: &str, p: Permissions) -> Result<Arc<dyn VfsNode>, KernelError> {
+            self.0.mkdir(n, p)
+        }
+        fn unlink(&self, n: &str) -> Result<(), KernelError> {
+            self.0.unlink(n)
+        }
+        fn truncate(&self, s: usize) -> Result<(), KernelError> {
+            self.0.truncate(s)
+        }
+        fn readlink(&self) -> Result<String, KernelError> {
+            self.0.readlink()
+        }
+        fn is_magic_link(&self) -> bool {
+            self.0.node_type() == NodeType::Symlink
+        }
+    }
+
+    struct MagicFs(ramfs::RamFs);
+
+    impl Filesystem for MagicFs {
+        fn root(&self) -> Arc<dyn VfsNode> {
+            Arc::new(Magic(self.0.root()))
+        }
+        fn name(&self) -> &str {
+            "magic"
+        }
+        fn is_readonly(&self) -> bool {
+            false
+        }
+        fn sync(&self) -> Result<(), KernelError> {
+            Ok(())
+        }
+    }
+
+    /// / with /top, /d/{f, sub/, rel -> f, abs -> /d/f, up -> ../top,
+    /// inroot -> /f, tomnt -> /mnt/m}, a ramfs on /mnt with
+    /// /mnt/{m, back -> /top}, and a magic filesystem on /proc with
+    /// /proc/exe -> /top.
+    fn resolve_tree() -> Vfs {
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        let p = Permissions::default();
+        root.create("top", p).unwrap();
+        root.mkdir("mnt", p).unwrap();
+        root.mkdir("proc", p).unwrap();
+        let d = root.mkdir("d", p).unwrap();
+        d.create("f", p).unwrap();
+        d.mkdir("sub", p).unwrap();
+        d.symlink("rel", "f").unwrap();
+        d.symlink("abs", "/d/f").unwrap();
+        d.symlink("up", "../top").unwrap();
+        d.symlink("inroot", "/f").unwrap();
+        d.symlink("tomnt", "/mnt/m").unwrap();
+        let mnt = Arc::new(ramfs::RamFs::new());
+        mnt.root().create("m", p).unwrap();
+        mnt.root().symlink("back", "/top").unwrap();
+        vfs.mount("/mnt".into(), mnt).unwrap();
+        let proc_fs = MagicFs(ramfs::RamFs::new());
+        proc_fs.0.root().symlink("exe", "/top").unwrap();
+        vfs.mount("/proc".into(), Arc::new(proc_fs)).unwrap();
+        vfs
+    }
+
+    /// The caller's view (root "/") with `resolve` from `start`.
+    fn resolving<'a>(vfs: &'a Vfs, resolve: u32, start: &str) -> CallerView<'a> {
+        CallerView {
+            vfs,
+            ctx: PathContext {
+                cwd: String::from("/"),
+                root: String::from("/"),
+                creds: None,
+                pid: 0,
+                resolve: 0,
+            },
+        }
+        .resolving(resolve, start)
+    }
+
+    fn ino(vfs: &Vfs, path: &str) -> u64 {
+        vfs.resolve_path(path).unwrap().metadata().unwrap().inode
+    }
+
+    fn ino_of(r: Result<Arc<dyn VfsNode>, KernelError>) -> Result<u64, KernelError> {
+        r.map(|n| n.metadata().unwrap().inode)
+    }
+
+    const EXDEV: KernelError = KernelError::FsError(FsError::CrossDevice);
+    const ELOOP: KernelError = KernelError::FsError(FsError::SymlinkLoop);
+
+    #[test]
+    fn resolve_beneath_stays_below_the_start() {
+        use resolve_flags::BENEATH;
+        let vfs = resolve_tree();
+        let f = ino(&vfs, "/d/f");
+        let view = resolving(&vfs, BENEATH, "/d");
+        assert_eq!(ino_of(view.resolve_path("f")), Ok(f));
+        assert_eq!(ino_of(view.resolve_path("sub/../f")), Ok(f));
+        assert_eq!(ino_of(view.resolve_path("rel")), Ok(f));
+        // Out by "..", by an absolute path, by an absolute symlink and by
+        // a relative symlink that climbs.
+        assert_eq!(ino_of(view.resolve_path("../top")), Err(EXDEV));
+        assert_eq!(ino_of(view.resolve_path("/d/f")), Err(EXDEV));
+        assert_eq!(ino_of(view.resolve_path("abs")), Err(EXDEV));
+        assert_eq!(ino_of(view.resolve_path("up")), Err(EXDEV));
+        // Without the flag the same walks leave /d.
+        let plain = resolving(&vfs, 0, "/d");
+        assert_eq!(ino_of(plain.resolve_path("../top")), Ok(ino(&vfs, "/top")));
+        assert_eq!(ino_of(plain.resolve_path("abs")), Ok(f));
+    }
+
+    #[test]
+    fn resolve_in_root_treats_the_start_as_root() {
+        let vfs = resolve_tree();
+        let f = ino(&vfs, "/d/f");
+        let view = resolving(&vfs, resolve_flags::IN_ROOT, "/d");
+        assert_eq!(ino_of(view.resolve_path("/f")), Ok(f));
+        assert_eq!(ino_of(view.resolve_path("../../f")), Ok(f));
+        assert_eq!(ino_of(view.resolve_path("inroot")), Ok(f));
+        // "/d/f" inside the new root is /d/d/f.
+        assert_eq!(
+            ino_of(view.resolve_path("abs")),
+            Err(KernelError::FsError(FsError::NotFound))
+        );
+    }
+
+    #[test]
+    fn resolve_no_xdev_refuses_every_mount_crossing() {
+        use resolve_flags::NO_XDEV;
+        let vfs = resolve_tree();
+        // Entering a mount, by name or through a symlink.
+        assert_eq!(
+            ino_of(resolving(&vfs, NO_XDEV, "/").resolve_path("mnt/m")),
+            Err(EXDEV)
+        );
+        assert_eq!(
+            ino_of(resolving(&vfs, NO_XDEV, "/d").resolve_path("tomnt")),
+            Err(EXDEV)
+        );
+        // Inside one mount; leaving it by ".."; an absolute symlink read on
+        // another mount than the root's.
+        let mnt = resolving(&vfs, NO_XDEV, "/mnt");
+        assert_eq!(ino_of(mnt.resolve_path("m")), Ok(ino(&vfs, "/mnt/m")));
+        assert_eq!(ino_of(mnt.resolve_path("../top")), Err(EXDEV));
+        assert_eq!(ino_of(mnt.resolve_path("back")), Err(EXDEV));
+        // An absolute path starts at the root, whatever the start.
+        assert_eq!(ino_of(mnt.resolve_path("/d/f")), Ok(ino(&vfs, "/d/f")));
+        // An absolute symlink on the root's mount to the root's mount.
+        assert_eq!(
+            ino_of(resolving(&vfs, NO_XDEV, "/d").resolve_path("abs")),
+            Ok(ino(&vfs, "/d/f"))
+        );
+    }
+
+    #[test]
+    fn resolve_no_symlinks_refuses_following_any() {
+        let vfs = resolve_tree();
+        let view = resolving(&vfs, resolve_flags::NO_SYMLINKS, "/d");
+        assert_eq!(ino_of(view.resolve_path("f")), Ok(ino(&vfs, "/d/f")));
+        assert_eq!(ino_of(view.resolve_path("rel")), Err(ELOOP));
+        assert_eq!(ino_of(view.resolve_path("/proc/exe")), Err(ELOOP));
+        // A final symlink that is not followed is not refused.
+        assert!(view.resolve_path_no_follow("rel").is_ok());
+    }
+
+    #[test]
+    fn resolve_magic_links() {
+        use resolve_flags::{BENEATH, IN_ROOT, NO_MAGICLINKS, NO_XDEV};
+        let vfs = resolve_tree();
+        let top = ino(&vfs, "/top");
+        assert_eq!(
+            ino_of(resolving(&vfs, 0, "/").resolve_path("/proc/exe")),
+            Ok(top)
+        );
+        assert_eq!(
+            ino_of(resolving(&vfs, NO_MAGICLINKS, "/").resolve_path("/proc/exe")),
+            Err(ELOOP)
+        );
+        // An ordinary symlink is still followed.
+        assert_eq!(
+            ino_of(resolving(&vfs, NO_MAGICLINKS, "/d").resolve_path("rel")),
+            Ok(ino(&vfs, "/d/f"))
+        );
+        // A scoped lookup cannot follow one; NO_XDEV cannot when it leaves
+        // the link's mount.
+        for flags in [BENEATH, IN_ROOT, NO_XDEV] {
+            assert_eq!(
+                ino_of(resolving(&vfs, flags, "/proc").resolve_path("exe")),
+                Err(EXDEV),
+                "flags {:#x}",
+                flags
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_flags_apply_to_the_parent_of_a_new_entry() {
+        let vfs = resolve_tree();
+        let p = Permissions::default();
+        let beneath = resolving(&vfs, resolve_flags::BENEATH, "/d");
+        assert!(beneath.mkdir("sub/new", p).is_ok());
+        assert!(vfs.resolve_path("/d/sub/new").is_ok());
+        // ".." is walked, not normalized away.
+        assert_eq!(beneath.mkdir("../escape", p).err(), Some(EXDEV));
+        assert_eq!(beneath.mkdir("/d/abs_new", p).err(), Some(EXDEV));
+        assert!(vfs.resolve_path("/escape").is_err());
+        // A name of its own: a relative one starts at the start.
+        assert!(beneath.mkdir("plain", p).is_ok());
+        assert!(vfs.resolve_path("/d/plain").is_ok());
+        assert_eq!(
+            resolving(&vfs, resolve_flags::NO_XDEV, "/")
+                .mkdir("mnt/x", p)
+                .err(),
+            Some(EXDEV)
+        );
+    }
+
+    #[test]
+    fn a_scoped_view_inside_a_chroot_nests_the_roots() {
+        let vfs = resolve_tree();
+        let mut view = jailed(&vfs);
+        view = view.resolving(resolve_flags::BENEATH, "/sub");
+        assert_eq!(view.get_root(), "/jail/sub");
+        assert_eq!(view.get_cwd(), "/");
+        let view = resolving(&vfs, resolve_flags::IN_ROOT, "/");
+        assert_eq!(view.get_root(), "/");
+        let view = resolving(&vfs, resolve_flags::NO_XDEV, "/d");
+        assert_eq!((view.get_root(), view.get_cwd()), ("/".into(), "/d".into()));
+    }
+
     #[test]
     fn test_mount_root() {
         let vfs = Vfs::new();
@@ -3505,6 +3892,7 @@ pub(crate) mod tests {
                 root: String::from("/"),
                 creds: None,
                 pid: 0,
+                resolve: 0,
             },
         };
         caller.unmount("/dev/shm").unwrap();

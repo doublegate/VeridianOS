@@ -95,6 +95,17 @@
   nothing, and tee copies without removing. Writes into a pipe nobody reads are EPIPE with
   SIGPIPE; SPLICE_F_NONBLOCK or O_NONBLOCK makes an empty or full pipe EAGAIN; RLIMIT_FSIZE and
   the set-ID clearing of a write apply.
+- openat2 (it was missing from the syscall table), following Linux 7.3's `fs/open.c` and
+  `fs/namei.c`. `struct open_how` is read as an extensible struct: below 24 bytes EINVAL, above a
+  page E2BIG, nonzero bytes past the known fields E2BIG. Its flags, mode and resolve bits are
+  checked in build_open_flags' order (unknown bits, BENEATH with IN_ROOT, a mode without a
+  creation, O_DIRECTORY with O_CREAT, O_TMPFILE without a write mode, OPENAT2_REGULAR with
+  O_DIRECTORY and O_PATH with other flags are EINVAL; RESOLVE_CACHED with O_CREAT, O_TRUNC or
+  O_TMPFILE is EAGAIN), then the name and the directory. RESOLVE_BENEATH and RESOLVE_IN_ROOT scope
+  the walk to the directory, RESOLVE_NO_XDEV refuses every mount crossing, RESOLVE_NO_SYMLINKS
+  every symlink and RESOLVE_NO_MAGICLINKS /proc/self/exe; a created file's parent is walked with
+  the same flags. OPENAT2_REGULAR opens only a regular file, otherwise EFTYPE (134, new in
+  Linux 7.3).
 - statx (it was ENOSYS), following Linux 7.3's `fs/stat.c`: AT_EMPTY_PATH with a NULL or empty
   name stats the descriptor (or the working directory with AT_FDCWD), the reserved mask bit, both
   sync types together and unknown flags are EINVAL, a bad name pointer EFAULT, an empty name

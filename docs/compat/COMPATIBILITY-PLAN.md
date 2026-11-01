@@ -103,7 +103,7 @@ Each group lands with its LTP cases. The counts are "missing" entries in the cov
   - Locks: flock, POSIX record locks and OFD locks.
   - sendfile, splice/tee/vmsplice and copy_file_range (done; they copy, KNOWN-LIMITATIONS).
   - Vectored I/O, renameat2 and openat2, close_range and fchmodat2, and execveat (preadv,
-    pwritev and their `2` forms, close_range and fchmodat2 are done).
+    pwritev and their `2` forms, close_range, fchmodat2 and openat2 are done).
   - Handles, xattrs, inotify and fanotify.
   - Real statx/statfs/fallocate, and every O_* flag (statx and statfs are done).
 - **memory (23)**

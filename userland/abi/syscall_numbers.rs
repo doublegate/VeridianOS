@@ -63,6 +63,7 @@ pub mod sysno {
     pub const SYS_tgkill: usize = 234;
     pub const SYS_open: usize = 2;
     pub const SYS_openat: usize = 257;
+    pub const SYS_openat2: usize = 437;
     pub const SYS_close: usize = 3;
     pub const SYS_read: usize = 0;
     pub const SYS_write: usize = 1;
@@ -374,6 +375,7 @@ pub mod sysno {
     pub const SYS_tkill: usize = 130;
     pub const SYS_tgkill: usize = 131;
     pub const SYS_openat: usize = 56;
+    pub const SYS_openat2: usize = 437;
     pub const SYS_close: usize = 57;
     pub const SYS_read: usize = 63;
     pub const SYS_write: usize = 64;
@@ -651,6 +653,7 @@ pub mod sysno {
     pub const SYS_tkill: usize = 130;
     pub const SYS_tgkill: usize = 131;
     pub const SYS_openat: usize = 56;
+    pub const SYS_openat2: usize = 437;
     pub const SYS_close: usize = 57;
     pub const SYS_read: usize = 63;
     pub const SYS_write: usize = 64;

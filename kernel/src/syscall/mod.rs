@@ -499,6 +499,9 @@ pub enum SyscallError {
     ReadOnlyFilesystem = -134,
     /// No such extended attribute (ENODATA, errno 61).
     NoData = -135,
+    /// The wrong type of file for the operation, e.g. a directory for
+    /// openat2's OPENAT2_REGULAR (EFTYPE, errno 134, new in Linux 7.3).
+    WrongFileType = -136,
     /// The call was interrupted and left a restart block (`restart`):
     /// Linux -ERESTART_RESTARTBLOCK, turned into EINTR or restart_syscall
     /// on the way back to user mode and never seen there.
@@ -1074,6 +1077,7 @@ fn handle_syscall(
         Syscall::Truncate => sys_truncate(arg1, arg2),
         Syscall::Poll => sys_poll(arg1, arg2, arg3),
         Syscall::Openat => sys_openat(arg1, arg2, arg3, arg4),
+        Syscall::Openat2 => sys_openat2(arg1, arg2, arg3, arg4),
         Syscall::Newfstatat => sys_fstatat(arg1, arg2, arg3, arg4),
         Syscall::Unlinkat => sys_unlinkat(arg1, arg2, arg3),
         Syscall::Mkdirat => sys_mkdirat(arg1, arg2, arg3),

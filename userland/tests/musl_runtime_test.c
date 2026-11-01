@@ -6558,6 +6558,201 @@ static void test_statx(void)
     report("statx", f == 0, why);
 }
 
+/*
+ * openat2 (group 3 step D3b): the extensible struct, build_open_flags'
+ * checks in Linux's order, OPENAT2_REGULAR, and every RESOLVE_* flag.
+ * musl has no wrapper; struct open_how is <linux/openat2.h>'s.
+ */
+struct musl_open_how {
+    uint64_t flags, mode, resolve;
+};
+#define MUSL_RESOLVE_NO_XDEV 0x01
+#define MUSL_RESOLVE_NO_MAGICLINKS 0x02
+#define MUSL_RESOLVE_NO_SYMLINKS 0x04
+#define MUSL_RESOLVE_BENEATH 0x08
+#define MUSL_RESOLVE_IN_ROOT 0x10
+#define MUSL_RESOLVE_CACHED 0x20
+#define MUSL_OPENAT2_REGULAR (1ULL << 32)
+#define MUSL_EFTYPE 134
+
+static long o2(int dfd, const char *path, uint64_t flags, uint64_t mode, uint64_t resolve)
+{
+    struct musl_open_how how = {flags, mode, resolve};
+    return syscall(SYS_openat2, dfd, path, &how, sizeof(how));
+}
+
+/* -1 and errno == want, or a descriptor (closed) when want is 0. */
+static int o2_is(int dfd, const char *path, uint64_t flags, uint64_t mode, uint64_t resolve,
+                 int want)
+{
+    errno = 0;
+    long fd = o2(dfd, path, flags, mode, resolve);
+    if (fd >= 0) close((int)fd);
+    return want ? (fd == -1 && errno == want) : fd >= 0;
+}
+
+static void test_openat2(void)
+{
+    const char *base = "/tmp/musl_o2";
+    char why[200];
+    int f = 0, step = 0;
+    unlink("/tmp/musl_o2/sub/file");
+    unlink("/tmp/musl_o2/abs");
+    unlink("/tmp/musl_o2/rel");
+    unlink("/tmp/musl_o2/up");
+    unlink("/tmp/musl_o2/fifo");
+    unlink("/tmp/musl_o2/new");
+    unlink("/tmp/musl_o2/sub/new");
+    rmdir("/tmp/musl_o2/sub");
+    rmdir(base);
+    unlink("/dev/shm/musl_o2_new");
+    unlink("/dev/shm/musl_o2_abs");
+    if (mkdir(base, 0755) || mkdir("/tmp/musl_o2/sub", 0755)) f |= 1;
+    int w = open("/tmp/musl_o2/sub/file", O_CREAT | O_WRONLY, 0644);
+    if (w < 0 || write(w, "x", 1) != 1) f |= 1;
+    close(w);
+    if (symlink("/tmp/musl_o2/sub/file", "/tmp/musl_o2/abs") ||
+        symlink("sub/file", "/tmp/musl_o2/rel") || symlink("../musl_o2/sub/file", "/tmp/musl_o2/up") ||
+        mkfifo("/tmp/musl_o2/fifo", 0644))
+        f |= 1;
+    int dir = open(base, O_RDONLY | O_DIRECTORY);
+    if (dir < 0) f |= 1;
+
+    /* The struct: below its first version EINVAL, above a page E2BIG, a
+     * zero tail fine, a nonzero one E2BIG, an unreadable one EFAULT. */
+    step = 1;
+    struct {
+        struct musl_open_how how;
+        uint64_t pad;
+    } big = {{O_RDONLY, 0, 0}, 0};
+    errno = 0;
+    if (syscall(SYS_openat2, dir, "sub/file", &big, 0) != -1 || errno != EINVAL) f |= 2;
+    errno = 0;
+    if (syscall(SYS_openat2, dir, "sub/file", &big, 23) != -1 || errno != EINVAL) f |= 2;
+    errno = 0;
+    if (syscall(SYS_openat2, dir, "sub/file", &big, 4097) != -1 || errno != E2BIG) f |= 2;
+    long fd = syscall(SYS_openat2, dir, "sub/file", &big, sizeof(big));
+    if (fd < 0) f |= 4;
+    else close((int)fd);
+    big.pad = 1;
+    errno = 0;
+    if (syscall(SYS_openat2, dir, "sub/file", &big, sizeof(big)) != -1 || errno != E2BIG) f |= 4;
+    char *pages = mmap(NULL, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (pages == MAP_FAILED || munmap(pages + 4096, 4096)) f |= 1;
+    else {
+        struct musl_open_how *edge = (struct musl_open_how *)(pages + 4096 - sizeof(*edge));
+        memset(edge, 0, sizeof(*edge));
+        errno = 0;
+        if (syscall(SYS_openat2, dir, "sub/file", edge, sizeof(*edge) + 1) != -1 || errno != EFAULT)
+            f |= 4;
+        munmap(pages, 4096);
+    }
+
+    /* build_open_flags, in order. */
+    step = 2;
+    if (!o2_is(dir, "sub/file", 1ULL << 33, 0, 0, EINVAL)) f |= 8;
+    if (!o2_is(dir, "sub/file", O_RDONLY, 0, 0x40, EINVAL)) f |= 8;
+    if (!o2_is(dir, "sub/file", O_RDONLY, 0, MUSL_RESOLVE_BENEATH | MUSL_RESOLVE_IN_ROOT, EINVAL))
+        f |= 8;
+    if (!o2_is(dir, "sub/file", O_RDONLY, 0644, 0, EINVAL)) f |= 16;
+    if (!o2_is(dir, "new", O_CREAT | O_WRONLY, 010000, 0, EINVAL)) f |= 16;
+    if (!o2_is(dir, "new", O_CREAT | O_DIRECTORY | O_RDONLY, 0644, 0, EINVAL)) f |= 16;
+    if (!o2_is(dir, "sub", O_TMPFILE | O_RDONLY, 0600, 0, EINVAL)) f |= 32;
+    if (!o2_is(dir, "sub", (O_TMPFILE & ~O_DIRECTORY) | O_RDWR, 0600, 0, EINVAL)) f |= 32;
+    if (!o2_is(dir, "sub", O_DIRECTORY | MUSL_OPENAT2_REGULAR, 0, 0, EINVAL)) f |= 32;
+    if (!o2_is(dir, "sub/file", O_PATH | O_WRONLY, 0, 0, EINVAL)) f |= 32;
+    if (!o2_is(dir, "new", O_CREAT | O_WRONLY, 0644, MUSL_RESOLVE_CACHED, EAGAIN)) f |= 64;
+    if (!o2_is(dir, "sub/file", O_WRONLY | O_TRUNC, 0, MUSL_RESOLVE_CACHED, EAGAIN)) f |= 64;
+    if (!o2_is(dir, "sub/file", O_RDONLY, 0, MUSL_RESOLVE_CACHED, 0)) f |= 64;
+    /* Then the name, then the directory. */
+    if (!o2_is(dir, NULL, O_RDONLY, 0, 0, EFAULT) || !o2_is(dir, "", O_RDONLY, 0, 0, ENOENT))
+        f |= 128;
+    if (!o2_is(-1, "sub/file", O_RDONLY, 0, 0, EBADF) ||
+        !o2_is(-1, "sub/file", O_RDONLY, 0, MUSL_RESOLVE_BENEATH, EBADF))
+        f |= 128;
+    int file_fd = open("/tmp/musl_o2/sub/file", O_RDONLY);
+    if (!o2_is(file_fd, "x", O_RDONLY, 0, MUSL_RESOLVE_NO_XDEV, ENOTDIR)) f |= 128;
+    close(file_fd);
+
+    /* OPENAT2_REGULAR: EFTYPE for a directory, a FIFO or a device. */
+    step = 3;
+    if (!o2_is(dir, "sub/file", O_RDONLY | MUSL_OPENAT2_REGULAR, 0, 0, 0) ||
+        !o2_is(dir, "sub", O_RDONLY | MUSL_OPENAT2_REGULAR, 0, 0, MUSL_EFTYPE) ||
+        !o2_is(dir, "fifo", O_RDONLY | O_NONBLOCK | MUSL_OPENAT2_REGULAR, 0, 0, MUSL_EFTYPE) ||
+        !o2_is(AT_FDCWD, "/dev/null", O_RDONLY | MUSL_OPENAT2_REGULAR, 0, 0, MUSL_EFTYPE))
+        f |= 256;
+
+    /* RESOLVE_NO_SYMLINKS refuses every symlink, RESOLVE_NO_MAGICLINKS only
+     * /proc/self/exe. */
+    step = 4;
+    if (!o2_is(dir, "rel", O_RDONLY, 0, 0, 0) ||
+        !o2_is(dir, "rel", O_RDONLY, 0, MUSL_RESOLVE_NO_SYMLINKS, ELOOP) ||
+        !o2_is(dir, "rel", O_RDONLY, 0, MUSL_RESOLVE_NO_MAGICLINKS, 0) ||
+        !o2_is(AT_FDCWD, "/proc/self/exe", O_RDONLY, 0, 0, 0) ||
+        !o2_is(AT_FDCWD, "/proc/self/exe", O_RDONLY, 0, MUSL_RESOLVE_NO_MAGICLINKS, ELOOP))
+        f |= 512;
+
+    /* RESOLVE_NO_XDEV: entering a mount, leaving one by "..", an absolute
+     * symlink read on another mount than the root's. */
+    step = 5;
+    int shm = open("/dev/shm", O_RDONLY | O_DIRECTORY);
+    if (shm < 0 || symlink("/tmp/musl_o2/sub/file", "/dev/shm/musl_o2_abs")) f |= 1;
+    if (!o2_is(AT_FDCWD, "/proc/version", O_RDONLY, 0, MUSL_RESOLVE_NO_XDEV, EXDEV) ||
+        !o2_is(dir, "abs", O_RDONLY, 0, MUSL_RESOLVE_NO_XDEV, 0) ||
+        !o2_is(shm, "musl_o2_new", O_CREAT | O_WRONLY, 0600, MUSL_RESOLVE_NO_XDEV, 0) ||
+        !o2_is(shm, "..", O_RDONLY | O_DIRECTORY, 0, MUSL_RESOLVE_NO_XDEV, EXDEV) ||
+        !o2_is(shm, "musl_o2_abs", O_RDONLY, 0, MUSL_RESOLVE_NO_XDEV, EXDEV))
+        f |= 1024;
+
+    /* RESOLVE_BENEATH: no absolute path or symlink, no ".." above the
+     * start, no magic link; a create stays inside. */
+    step = 6;
+    int proc_self = open("/proc/self", O_RDONLY | O_DIRECTORY);
+    if (!o2_is(dir, "sub/../sub/file", O_RDONLY, 0, MUSL_RESOLVE_BENEATH, 0) ||
+        !o2_is(dir, "rel", O_RDONLY, 0, MUSL_RESOLVE_BENEATH, 0) ||
+        !o2_is(dir, "/tmp/musl_o2/sub/file", O_RDONLY, 0, MUSL_RESOLVE_BENEATH, EXDEV) ||
+        !o2_is(dir, "../musl_o2/sub/file", O_RDONLY, 0, MUSL_RESOLVE_BENEATH, EXDEV) ||
+        !o2_is(dir, "abs", O_RDONLY, 0, MUSL_RESOLVE_BENEATH, EXDEV) ||
+        !o2_is(dir, "up", O_RDONLY, 0, MUSL_RESOLVE_BENEATH, EXDEV) ||
+        !o2_is(proc_self, "exe", O_RDONLY, 0, MUSL_RESOLVE_BENEATH, EXDEV) ||
+        !o2_is(dir, "sub/new", O_CREAT | O_WRONLY, 0600, MUSL_RESOLVE_BENEATH, 0) ||
+        !o2_is(dir, "../musl_o2/new", O_CREAT | O_WRONLY, 0600, MUSL_RESOLVE_BENEATH, EXDEV))
+        f |= 2048;
+    struct stat st;
+    if (stat("/tmp/musl_o2/sub/new", &st) || stat("/tmp/musl_o2/new", &st) == 0) f |= 2048;
+
+    /* RESOLVE_IN_ROOT: "/" and ".." stay at the start, as under chroot. */
+    step = 7;
+    if (!o2_is(dir, "/sub/file", O_RDONLY, 0, MUSL_RESOLVE_IN_ROOT, 0) ||
+        !o2_is(dir, "../../sub/file", O_RDONLY, 0, MUSL_RESOLVE_IN_ROOT, 0) ||
+        !o2_is(dir, "/proc/version", O_RDONLY, 0, MUSL_RESOLVE_IN_ROOT, ENOENT) ||
+        !o2_is(dir, "abs", O_RDONLY, 0, MUSL_RESOLVE_IN_ROOT, ENOENT) ||
+        !o2_is(proc_self, "exe", O_RDONLY, 0, MUSL_RESOLVE_IN_ROOT, EXDEV))
+        f |= 4096;
+
+    /* openat's behaviour without resolve flags; O_CLOEXEC is kept. */
+    step = 8;
+    fd = o2(dir, "sub/file", O_RDONLY | O_CLOEXEC, 0, 0);
+    if (fd < 0 || !(fcntl((int)fd, F_GETFD) & FD_CLOEXEC)) f |= 8192;
+    if (fd >= 0) close((int)fd);
+
+    close(proc_self);
+    close(shm);
+    close(dir);
+    unlink("/dev/shm/musl_o2_new");
+    unlink("/dev/shm/musl_o2_abs");
+    unlink("/tmp/musl_o2/sub/new");
+    unlink("/tmp/musl_o2/sub/file");
+    unlink("/tmp/musl_o2/abs");
+    unlink("/tmp/musl_o2/rel");
+    unlink("/tmp/musl_o2/up");
+    unlink("/tmp/musl_o2/fifo");
+    rmdir("/tmp/musl_o2/sub");
+    rmdir(base);
+    snprintf(why, sizeof(why), "f=0x%x step=%d errno=%d", f, step, errno);
+    report("openat2", f == 0, why);
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
@@ -6659,6 +6854,7 @@ int main(int argc, char **argv)
     test_close_range_and_advice();
     test_splice_family();
     test_statx();
+    test_openat2();
 #if defined(__x86_64__)
     test_ustat_sysfs();
 #endif
