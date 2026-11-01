@@ -66,6 +66,11 @@ exposed were fixed (N-182 to N-189); the rest are listed, with their targets, in
   thread, whose threads share one descriptor table that cannot be split yet (with one thread
   there is nothing to unshare). Every file reports device 1 (`st_dev`), so ustat knows only
   that device, which it takes for the root filesystem.
+- **statx reports what stat reports.** No birth time (STATX_BTIME is never set: no filesystem
+  records one), the same device, link count and block numbers as stat, and no attributes but
+  STATX_ATTR_MOUNT_ROOT. The sync types are accepted and change nothing (every filesystem is
+  local). Mount ids match no /proc/self/mountinfo, which does not exist yet, so LTP statx01's
+  mount-id check cannot pass.
 - **splice and its relatives copy.** sendfile, copy_file_range, splice, tee and vmsplice move
   data through a kernel buffer, 64 KiB at a time; no page is moved or shared between a pipe and
   a file, SPLICE_F_MOVE and SPLICE_F_GIFT are accepted and change nothing, and copy_file_range

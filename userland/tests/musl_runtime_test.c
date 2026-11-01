@@ -6451,6 +6451,113 @@ static void test_ustat_sysfs(void)
 }
 #endif
 
+/*
+ * statx (group 3 step D3a): the numbers stat reports, the mount id and
+ * mount root, AT_EMPTY_PATH on a descriptor and on the cwd, and the
+ * argument errors in Linux's order.
+ */
+static void test_statx(void)
+{
+    const char *path = "/tmp/musl_statx", *link_path = "/tmp/musl_statx_ln";
+    char why[200];
+    int f = 0;
+    unlink(path);
+    unlink(link_path);
+    int fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0640);
+    if (fd < 0 || write(fd, "0123456789", 10) != 10) f |= 1;
+    struct stat st;
+    struct statx sx;
+    memset(&sx, 0xa5, sizeof(sx));
+    if (stat(path, &st) || statx(AT_FDCWD, path, 0, STATX_BASIC_STATS, &sx)) f |= 2;
+    if ((sx.stx_mask & STATX_BASIC_STATS) != STATX_BASIC_STATS || !(sx.stx_mask & STATX_MNT_ID) ||
+        (sx.stx_mask & STATX_BTIME))
+        f |= 4;
+    if (sx.stx_ino != st.st_ino || sx.stx_size != 10 || sx.stx_mode != st.st_mode ||
+        sx.stx_uid != st.st_uid || sx.stx_nlink != st.st_nlink ||
+        sx.stx_blocks != (uint64_t)st.st_blocks || sx.stx_blksize != (uint32_t)st.st_blksize ||
+        sx.stx_mtime.tv_sec != st.st_mtime ||
+        makedev(sx.stx_dev_major, sx.stx_dev_minor) != st.st_dev)
+        f |= 8;
+    if ((sx.stx_attributes & STATX_ATTR_MOUNT_ROOT) ||
+        !(sx.stx_attributes_mask & STATX_ATTR_MOUNT_ROOT))
+        f |= 16;
+    /* The rest of the struct is written as zeroes, not left as it was. */
+    if (sx.stx_btime.tv_sec != 0 || sx.__pad2[8] != 0) f |= 32;
+    /* AT_EMPTY_PATH with NULL or "" is the descriptor; with AT_FDCWD the
+     * cwd. */
+    struct statx byfd, empty, cwd;
+    if (statx(fd, NULL, AT_EMPTY_PATH, STATX_BASIC_STATS, &byfd) ||
+        statx(fd, "", AT_EMPTY_PATH, STATX_BASIC_STATS, &empty) ||
+        byfd.stx_ino != sx.stx_ino || empty.stx_ino != sx.stx_ino ||
+        byfd.stx_mnt_id != sx.stx_mnt_id)
+        f |= 64;
+    struct stat dot;
+    if (stat(".", &dot) || statx(AT_FDCWD, "", AT_EMPTY_PATH, 0, &cwd) ||
+        cwd.stx_ino != dot.st_ino)
+        f |= 128;
+    /* Mount roots: "/", /proc and /dev/shm, each with its own id. */
+    struct statx root, proc, shm;
+    if (statx(AT_FDCWD, "/", 0, 0, &root) || statx(AT_FDCWD, "/proc", 0, 0, &proc) ||
+        statx(AT_FDCWD, "/dev/shm", 0, 0, &shm))
+        f |= 256;
+    if (!(root.stx_attributes & STATX_ATTR_MOUNT_ROOT) ||
+        !(proc.stx_attributes & STATX_ATTR_MOUNT_ROOT) ||
+        !(shm.stx_attributes & STATX_ATTR_MOUNT_ROOT) || proc.stx_mnt_id == root.stx_mnt_id ||
+        shm.stx_mnt_id == proc.stx_mnt_id)
+        f |= 512;
+    /* STATX_MNT_ID_UNIQUE instead of STATX_MNT_ID, above 1 << 31. */
+    struct statx uniq;
+    if (statx(AT_FDCWD, "/proc", 0, STATX_MNT_ID_UNIQUE, &uniq) ||
+        !(uniq.stx_mask & STATX_MNT_ID_UNIQUE) || (uniq.stx_mask & STATX_MNT_ID) ||
+        uniq.stx_mnt_id <= (1ULL << 31))
+        f |= 1024;
+    /* AT_SYMLINK_NOFOLLOW stats the link; without it, the target. */
+    struct statx ln, target;
+    if (symlink(path, link_path) ||
+        statx(AT_FDCWD, link_path, AT_SYMLINK_NOFOLLOW, STATX_BASIC_STATS, &ln) ||
+        !S_ISLNK(ln.stx_mode) || statx(AT_FDCWD, link_path, 0, STATX_BASIC_STATS, &target) ||
+        target.stx_ino != sx.stx_ino)
+        f |= 2048;
+    /* A pipe has no path: still a FIFO, with a mount id. */
+    int p[2];
+    struct statx pipe_sx;
+    if (pipe(p) || statx(p[0], NULL, AT_EMPTY_PATH, STATX_BASIC_STATS, &pipe_sx) ||
+        !S_ISFIFO(pipe_sx.stx_mode) || !(pipe_sx.stx_mask & STATX_MNT_ID))
+        f |= 4096;
+    close(p[0]);
+    close(p[1]);
+    /* Errors: the reserved mask bit and both sync types are EINVAL, an
+     * unknown flag on a lookup EINVAL, a negative dirfd with no name EBADF,
+     * a bad name EFAULT before EINVAL, no name without AT_EMPTY_PATH
+     * ENOENT. */
+    struct statx junk;
+    errno = 0;
+    if (statx(AT_FDCWD, path, 0, 0x80000000U, &junk) != -1 || errno != EINVAL) f |= 8192;
+    errno = 0;
+    if (statx(AT_FDCWD, path, AT_STATX_FORCE_SYNC | AT_STATX_DONT_SYNC, 0, &junk) != -1 ||
+        errno != EINVAL)
+        f |= 16384;
+    errno = 0;
+    if (statx(AT_FDCWD, path, 0x8000, 0, &junk) != -1 || errno != EINVAL) f |= 32768;
+    errno = 0;
+    if (statx(-1, NULL, AT_EMPTY_PATH, 0, &junk) != -1 || errno != EBADF) f |= 65536;
+    errno = 0;
+    if (statx(AT_FDCWD, (const char *)1, 0, 0x80000000U, &junk) != -1 || errno != EFAULT)
+        f |= 131072;
+    errno = 0;
+    if (statx(AT_FDCWD, "", 0, 0, &junk) != -1 || errno != ENOENT) f |= 262144;
+    /* Either sync type alone is fine. */
+    if (statx(AT_FDCWD, path, AT_STATX_DONT_SYNC, 0, &junk)) f |= 524288;
+    close(fd);
+    unlink(link_path);
+    unlink(path);
+    snprintf(why, sizeof(why), "f=0x%x mask=0x%x attrs=0x%llx mnt=%llu/%llu/%llu errno=%d", f,
+             sx.stx_mask, (unsigned long long)sx.stx_attributes,
+             (unsigned long long)root.stx_mnt_id, (unsigned long long)proc.stx_mnt_id,
+             (unsigned long long)shm.stx_mnt_id, errno);
+    report("statx", f == 0, why);
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
@@ -6551,6 +6658,7 @@ int main(int argc, char **argv)
     test_creat_lchown_fchmodat2();
     test_close_range_and_advice();
     test_splice_family();
+    test_statx();
 #if defined(__x86_64__)
     test_ustat_sysfs();
 #endif

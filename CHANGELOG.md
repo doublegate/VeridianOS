@@ -95,6 +95,13 @@
   nothing, and tee copies without removing. Writes into a pipe nobody reads are EPIPE with
   SIGPIPE; SPLICE_F_NONBLOCK or O_NONBLOCK makes an empty or full pipe EAGAIN; RLIMIT_FSIZE and
   the set-ID clearing of a write apply.
+- statx (it was ENOSYS), following Linux 7.3's `fs/stat.c`: AT_EMPTY_PATH with a NULL or empty
+  name stats the descriptor (or the working directory with AT_FDCWD), the reserved mask bit, both
+  sync types together and unknown flags are EINVAL, a bad name pointer EFAULT, an empty name
+  without AT_EMPTY_PATH ENOENT, in Linux's order. It reports the numbers stat reports plus the
+  mount: every mount now has an id (the lowest free one, as Linux allocates them) and a unique id
+  above 2^31 (STATX_MNT_ID_UNIQUE), and STATX_ATTR_MOUNT_ROOT marks a mount's root. The whole
+  256-byte struct is written; no birth time is reported.
 - adjtimex and clock_adjtime (they were ENOSYS), from Linux's `kernel/time/ntp.c` and
   `timekeeping.c` (`timer::ntp`). Everyone may read the NTP state; changing it needs CAP_SYS_TIME,
   checked in Linux's order, and a refused call leaves the struct unwritten. Status, time constant,

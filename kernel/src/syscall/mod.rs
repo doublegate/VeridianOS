@@ -1528,7 +1528,8 @@ fn handle_syscall(
         Syscall::TimerGetoverrun => time::sys_timer_getoverrun(arg1),
         #[cfg(feature = "alloc")]
         Syscall::TimerDelete => time::sys_timer_delete(arg1),
-        Syscall::Rseq | Syscall::Statx | Syscall::Clone3 => Err(SyscallError::NotImplemented),
+        Syscall::Rseq | Syscall::Clone3 => Err(SyscallError::NotImplemented),
+        Syscall::Statx => sys_statx(arg1, arg2, arg3, arg4, arg5),
         Syscall::Fallocate => sys_fallocate(arg1, arg2, arg3, arg4),
         Syscall::Statfs => sys_statfs(arg1, arg2),
         Syscall::Fstatfs => sys_fstatfs(arg1, arg2),

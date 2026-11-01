@@ -876,6 +876,27 @@ pub struct MountPoint {
     pub filesystem: Arc<dyn Filesystem>,
 }
 
+/// A mount's identifiers, as statx reports them (Linux's `mnt_id` and
+/// `mnt_id_unique`): `id` is the lowest one free when it was mounted and
+/// is reused after an unmount; `unique` never is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MountIds {
+    pub id: u32,
+    pub unique: u64,
+}
+
+/// Linux's MNT_UNIQUE_ID_OFFSET: unique ids start above it, so that one
+/// is never mistaken for a 31-bit `mnt_id`.
+const MNT_UNIQUE_ID_OFFSET: u64 = 1 << 31;
+
+/// The mount of files that have no path (pipes, sockets, anonymous
+/// inodes), Linux's internal pipefs and sockfs mounts: the first ids,
+/// taken before any other mount.
+pub const PSEUDO_MOUNT: MountIds = MountIds {
+    id: 0,
+    unique: MNT_UNIQUE_ID_OFFSET + 1,
+};
+
 /// Make `path` absolute (relative to `cwd`) and remove `.`, `..` and empty
 /// components lexically. `..` at the root stays at the root. The result
 /// always starts with `/` and never ends with one (except `/` itself).
@@ -932,6 +953,39 @@ struct MountTable {
     root_fs: Option<Arc<dyn Filesystem>>,
     /// Mount points, keyed by normalized path
     mounts: BTreeMap<String, Arc<dyn Filesystem>>,
+    /// Each mount's ids, keyed as `mounts` ("/" for the root).
+    ids: BTreeMap<String, MountIds>,
+    /// The last unique id handed out (0 before the first).
+    last_unique: u64,
+}
+
+impl MountTable {
+    /// Give the new mount at `path` its ids (Linux's mnt_alloc_id): the
+    /// lowest free id and the next unique one.
+    fn assign_ids(&mut self, path: &str) {
+        let mut id = PSEUDO_MOUNT.id + 1;
+        while self.ids.values().any(|m| m.id == id) {
+            id += 1;
+        }
+        self.last_unique = self.last_unique.max(PSEUDO_MOUNT.unique) + 1;
+        self.ids.insert(
+            String::from(path),
+            MountIds {
+                id,
+                unique: self.last_unique,
+            },
+        );
+    }
+
+    /// The mount point serving normalized `path`: the longest one it lies
+    /// under, or the root.
+    fn mount_of(&self, path: &str) -> &str {
+        self.mounts
+            .keys()
+            .filter(|m| path_is_under(path, m))
+            .max_by_key(|m| m.len())
+            .map_or("/", |m| m.as_str())
+    }
 }
 
 /// Virtual Filesystem Manager
@@ -1372,6 +1426,7 @@ impl Vfs {
                 return Err(KernelError::FsError(crate::error::FsError::AlreadyMounted));
             }
             t.root_fs = Some(fs);
+            t.assign_ids("/");
             Ok(())
         })
     }
@@ -1386,6 +1441,7 @@ impl Vfs {
             if t.mounts.contains_key(&path) {
                 return Err(KernelError::FsError(crate::error::FsError::AlreadyMounted));
             }
+            t.assign_ids(&path);
             t.mounts.insert(path, fs);
             Ok(())
         })
@@ -1414,17 +1470,21 @@ impl Vfs {
     /// The previous root filesystem (if any) is dropped. Mount points under
     /// `/dev` and `/proc` should be re-mounted after calling this.
     pub fn swap_root(&self, fs: Arc<dyn Filesystem>) {
-        self.update_table(|t| t.root_fs = Some(fs));
+        self.update_table(|t| {
+            t.root_fs = Some(fs);
+            t.assign_ids("/");
+        });
     }
 
     /// Unmount a filesystem at the specified path
     pub fn unmount(&self, path: &str) -> Result<(), KernelError> {
         let path = normalize_path(path, "/");
         self.update_table(|t| {
-            t.mounts
-                .remove(&path)
-                .ok_or(KernelError::FsError(crate::error::FsError::NotMounted))
-                .map(|_| ())
+            if t.mounts.remove(&path).is_none() {
+                return Err(KernelError::FsError(crate::error::FsError::NotMounted));
+            }
+            t.ids.remove(&path);
+            Ok(())
         })
     }
 
@@ -1528,13 +1588,18 @@ impl Vfs {
     /// tree.
     pub fn mount_point_of(&self, path: &str) -> String {
         let path = normalize_path(path, "/");
-        self.snapshot()
-            .mounts
-            .keys()
-            .filter(|m| path_is_under(&path, m))
-            .max_by_key(|m| m.len())
-            .cloned()
-            .unwrap_or_else(|| String::from("/"))
+        String::from(self.snapshot().mount_of(&path))
+    }
+
+    /// The ids of the mount serving `path`, a canonical path in the whole
+    /// tree, and whether `path` is that mount's root (statx's
+    /// STATX_ATTR_MOUNT_ROOT).
+    pub fn mount_ids_of(&self, path: &str) -> (MountIds, bool) {
+        let path = normalize_path(path, "/");
+        let table = self.snapshot();
+        let mount = table.mount_of(&path);
+        let ids = table.ids.get(mount).copied().unwrap_or(PSEUDO_MOUNT);
+        (ids, path == mount)
     }
 
     /// The mount point holding the directory entry `name` in `parent`, with
@@ -3287,6 +3352,41 @@ pub(crate) mod tests {
     }
 
     // --- Mount tests ---
+
+    #[test]
+    fn mounts_take_the_lowest_free_id_and_a_new_unique_id() {
+        let vfs = make_vfs_with_root();
+        let (root, at_root) = vfs.mount_ids_of("/");
+        assert!(at_root);
+        assert_eq!(root.id, 1);
+        assert!(root.unique > PSEUDO_MOUNT.unique);
+        vfs.mount("/a".into(), Arc::new(ramfs::RamFs::new()))
+            .unwrap();
+        let (a, a_root) = vfs.mount_ids_of("/a");
+        assert!(a_root);
+        assert_eq!(a.id, 2);
+        assert!(a.unique > root.unique);
+        // Below a mount point, and beside one with the same prefix.
+        assert_eq!(vfs.mount_ids_of("/a/x/y"), (a, false));
+        assert_eq!(vfs.mount_ids_of("/ab"), (root, false));
+        // An unmounted id is reused; a unique id never is.
+        vfs.unmount("/a").unwrap();
+        vfs.mount("/b".into(), Arc::new(ramfs::RamFs::new()))
+            .unwrap();
+        let (b, _) = vfs.mount_ids_of("/b");
+        assert_eq!(b.id, 2);
+        assert!(b.unique > a.unique);
+        // A new root is a new mount.
+        vfs.swap_root(Arc::new(ramfs::RamFs::new()));
+        let (new_root, _) = vfs.mount_ids_of("/");
+        assert_eq!(new_root.id, 3);
+        assert!(new_root.unique > b.unique);
+    }
+
+    #[test]
+    fn without_a_root_everything_is_the_pseudo_mount() {
+        assert_eq!(Vfs::new().mount_ids_of("/x"), (PSEUDO_MOUNT, false));
+    }
 
     #[test]
     fn test_mount_root() {

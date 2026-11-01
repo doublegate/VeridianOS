@@ -1161,6 +1161,124 @@ fn fill_x86_stat(metadata: &crate::fs::Metadata, rdev: u32) -> X86Stat {
     }
 }
 
+/// Linux's `struct statx_timestamp`.
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+struct StatxTimestamp {
+    tv_sec: i64,
+    tv_nsec: u32,
+    __reserved: i32,
+}
+
+/// Linux's `struct statx`: 256 bytes, the same on every architecture.
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+struct Statx {
+    stx_mask: u32,
+    stx_blksize: u32,
+    stx_attributes: u64,
+    stx_nlink: u32,
+    stx_uid: u32,
+    stx_gid: u32,
+    stx_mode: u16,
+    __spare0: u16,
+    stx_ino: u64,
+    stx_size: u64,
+    stx_blocks: u64,
+    stx_attributes_mask: u64,
+    stx_atime: StatxTimestamp,
+    stx_btime: StatxTimestamp,
+    stx_ctime: StatxTimestamp,
+    stx_mtime: StatxTimestamp,
+    stx_rdev_major: u32,
+    stx_rdev_minor: u32,
+    stx_dev_major: u32,
+    stx_dev_minor: u32,
+    stx_mnt_id: u64,
+    stx_dio_mem_align: u32,
+    stx_dio_offset_align: u32,
+    stx_subvol: u64,
+    stx_atomic_write_unit_min: u32,
+    stx_atomic_write_unit_max: u32,
+    stx_atomic_write_segments_max: u32,
+    stx_dio_read_offset_align: u32,
+    stx_atomic_write_unit_max_opt: u32,
+    __spare2: u32,
+    __spare3: [u64; 8],
+}
+
+const _: () = assert!(core::mem::size_of::<Statx>() == 256);
+// The offsets of include/uapi/linux/stat.h, with no implicit padding.
+const _: () = {
+    use core::mem::offset_of;
+    assert!(offset_of!(Statx, stx_nlink) == 0x10);
+    assert!(offset_of!(Statx, stx_ino) == 0x20);
+    assert!(offset_of!(Statx, stx_atime) == 0x40);
+    assert!(offset_of!(Statx, stx_rdev_major) == 0x80);
+    assert!(offset_of!(Statx, stx_mnt_id) == 0x90);
+    assert!(offset_of!(Statx, stx_subvol) == 0xa0);
+    assert!(offset_of!(Statx, stx_atomic_write_segments_max) == 0xb0);
+    assert!(offset_of!(Statx, __spare3) == 0xc0);
+};
+
+const STATX_BASIC_STATS: u32 = 0x7ff;
+const STATX_MNT_ID: u32 = 0x1000;
+const STATX_MNT_ID_UNIQUE: u32 = 0x4000;
+const STATX_RESERVED: u32 = 0x8000_0000;
+const STATX_ATTR_AUTOMOUNT: u64 = 0x1000;
+const STATX_ATTR_MOUNT_ROOT: u64 = 0x2000;
+const STATX_ATTR_DAX: u64 = 0x20_0000;
+/// AT_STATX_FORCE_SYNC | AT_STATX_DONT_SYNC; both at once is EINVAL.
+const AT_STATX_SYNC_TYPE: usize = 0x6000;
+
+/// What statx reports for a node (Linux's vfs_statx_path and cp_statx):
+/// the numbers stat reports, its device's major and minor in `rdev`, the
+/// id of its mount (the unique one when `mask` asks for it) and whether it
+/// is that mount's root. No filesystem records a birth time, so
+/// STATX_BTIME is never in the result.
+fn fill_statx(
+    metadata: &crate::fs::Metadata,
+    rdev: (u32, u32),
+    mount: crate::fs::MountIds,
+    mount_root: bool,
+    mask: u32,
+) -> Statx {
+    let st = fill_x86_stat(metadata, 0);
+    let time = |sec: i64, nsec: i64| StatxTimestamp {
+        tv_sec: sec,
+        tv_nsec: nsec as u32,
+        __reserved: 0,
+    };
+    let (mnt_bit, mnt_id) = if mask & STATX_MNT_ID_UNIQUE != 0 {
+        (STATX_MNT_ID_UNIQUE, mount.unique)
+    } else {
+        (STATX_MNT_ID, u64::from(mount.id))
+    };
+    let dev = st.st_dev as u32;
+    Statx {
+        stx_mask: STATX_BASIC_STATS | mnt_bit,
+        stx_blksize: st.st_blksize as u32,
+        stx_attributes: if mount_root { STATX_ATTR_MOUNT_ROOT } else { 0 },
+        stx_nlink: st.st_nlink as u32,
+        stx_uid: st.st_uid,
+        stx_gid: st.st_gid,
+        stx_mode: st.st_mode as u16,
+        stx_ino: st.st_ino,
+        stx_size: st.st_size as u64,
+        stx_blocks: st.st_blocks as u64,
+        stx_attributes_mask: STATX_ATTR_AUTOMOUNT | STATX_ATTR_DAX | STATX_ATTR_MOUNT_ROOT,
+        stx_atime: time(st.st_atime, st.st_atime_nsec),
+        stx_ctime: time(st.st_ctime, st.st_ctime_nsec),
+        stx_mtime: time(st.st_mtime, st.st_mtime_nsec),
+        stx_rdev_major: rdev.0,
+        stx_rdev_minor: rdev.1,
+        stx_dev_major: crate::fs::dev_major(dev),
+        stx_dev_minor: crate::fs::dev_minor(dev),
+        stx_mnt_id: mnt_id,
+        ..Statx::default()
+    }
+}
+
 /// Map a `KernelError` from VFS path resolution to the most appropriate
 /// `SyscallError`, preserving important distinctions like ELOOP and
 /// ENOENT.
@@ -3201,6 +3319,89 @@ pub fn sys_fstatat(dirfd: usize, path_ptr: usize, stat_buf: usize, flags: usize)
     Ok(0)
 }
 
+/// statx(dirfd, path, flags, mask, buf), as Linux's (fs/stat.c). With
+/// AT_EMPTY_PATH a NULL or empty path names `dirfd` itself -- an open
+/// descriptor of any kind, without looking at the other flags, as
+/// do_statx_fd -- or with AT_FDCWD the working directory. A reserved mask
+/// bit or both AT_STATX_SYNC_TYPE bits is EINVAL, as is an unknown flag
+/// for a lookup; either sync type alone is accepted, every filesystem
+/// being local. The path is read first, so a bad one is EFAULT before any
+/// of those.
+pub fn sys_statx(
+    dirfd: usize,
+    path_ptr: usize,
+    flags: usize,
+    mask: usize,
+    buf: usize,
+) -> SyscallResult {
+    const AT_NO_AUTOMOUNT: usize = 0x800;
+    let flags = flags as u32 as usize;
+    let mask = mask as u32;
+    let name = if flags & AT_EMPTY_PATH == 0 {
+        Some(read_user_path(path_ptr)?)
+    } else if path_ptr == 0 {
+        None
+    } else {
+        Some(read_user_path_or_empty(path_ptr)?).filter(|p| !p.is_empty())
+    };
+    let dfd = dirfd as u32 as i32;
+    let bad_request =
+        mask & STATX_RESERVED != 0 || flags & AT_STATX_SYNC_TYPE == AT_STATX_SYNC_TYPE;
+    let vfs = vfs()?;
+    let (node, canonical) = match name {
+        None if dfd >= 0 => {
+            if bad_request {
+                return Err(SyscallError::InvalidArgument);
+            }
+            let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+            let file = proc
+                .file_table
+                .lock()
+                .get(dfd as usize)
+                .ok_or(SyscallError::BadFileDescriptor)?;
+            (file.node.clone(), file.path.clone())
+        }
+        name => {
+            if bad_request
+                || flags
+                    & !(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH | AT_STATX_SYNC_TYPE)
+                    != 0
+            {
+                return Err(SyscallError::InvalidArgument);
+            }
+            let (node, canonical) = match name {
+                None if dfd != AT_FDCWD as u32 as i32 => {
+                    return Err(SyscallError::BadFileDescriptor)
+                }
+                None => vfs.resolve_path_canonical(".").map_err(map_resolve_err)?,
+                Some(rel_path) => {
+                    let abs_path = resolve_at_path(dirfd, &rel_path)?;
+                    let trailing_slash = rel_path.ends_with('/');
+                    let follow = flags & AT_SYMLINK_NOFOLLOW == 0 || trailing_slash;
+                    let found = vfs
+                        .resolve_canonical(&abs_path, &vfs.get_cwd(), follow)
+                        .map_err(map_resolve_err)?;
+                    if trailing_slash && found.0.node_type() != crate::fs::NodeType::Directory {
+                        return Err(SyscallError::NotADirectory);
+                    }
+                    found
+                }
+            };
+            (node, Some(canonical))
+        }
+    };
+
+    let metadata = node.metadata().map_err(super::map_kernel_error)?;
+    let (mount, mount_root) = canonical
+        .as_deref()
+        .map_or((crate::fs::PSEUDO_MOUNT, false), |path| {
+            vfs.global().mount_ids_of(path)
+        });
+    let rdev = node.device_id().unwrap_or((0, 0));
+    super::userspace::write_user(buf, fill_statx(&metadata, rdev, mount, mount_root, mask))?;
+    Ok(0)
+}
+
 /// Copy what statfs reports about `node`'s filesystem to `buf` (`struct
 /// statfs`, `fs::statfs::LINUX_STATFS_SIZE` bytes). A filesystem that
 /// cannot say is ENOSYS, as on Linux.
@@ -3981,5 +4182,48 @@ mod tests {
     #[test]
     fn utimbuf_times_are_whole_seconds() {
         assert_eq!(utimbuf_times([11, 22]), [[11, 0], [22, 0]]);
+    }
+
+    /// statx reports what stat does, plus the mount: its 31-bit id, or the
+    /// unique one when asked, never both, and MOUNT_ROOT at its root; the
+    /// attributes it can report are in the mask either way.
+    #[test]
+    fn statx_reports_stat_numbers_and_the_mount() {
+        let mut m = meta(0o4750, 1000, 100);
+        m.size = 1000;
+        m.inode = 77;
+        m.accessed = 5;
+        m.modified = 6;
+        m.created = 7;
+        let mount = crate::fs::MountIds {
+            id: 3,
+            unique: (1 << 31) + 9,
+        };
+        let s = fill_statx(&m, (4, 64), mount, false, STATX_BASIC_STATS);
+        assert_eq!(s.stx_mask, STATX_BASIC_STATS | STATX_MNT_ID);
+        assert_eq!(s.stx_mode, 0o104750);
+        assert_eq!((s.stx_uid, s.stx_gid, s.stx_nlink), (1000, 100, 1));
+        assert_eq!((s.stx_ino, s.stx_size, s.stx_blocks), (77, 1000, 2));
+        assert_eq!(s.stx_blksize, 4096);
+        assert_eq!(
+            (s.stx_atime.tv_sec, s.stx_mtime.tv_sec, s.stx_ctime.tv_sec),
+            (5, 6, 7)
+        );
+        assert_eq!(s.stx_btime, StatxTimestamp::default());
+        assert_eq!((s.stx_rdev_major, s.stx_rdev_minor), (4, 64));
+        // st_dev 1 is device 0:1.
+        assert_eq!((s.stx_dev_major, s.stx_dev_minor), (0, 1));
+        assert_eq!(s.stx_mnt_id, 3);
+        assert_eq!(s.stx_attributes, 0);
+        assert_eq!(
+            s.stx_attributes_mask,
+            STATX_ATTR_AUTOMOUNT | STATX_ATTR_DAX | STATX_ATTR_MOUNT_ROOT
+        );
+        assert_eq!(s.__spare3, [0; 8]);
+
+        let u = fill_statx(&m, (0, 0), mount, true, STATX_MNT_ID_UNIQUE);
+        assert_eq!(u.stx_mask, STATX_BASIC_STATS | STATX_MNT_ID_UNIQUE);
+        assert_eq!(u.stx_mnt_id, (1 << 31) + 9);
+        assert_eq!(u.stx_attributes, STATX_ATTR_MOUNT_ROOT);
     }
 }
