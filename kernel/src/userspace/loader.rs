@@ -402,6 +402,15 @@ impl crate::fs::VfsNode for SerialConsoleNode {
         crate::drivers::console_input::tty_readiness()
     }
 
+    fn bytes_readable(&self) -> Option<usize> {
+        Some(crate::drivers::console_input::bytes_readable())
+    }
+
+    /// /dev/console's number, so ioctl sees a terminal.
+    fn device_id(&self) -> Option<(u32, u32)> {
+        Some((5, 1))
+    }
+
     fn wakes_io_waiters(&self) -> bool {
         cfg!(target_arch = "x86_64")
     }

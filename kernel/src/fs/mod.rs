@@ -630,6 +630,15 @@ pub trait VfsNode: Send + Sync {
         0x0001 | 0x0004 // POLLIN | POLLOUT
     }
 
+    /// FIONREAD on a node that is not a regular file: how many bytes are
+    /// queued for reading now (a pipe's contents, a terminal's input as
+    /// its line discipline would hand it out). `None`: the node keeps no
+    /// such count, and FIONREAD is ENOTTY, as on Linux for a file whose
+    /// driver has no FIONREAD.
+    fn bytes_readable(&self) -> Option<usize> {
+        None
+    }
+
     /// Whether the node is a stream with no file position -- a pipe,
     /// socket, terminal or event object -- so lseek, pread and pwrite on
     /// it are ESPIPE, as for Linux's nonseekable files.

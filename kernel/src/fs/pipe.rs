@@ -348,6 +348,11 @@ impl VfsNode for PipeReadNode {
         Some(self.reader.lock().id())
     }
 
+    /// Linux's pipe_ioctl: the bytes in the pipe.
+    fn bytes_readable(&self) -> Option<usize> {
+        Some(self.reader.lock().inner.lock().buffer.len())
+    }
+
     fn pipe_splice(
         &self,
         max: usize,
@@ -484,6 +489,12 @@ impl VfsNode for PipeWriteNode {
 
     fn pipe_id(&self) -> Option<usize> {
         Some(self.writer.lock().id())
+    }
+
+    /// The bytes in the pipe, as from the read end (Linux answers FIONREAD
+    /// on either end).
+    fn bytes_readable(&self) -> Option<usize> {
+        Some(self.writer.lock().inner.lock().buffer.len())
     }
 
     fn pipe_room(&self) -> Result<usize, KernelError> {

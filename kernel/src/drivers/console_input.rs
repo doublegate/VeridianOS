@@ -480,6 +480,37 @@ fn raw_readable(vmin: u8, vtime: u8, avail: usize) -> bool {
     avail >= amt
 }
 
+/// FIONREAD (TIOCINQ) on the console, as n_tty counts it: in canonical
+/// mode the bytes of complete lines only (the line being edited is not
+/// readable yet), in raw mode every byte received.
+pub fn bytes_readable() -> usize {
+    use crate::drivers::terminal;
+    poll_hardware();
+    let canonical = terminal::is_canonical_mode();
+    let line = LINE.lock();
+    with_ring(|r| readable_count(canonical, &line, r))
+}
+
+/// [`bytes_readable`] for given line and ring states. In canonical mode a
+/// complete `line` is what a read returns; otherwise the ring bytes up to
+/// and including the first line end join the partial line (an ^D ending
+/// the line is not data).
+fn readable_count(canonical: bool, line: &Line, ring: &Ring) -> usize {
+    if !canonical {
+        return line.len + ring.len;
+    }
+    if line.complete {
+        return line.len;
+    }
+    (0..ring.len)
+        .map(|i| ring.buf[(ring.head + i) % CAPACITY])
+        .position(|b| matches!(b, b'\n' | b'\r' | EOF_CHAR))
+        .map_or(0, |end| {
+            let eof = ring.buf[(ring.head + end) % CAPACITY] == EOF_CHAR;
+            line.len + end + usize::from(!eof)
+        })
+}
+
 /// Whether the ring holds what ends a canonical line.
 fn ring_has_line_end(r: &Ring) -> bool {
     (0..r.len).any(|i| matches!(r.buf[(r.head + i) % CAPACITY], b'\n' | b'\r' | EOF_CHAR))
@@ -510,6 +541,41 @@ mod tests {
         assert!(r.push(1));
         assert!(r.push(2));
         assert_eq!((r.pop(), r.pop()), (Some(1), Some(2)));
+    }
+
+    /// FIONREAD counts what a read would hand out: nothing of a canonical
+    /// line still being typed, a finished line with its newline but not
+    /// the ^D that ends one, everything in raw mode.
+    #[test]
+    fn readable_count_follows_the_line_discipline() {
+        let line = |text: &[u8], complete| {
+            let mut l = Line {
+                buf: [0; CAPACITY],
+                len: text.len(),
+                complete,
+            };
+            l.buf[..text.len()].copy_from_slice(text);
+            l
+        };
+        let ring = |bytes: &[u8]| {
+            let mut r = Ring::new();
+            for &b in bytes {
+                r.push(b);
+            }
+            r
+        };
+        assert_eq!(readable_count(true, &line(b"", false), &ring(b"abc")), 0);
+        assert_eq!(readable_count(true, &line(b"", false), &ring(b"ab\ncd")), 3);
+        assert_eq!(readable_count(true, &line(b"xy", false), &ring(b"z\r")), 4);
+        assert_eq!(
+            readable_count(true, &line(b"ab", false), &ring(&[EOF_CHAR])),
+            2
+        );
+        assert_eq!(
+            readable_count(true, &line(b"done\n", true), &ring(b"more\n")),
+            5
+        );
+        assert_eq!(readable_count(false, &line(b"ab", false), &ring(b"cd")), 4);
     }
 
     /// The ring and the line buffer are global: tests that use them run

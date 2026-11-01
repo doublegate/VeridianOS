@@ -31,6 +31,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
+#include <termios.h>
+#include <sys/ioctl.h>
 #include <sys/fsuid.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
@@ -7116,6 +7118,83 @@ static void test_fhandle(void)
     report("fhandle", f == 0, why);
 }
 
+/*
+ * ioctl (group 3 step E1, N-198): a descriptor is a terminal by what it
+ * is, not by its number -- a file is not one even as fd 0, /dev/console
+ * is one above 2; an unknown request is ENOTTY, a closed fd EBADF before
+ * anything else; FIONREAD, FIONBIO and FIOCLEX/FIONCLEX work on any file.
+ */
+static void test_ioctl(void)
+{
+    const char *path = "/tmp/musl_ioctl";
+    struct termios t;
+    char why[96], buf[4];
+    int f = 0, n = -1;
+
+    int fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0644);
+    if (fd < 0 || write(fd, "abcdef", 6) != 6 || lseek(fd, 2, SEEK_SET) != 2) f |= 1;
+    /* A file: FIONREAD is size minus position; no terminal calls. */
+    if (ioctl(fd, FIONREAD, &n) != 0 || n != 4) f |= 2;
+    errno = 0;
+    if (!fails_with(ioctl(fd, TCGETS, &t), ENOTTY) || isatty(fd)) f |= 4;
+    errno = 0;
+    if (!fails_with(ioctl(fd, 0x7fff, 0), ENOTTY)) f |= 4;
+    /* The same file as fd 0 is still not a terminal. */
+    int saved = dup(0);
+    if (saved < 0 || dup2(fd, 0) != 0) f |= 8;
+    errno = 0;
+    if (!fails_with(ioctl(0, TCGETS, &t), ENOTTY)) f |= 8;
+    if (saved >= 0) {
+        dup2(saved, 0);
+        close(saved);
+    }
+
+    /* FIOCLEX and FIONCLEX are F_SETFD's close-on-exec. */
+    if (ioctl(fd, FIOCLEX) != 0 || fcntl(fd, F_GETFD) != FD_CLOEXEC) f |= 16;
+    if (ioctl(fd, FIONCLEX) != 0 || fcntl(fd, F_GETFD) != 0) f |= 16;
+    close(fd);
+    unlink(path);
+
+    /* A closed descriptor: EBADF, whatever the request. */
+    errno = 0;
+    if (!fails_with(ioctl(fd, TCGETS, &t), EBADF)) f |= 32;
+    errno = 0;
+    if (!fails_with(ioctl(fd, FIONREAD, &n), EBADF)) f |= 32;
+
+    /* A pipe: FIONREAD on either end; FIONBIO is O_NONBLOCK. */
+    int p[2];
+    if (pipe(p) != 0 || write(p[1], "hello", 5) != 5) f |= 64;
+    if (ioctl(p[0], FIONREAD, &n) != 0 || n != 5) f |= 64;
+    if (ioctl(p[1], FIONREAD, &n) != 0 || n != 5) f |= 64;
+    if (read(p[0], buf, 2) != 2 || ioctl(p[0], FIONREAD, &n) != 0 || n != 3) f |= 64;
+    int on = 1, off = 0;
+    if (read(p[0], buf, 3) != 3 || ioctl(p[0], FIONBIO, &on) != 0 ||
+        !(fcntl(p[0], F_GETFL) & O_NONBLOCK))
+        f |= 128;
+    errno = 0;
+    if (!fails_with(read(p[0], buf, 1), EAGAIN)) f |= 128;
+    if (ioctl(p[0], FIONBIO, &off) != 0 || (fcntl(p[0], F_GETFL) & O_NONBLOCK)) f |= 128;
+    if (ioctl(p[0], FIOASYNC, &off) != 0) f |= 128;
+    errno = 0;
+    if (!fails_with(ioctl(p[0], TCGETS, &t), ENOTTY)) f |= 128;
+    close(p[0]);
+    close(p[1]);
+
+    /* /dev/console is a terminal at any fd number; /dev/null is not. */
+    int con = open("/dev/console", O_RDWR | O_NOCTTY);
+    if (con < 3 || ioctl(con, TCGETS, &t) != 0 || !isatty(con)) f |= 256;
+    close(con);
+    int null = open("/dev/null", O_RDWR);
+    errno = 0;
+    if (null < 0 || !fails_with(ioctl(null, TCGETS, &t), ENOTTY) ||
+        !fails_with(ioctl(null, FIONREAD, &n), ENOTTY))
+        f |= 512;
+    close(null);
+
+    snprintf(why, sizeof(why), "f=0x%x n=%d errno=%d", f, n, errno);
+    report("ioctl", f == 0, why);
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
@@ -7222,6 +7301,7 @@ int main(int argc, char **argv)
     test_openat2();
     test_execveat();
     test_fhandle();
+    test_ioctl();
 #if defined(__x86_64__)
     test_ustat_sysfs();
 #endif

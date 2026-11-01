@@ -1771,13 +1771,72 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
         self, KernelTermios, KernelWinsize, TCGETS, TCSETS, TCSETSF, TCSETSW, TIOCGPGRP,
         TIOCGWINSZ, TIOCSPGRP, TIOCSWINSZ,
     };
+    const FIONREAD: usize = 0x541B;
+    const FIONBIO: usize = 0x5421;
+    const FIONCLEX: usize = 0x5450;
+    const FIOCLEX: usize = 0x5451;
+    const FIOASYNC: usize = 0x5452;
 
-    // Give PTY fds priority for TIOCGWINSZ / TIOCSWINSZ before the generic
-    // terminal-only guard below rejects them.  For fd > 2, check whether the
-    // fd refers to a PTY master or slave node.  If so, the PTY handler
-    // returns Some(result) and we propagate it directly.  If the fd is not a
-    // PTY node, it returns None and we fall through to the standard path.
-    if fd > 2 {
+    // The open file, or the implicit console of a standard descriptor
+    // never replaced. Anything else is EBADF whatever the command, as
+    // Linux's fdget comes first (N-198).
+    let file = process::current_process().and_then(|p| p.file_table.lock().get(fd));
+    if file.is_none() && !console_fallback_allowed(fd) {
+        return Err(SyscallError::BadFileDescriptor);
+    }
+
+    // What every file answers, before its driver sees the command
+    // (Linux's do_vfs_ioctl).
+    match cmd {
+        FIOCLEX | FIONCLEX => {
+            if let Some(proc) = process::current_process() {
+                // The implicit console has no entry to mark; Linux's
+                // set_close_on_exec has no failure either.
+                let _ = proc.file_table.lock().set_cloexec(fd, cmd == FIOCLEX);
+            }
+            return Ok(0);
+        }
+        FIONBIO => {
+            let on: i32 = super::userspace::read_user(arg)?;
+            if let Some(file) = &file {
+                file.nonblock
+                    .store(on != 0, core::sync::atomic::Ordering::Relaxed);
+            }
+            return Ok(0);
+        }
+        FIOASYNC => {
+            let on: i32 = super::userspace::read_user(arg)?;
+            // No file sends SIGIO yet, so none can turn it on: Linux's
+            // ENOTTY for a file without fasync. Turning it off is a no-op.
+            return if on != 0 {
+                Err(SyscallError::NotATerminal)
+            } else {
+                Ok(0)
+            };
+        }
+        FIONREAD => {
+            // A regular file: size minus position, truncated to an int as
+            // Linux's put_user does. Anything else: what its node queues.
+            let count = match &file {
+                Some(file) if file.node.node_type() == crate::fs::NodeType::File => {
+                    let size = file.node.metadata().map_err(super::map_kernel_error)?.size;
+                    (size as i64).wrapping_sub(*file.position.read() as i64) as i32
+                }
+                Some(file) => file
+                    .node
+                    .bytes_readable()
+                    .ok_or(SyscallError::NotATerminal)? as i32,
+                None => crate::drivers::console_input::bytes_readable() as i32,
+            };
+            super::userspace::write_user(arg, count)?;
+            return Ok(0);
+        }
+        _ => {}
+    }
+
+    // PTY ends answer the window-size calls themselves (and ENOTTY for
+    // the rest); None means the fd is not a PTY.
+    if file.is_some() {
         if let Some(result) = crate::syscall::pty::handle_pty_ioctl(fd, cmd, arg) {
             return result;
         }
@@ -1787,62 +1846,39 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
     // (major, minor), never by the path it was opened with (W-7). Both run
     // against a kernel copy of the argument (W-4, W-19): the handlers never
     // see the user pointer.
-    if fd > 2 {
-        if let Some(proc) = process::current_process() {
-            let file_table = proc.file_table.lock();
-            let device = file_table
-                .get(fd as crate::fs::file::FileDescriptor)
-                .and_then(|file| file.node.device_id());
-            drop(file_table);
-            match device {
-                Some((crate::fs::devfs::DRM_MAJOR, _)) => {
-                    let result =
-                        crate::syscall::userspace::ioctl_bounce(cmd as u64, arg, |kernel_arg| {
-                            crate::graphics::drm_ioctl::drm_ioctl_dispatch(
-                                fd as i32, cmd as u64, kernel_arg,
-                            )
-                        })?;
-                    return match result {
-                        Ok(v) => Ok(v as usize),
-                        Err(crate::error::KernelError::PermissionDenied { .. }) => {
-                            Err(SyscallError::PermissionDenied)
-                        }
-                        Err(_) => Err(SyscallError::InvalidArgument),
-                    };
+    let device = file.as_ref().and_then(|file| file.node.device_id());
+    match device {
+        Some((crate::fs::devfs::DRM_MAJOR, _)) => {
+            let result = crate::syscall::userspace::ioctl_bounce(cmd as u64, arg, |kernel_arg| {
+                crate::graphics::drm_ioctl::drm_ioctl_dispatch(fd as i32, cmd as u64, kernel_arg)
+            })?;
+            return match result {
+                Ok(v) => Ok(v as usize),
+                Err(crate::error::KernelError::PermissionDenied { .. }) => {
+                    Err(SyscallError::PermissionDenied)
                 }
-                Some((EVDEV_MAJOR, minor)) => {
-                    let result =
-                        crate::syscall::userspace::ioctl_bounce(cmd as u64, arg, |kernel_arg| {
-                            crate::drivers::evdev::handle_ioctl(minor, cmd as u32, kernel_arg)
-                        })?;
-                    return match result {
-                        Ok(v) => Ok(v as usize),
-                        Err(_) => Err(SyscallError::InvalidArgument),
-                    };
-                }
-                _ => {}
-            }
+                Err(_) => Err(SyscallError::InvalidArgument),
+            };
         }
+        Some((EVDEV_MAJOR, minor)) => {
+            let result = crate::syscall::userspace::ioctl_bounce(cmd as u64, arg, |kernel_arg| {
+                crate::drivers::evdev::handle_ioctl(minor, cmd as u32, kernel_arg)
+            })?;
+            return match result {
+                Ok(v) => Ok(v as usize),
+                Err(_) => Err(SyscallError::InvalidArgument),
+            };
+        }
+        _ => {}
     }
 
-    // Terminal ioctls are only valid on terminal fds (0=stdin, 1=stdout,
-    // 2=stderr which are connected to the serial console). Regular files
-    // opened via open() must return ENOTTY so that isatty() returns false
-    // and BFD/stdio treat them as seekable files, not terminal streams.
-    let is_terminal_cmd = matches!(
-        cmd,
-        TIOCGWINSZ | TIOCSWINSZ | TCGETS | TCSETS | TCSETSW | TCSETSF | TIOCGPGRP | TIOCSPGRP
-    );
-    if is_terminal_cmd && fd > 2 {
+    // Terminal ioctls go to the console only: the implicit console, or a
+    // file whose node is /dev/console or /dev/tty0, whatever its fd number.
+    // Deciding by number made fds 0-2 a terminal even when redirected to a
+    // file, and an open of /dev/console above 2 not one (N-198). Everything
+    // else, and any command the console does not know, is ENOTTY.
+    if !is_console_terminal(device, file.is_none()) {
         return Err(SyscallError::NotATerminal);
-    }
-    // A closed standard descriptor is not a terminal; it is not open at all.
-    if is_terminal_cmd {
-        let has_entry =
-            process::current_process().is_some_and(|p| p.file_table.lock().get(fd).is_some());
-        if !has_entry && !console_fallback_allowed(fd) {
-            return Err(SyscallError::BadFileDescriptor);
-        }
     }
 
     match cmd {
@@ -1937,11 +1973,15 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
             validate_user_ptr_typed::<i32>(arg)?;
             Ok(0)
         }
-        _ => {
-            // ENOTTY -- not a terminal or unsupported ioctl
-            Err(SyscallError::InvalidArgument)
-        }
+        _ => Err(SyscallError::NotATerminal),
     }
+}
+
+/// Whether an ioctl target is the console terminal: the implicit console
+/// (`implicit`, a standard descriptor with no file), or a character device
+/// numbered as /dev/console (5, 1) or /dev/tty0 (4, 0).
+fn is_console_terminal(device: Option<(u32, u32)>, implicit: bool) -> bool {
+    implicit || matches!(device, Some((5, 1) | (4, 0)))
 }
 
 /// Send a signal to a process
@@ -4112,6 +4152,41 @@ mod tests {
         tests::{make_vfs_with_root, StuckCaps},
         xattr, Permissions, VfsNode,
     };
+
+    /// The console is a terminal by what the fd is, not by its number
+    /// (N-198): /dev/console and /dev/tty0 are, the implicit console is,
+    /// a file, a pipe or /dev/null is not.
+    #[test]
+    fn terminal_ioctls_are_decided_by_the_node() {
+        use super::is_console_terminal as tty;
+        assert!(tty(Some((5, 1)), false));
+        assert!(tty(Some((4, 0)), false));
+        assert!(tty(None, true));
+        assert!(!tty(None, false), "a regular file or a pipe");
+        assert!(!tty(Some((1, 3)), false), "/dev/null");
+        assert!(!tty(Some((226, 0)), false), "a DRM card");
+    }
+
+    /// FIONREAD counts on the nodes that keep one: a pipe's contents from
+    /// either end, a FIFO's; none on a plain file node (whose count comes
+    /// from size and position instead).
+    #[test]
+    fn fionread_counts_queued_bytes() {
+        use crate::fs::pipe::{create_pipe, PipeReadNode, PipeWriteNode};
+        let (r, w) = create_pipe().unwrap();
+        let (r, w) = (PipeReadNode::new(r), PipeWriteNode::new(w));
+        assert_eq!(r.bytes_readable(), Some(0));
+        w.write(0, b"hello").unwrap();
+        assert_eq!(r.bytes_readable(), Some(5));
+        assert_eq!(w.bytes_readable(), Some(5));
+        let mut buf = [0u8; 2];
+        r.read(0, &mut buf).unwrap();
+        assert_eq!(r.bytes_readable(), Some(3));
+        let vfs = make_vfs_with_root();
+        let root = vfs.resolve_path("/").unwrap();
+        let file = root.create("f", Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(file.bytes_readable(), None);
+    }
 
     /// openat2's `how` checks, in build_open_flags' order.
     #[test]

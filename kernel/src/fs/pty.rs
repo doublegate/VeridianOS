@@ -636,6 +636,11 @@ impl VfsNode for PtyMasterNode {
         self.master.master_readiness()
     }
 
+    /// What the slave wrote and the master has not read.
+    fn bytes_readable(&self) -> Option<usize> {
+        Some(self.master.output_buffer.read().len())
+    }
+
     /// Every buffer change calls `io_event`, so poll, epoll and blocking
     /// reads sleep instead of re-checking every 10 ms.
     fn wakes_io_waiters(&self) -> bool {
@@ -761,6 +766,12 @@ impl VfsNode for PtySlaveNode {
         // A slave whose master is gone is hung up: reads and writes give
         // EIO, and poll says so (POLLIN promised data a read did not give).
         get_pty_master(self.slave.master_id()).map_or(POLLHUP | POLLERR, |m| m.slave_readiness())
+    }
+
+    /// What the master wrote and the slave has not read (0 once the master
+    /// is gone).
+    fn bytes_readable(&self) -> Option<usize> {
+        Some(get_pty_master(self.slave.master_id()).map_or(0, |m| m.input_buffer.read().len()))
     }
 
     fn wakes_io_waiters(&self) -> bool {

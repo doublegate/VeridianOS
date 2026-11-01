@@ -263,8 +263,12 @@ What remains:
   on (another thread took it) returns EINTR where Linux would run the call again.
 - **Handlers save x87/SSE state only.** The signal frame holds an FXSAVE image, so the upper
   halves of AVX registers are not preserved across a handler that uses them.
+- **PTYs answer only the window-size ioctls.** TCGETS, TCSETS and the rest are ENOTTY on either
+  end of a PTY, so tcgetattr fails there (isatty works: musl asks TIOCGWINSZ). The console is the
+  only terminal with termios calls.
 - **No I/O siginfo.** SIGIO (F_SETOWN, O_ASYNC) does not exist yet, so no signal arrives with
-  POLL_* information; kill, tkill, sigqueue, POSIX timers, SIGCHLD and fault signals carry
+  POLL_* information, and FIOASYNC refuses to turn it on (ENOTTY, Linux's answer for a file
+  that cannot send it); kill, tkill, sigqueue, POSIX timers, SIGCHLD and fault signals carry
   Linux's siginfo (N-259).
 - **POSIX timers on another process's CPU clock.** timer_create on a clock from
   clock_getcpuclockid for another process is EOPNOTSUPP; Linux allows it. CPU-clock timers

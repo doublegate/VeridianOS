@@ -114,6 +114,13 @@
   needed written back); AT_HANDLE_MNT_ID_UNIQUE reports statx's unique mount id; a connectable
   handle opens only below its mount descriptor; open_by_handle_at needs CAP_DAC_READ_SEARCH
   (EPERM) and is ESTALE for a file that is gone. New error: ESTALE.
+- ioctl decides by what a descriptor is, not by its number: terminal requests reach the console
+  through /dev/console or /dev/tty0 at any fd number (an open of either above fd 2 was not a
+  terminal), and not a file or pipe redirected onto fds 0-2 (which isatty called a terminal). A
+  closed descriptor is EBADF whatever the request, and a request the file does not know is ENOTTY
+  (it was EINVAL). FIONREAD (a regular file's size past the position, a pipe's or FIFO's contents
+  from either end, a PTY's or the console's input), FIONBIO, FIOCLEX and FIONCLEX work on any
+  file; FIOASYNC turning SIGIO on is ENOTTY, since nothing sends it yet (N-198).
 - execve of a relative name runs it from the working directory, as on Linux; it searched PATH,
   which is libc's job (execvp). Exec errors keep their errno (EACCES, ENOTDIR, ELOOP) instead of
   all being ENOENT, a script's interpreter is opened the same way, and an empty argv gets "" as

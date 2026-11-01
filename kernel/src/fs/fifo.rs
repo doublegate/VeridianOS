@@ -257,6 +257,11 @@ impl VfsNode for FifoEnd {
         Some(Arc::as_ptr(&self.fifo) as usize)
     }
 
+    /// The bytes in the FIFO (Linux's pipe_ioctl).
+    fn bytes_readable(&self) -> Option<usize> {
+        Some(self.fifo.state.lock().buffer.len())
+    }
+
     fn pipe_room(&self) -> Result<usize, KernelError> {
         if !self.write {
             return Err(KernelError::FsError(FsError::BadFileDescriptor));
