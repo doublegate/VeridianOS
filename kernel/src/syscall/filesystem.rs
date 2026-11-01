@@ -3212,6 +3212,74 @@ pub fn sys_truncate(path_ptr: usize, length: usize) -> SyscallResult {
     Ok(0)
 }
 
+/// The file execveat runs and its names (Linux's do_open_execat and
+/// alloc_bprm): `name` from `dirfd` (EBADF, ENOTDIR), the final symlink
+/// not followed with `nofollow` (ELOOP), or with an empty name the
+/// descriptor itself (AT_EMPTY_PATH; the caller checked the flag) or, for
+/// AT_FDCWD, the working directory. A name relative to a descriptor is
+/// `/dev/fd/N/name`, an empty one `/dev/fd/N`; such a name is inaccessible
+/// after the exec when the descriptor is close-on-exec.
+pub(crate) fn exec_file_at(
+    dirfd: usize,
+    name: &str,
+    nofollow: bool,
+) -> Result<crate::process::creation::ExecFile, SyscallError> {
+    use alloc::{format, string::String};
+    let dfd = dirfd as u32 as i32;
+    let at_cwd = dfd == AT_FDCWD as u32 as i32;
+    let vfs = vfs()?;
+    let root = vfs.get_root();
+    let entry = || -> Result<(alloc::sync::Arc<crate::fs::file::File>, bool), SyscallError> {
+        let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+        let entry = proc.file_table.lock().get_entry(dfd as u32 as usize);
+        entry.ok_or(SyscallError::BadFileDescriptor)
+    };
+    let base = |p: &str| String::from(p.rsplit('/').next().unwrap_or(""));
+
+    if name.is_empty() && !at_cwd {
+        let (file, cloexec) = entry()?;
+        let exe_path = file
+            .path
+            .as_deref()
+            .map(|p| crate::fs::root_relative(p, &root))
+            .unwrap_or_default();
+        return Ok(crate::process::creation::ExecFile {
+            node: file.node.clone(),
+            filename: format!("/dev/fd/{}", dfd),
+            comm: base(&exe_path),
+            exe_path,
+            path_inaccessible: cloexec,
+        });
+    }
+    let lookup = if name.is_empty() {
+        String::from(".")
+    } else {
+        resolve_at_path(dirfd, name)?
+    };
+    let (node, canonical) = vfs
+        .resolve_canonical(&lookup, &vfs.get_cwd(), !nofollow || name.ends_with('/'))
+        .map_err(map_resolve_err)?;
+    if name.ends_with('/') && node.node_type() != crate::fs::NodeType::Directory {
+        return Err(SyscallError::NotADirectory);
+    }
+    if node.node_type() == crate::fs::NodeType::Symlink {
+        return Err(SyscallError::SymlinkLoop);
+    }
+    let from_fd = !name.starts_with('/') && !at_cwd;
+    let filename = if from_fd {
+        format!("/dev/fd/{}/{}", dfd, name)
+    } else {
+        String::from(name)
+    };
+    Ok(crate::process::creation::ExecFile {
+        node,
+        comm: base(&filename),
+        exe_path: crate::fs::root_relative(&canonical, &root),
+        filename,
+        path_inaccessible: from_fd && entry().is_ok_and(|(_, cloexec)| cloexec),
+    })
+}
+
 /// Resolve a path relative to a directory fd.
 ///
 /// If `dirfd == AT_FDCWD`, uses the process CWD. Otherwise resolves the

@@ -37,6 +37,7 @@ exit_group
 fork
 vfork
 execve
+execveat
 wait4
 getpid
 getppid

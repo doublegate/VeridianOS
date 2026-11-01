@@ -95,6 +95,19 @@
   nothing, and tee copies without removing. Writes into a pipe nobody reads are EPIPE with
   SIGPIPE; SPLICE_F_NONBLOCK or O_NONBLOCK makes an empty or full pipe EAGAIN; RLIMIT_FSIZE and
   the set-ID clearing of a write apply.
+- execveat (it was missing from the syscall table), following Linux 7.3's `fs/exec.c`: the name
+  (EFAULT, or ENOENT for an empty one without AT_EMPTY_PATH), then unknown flags (EINVAL), then the
+  lookup against the directory descriptor (EBADF, ENOTDIR, ELOOP for a final symlink with
+  AT_SYMLINK_NOFOLLOW), then the file (EACCES unless it is a regular file the caller may execute),
+  then argv and envp (EFAULT, E2BIG). AT_EMPTY_PATH runs the descriptor itself; AT_EXECVE_CHECK
+  (new in Linux 7.3) makes the same checks and returns 0 without executing. A program run from a
+  descriptor sees `/dev/fd/N` or `/dev/fd/N/name` as AT_EXECFN and its file's own path in
+  /proc/self/exe; a script run from a close-on-exec descriptor is ENOENT, since its interpreter
+  could not open it.
+- execve of a relative name runs it from the working directory, as on Linux; it searched PATH,
+  which is libc's job (execvp). Exec errors keep their errno (EACCES, ENOTDIR, ELOOP) instead of
+  all being ENOENT, a script's interpreter is opened the same way, and an empty argv gets "" as
+  argv[0].
 - openat2 (it was missing from the syscall table), following Linux 7.3's `fs/open.c` and
   `fs/namei.c`. `struct open_how` is read as an extensible struct: below 24 bytes EINVAL, above a
   page E2BIG, nonzero bytes past the known fields E2BIG. Its flags, mode and resolve bits are

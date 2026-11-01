@@ -6753,10 +6753,204 @@ static void test_openat2(void)
     report("openat2", f == 0, why);
 }
 
+#ifndef AT_EXECVE_CHECK
+#define AT_EXECVE_CHECK 0x10000
+#endif
+
+/*
+ * `--exe EXE EXECFN`: the exec under test landed here; exit 0 when
+ * /proc/self/exe is EXE and AT_EXECFN is EXECFN, else which differed.
+ */
+static int print_exe_check(const char *exe, const char *execfn)
+{
+    char buf[512];
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    const char *fn = (const char *)getauxval(AT_EXECFN);
+    int bad = 0;
+    if (n < 0 || (buf[n] = 0, strcmp(buf, exe) != 0)) bad |= 1;
+    if (!fn || strcmp(fn, execfn) != 0) bad |= 2;
+    return bad;
+}
+
+static long musl_execveat(int dfd, const char *path, char *const *argv, char *const *envp,
+                          int flags)
+{
+    return syscall(SYS_execveat, dfd, path, argv, envp, flags);
+}
+
+/* The exit status a child gives when its exec failed with `e`. */
+#define EXEC_ERR(e) (200 + ((e) & 0x3f))
+
+/* Run execveat in a child: its exit status, EXEC_ERR(errno) when the call
+ * failed, or -1 when the child died otherwise. */
+static int execveat_status(int dfd, const char *path, char *const *argv, int flags)
+{
+    char *env[] = {NULL};
+    pid_t pid = fork();
+    if (pid == 0) {
+        musl_execveat(dfd, path, argv, env, flags);
+        _exit(EXEC_ERR(errno));
+    }
+    int status;
+    if (pid < 0 || waitpid(pid, &status, 0) != pid || !WIFEXITED(status)) return -1;
+    return WEXITSTATUS(status);
+}
+
+/*
+ * execveat (group 3 step D3c): a dirfd, AT_FDCWD, AT_EMPTY_PATH on a
+ * descriptor, the names the program gets (/proc/self/exe, AT_EXECFN),
+ * AT_EXECVE_CHECK, a script from a close-on-exec descriptor, and the errors
+ * in Linux's order. execve of a relative name runs it from the working
+ * directory, without a PATH search.
+ */
+static void test_execveat(void)
+{
+    const char *plain = "/tmp/musl_execveat_plain", *script = "/tmp/musl_execveat.sh";
+    const char *junk = "/tmp/musl_execveat_junk", *link_path = "/tmp/musl_execveat_ln";
+    char why[240], self[512], dir[512], fdname[64], fdexecfn[600];
+    int f = 0;
+    char *t_argv[] = {"true", NULL}, *f_argv[] = {"false", NULL};
+    char *env[] = {NULL};
+
+    ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
+    if (n <= 0) {
+        report("execveat", 0, "readlink /proc/self/exe");
+        return;
+    }
+    self[n] = 0;
+    /* The kernel's launcher records the name it was given, which may run
+     * through a symlink; exec records the file's own path. */
+    char real[512];
+    if (realpath(self, real)) strcpy(self, real);
+    strcpy(dir, self);
+    *strrchr(dir, '/') = 0;
+    const char *base = strrchr(self, '/') + 1;
+
+    /* AT_FDCWD with an absolute name; a dirfd with a relative one. */
+    if (execveat_status(AT_FDCWD, "/bin/true", t_argv, 0) != 0) f |= 1;
+    int bin = open("/bin", O_RDONLY | O_DIRECTORY);
+    if (bin < 0 || execveat_status(bin, "true", t_argv, 0) != 0 ||
+        execveat_status(bin, "false", f_argv, 0) != 1)
+        f |= 2;
+
+    /* The program's names: a dirfd-relative exec is /dev/fd/N/name to
+     * AT_EXECFN and the file itself to /proc/self/exe; AT_EMPTY_PATH is
+     * /dev/fd/N. */
+    int dfd = open(dir, O_RDONLY | O_DIRECTORY);
+    snprintf(fdexecfn, sizeof(fdexecfn), "/dev/fd/%d/%s", dfd, base);
+    char *names_argv[] = {"x", "--exe", self, fdexecfn, NULL};
+    if (dfd < 0 || execveat_status(dfd, base, names_argv, 0) != 0) f |= 4;
+    int exe = open(self, O_RDONLY);
+    snprintf(fdname, sizeof(fdname), "/dev/fd/%d", exe);
+    char *empty_argv[] = {"x", "--exe", self, fdname, NULL};
+    if (exe < 0 || execveat_status(exe, "", empty_argv, AT_EMPTY_PATH) != 0) f |= 8;
+    /* An absolute name is itself, whatever the dirfd. */
+    char *abs_argv[] = {"x", "--exe", self, self, NULL};
+    if (execveat_status(bin, self, abs_argv, 0) != 0) f |= 16;
+
+    /* execve("name") runs ./name: no PATH search, and /proc/self/exe is
+     * the canonical path. */
+    char *rel_argv[] = {"x", "--exe", self, (char *)base, NULL};
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (chdir(dir) == 0) execve(base, rel_argv, env);
+        _exit(EXEC_ERR(errno));
+    }
+    int status = -1;
+    if (pid < 0 || waitpid(pid, &status, 0) != pid || !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 0)
+        f |= 32;
+    pid = fork();
+    if (pid == 0) {
+        if (chdir("/tmp") == 0) execve("true", t_argv, env);
+        _exit(EXEC_ERR(errno));
+    }
+    if (pid < 0 || waitpid(pid, &status, 0) != pid || !WIFEXITED(status) ||
+        WEXITSTATUS(status) != EXEC_ERR(ENOENT))
+        f |= 64;
+
+    /* A script run from a close-on-exec descriptor: its interpreter could
+     * not open /dev/fd/N after the exec, so ENOENT up front. */
+    int sfd = open(script, O_CREAT | O_WRONLY | O_TRUNC, 0755);
+    if (sfd < 0 || write(sfd, "#!/bin/sh\nexit 3\n", 17) != 17) f |= 128;
+    close(sfd);
+    if (execveat_status(AT_FDCWD, script, t_argv, 0) != 3) f |= 128;
+    sfd = open(script, O_RDONLY | O_CLOEXEC);
+    if (sfd < 0 || execveat_status(sfd, "", t_argv, AT_EMPTY_PATH) != EXEC_ERR(ENOENT))
+        f |= 256;
+
+    /* AT_EXECVE_CHECK: the checks and nothing else, so it returns here,
+     * also for a file that is not a program; no execute bit is EACCES. */
+    int jfd = open(junk, O_CREAT | O_WRONLY | O_TRUNC, 0755);
+    if (jfd < 0 || write(jfd, "junk", 4) != 4) f |= 512;
+    close(jfd);
+    errno = 0;
+    if (musl_execveat(AT_FDCWD, "/bin/true", t_argv, env, AT_EXECVE_CHECK) != 0 ||
+        musl_execveat(AT_FDCWD, junk, t_argv, env, AT_EXECVE_CHECK) != 0 ||
+        musl_execveat(exe, "", NULL, NULL, AT_EMPTY_PATH | AT_EXECVE_CHECK) != 0)
+        f |= 1024;
+    int pfd = open(plain, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    close(pfd);
+    errno = 0;
+    if (musl_execveat(AT_FDCWD, plain, t_argv, env, AT_EXECVE_CHECK) != -1 || errno != EACCES)
+        f |= 2048;
+
+    /* Errors: the name first (EFAULT, ENOENT for an empty one without
+     * AT_EMPTY_PATH), then unknown flags (EINVAL), then the lookup (EBADF,
+     * ENOTDIR, ELOOP, ENOENT), then the file (EACCES for a directory, a
+     * file without x), then argv (EFAULT). */
+    struct {
+        int dfd;
+        const char *path;
+        char *const *argv;
+        int flags, err;
+    } cases[] = {
+        {AT_FDCWD, (const char *)1, t_argv, 0x1, EFAULT},
+        {AT_FDCWD, "", t_argv, 0x1, ENOENT},
+        {AT_FDCWD, "/bin/true", t_argv, 0x1, EINVAL},
+        {AT_FDCWD, "/bin/true", t_argv, AT_SYMLINK_FOLLOW, EINVAL},
+        {-1, "", t_argv, AT_EMPTY_PATH, EBADF},
+        {-1, "true", t_argv, 0, EBADF},
+        {exe, "true", t_argv, 0, ENOTDIR},
+        {AT_FDCWD, link_path, t_argv, AT_SYMLINK_NOFOLLOW, ELOOP},
+        {AT_FDCWD, "/tmp/musl_execveat_none", (char *const *)1, 0, ENOENT},
+        {AT_FDCWD, "/tmp", t_argv, 0, EACCES},
+        {AT_FDCWD, plain, t_argv, 0, EACCES},
+        {AT_FDCWD, "/bin/true/", t_argv, 0, ENOTDIR},
+        {AT_FDCWD, "/bin/true", (char *const *)1, 0, EFAULT},
+    };
+    unlink(link_path);
+    if (symlink("/bin/true", link_path)) f |= 4096;
+    int bad_case = -1, bad_errno = 0;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        errno = 0;
+        long r = musl_execveat(cases[i].dfd, cases[i].path, cases[i].argv, env, cases[i].flags);
+        if (r != -1 || errno != cases[i].err) {
+            if (bad_case < 0) bad_case = (int)i, bad_errno = errno;
+            f |= 8192;
+        }
+    }
+    /* Following the symlink is fine. */
+    if (execveat_status(AT_FDCWD, link_path, t_argv, 0) != 0) f |= 16384;
+
+    close(bin);
+    close(dfd);
+    close(exe);
+    close(sfd);
+    unlink(script);
+    unlink(junk);
+    unlink(plain);
+    unlink(link_path);
+    snprintf(why, sizeof(why), "f=0x%x case=%d errno=%d", f, bad_case, bad_errno);
+    report("execveat", f == 0, why);
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
         return print_ids();
+    if (argc >= 4 && strcmp(argv[1], "--exe") == 0)
+        return print_exe_check(argv[2], argv[3]);
     if (argc >= 3 && strcmp(argv[1], "--only") == 0) {
         /* `--only NAME [N]`: run it N times (default once), to catch a
          * test that fails only sometimes. */
@@ -6855,6 +7049,7 @@ int main(int argc, char **argv)
     test_splice_family();
     test_statx();
     test_openat2();
+    test_execveat();
 #if defined(__x86_64__)
     test_ustat_sysfs();
 #endif

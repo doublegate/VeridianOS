@@ -3,7 +3,7 @@
 //! Implements system calls for process and thread management including
 //! creation, termination, and state management.
 
-use super::{validate_user_buffer, validate_user_string_ptr, SyscallError, SyscallResult};
+use super::{validate_user_buffer, SyscallError, SyscallResult};
 #[cfg(target_arch = "x86_64")]
 use crate::arch::context::ThreadContext;
 use crate::process::{
@@ -99,26 +99,49 @@ pub(crate) fn sys_fork_with(opts: &crate::process::fork::ForkOptions) -> Syscall
     }
 }
 
-/// Execute a new program
-///
-/// # Arguments
-/// - path_ptr: Pointer to null-terminated path string
-/// - argv_ptr: Pointer to argument array
-/// - envp_ptr: Pointer to environment array
+/// execve(path, argv, envp): execveat from the working directory.
 pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallResult {
-    use crate::syscall::userspace::{copy_string_array_from_user_tracked, copy_string_from_user};
+    sys_execveat(super::filesystem::AT_FDCWD, path_ptr, argv_ptr, envp_ptr, 0)
+}
 
-    // Validate path pointer is in user space
-    validate_user_string_ptr(path_ptr)?;
+/// execveat(dirfd, path, argv, envp, flags), in Linux 7.3's order
+/// (do_execveat_common): the name (EFAULT; an empty one ENOENT without
+/// AT_EMPTY_PATH), the flags (EINVAL past AT_SYMLINK_NOFOLLOW,
+/// AT_EMPTY_PATH and AT_EXECVE_CHECK), the file
+/// (`filesystem::exec_file_at`) and whether the caller may execute it
+/// (EACCES), then argv and envp (EFAULT, E2BIG). AT_EXECVE_CHECK stops
+/// there and returns 0: the file is checked as an exec would check it and
+/// not run.
+pub fn sys_execveat(
+    dirfd: usize,
+    path_ptr: usize,
+    argv_ptr: usize,
+    envp_ptr: usize,
+    flags: usize,
+) -> SyscallResult {
+    use super::filesystem::{
+        read_user_path, read_user_path_or_empty, AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW,
+    };
+    use crate::syscall::userspace::copy_string_array_from_user_tracked;
+    const AT_EXECVE_CHECK: usize = 0x1_0000;
 
-    // Copy path from user space
-    // SAFETY: path_ptr was validated as non-null and in user-space above.
-    // copy_string_from_user reads a null-terminated string from the user-space
-    // pointer with length bounds checking. The caller must provide valid mapped
-    // user memory.
-    let path = unsafe { copy_string_from_user(path_ptr)? };
+    let flags = flags as u32 as usize;
+    let path = if flags & AT_EMPTY_PATH != 0 {
+        read_user_path_or_empty(path_ptr)?
+    } else {
+        read_user_path(path_ptr)?
+    };
+    if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH | AT_EXECVE_CHECK) != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let file = super::filesystem::exec_file_at(dirfd, &path, flags & AT_SYMLINK_NOFOLLOW != 0)?;
+    crate::process::creation::check_executable(
+        &*file.node,
+        &crate::process::creds::Caller::current(),
+    )
+    .map_err(super::map_kernel_error)?;
 
-    crate::println!("[SYS_EXEC] path=\"{}\"", path);
+    crate::println!("[SYS_EXEC] path=\"{}\"", file.filename);
 
     // Parse argv and envp arrays from user space with cumulative ARG_MAX
     // enforcement. A single counter tracks total bytes across both argv and
@@ -129,13 +152,22 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
     // SAFETY: argv_ptr and envp_ptr are user-space pointers to null-terminated
     // arrays of string pointers. copy_string_array_from_user_tracked handles
     // null pointer checks internally and bounds-checks string lengths.
-    let argv = unsafe { copy_string_array_from_user_tracked(argv_ptr, &mut arg_total_bytes)? };
+    let mut argv = unsafe { copy_string_array_from_user_tracked(argv_ptr, &mut arg_total_bytes)? };
 
     // A NULL or empty envp is an empty environment, as on Linux: it used to
     // inherit the caller's, so `env -i` passed everything on (N-211).
     //
     // SAFETY: as for argv above -- the callee validates every user pointer.
     let envp = unsafe { copy_string_array_from_user_tracked(envp_ptr, &mut arg_total_bytes)? };
+
+    // An empty argv gets "" as argv[0], as on Linux, so a program reading
+    // from argv[1] does not walk into envp.
+    if argv.is_empty() {
+        argv.push(alloc::string::String::new());
+    }
+    if flags & AT_EXECVE_CHECK != 0 {
+        return Ok(0);
+    }
 
     // exec_process keeps only PRESERVE_EXEC capabilities once the new
     // image is in place (N-30, N-94).
@@ -160,7 +192,7 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
         Ok(())
     };
 
-    match exec_process(&path, &argv_refs, &envp_refs, &before_commit) {
+    match exec_process(file, &argv_refs, &envp_refs, &before_commit) {
         Ok(_) => {
             // exec succeeded. The current process's address space has been
             // replaced with the new program image. We cannot return via

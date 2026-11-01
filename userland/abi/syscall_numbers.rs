@@ -21,6 +21,7 @@ pub mod sysno {
     pub const SYS_fork: usize = 57;
     pub const SYS_vfork: usize = 58;
     pub const SYS_execve: usize = 59;
+    pub const SYS_execveat: usize = 322;
     pub const SYS_wait4: usize = 61;
     pub const SYS_getpid: usize = 39;
     pub const SYS_getppid: usize = 110;
@@ -335,6 +336,7 @@ pub mod sysno {
     pub const SYS_sched_yield: usize = 124;
     pub const SYS_exit_group: usize = 94;
     pub const SYS_execve: usize = 221;
+    pub const SYS_execveat: usize = 281;
     pub const SYS_wait4: usize = 260;
     pub const SYS_getpid: usize = 172;
     pub const SYS_getppid: usize = 173;
@@ -613,6 +615,7 @@ pub mod sysno {
     pub const SYS_sched_yield: usize = 124;
     pub const SYS_exit_group: usize = 94;
     pub const SYS_execve: usize = 221;
+    pub const SYS_execveat: usize = 281;
     pub const SYS_wait4: usize = 260;
     pub const SYS_getpid: usize = 172;
     pub const SYS_getppid: usize = 173;

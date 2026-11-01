@@ -908,6 +908,7 @@ fn handle_syscall(
         Syscall::Fork => sys_fork(),
         Syscall::Vfork => process::sys_vfork(),
         Syscall::Execve => sys_exec(arg1, arg2, arg3),
+        Syscall::Execveat => sys_execveat(arg1, arg2, arg3, arg4, arg5),
         Syscall::Wait4 => sys_wait4(arg1 as isize, arg2, arg3, arg4),
         Syscall::Getpid => sys_getpid(),
         Syscall::Getppid => sys_getppid(),
