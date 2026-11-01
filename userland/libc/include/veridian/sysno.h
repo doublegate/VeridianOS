@@ -82,6 +82,10 @@
 #define SYS_pwrite64                     18
 #define SYS_readv                        19
 #define SYS_writev                       20
+#define SYS_preadv                       295
+#define SYS_pwritev                      296
+#define SYS_preadv2                      327
+#define SYS_pwritev2                     328
 #define SYS_fstat                        5
 #define SYS_stat                         4
 #define SYS_lstat                        6
@@ -106,9 +110,11 @@
 #define SYS_chmod                        90
 #define SYS_fchmod                       91
 #define SYS_fchmodat                     268
+#define SYS_fchmodat2                    452
 #define SYS_chown                        92
 #define SYS_fchown                       93
 #define SYS_fchownat                     260
+#define SYS_lchown                       94
 #define SYS_mknod                        133
 #define SYS_mknodat                      259
 #define SYS_rename                       82
@@ -131,6 +137,11 @@
 #define SYS_select                       23
 #define SYS_pselect6                     270
 #define SYS_getdents64                   217
+#define SYS_getdents                     78
+#define SYS_creat                        85
+#define SYS_close_range                  436
+#define SYS_readahead                    187
+#define SYS_fadvise64                    221
 /* Extended attributes (ADR 0020) */
 #define SYS_setxattr                     188
 #define SYS_lsetxattr                    189
@@ -161,6 +172,10 @@
 #define SYS_sync                         162
 #define SYS_fsync                        74
 #define SYS_fdatasync                    75
+#define SYS_syncfs                       306
+#define SYS_sync_file_range              277
+#define SYS_ustat                        136
+#define SYS_sysfs                        139
 /* Kernel information */
 #define SYS_KERNEL_GET_INFO              1104
 #define SYS_sysinfo                      99
@@ -398,6 +413,10 @@
 #define SYS_pwrite64                     68
 #define SYS_readv                        65
 #define SYS_writev                       66
+#define SYS_preadv                       69
+#define SYS_pwritev                      70
+#define SYS_preadv2                      286
+#define SYS_pwritev2                     287
 #define SYS_fstat                        80
 #define SYS_newfstatat                   79
 #define SYS_statx                        291
@@ -416,6 +435,7 @@
 #define SYS_faccessat2                   439
 #define SYS_fchmod                       52
 #define SYS_fchmodat                     53
+#define SYS_fchmodat2                    452
 #define SYS_fchown                       55
 #define SYS_fchownat                     54
 #define SYS_mknodat                      33
@@ -428,6 +448,9 @@
 #define SYS_ppoll                        73
 #define SYS_pselect6                     72
 #define SYS_getdents64                   61
+#define SYS_close_range                  436
+#define SYS_readahead                    213
+#define SYS_fadvise64                    223
 /* Extended attributes (ADR 0020) */
 #define SYS_setxattr                     5
 #define SYS_lsetxattr                    6
@@ -456,6 +479,8 @@
 #define SYS_sync                         81
 #define SYS_fsync                        82
 #define SYS_fdatasync                    83
+#define SYS_syncfs                       267
+#define SYS_sync_file_range              84
 /* Kernel information */
 #define SYS_KERNEL_GET_INFO              1104
 #define SYS_sysinfo                      179
@@ -685,6 +710,10 @@
 #define SYS_pwrite64                     68
 #define SYS_readv                        65
 #define SYS_writev                       66
+#define SYS_preadv                       69
+#define SYS_pwritev                      70
+#define SYS_preadv2                      286
+#define SYS_pwritev2                     287
 #define SYS_fstat                        80
 #define SYS_newfstatat                   79
 #define SYS_statx                        291
@@ -703,6 +732,7 @@
 #define SYS_faccessat2                   439
 #define SYS_fchmod                       52
 #define SYS_fchmodat                     53
+#define SYS_fchmodat2                    452
 #define SYS_fchown                       55
 #define SYS_fchownat                     54
 #define SYS_mknodat                      33
@@ -716,6 +746,9 @@
 #define SYS_ppoll                        73
 #define SYS_pselect6                     72
 #define SYS_getdents64                   61
+#define SYS_close_range                  436
+#define SYS_readahead                    213
+#define SYS_fadvise64                    223
 /* Extended attributes (ADR 0020) */
 #define SYS_setxattr                     5
 #define SYS_lsetxattr                    6
@@ -744,6 +777,8 @@
 #define SYS_sync                         81
 #define SYS_fsync                        82
 #define SYS_fdatasync                    83
+#define SYS_syncfs                       267
+#define SYS_sync_file_range              84
 /* Kernel information */
 #define SYS_KERNEL_GET_INFO              1104
 #define SYS_sysinfo                      179

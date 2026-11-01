@@ -365,6 +365,8 @@ mod linux_caps;
 mod thread_clone;
 pub(crate) mod userspace;
 mod xattr;
+// Simple file calls (creat, preadv2, close_range, sync_file_range, ...)
+mod file_calls;
 pub(crate) use filesystem::rename_paths;
 pub use futex::sys_futex_wake;
 
@@ -827,11 +829,15 @@ fn dispatch(
 /// Whether EPIPE from `syscall` comes with SIGPIPE for the caller, as on
 /// Linux: from a write always (pipe_write; a socket written with write),
 /// from a send unless its flags (`arg3` for sendmsg, `arg4` for sendto)
-/// carry MSG_NOSIGNAL.
+/// carry MSG_NOSIGNAL, from pwritev2 unless its flags carry RWF_NOSIGNAL.
 fn raises_sigpipe(syscall: Syscall, arg3: usize, arg4: usize) -> bool {
     const MSG_NOSIGNAL: usize = 0x4000;
+    const RWF_NOSIGNAL: usize = 0x100;
     match syscall {
         Syscall::Write | Syscall::Writev | Syscall::SocketSend => true,
+        // At the file position (an offset is ESPIPE on a pipe or socket),
+        // unless its flags carry RWF_NOSIGNAL.
+        Syscall::Pwritev2 => syscall_arg6().map_or(true, |f| f as u32 as usize & RWF_NOSIGNAL == 0),
         Syscall::Sendto => arg4 & MSG_NOSIGNAL == 0,
         Syscall::Sendmsg => arg3 & MSG_NOSIGNAL == 0,
         _ => false,
@@ -1432,6 +1438,21 @@ fn handle_syscall(
 
         // musl libc compatibility syscalls
         Syscall::Getdents64 => sys_getdents64(arg1, arg2, arg3),
+        Syscall::Getdents => file_calls::sys_getdents(arg1, arg2, arg3),
+        Syscall::Creat => file_calls::sys_creat(arg1, arg2),
+        Syscall::Lchown => file_calls::sys_lchown(arg1, arg2, arg3),
+        Syscall::Fchmodat2 => file_calls::sys_fchmodat2(arg1, arg2, arg3, arg4),
+        Syscall::Preadv => file_calls::sys_preadv(arg1, arg2, arg3, arg4),
+        Syscall::Pwritev => file_calls::sys_pwritev(arg1, arg2, arg3, arg4),
+        Syscall::Preadv2 => file_calls::sys_preadv2(arg1, arg2, arg3, arg4, syscall_arg6()?),
+        Syscall::Pwritev2 => file_calls::sys_pwritev2(arg1, arg2, arg3, arg4, syscall_arg6()?),
+        Syscall::CloseRange => file_calls::sys_close_range(arg1, arg2, arg3),
+        Syscall::Syncfs => file_calls::sys_syncfs(arg1),
+        Syscall::SyncFileRange => file_calls::sys_sync_file_range(arg1, arg2, arg3, arg4),
+        Syscall::Readahead => file_calls::sys_readahead(arg1, arg2, arg3),
+        Syscall::Fadvise64 => file_calls::sys_fadvise64(arg1, arg2, arg3, arg4),
+        Syscall::Ustat => file_calls::sys_ustat(arg1, arg2),
+        Syscall::Sysfs => file_calls::sys_sysfs(arg1, arg2, arg3),
         #[cfg(feature = "alloc")]
         Syscall::Prlimit64 => limits::sys_prlimit64(arg1, arg2, arg3, arg4),
         Syscall::InotifyInit1 => Err(SyscallError::NotImplemented),
@@ -1822,6 +1843,12 @@ fn sys_getrandom(buf_ptr: usize, buflen: usize, flags: usize) -> SyscallResult {
 /// Number of bytes written to buf, or 0 when no more entries. A buffer too
 /// small for the next entry is EINVAL.
 fn sys_getdents64(fd: usize, buf_ptr: usize, buf_size: usize) -> SyscallResult {
+    getdents(fd, buf_ptr, buf_size, DirentForm::Dirent64)
+}
+
+/// getdents and getdents64: as many records of `form` as fit in
+/// `buf_size` bytes at `buf_ptr`, from the directory position of `fd` on.
+fn getdents(fd: usize, buf_ptr: usize, buf_size: usize, form: DirentForm) -> SyscallResult {
     if buf_size == 0 {
         return Err(SyscallError::InvalidArgument);
     }
@@ -1842,7 +1869,7 @@ fn sys_getdents64(fd: usize, buf_ptr: usize, buf_size: usize) -> SyscallResult {
     }
 
     // Records are built in a kernel buffer and copied out once (N-43).
-    let (out, idx) = build_dirents64(&entries, pos, buf_size)?;
+    let (out, idx) = build_dirents(&entries, pos, buf_size, form)?;
 
     userspace::write_user_bytes(buf_ptr, &out)?;
 
@@ -1867,14 +1894,37 @@ fn dirent64_type(node_type: crate::fs::NodeType) -> u8 {
     }
 }
 
-/// Build `linux_dirent64` records for `entries[pos..]`, as many as fit in
-/// `buf_size` bytes. Returns the records and the index of the first entry
-/// not included (no records at all past the last entry), or EINVAL if not
-/// even the first remaining record fits.
+/// The directory record a getdents call writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirentForm {
+    /// `struct linux_dirent64`: d_ino, d_off, d_reclen, d_type, d_name.
+    Dirent64,
+    /// `struct linux_dirent` (getdents, x86_64 only): d_ino, d_off,
+    /// d_reclen, d_name, then d_type in the record's last byte, as Linux's
+    /// filldir writes it.
+    Dirent,
+}
+
+/// Build `linux_dirent64` records for `entries[pos..]`: `build_dirents`
+/// for getdents64.
+#[cfg(test)]
 fn build_dirents64(
     entries: &[crate::fs::DirEntry],
     pos: usize,
     buf_size: usize,
+) -> Result<(alloc::vec::Vec<u8>, usize), SyscallError> {
+    build_dirents(entries, pos, buf_size, DirentForm::Dirent64)
+}
+
+/// Build `form` records for `entries[pos..]`, as many as fit in `buf_size`
+/// bytes. Returns the records and the index of the first entry not
+/// included (no records at all past the last entry), or EINVAL if not even
+/// the first remaining record fits.
+fn build_dirents(
+    entries: &[crate::fs::DirEntry],
+    pos: usize,
+    buf_size: usize,
+    form: DirentForm,
 ) -> Result<(alloc::vec::Vec<u8>, usize), SyscallError> {
     let mut offset = 0usize;
     let mut idx = pos;
@@ -1883,7 +1933,8 @@ fn build_dirents64(
     while idx < entries.len() {
         let entry = &entries[idx];
         let name_bytes = entry.name.as_bytes();
-        // d_ino(8) + d_off(8) + d_reclen(2) + d_type(1) + name + NUL
+        // d_ino(8) + d_off(8) + d_reclen(2) + d_type(1) + name + NUL; the
+        // old record has d_type after the NUL, in its last byte.
         let reclen_unaligned = 8 + 8 + 2 + 1 + name_bytes.len() + 1;
         // Align to 8 bytes
         let reclen = (reclen_unaligned + 7) & !7;
@@ -1906,11 +1957,20 @@ fn build_dirents64(
         out.extend_from_slice(&((idx + 1) as u64).to_ne_bytes());
         // d_reclen
         out.extend_from_slice(&(reclen as u16).to_ne_bytes());
-        // d_type
-        out.push(dirent64_type(entry.node_type));
-        // d_name (NUL-terminated), then zero padding to reclen
-        out.extend_from_slice(name_bytes);
-        out.resize(offset + reclen, 0);
+        match form {
+            DirentForm::Dirent64 => {
+                // d_type, d_name (NUL-terminated), zero padding to reclen
+                out.push(dirent64_type(entry.node_type));
+                out.extend_from_slice(name_bytes);
+                out.resize(offset + reclen, 0);
+            }
+            DirentForm::Dirent => {
+                // d_name (NUL-terminated), zero padding, d_type last
+                out.extend_from_slice(name_bytes);
+                out.resize(offset + reclen - 1, 0);
+                out.push(dirent64_type(entry.node_type));
+            }
+        }
 
         offset += reclen;
         idx += 1;
@@ -1941,14 +2001,17 @@ fn sys_fchmodat(dirfd: usize, path_ptr: usize, mode: usize) -> SyscallResult {
     filesystem::chmod_node(&node, mode)
 }
 
-/// fchownat syscall -- chown relative to a directory fd.
+/// fchownat syscall -- chown relative to a directory fd, as Linux's
+/// do_fchownat: AT_SYMLINK_NOFOLLOW changes a final symlink itself,
+/// AT_EMPTY_PATH with an empty path changes `dirfd` (or the cwd), and
+/// other flags are EINVAL (they used to be ignored).
 ///
 /// # Arguments
 /// - `dirfd`: Directory fd (AT_FDCWD for CWD-relative).
 /// - `path_ptr`: Path to the file.
 /// - `uid`: User ID.
 /// - `gid`: Group ID.
-/// - `flags`: AT_SYMLINK_NOFOLLOW, etc.
+/// - `flags`: AT_SYMLINK_NOFOLLOW, AT_EMPTY_PATH.
 fn sys_fchownat(
     dirfd: usize,
     path_ptr: usize,
@@ -1956,15 +2019,7 @@ fn sys_fchownat(
     gid: usize,
     flags: usize,
 ) -> SyscallResult {
-    let rel_path = filesystem::read_user_path(path_ptr)?;
-    let abs_path = filesystem::resolve_at_path(dirfd, &rel_path)?;
-    let vfs = filesystem::vfs()?;
-    let node = if flags & filesystem::AT_SYMLINK_NOFOLLOW != 0 {
-        vfs.resolve_path_no_follow(&abs_path)
-    } else {
-        vfs.resolve_path(&abs_path)
-    }
-    .map_err(filesystem::map_resolve_err)?;
+    let node = xattr::target(dirfd, path_ptr, flags as u32 as usize, true)?;
     // Same rules as chown (root only); this used to report success and
     // change nothing.
     filesystem::chown_node(&node, uid, gid)
@@ -4555,6 +4610,35 @@ mod tests {
         assert_eq!(dirent64_type(NodeType::File), 8);
         assert_eq!(dirent64_type(NodeType::Symlink), 10);
         assert_eq!(dirent64_type(NodeType::Socket), 12);
+    }
+
+    /// The old `struct linux_dirent` (getdents): the name at 18, d_type in
+    /// the record's last byte, the same lengths as filldir's
+    /// ALIGN(18 + namlen + 2, 8).
+    #[test]
+    fn old_dirents_put_the_type_last() {
+        use crate::fs::NodeType;
+        let entries = [
+            dir_entry("..", NodeType::Directory, 2),
+            dir_entry("abcdef", NodeType::File, 9),
+        ];
+        let (buf, next) = build_dirents(&entries, 0, 4096, DirentForm::Dirent).unwrap();
+        // 18 + 2 + 2 = 22 -> 24; 18 + 6 + 2 = 26 -> 32.
+        assert_eq!((buf.len(), next), (24 + 32, 2));
+        assert_eq!(u64::from_ne_bytes(buf[0..8].try_into().unwrap()), 2);
+        assert_eq!(u64::from_ne_bytes(buf[8..16].try_into().unwrap()), 1);
+        assert_eq!(u16::from_ne_bytes(buf[16..18].try_into().unwrap()), 24);
+        assert_eq!(&buf[18..21], b"..\0");
+        assert_eq!(buf[23], 4);
+        let rec = &buf[24..];
+        assert_eq!(u16::from_ne_bytes(rec[16..18].try_into().unwrap()), 32);
+        assert_eq!(&rec[18..25], b"abcdef\0");
+        assert!(rec[25..31].iter().all(|&b| b == 0));
+        assert_eq!(rec[31], 8);
+        assert_eq!(
+            build_dirents(&entries, 0, 23, DirentForm::Dirent),
+            Err(SyscallError::InvalidArgument)
+        );
     }
 
     #[test]

@@ -2046,6 +2046,12 @@ pub(crate) fn chmod_node(
     node: &alloc::sync::Arc<dyn crate::fs::VfsNode>,
     mode: usize,
 ) -> SyscallResult {
+    // A symlink's mode cannot change (Linux's notify_change, which
+    // fchmodat2 with AT_SYMLINK_NOFOLLOW reaches), before any permission
+    // check.
+    if node.node_type() == crate::fs::NodeType::Symlink {
+        return Err(SyscallError::NotSupported);
+    }
     let meta = node.metadata().map_err(super::map_kernel_error)?;
     let perms = chmod_perms(&Caller::current(), meta.uid, meta.gid, mode)?;
     node.chmod(perms).map_err(super::map_kernel_error)?;
@@ -2794,6 +2800,36 @@ unsafe impl super::userspace::UserPod for Iovec {}
 /// Maximum number of iovec entries per readv/writev call.
 const IOV_MAX: usize = 1024;
 
+/// The most one read or write moves (Linux's MAX_RW_COUNT, INT_MAX rounded
+/// down to a page).
+const MAX_RW_COUNT: usize = 0x7fff_f000;
+
+/// The `iovcnt` entries of the iovec array at `iov_ptr`, as (base, length),
+/// checked as Linux's import_iovec: more than IOV_MAX entries, or a length
+/// that is negative as an ssize_t, is EINVAL; an unreadable array is
+/// EFAULT; and the lengths are cut so the total is at most MAX_RW_COUNT.
+/// The buffers themselves are checked when they are copied.
+pub(super) fn read_iovecs(
+    iov_ptr: usize,
+    iovcnt: usize,
+) -> Result<alloc::vec::Vec<(usize, usize)>, SyscallError> {
+    if iovcnt > IOV_MAX {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let mut iovs = alloc::vec::Vec::with_capacity(iovcnt);
+    let mut total = 0usize;
+    for i in 0..iovcnt {
+        let iov: Iovec = super::userspace::read_user_index(iov_ptr, i)?;
+        if (iov.iov_len as isize) < 0 {
+            return Err(SyscallError::InvalidArgument);
+        }
+        let len = iov.iov_len.min(MAX_RW_COUNT - total);
+        total += len;
+        iovs.push((iov.iov_base, len));
+    }
+    Ok(iovs)
+}
+
 /// Read from a file descriptor into multiple buffers (SYS_readv = 19).
 ///
 /// # Arguments
@@ -2856,6 +2892,12 @@ pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
 /// # Returns
 /// Total number of bytes written across all buffers.
 pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
+    writev(fd, iov_ptr, iovcnt, false)
+}
+
+/// writev, and pwritev2 at the file position: `nosignal` (RWF_NOSIGNAL)
+/// keeps a pipe that loses its reader part way from raising SIGPIPE.
+pub(super) fn writev(fd: usize, iov_ptr: usize, iovcnt: usize, nosignal: bool) -> SyscallResult {
     if iovcnt == 0 {
         return Ok(0);
     }
@@ -2908,8 +2950,9 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
             Err(e) => {
                 // If we already wrote some data, return what we have
                 if total_written > 0 {
-                    if let Some(file) =
-                        process::current_process().and_then(|p| p.file_table.lock().get(fd))
+                    if let Some(file) = process::current_process()
+                        .and_then(|p| p.file_table.lock().get(fd))
+                        .filter(|_| !nosignal)
                     {
                         sigpipe_after_partial_write(&file, e);
                     }
@@ -3286,7 +3329,7 @@ pub fn sys_renameat2(
 /// offset is EINVAL, then an unknown fd EBADF, then a stream (pipe, socket,
 /// terminal, event fd), which has no offset, ESPIPE (N-190). The access
 /// mode is the caller's check.
-fn positioned_file(
+pub(super) fn positioned_file(
     fd: usize,
     offset: usize,
 ) -> Result<alloc::sync::Arc<crate::fs::file::File>, SyscallError> {
@@ -3311,6 +3354,18 @@ pub fn sys_pread(fd: usize, buf: usize, count: usize, offset: usize) -> SyscallR
     if !file.flags.read {
         return Err(SyscallError::BadFileDescriptor);
     }
+    pread_file(&file, buf, count, offset)
+}
+
+/// Read `count` bytes at `offset` of `file` (open for reading, with an
+/// offset) into `buf`, leaving its position alone: pread and each buffer
+/// of preadv.
+pub(super) fn pread_file(
+    file: &crate::fs::file::File,
+    buf: usize,
+    count: usize,
+    offset: usize,
+) -> SyscallResult {
     if file.node.node_type() == crate::fs::NodeType::Directory {
         return Err(SyscallError::IsADirectory);
     }
@@ -3336,12 +3391,36 @@ pub fn sys_pread(fd: usize, buf: usize, count: usize, offset: usize) -> SyscallR
 }
 
 /// Write to a file descriptor at a given offset without changing position
-/// (syscall 196).
+/// (syscall 196). As on Linux, a file opened with O_APPEND is appended to
+/// whatever the offset (musl's pwrite asks for POSIX's behaviour through
+/// pwritev2 with RWF_NOAPPEND instead).
 pub fn sys_pwrite(fd: usize, buf: usize, count: usize, offset: usize) -> SyscallResult {
     let file = positioned_file(fd, offset)?;
     if !file.flags.write {
         return Err(SyscallError::BadFileDescriptor);
     }
+    let offset = if file.flags.append {
+        file_size(&file)?
+    } else {
+        offset
+    };
+    pwrite_file(&file, buf, count, offset)
+}
+
+/// The size of `file`'s node: where an appending write starts.
+pub(super) fn file_size(file: &crate::fs::file::File) -> Result<usize, SyscallError> {
+    Ok(file.node.metadata().map_err(super::map_kernel_error)?.size)
+}
+
+/// Write `count` bytes from `buf` at `offset` of `file` (open for writing,
+/// with an offset), leaving its position alone: pwrite and each buffer of
+/// pwritev.
+pub(super) fn pwrite_file(
+    file: &crate::fs::file::File,
+    buf: usize,
+    count: usize,
+    offset: usize,
+) -> SyscallResult {
     if count == 0 {
         return Ok(0);
     }

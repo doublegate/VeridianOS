@@ -786,6 +786,15 @@ impl FileTable {
         }
     }
 
+    /// The open descriptors from `first` to `last` (inclusive), in order,
+    /// the implicit console among them (close_range).
+    pub fn open_in(&self, first: FileDescriptor, last: FileDescriptor) -> Vec<FileDescriptor> {
+        let files = self.files.read();
+        (first..=last.min(files.len().saturating_sub(1)))
+            .filter(|&fd| files[fd].is_some() || self.is_implicit_console(fd))
+            .collect()
+    }
+
     /// Get the number of open file descriptors
     pub fn count_open(&self) -> usize {
         let files = self.files.read();
@@ -846,6 +855,23 @@ mod tests {
         (0..)
             .find(|&fd| fd >= files.len() || table.is_allocatable(&files, fd))
             .unwrap()
+    }
+
+    /// open_in lists open fds and the implicit console in a range, and
+    /// nothing past the table.
+    #[test]
+    fn open_in_lists_the_range() {
+        let table = FileTable::new();
+        let a = table.open_with_flags(some_file(), false).unwrap();
+        let b = table.open_with_flags(some_file(), false).unwrap();
+        let c = table.open_with_flags(some_file(), false).unwrap();
+        assert_eq!((a, b, c), (3, 4, 5));
+        table.close(b).unwrap();
+        table.close(1).unwrap();
+        assert_eq!(table.open_in(0, usize::MAX), alloc::vec![0, 2, 3, 5]);
+        assert_eq!(table.open_in(3, 4), alloc::vec![3]);
+        assert_eq!(table.open_in(6, usize::MAX), alloc::vec![]);
+        assert_eq!(table.open_in(usize::MAX, usize::MAX), alloc::vec![]);
     }
 
     /// A dup target at or past MAX_FDS fails without growing the table

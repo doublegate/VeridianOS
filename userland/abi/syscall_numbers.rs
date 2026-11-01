@@ -71,6 +71,10 @@ pub mod sysno {
     pub const SYS_pwrite64: usize = 18;
     pub const SYS_readv: usize = 19;
     pub const SYS_writev: usize = 20;
+    pub const SYS_preadv: usize = 295;
+    pub const SYS_pwritev: usize = 296;
+    pub const SYS_preadv2: usize = 327;
+    pub const SYS_pwritev2: usize = 328;
     pub const SYS_fstat: usize = 5;
     pub const SYS_stat: usize = 4;
     pub const SYS_lstat: usize = 6;
@@ -95,9 +99,11 @@ pub mod sysno {
     pub const SYS_chmod: usize = 90;
     pub const SYS_fchmod: usize = 91;
     pub const SYS_fchmodat: usize = 268;
+    pub const SYS_fchmodat2: usize = 452;
     pub const SYS_chown: usize = 92;
     pub const SYS_fchown: usize = 93;
     pub const SYS_fchownat: usize = 260;
+    pub const SYS_lchown: usize = 94;
     pub const SYS_mknod: usize = 133;
     pub const SYS_mknodat: usize = 259;
     pub const SYS_rename: usize = 82;
@@ -120,6 +126,11 @@ pub mod sysno {
     pub const SYS_select: usize = 23;
     pub const SYS_pselect6: usize = 270;
     pub const SYS_getdents64: usize = 217;
+    pub const SYS_getdents: usize = 78;
+    pub const SYS_creat: usize = 85;
+    pub const SYS_close_range: usize = 436;
+    pub const SYS_readahead: usize = 187;
+    pub const SYS_fadvise64: usize = 221;
     pub const SYS_setxattr: usize = 188;
     pub const SYS_lsetxattr: usize = 189;
     pub const SYS_fsetxattr: usize = 190;
@@ -147,6 +158,10 @@ pub mod sysno {
     pub const SYS_sync: usize = 162;
     pub const SYS_fsync: usize = 74;
     pub const SYS_fdatasync: usize = 75;
+    pub const SYS_syncfs: usize = 306;
+    pub const SYS_sync_file_range: usize = 277;
+    pub const SYS_ustat: usize = 136;
+    pub const SYS_sysfs: usize = 139;
     pub const SYS_KERNEL_GET_INFO: usize = 1104;
     pub const SYS_sysinfo: usize = 99;
     pub const SYS_getrusage: usize = 98;
@@ -362,6 +377,10 @@ pub mod sysno {
     pub const SYS_pwrite64: usize = 68;
     pub const SYS_readv: usize = 65;
     pub const SYS_writev: usize = 66;
+    pub const SYS_preadv: usize = 69;
+    pub const SYS_pwritev: usize = 70;
+    pub const SYS_preadv2: usize = 286;
+    pub const SYS_pwritev2: usize = 287;
     pub const SYS_fstat: usize = 80;
     pub const SYS_newfstatat: usize = 79;
     pub const SYS_statx: usize = 291;
@@ -380,6 +399,7 @@ pub mod sysno {
     pub const SYS_faccessat2: usize = 439;
     pub const SYS_fchmod: usize = 52;
     pub const SYS_fchmodat: usize = 53;
+    pub const SYS_fchmodat2: usize = 452;
     pub const SYS_fchown: usize = 55;
     pub const SYS_fchownat: usize = 54;
     pub const SYS_mknodat: usize = 33;
@@ -392,6 +412,9 @@ pub mod sysno {
     pub const SYS_ppoll: usize = 73;
     pub const SYS_pselect6: usize = 72;
     pub const SYS_getdents64: usize = 61;
+    pub const SYS_close_range: usize = 436;
+    pub const SYS_readahead: usize = 213;
+    pub const SYS_fadvise64: usize = 223;
     pub const SYS_setxattr: usize = 5;
     pub const SYS_lsetxattr: usize = 6;
     pub const SYS_fsetxattr: usize = 7;
@@ -417,6 +440,8 @@ pub mod sysno {
     pub const SYS_sync: usize = 81;
     pub const SYS_fsync: usize = 82;
     pub const SYS_fdatasync: usize = 83;
+    pub const SYS_syncfs: usize = 267;
+    pub const SYS_sync_file_range: usize = 84;
     pub const SYS_KERNEL_GET_INFO: usize = 1104;
     pub const SYS_sysinfo: usize = 179;
     pub const SYS_getrusage: usize = 165;
@@ -624,6 +649,10 @@ pub mod sysno {
     pub const SYS_pwrite64: usize = 68;
     pub const SYS_readv: usize = 65;
     pub const SYS_writev: usize = 66;
+    pub const SYS_preadv: usize = 69;
+    pub const SYS_pwritev: usize = 70;
+    pub const SYS_preadv2: usize = 286;
+    pub const SYS_pwritev2: usize = 287;
     pub const SYS_fstat: usize = 80;
     pub const SYS_newfstatat: usize = 79;
     pub const SYS_statx: usize = 291;
@@ -642,6 +671,7 @@ pub mod sysno {
     pub const SYS_faccessat2: usize = 439;
     pub const SYS_fchmod: usize = 52;
     pub const SYS_fchmodat: usize = 53;
+    pub const SYS_fchmodat2: usize = 452;
     pub const SYS_fchown: usize = 55;
     pub const SYS_fchownat: usize = 54;
     pub const SYS_mknodat: usize = 33;
@@ -655,6 +685,9 @@ pub mod sysno {
     pub const SYS_ppoll: usize = 73;
     pub const SYS_pselect6: usize = 72;
     pub const SYS_getdents64: usize = 61;
+    pub const SYS_close_range: usize = 436;
+    pub const SYS_readahead: usize = 213;
+    pub const SYS_fadvise64: usize = 223;
     pub const SYS_setxattr: usize = 5;
     pub const SYS_lsetxattr: usize = 6;
     pub const SYS_fsetxattr: usize = 7;
@@ -680,6 +713,8 @@ pub mod sysno {
     pub const SYS_sync: usize = 81;
     pub const SYS_fsync: usize = 82;
     pub const SYS_fdatasync: usize = 83;
+    pub const SYS_syncfs: usize = 267;
+    pub const SYS_sync_file_range: usize = 84;
     pub const SYS_KERNEL_GET_INFO: usize = 1104;
     pub const SYS_sysinfo: usize = 179;
     pub const SYS_getrusage: usize = 165;

@@ -95,6 +95,10 @@ pread64
 pwrite64
 readv
 writev
+preadv
+pwritev
+preadv2
+pwritev2
 fstat
 stat
 lstat
@@ -119,9 +123,11 @@ faccessat2
 chmod
 fchmod
 fchmodat
+fchmodat2
 chown
 fchown
 fchownat
+lchown
 mknod
 mknodat
 rename
@@ -144,6 +150,11 @@ ppoll
 select
 pselect6
 getdents64
+getdents
+creat
+close_range
+readahead
+fadvise64
 
 ## Extended attributes (ADR 0020)
 setxattr
@@ -177,6 +188,10 @@ FsUnmount               private 1095
 sync
 fsync
 fdatasync
+syncfs
+sync_file_range
+ustat
+sysfs
 
 ## Kernel information
 KernelGetInfo           private 1104

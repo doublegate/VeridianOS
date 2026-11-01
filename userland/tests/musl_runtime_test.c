@@ -6115,6 +6115,248 @@ static void test_restart_syscall(void)
            none_eintr && r == -1 && e == EINTR && restart_alrm == 1 && left && after_eintr, why);
 }
 
+#ifndef RWF_NOSIGNAL
+#define RWF_NOSIGNAL 0x00000100
+#endif
+
+/* Read the file at `path` whole into buf (at most n - 1 bytes, NUL ended). */
+static ssize_t slurp(const char *path, char *buf, size_t n)
+{
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return -1;
+    ssize_t r = read(fd, buf, n - 1);
+    close(fd);
+    if (r >= 0)
+        buf[r] = 0;
+    return r;
+}
+
+/*
+ * preadv, pwritev, preadv2, pwritev2 (group 3 step D1): positioned vectors
+ * leave the file position alone, -1 uses it, and the RWF_* flags are
+ * checked as Linux's. musl's pwrite is pwritev2 with RWF_NOAPPEND, so on
+ * an O_APPEND file it writes where asked, while the raw pwrite64 and
+ * pwritev append, as on Linux. RWF_NOSIGNAL keeps EPIPE quiet.
+ */
+static void test_preadv_pwritev(void)
+{
+    const char *path = "/tmp/musl_vec";
+    char why[160];
+    int f = 0;
+    int fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0644);
+    if (fd < 0 || write(fd, "0123456789", 10) != 10) f |= 1;
+    struct iovec w[2] = {{"ab", 2}, {"cd", 2}};
+    if (pwritev2(fd, w, 2, 2, 0) != 4 || lseek(fd, 0, SEEK_CUR) != 10) f |= 2;
+    char a[4] = {0}, b[4] = {0};
+    struct iovec r[2] = {{a, 3}, {b, 3}};
+    if (preadv(fd, r, 2, 1) != 6 || memcmp(a, "1ab", 3) || memcmp(b, "cd6", 3)) f |= 4;
+    /* Offset -1: at the position, which then moves. */
+    lseek(fd, 8, SEEK_SET);
+    memset(a, 0, sizeof(a));
+    struct iovec one = {a, 3};
+    if (preadv2(fd, &one, 1, -1, RWF_HIPRI) != 2 || memcmp(a, "89", 2) ||
+        lseek(fd, 0, SEEK_CUR) != 10) f |= 8;
+    errno = 0;
+    if (preadv2(fd, &one, 1, 0, 0x200) != -1 || errno != EOPNOTSUPP) f |= 16;
+    errno = 0;
+    if (syscall(SYS_preadv2, fd, &one, 1, -2L, 0L, 0) != -1 || errno != EINVAL) f |= 32;
+    errno = 0;
+    if (pwritev2(fd, w, 1, 0, RWF_APPEND | RWF_NOAPPEND) != -1 || errno != EINVAL) f |= 64;
+    /* RWF_APPEND: at the end, whatever the offset. */
+    if (pwritev2(fd, w, 1, 0, RWF_APPEND) != 2) f |= 128;
+    close(fd);
+    /* O_APPEND: musl's pwrite (pwritev2 with RWF_NOAPPEND) writes at 0;
+     * the raw pwrite64 and pwritev calls append. */
+    fd = open(path, O_RDWR | O_APPEND);
+    struct iovec x = {"Y", 1};
+    if (fd < 0 || pwrite(fd, "X", 1, 0) != 1 ||
+        syscall(SYS_pwrite64, fd, "Z", 1, 0L) != 1 ||
+        syscall(SYS_pwritev, fd, &x, 1, 0L, 0L) != 1) f |= 256;
+    close(fd);
+    char got[32];
+    if (slurp(path, got, sizeof(got)) != 14 || strcmp(got, "X1abcd6789abZY")) f |= 512;
+    /* A pipe has no offset (ESPIPE); with no reader, EPIPE, and SIGPIPE
+     * only without RWF_NOSIGNAL. */
+    int p[2];
+    sigset_t pipe_set, old, pending;
+    sigemptyset(&pipe_set);
+    sigaddset(&pipe_set, SIGPIPE);
+    sigprocmask(SIG_BLOCK, &pipe_set, &old);
+    if (pipe(p) != 0) f |= 1024;
+    errno = 0;
+    if (preadv(p[0], r, 1, 0) != -1 || errno != ESPIPE) f |= 2048;
+    close(p[0]);
+    errno = 0;
+    if (pwritev2(p[1], w, 1, -1, RWF_NOSIGNAL) != -1 || errno != EPIPE) f |= 4096;
+    sigpending(&pending);
+    if (sigismember(&pending, SIGPIPE)) f |= 8192;
+    errno = 0;
+    if (pwritev2(p[1], w, 1, -1, 0) != -1 || errno != EPIPE) f |= 16384;
+    sigpending(&pending);
+    if (!sigismember(&pending, SIGPIPE)) f |= 32768;
+    struct timespec zero = {0, 0};
+    sigtimedwait(&pipe_set, NULL, &zero);
+    sigprocmask(SIG_SETMASK, &old, NULL);
+    close(p[1]);
+    unlink(path);
+    snprintf(why, sizeof(why), "f=0x%x got=%s errno=%d", f, got, errno);
+    report("preadv_pwritev_rwf", f == 0, why);
+}
+
+/*
+ * creat, lchown, fchmodat2 and the old getdents (group 3 step D1).
+ */
+static void test_creat_lchown_fchmodat2(void)
+{
+    const char *path = "/tmp/musl_creat", *link = "/tmp/musl_creat_lnk";
+    char why[160];
+    int f = 0;
+    unlink(link);
+    int fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd < 0 || write(fd, "old", 3) != 3) f |= 1;
+    close(fd);
+    /* creat truncates and opens write-only. */
+#ifdef SYS_creat
+    fd = syscall(SYS_creat, path, 0600);
+#else
+    fd = creat(path, 0600);
+#endif
+    char c;
+    struct stat st;
+    errno = 0;
+    if (fd < 0 || read(fd, &c, 1) != -1 || errno != EBADF || fstat(fd, &st) || st.st_size != 0)
+        f |= 2;
+    close(fd);
+    if (symlink(path, link) != 0) f |= 4;
+    /* lchown changes the link, not its target. */
+    struct stat ls;
+    if (lchown(link, 1000, 1001) != 0 || lstat(link, &ls) || stat(path, &st) ||
+        ls.st_uid != 1000 || ls.st_gid != 1001 || st.st_uid != 0) f |= 8;
+    errno = 0;
+    if (syscall(SYS_fchownat, AT_FDCWD, link, -1, -1, AT_SYMLINK_FOLLOW) != -1 || errno != EINVAL)
+        f |= 16;
+    /* fchmodat2: a symlink's mode cannot change; bad flags are EINVAL;
+     * AT_EMPTY_PATH changes the fd's file. */
+    errno = 0;
+    if (syscall(SYS_fchmodat2, AT_FDCWD, link, 0600, AT_SYMLINK_NOFOLLOW) != -1 ||
+        errno != EOPNOTSUPP) f |= 32;
+    errno = 0;
+    if (syscall(SYS_fchmodat2, AT_FDCWD, path, 0600, 0x8000) != -1 || errno != EINVAL) f |= 64;
+    fd = open(path, O_RDONLY);
+    if (syscall(SYS_fchmodat2, fd, "", 0640, AT_EMPTY_PATH) != 0 || fstat(fd, &st) ||
+        (st.st_mode & 07777) != 0640) f |= 128;
+    if (syscall(SYS_fchmodat2, AT_FDCWD, link, 0604, 0) != 0 || stat(path, &st) ||
+        (st.st_mode & 07777) != 0604) f |= 256;
+    close(fd);
+#ifdef SYS_getdents
+    /* The old record: d_type in its last byte. */
+    mkdir("/tmp/musl_gd", 0755);
+    close(open("/tmp/musl_gd/regular", O_CREAT | O_WRONLY, 0644));
+    int dfd = open("/tmp/musl_gd", O_RDONLY | O_DIRECTORY);
+    char buf[1024];
+    long n = syscall(SYS_getdents, dfd, buf, sizeof(buf));
+    int found = 0;
+    for (long off = 0; off < n;) {
+        unsigned short reclen;
+        memcpy(&reclen, buf + off + 16, 2);
+        if (reclen == 0) break;
+        if (strcmp(buf + off + 18, "regular") == 0 && buf[off + reclen - 1] == DT_REG) found = 1;
+        off += reclen;
+    }
+    if (n <= 0 || !found) f |= 512;
+    close(dfd);
+    unlink("/tmp/musl_gd/regular");
+    rmdir("/tmp/musl_gd");
+#endif
+    unlink(link);
+    unlink(path);
+    snprintf(why, sizeof(why), "f=0x%x errno=%d", f, errno);
+    report("creat_lchown_fchmodat2_getdents", f == 0, why);
+}
+
+/*
+ * close_range, syncfs, sync_file_range, posix_fadvise and readahead
+ * (group 3 step D1).
+ */
+static void test_close_range_and_advice(void)
+{
+    char why[160];
+    int f = 0;
+    /* Fixed numbers well above anything the earlier tests left open. */
+    int null = open("/dev/null", O_RDONLY);
+    int a = dup2(null, 200), b = dup2(null, 201), c = dup2(null, 202);
+    close(null);
+    if (a != 200 || b != 201 || c != 202) f |= 1;
+    if (syscall(SYS_close_range, b, c, 4 /* CLOSE_RANGE_CLOEXEC */) != 0 ||
+        fcntl(b, F_GETFD) != FD_CLOEXEC || fcntl(c, F_GETFD) != FD_CLOEXEC ||
+        fcntl(a, F_GETFD) != 0) f |= 2;
+    errno = 0;
+    if (syscall(SYS_close_range, 5, 4, 0) != -1 || errno != EINVAL) f |= 4;
+    errno = 0;
+    if (syscall(SYS_close_range, 3, ~0U, ~0U) != -1 || errno != EINVAL) f |= 8;
+    if (syscall(SYS_close_range, b, ~0U, 2 /* CLOSE_RANGE_UNSHARE */) != 0 ||
+        fcntl(b, F_GETFD) != -1 || fcntl(c, F_GETFD) != -1 || fcntl(a, F_GETFD) != 0) f |= 16;
+    close(a);
+    int fd = open("/tmp/musl_adv", O_CREAT | O_RDWR | O_TRUNC, 0644);
+    write(fd, "data", 4);
+    errno = 0;
+    if (syncfs(fd) != 0 || syncfs(-1) != -1 || errno != EBADF) f |= 32;
+    if (sync_file_range(fd, 0, 0, SYNC_FILE_RANGE_WRITE | SYNC_FILE_RANGE_WAIT_AFTER) != 0) f |= 64;
+    errno = 0;
+    if (sync_file_range(fd, 0, 0, 8) != -1 || errno != EINVAL) f |= 128;
+    errno = 0;
+    if (sync_file_range(fd, -1, 0, 0) != -1 || errno != EINVAL) f |= 256;
+    if (posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED) != 0 ||
+        posix_fadvise(fd, 0, 0, 99) != EINVAL || posix_fadvise(fd, 0, -1, 0) != EINVAL) f |= 512;
+    if (readahead(fd, 0, 4096) != 0) f |= 1024;
+    int p[2];
+    pipe(p);
+    errno = 0;
+    if (sync_file_range(p[0], 0, 0, 0) != -1 || errno != ESPIPE) f |= 2048;
+    if (posix_fadvise(p[0], 0, 0, 0) != ESPIPE) f |= 4096;
+    errno = 0;
+    if (readahead(p[0], 0, 1) != -1 || errno != EINVAL) f |= 8192;
+    errno = 0;
+    if (readahead(p[1], 0, 1) != -1 || errno != EBADF) f |= 16384;
+    close(p[0]);
+    close(p[1]);
+    close(fd);
+    unlink("/tmp/musl_adv");
+    snprintf(why, sizeof(why), "f=0x%x errno=%d", f, errno);
+    report("close_range_sync_advice", f == 0, why);
+}
+
+#if defined(__x86_64__)
+/* ustat and sysfs, x86_64 only (group 3 step D1). */
+static void test_ustat_sysfs(void)
+{
+    char why[160];
+    int f = 0;
+    struct stat st;
+    char ubuf[32];
+    if (stat("/", &st) != 0 || syscall(SYS_ustat, (unsigned)st.st_dev, ubuf) != 0) f |= 1;
+    errno = 0;
+    if (syscall(SYS_ustat, (unsigned)-1, ubuf) != -1 || errno != EINVAL) f |= 2;
+    errno = 0;
+    if (syscall(SYS_ustat, (unsigned)st.st_dev, (void *)-1) != -1 || errno != EFAULT) f |= 4;
+    long idx = syscall(SYS_sysfs, 1, "proc");
+    char name[32] = {0};
+    if (idx < 0 || syscall(SYS_sysfs, 2, idx, name) != 0 || strcmp(name, "proc")) f |= 8;
+    if (syscall(SYS_sysfs, 3) <= idx) f |= 16;
+    errno = 0;
+    if (syscall(SYS_sysfs, 1, "ext0") != -1 || errno != EINVAL) f |= 32;
+    errno = 0;
+    if (syscall(SYS_sysfs, 4) != -1 || errno != EINVAL) f |= 64;
+    errno = 0;
+    if (syscall(SYS_sysfs, 2, 1000, name) != -1 || errno != EINVAL) f |= 128;
+    errno = 0;
+    if (syscall(SYS_sysfs, 1, NULL) != -1 || errno != EFAULT) f |= 256;
+    snprintf(why, sizeof(why), "f=0x%x errno=%d", f, errno);
+    report("ustat_sysfs", f == 0, why);
+}
+#endif
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
@@ -6211,6 +6453,12 @@ int main(int argc, char **argv)
     test_posix_timers();
     test_restart_syscall();
     test_adjtimex();
+    test_preadv_pwritev();
+    test_creat_lchown_fchmodat2();
+    test_close_range_and_advice();
+#if defined(__x86_64__)
+    test_ustat_sysfs();
+#endif
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

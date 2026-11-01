@@ -33,7 +33,9 @@ const XATTR_ARGS_SIZE_VER0: usize = 16;
 /// AT_FDCWD names the working directory only when `cwd_ok` (get and set:
 /// Linux's path_getxattrat and path_setxattrat look the empty name up for
 /// a negative fd); list and remove always take the fd, so it is EBADF.
-fn target(
+/// Flags other than AT_SYMLINK_NOFOLLOW and AT_EMPTY_PATH are EINVAL.
+/// fchownat and fchmodat2 find their node the same way.
+pub(super) fn target(
     dfd: usize,
     path_ptr: usize,
     at_flags: usize,

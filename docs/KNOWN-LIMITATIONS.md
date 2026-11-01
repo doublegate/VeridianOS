@@ -58,6 +58,14 @@ exposed were fixed (N-182 to N-189); the rest are listed, with their targets, in
   decay each second, the clock never leaves TIME_OK on its own, and STA_INS/STA_DEL are stored
   but no leap second is inserted or deleted (LTP leapsec01 still fails). There is no PPS, and no
   auxiliary clocks.
+- **File calls without a page cache.** readahead and posix_fadvise check their arguments and
+  change nothing; syncfs and sync_file_range sync every filesystem, as fsync does. RWF_NOWAIT
+  is taken on regular files, whose reads and writes never wait, and refused with EOPNOTSUPP on a
+  pipe or socket, where Linux returns EAGAIN instead of waiting; RWF_ATOMIC and RWF_DONTCACHE
+  are EOPNOTSUPP. close_range with CLOSE_RANGE_UNSHARE is EINVAL in a process with more than one
+  thread, whose threads share one descriptor table that cannot be split yet (with one thread
+  there is nothing to unshare). Every file reports device 1 (`st_dev`), so ustat knows only
+  that device, which it takes for the root filesystem.
 - **Resource usage.** getrusage, times and wait4 report CPU time (split into user and system
   time by tick samples), peak resident set and context switches; page-fault, block I/O, IPC and
   signal counts are zero.

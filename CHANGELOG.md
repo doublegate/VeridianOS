@@ -72,6 +72,19 @@
   EOPNOTSUPP, as Linux's does. LTP creates its 300 MB loop image with fallocate, so the tests
   that ask for a block device now stop at once instead of writing the image until the disk is
   full or the time limit passes.
+- creat, getdents, lchown, ustat and sysfs (x86_64), and preadv, pwritev, preadv2, pwritev2,
+  fchmodat2, close_range, syncfs, sync_file_range, readahead and fadvise64 (all three; they were
+  ENOSYS), as Linux 7.3 has them. The vectored calls check their offset, descriptor and iovec
+  array in Linux's order and take the RWF_* flags: RWF_APPEND, RWF_NOAPPEND, RWF_DSYNC and
+  RWF_SYNC, RWF_NOSIGNAL (EPIPE without SIGPIPE) and RWF_HIPRI; RWF_ATOMIC and RWF_DONTCACHE are
+  EOPNOTSUPP, as on a filesystem without them, and so is RWF_NOWAIT on a pipe or socket. musl's
+  pwrite and pwritev are pwritev2 with RWF_NOAPPEND, so they now write where asked on an
+  O_APPEND file instead of failing with EOPNOTSUPP (LTP's pwrite04 was BROK). fchmodat2 refuses
+  to change a symlink (EOPNOTSUPP) and takes AT_EMPTY_PATH. close_range closes or marks
+  close-on-exec a range of descriptors. readahead and fadvise check their arguments and do
+  nothing more, there being no page cache; syncfs and sync_file_range sync every filesystem, as
+  fsync does. ustat knows the root filesystem, the device every file reports; sysfs lists the
+  filesystem types by their Linux names.
 - adjtimex and clock_adjtime (they were ENOSYS), from Linux's `kernel/time/ntp.c` and
   `timekeeping.c` (`timer::ntp`). Everyone may read the NTP state; changing it needs CAP_SYS_TIME,
   checked in Linux's order, and a refused call leaves the struct unwritten. Status, time constant,
@@ -259,6 +272,10 @@
 
 ### Fixed
 
+- pwrite64 on a file opened with O_APPEND appends, whatever the offset, as Linux's does (it
+  wrote at the offset); musl's pwrite asks for the offset through pwritev2 instead.
+- fchownat refuses flags other than AT_SYMLINK_NOFOLLOW and AT_EMPTY_PATH with EINVAL (they were
+  ignored) and takes AT_EMPTY_PATH; chmod of a symlink itself is EOPNOTSUPP, as on Linux.
 - BlockFS on a read-only disk (QEMU's `readonly=on`) refuses every change with EROFS before it
   starts, as Linux and the ext4 driver do; writes, creates, renames, chmod and the rest succeeded
   in memory and failed only when the cache was written back.
