@@ -584,7 +584,7 @@ fn sigpipe_after_partial_write(file: &crate::fs::file::File, error: SyscallError
 /// but the operation still blocked, this one sleeps for the interval
 /// instead, so a node whose readiness and I/O disagree cannot spin.
 #[cfg(feature = "alloc")]
-fn wait_ready(
+pub(super) fn wait_ready(
     file: &crate::fs::file::File,
     mask: u16,
     retry_now: &mut bool,

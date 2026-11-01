@@ -367,6 +367,8 @@ pub(crate) mod userspace;
 mod xattr;
 // Simple file calls (creat, preadv2, close_range, sync_file_range, ...)
 mod file_calls;
+// sendfile, copy_file_range, splice, tee and vmsplice
+mod splice;
 pub(crate) use filesystem::rename_paths;
 pub use futex::sys_futex_wake;
 
@@ -834,7 +836,13 @@ fn raises_sigpipe(syscall: Syscall, arg3: usize, arg4: usize) -> bool {
     const MSG_NOSIGNAL: usize = 0x4000;
     const RWF_NOSIGNAL: usize = 0x100;
     match syscall {
-        Syscall::Write | Syscall::Writev | Syscall::SocketSend => true,
+        Syscall::Write
+        | Syscall::Writev
+        | Syscall::SocketSend
+        | Syscall::Sendfile
+        | Syscall::Splice
+        | Syscall::Tee
+        | Syscall::Vmsplice => true,
         // At the file position (an offset is ESPIPE on a pipe or socket),
         // unless its flags carry RWF_NOSIGNAL.
         Syscall::Pwritev2 => syscall_arg6().map_or(true, |f| f as u32 as usize & RWF_NOSIGNAL == 0),
@@ -1447,6 +1455,13 @@ fn handle_syscall(
         Syscall::Preadv2 => file_calls::sys_preadv2(arg1, arg2, arg3, arg4, syscall_arg6()?),
         Syscall::Pwritev2 => file_calls::sys_pwritev2(arg1, arg2, arg3, arg4, syscall_arg6()?),
         Syscall::CloseRange => file_calls::sys_close_range(arg1, arg2, arg3),
+        Syscall::Sendfile => splice::sys_sendfile(arg1, arg2, arg3, arg4),
+        Syscall::CopyFileRange => {
+            splice::sys_copy_file_range(arg1, arg2, arg3, arg4, arg5, syscall_arg6()?)
+        }
+        Syscall::Splice => splice::sys_splice(arg1, arg2, arg3, arg4, arg5, syscall_arg6()?),
+        Syscall::Tee => splice::sys_tee(arg1, arg2, arg3, arg4),
+        Syscall::Vmsplice => splice::sys_vmsplice(arg1, arg2, arg3, arg4),
         Syscall::Syncfs => file_calls::sys_syncfs(arg1),
         Syscall::SyncFileRange => file_calls::sys_sync_file_range(arg1, arg2, arg3, arg4),
         Syscall::Readahead => file_calls::sys_readahead(arg1, arg2, arg3),

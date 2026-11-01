@@ -630,6 +630,38 @@ pub trait VfsNode: Send + Sync {
         matches!(self.node_type(), NodeType::Pipe | NodeType::Socket)
     }
 
+    /// Which pipe this node is an end of (`None`: it is not a pipe or FIFO
+    /// end), so that splice and tee can tell two ends of one pipe from two
+    /// pipes.
+    fn pipe_id(&self) -> Option<usize> {
+        None
+    }
+
+    /// Free bytes in the pipe this end writes to, for splice, tee and
+    /// vmsplice: `BrokenPipe` once it has no reader.
+    fn pipe_room(&self) -> Result<usize, KernelError> {
+        Err(KernelError::OperationNotSupported {
+            operation: "pipe_room",
+        })
+    }
+
+    /// Splice's read of the pipe this end reads: hand up to `max` queued
+    /// bytes to `sink` and, with `consume`, remove from the pipe the
+    /// number it returns (tee leaves them). No other read of the pipe runs
+    /// meanwhile, so what `sink` was given is what goes. An empty pipe is
+    /// `Ok(0)` without a writer (end of file) and `WouldBlock` with one;
+    /// `sink` is never given nothing.
+    fn pipe_splice(
+        &self,
+        _max: usize,
+        _consume: bool,
+        _sink: &mut dyn FnMut(&[u8]) -> Result<usize, KernelError>,
+    ) -> Result<usize, KernelError> {
+        Err(KernelError::OperationNotSupported {
+            operation: "pipe_splice",
+        })
+    }
+
     /// The file's seals (fcntl F_GET_SEALS, bits from [`seals`]); `None`
     /// for a file that cannot be sealed -- only memfds can -- which fcntl
     /// reports as EINVAL.

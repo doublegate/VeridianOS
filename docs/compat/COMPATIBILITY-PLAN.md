@@ -101,7 +101,7 @@ Each group lands with its LTP cases. The counts are "missing" entries in the cov
   - truncate, fchdir, creat, lchown, getdents, mknodat, readahead/fadvise and the sync family
     (creat, lchown, getdents, readahead, fadvise64, syncfs and sync_file_range are done).
   - Locks: flock, POSIX record locks and OFD locks.
-  - sendfile, splice/tee/vmsplice and copy_file_range.
+  - sendfile, splice/tee/vmsplice and copy_file_range (done; they copy, KNOWN-LIMITATIONS).
   - Vectored I/O, renameat2 and openat2, close_range and fchmodat2, and execveat (preadv,
     pwritev and their `2` forms, close_range and fchmodat2 are done).
   - Handles, xattrs, inotify and fanotify.

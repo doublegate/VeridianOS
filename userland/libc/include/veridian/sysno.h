@@ -86,6 +86,11 @@
 #define SYS_pwritev                      296
 #define SYS_preadv2                      327
 #define SYS_pwritev2                     328
+#define SYS_sendfile                     40
+#define SYS_copy_file_range              326
+#define SYS_splice                       275
+#define SYS_tee                          276
+#define SYS_vmsplice                     278
 #define SYS_fstat                        5
 #define SYS_stat                         4
 #define SYS_lstat                        6
@@ -417,6 +422,11 @@
 #define SYS_pwritev                      70
 #define SYS_preadv2                      286
 #define SYS_pwritev2                     287
+#define SYS_sendfile                     71
+#define SYS_copy_file_range              285
+#define SYS_splice                       76
+#define SYS_tee                          77
+#define SYS_vmsplice                     75
 #define SYS_fstat                        80
 #define SYS_newfstatat                   79
 #define SYS_statx                        291
@@ -714,6 +724,11 @@
 #define SYS_pwritev                      70
 #define SYS_preadv2                      286
 #define SYS_pwritev2                     287
+#define SYS_sendfile                     71
+#define SYS_copy_file_range              285
+#define SYS_splice                       76
+#define SYS_tee                          77
+#define SYS_vmsplice                     75
 #define SYS_fstat                        80
 #define SYS_newfstatat                   79
 #define SYS_statx                        291

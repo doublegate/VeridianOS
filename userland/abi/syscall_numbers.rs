@@ -75,6 +75,11 @@ pub mod sysno {
     pub const SYS_pwritev: usize = 296;
     pub const SYS_preadv2: usize = 327;
     pub const SYS_pwritev2: usize = 328;
+    pub const SYS_sendfile: usize = 40;
+    pub const SYS_copy_file_range: usize = 326;
+    pub const SYS_splice: usize = 275;
+    pub const SYS_tee: usize = 276;
+    pub const SYS_vmsplice: usize = 278;
     pub const SYS_fstat: usize = 5;
     pub const SYS_stat: usize = 4;
     pub const SYS_lstat: usize = 6;
@@ -381,6 +386,11 @@ pub mod sysno {
     pub const SYS_pwritev: usize = 70;
     pub const SYS_preadv2: usize = 286;
     pub const SYS_pwritev2: usize = 287;
+    pub const SYS_sendfile: usize = 71;
+    pub const SYS_copy_file_range: usize = 285;
+    pub const SYS_splice: usize = 76;
+    pub const SYS_tee: usize = 77;
+    pub const SYS_vmsplice: usize = 75;
     pub const SYS_fstat: usize = 80;
     pub const SYS_newfstatat: usize = 79;
     pub const SYS_statx: usize = 291;
@@ -653,6 +663,11 @@ pub mod sysno {
     pub const SYS_pwritev: usize = 70;
     pub const SYS_preadv2: usize = 286;
     pub const SYS_pwritev2: usize = 287;
+    pub const SYS_sendfile: usize = 71;
+    pub const SYS_copy_file_range: usize = 285;
+    pub const SYS_splice: usize = 76;
+    pub const SYS_tee: usize = 77;
+    pub const SYS_vmsplice: usize = 75;
     pub const SYS_fstat: usize = 80;
     pub const SYS_newfstatat: usize = 79;
     pub const SYS_statx: usize = 291;

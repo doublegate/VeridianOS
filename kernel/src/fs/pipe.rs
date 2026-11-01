@@ -149,6 +149,40 @@ impl PipeReader {
     pub fn has_data(&self) -> bool {
         !self.inner.lock().buffer.is_empty()
     }
+
+    /// Copy up to `buf.len()` queued bytes into `buf` without removing
+    /// them: end of file is 0, empty with a writer `WouldBlock`.
+    fn peek(&self, buf: &mut [u8]) -> Result<usize, KernelError> {
+        let pipe = self.inner.lock();
+        if pipe.buffer.is_empty() {
+            return if pipe.write_closed {
+                Ok(0)
+            } else {
+                Err(KernelError::WouldBlock)
+            };
+        }
+        let n = buf.len().min(pipe.buffer.len());
+        for (dst, src) in buf.iter_mut().zip(pipe.buffer.iter()) {
+            *dst = *src;
+        }
+        Ok(n)
+    }
+
+    /// Remove the first `n` queued bytes (after a [`Self::peek`]).
+    fn consume(&self, n: usize) {
+        {
+            let mut pipe = self.inner.lock();
+            let n = n.min(pipe.buffer.len());
+            pipe.buffer.drain(..n);
+            pipe.generation += 1;
+        }
+        pipe_event(); // room for a waiting writer
+    }
+
+    /// Which pipe this is (the shared state's address).
+    fn id(&self) -> usize {
+        Arc::as_ptr(&self.inner) as *const () as usize
+    }
 }
 
 impl Drop for PipeReader {
@@ -224,6 +258,20 @@ impl PipeWriter {
     pub fn generation(&self) -> u64 {
         self.inner.lock().generation
     }
+
+    /// Free bytes in the pipe: `BrokenPipe` once the read end is closed.
+    fn room(&self) -> Result<usize, KernelError> {
+        let pipe = self.inner.lock();
+        if pipe.read_closed {
+            return Err(KernelError::BrokenPipe);
+        }
+        Ok(pipe.capacity.saturating_sub(pipe.buffer.len()))
+    }
+
+    /// Which pipe this is (the shared state's address).
+    fn id(&self) -> usize {
+        Arc::as_ptr(&self.inner) as *const () as usize
+    }
 }
 
 impl Drop for PipeWriter {
@@ -254,10 +302,15 @@ pub fn drain_pipe(reader: &PipeReader) -> Vec<u8> {
 // ============================================================================
 
 use super::{DirEntry, Metadata, NodeType, Permissions, VfsNode};
+use crate::sync::sleep_mutex::SleepMutex;
 
 /// VfsNode adapter wrapping the read end of a pipe.
 pub struct PipeReadNode {
     reader: Arc<Mutex<PipeReader>>,
+    /// Held by each read of the pipe, and by a splice from it across its
+    /// write of what it saw (which may sleep), so that two readers never
+    /// take the same bytes (Linux's pipe mutex).
+    read_lock: SleepMutex<()>,
 }
 
 impl PipeReadNode {
@@ -265,6 +318,7 @@ impl PipeReadNode {
     pub fn new(reader: PipeReader) -> Self {
         Self {
             reader: Arc::new(Mutex::new(reader)),
+            read_lock: SleepMutex::new(()),
         }
     }
 }
@@ -286,7 +340,31 @@ impl VfsNode for PipeReadNode {
     }
 
     fn read(&self, _offset: usize, buffer: &mut [u8]) -> Result<usize, KernelError> {
+        let _read = self.read_lock.lock();
         self.reader.lock().try_read(buffer)
+    }
+
+    fn pipe_id(&self) -> Option<usize> {
+        Some(self.reader.lock().id())
+    }
+
+    fn pipe_splice(
+        &self,
+        max: usize,
+        consume: bool,
+        sink: &mut dyn FnMut(&[u8]) -> Result<usize, KernelError>,
+    ) -> Result<usize, KernelError> {
+        let _read = self.read_lock.lock();
+        let mut buf = alloc::vec![0u8; max.min(PIPE_CAPACITY)];
+        let n = self.reader.lock().peek(&mut buf)?;
+        if n == 0 {
+            return Ok(0);
+        }
+        let taken = sink(&buf[..n])?.min(n);
+        if consume && taken > 0 {
+            self.reader.lock().consume(taken);
+        }
+        Ok(taken)
     }
 
     fn write(&self, _offset: usize, _data: &[u8]) -> Result<usize, KernelError> {
@@ -404,6 +482,14 @@ impl VfsNode for PipeWriteNode {
         self.writer.lock().write(data)
     }
 
+    fn pipe_id(&self) -> Option<usize> {
+        Some(self.writer.lock().id())
+    }
+
+    fn pipe_room(&self) -> Result<usize, KernelError> {
+        self.writer.lock().room()
+    }
+
     fn poll_readiness(&self) -> u16 {
         let writer = self.writer.lock();
         let pipe = writer.inner.lock();
@@ -483,6 +569,46 @@ mod tests {
             writer.write(&[2u8; 5000]),
             Err(KernelError::WouldBlock)
         ));
+    }
+
+    /// Splice's view of a pipe: the sink sees the queued bytes, only what
+    /// it takes leaves the pipe, tee (no consume) leaves them all, and room
+    /// and end of file follow the other end.
+    #[test]
+    fn pipe_splice_consumes_only_what_the_sink_took() {
+        let (reader, writer) = create_pipe_with_capacity(16).unwrap();
+        let (r, w) = (PipeReadNode::new(reader), PipeWriteNode::new(writer));
+        assert_eq!(r.pipe_id(), w.pipe_id());
+        assert!(matches!(
+            r.pipe_splice(8, true, &mut |_| Ok(1)),
+            Err(KernelError::WouldBlock)
+        ));
+        assert_eq!(w.write(0, b"abcdef").unwrap(), 6);
+        assert_eq!(w.pipe_room().unwrap(), 10);
+        let mut seen = alloc::vec::Vec::new();
+        let n = r
+            .pipe_splice(4, false, &mut |d| {
+                seen.extend_from_slice(d);
+                Ok(d.len())
+            })
+            .unwrap();
+        assert_eq!((n, &seen[..]), (4, &b"abcd"[..]));
+        assert_eq!(w.pipe_room().unwrap(), 10, "tee leaves the bytes");
+        assert_eq!(r.pipe_splice(8, true, &mut |_| Ok(2)).unwrap(), 2);
+        let mut buf = [0u8; 8];
+        assert_eq!(r.read(0, &mut buf).unwrap(), 4);
+        assert_eq!(&buf[..4], b"cdef");
+        drop(w);
+        assert_eq!(r.pipe_splice(8, true, &mut |_| Ok(1)).unwrap(), 0);
+    }
+
+    /// A write end whose reader is gone has no room: EPIPE.
+    #[test]
+    fn pipe_room_is_broken_pipe_without_a_reader() {
+        let (reader, writer) = create_pipe_with_capacity(16).unwrap();
+        let w = PipeWriteNode::new(writer);
+        drop(PipeReadNode::new(reader));
+        assert!(matches!(w.pipe_room(), Err(KernelError::BrokenPipe)));
     }
 
     #[test]

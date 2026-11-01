@@ -66,6 +66,12 @@ exposed were fixed (N-182 to N-189); the rest are listed, with their targets, in
   thread, whose threads share one descriptor table that cannot be split yet (with one thread
   there is nothing to unshare). Every file reports device 1 (`st_dev`), so ustat knows only
   that device, which it takes for the root filesystem.
+- **splice and its relatives copy.** sendfile, copy_file_range, splice, tee and vmsplice move
+  data through a kernel buffer, 64 KiB at a time; no page is moved or shared between a pipe and
+  a file, SPLICE_F_MOVE and SPLICE_F_GIFT are accepted and change nothing, and copy_file_range
+  makes no reflink or server-side copy. copy_file_range tells two filesystems apart by the
+  filesystem of their inodes where both report one, else by the mount their opened paths are
+  under (a path through a symlink into another mount can be taken for the same filesystem).
 - **Resource usage.** getrusage, times and wait4 report CPU time (split into user and system
   time by tick samples), peak resident set and context switches; page-fault, block I/O, IPC and
   signal counts are zero.

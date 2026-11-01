@@ -41,6 +41,7 @@
 #include <sys/time.h>
 #include <sys/times.h>
 #include <sys/select.h>
+#include <sys/sendfile.h>
 #include <spawn.h>
 #include <sys/wait.h>
 #include <sys/socket.h>
@@ -6327,6 +6328,99 @@ static void test_close_range_and_advice(void)
     report("close_range_sync_advice", f == 0, why);
 }
 
+/*
+ * sendfile, copy_file_range, splice, tee and vmsplice (group 3 step D2).
+ */
+static void test_splice_family(void)
+{
+    const char *src = "/tmp/musl_sf_src", *dst = "/tmp/musl_sf_dst";
+    char why[160], got[64] = "";
+    int f = 0;
+    int in = open(src, O_CREAT | O_RDWR | O_TRUNC, 0644);
+    int out = open(dst, O_CREAT | O_RDWR | O_TRUNC, 0644);
+    if (in < 0 || out < 0 || write(in, "0123456789", 10) != 10) f |= 1;
+    /* sendfile with an offset reads from it and moves it, not the position;
+     * without one, from the position, which moves. */
+    off_t off = 2;
+    if (sendfile(out, in, &off, 5) != 5 || off != 7 || lseek(in, 0, SEEK_CUR) != 10) f |= 2;
+    lseek(in, 8, SEEK_SET);
+    if (sendfile(out, in, NULL, 100) != 2 || lseek(in, 0, SEEK_CUR) != 10) f |= 4;
+    if (slurp(dst, got, sizeof(got)) != 7 || strcmp(got, "2345689")) f |= 8;
+    /* copy_file_range: the offsets move, the positions do not. */
+    off_t oi = 0, oo = 7;
+    if (copy_file_range(in, &oi, out, &oo, 3, 0) != 3 || oi != 3 || oo != 10 ||
+        lseek(out, 0, SEEK_CUR) != 7) f |= 16;
+    /* Overlap in one file, flags, a directory, O_APPEND, two filesystems. */
+    off_t a = 0, b = 5;
+    errno = 0;
+    if (copy_file_range(out, &a, out, &b, 10, 0) != -1 || errno != EINVAL) f |= 32;
+    errno = 0;
+    if (copy_file_range(in, &a, out, &oo, 1, 1) != -1 || errno != EINVAL) f |= 64;
+    int dir = open("/tmp", O_RDONLY | O_DIRECTORY);
+    errno = 0;
+    if (copy_file_range(dir, NULL, out, NULL, 1, 0) != -1 || errno != EISDIR) f |= 128;
+    close(dir);
+    int app = open(dst, O_WRONLY | O_APPEND);
+    errno = 0;
+    if (copy_file_range(in, &a, app, NULL, 1, 0) != -1 || errno != EBADF) f |= 256;
+    close(app);
+    int shm = open("/dev/shm/musl_sf", O_CREAT | O_RDWR | O_TRUNC, 0644);
+    errno = 0;
+    if (shm < 0 || copy_file_range(in, &a, shm, NULL, 1, 0) != -1 || errno != EXDEV) f |= 512;
+    close(shm);
+    unlink("/dev/shm/musl_sf");
+    /* splice a file into a pipe, tee it into another, read that one back
+     * with vmsplice, then splice the first into the file. */
+    int p[2], q[2];
+    if (pipe(p) || pipe(q)) f |= 1024;
+    off_t so = 1;
+    if (splice(in, &so, p[1], NULL, 4, 0) != 4 || so != 5) f |= 2048;
+    if (tee(p[0], q[1], 100, 0) != 4) f |= 4096;
+    char buf[16] = {0};
+    struct iovec v = {buf, sizeof(buf)};
+    if (vmsplice(q[0], &v, 1, 0) != 4 || memcmp(buf, "1234", 4)) f |= 8192;
+    off_t to = 0;
+    if (splice(p[0], NULL, out, &to, 100, 0) != 4 || to != 4) f |= 16384;
+    if (slurp(dst, got, sizeof(got)) != 10 || strcmp(got, "1234689012")) f |= 32768;
+    /* A pipe takes no offset; a pipe into itself; an empty pipe without
+     * waiting; a pipe is no sendfile source. */
+    errno = 0;
+    if (splice(p[0], &so, out, NULL, 1, 0) != -1 || errno != ESPIPE) f |= 65536;
+    errno = 0;
+    if (splice(p[0], NULL, p[1], NULL, 1, 0) != -1 || errno != EINVAL) f |= 131072;
+    errno = 0;
+    if (splice(p[0], NULL, q[1], NULL, 1, SPLICE_F_NONBLOCK) != -1 || errno != EAGAIN)
+        f |= 262144;
+    struct iovec w = {"xy", 2};
+    if (vmsplice(p[1], &w, 1, 0) != 2 || read(p[0], buf, sizeof(buf)) != 2 ||
+        memcmp(buf, "xy", 2)) f |= 524288;
+    errno = 0;
+    if (sendfile(out, p[0], NULL, 1) != -1 || errno != EINVAL) f |= 1048576;
+    /* Into a pipe nobody reads: EPIPE, and SIGPIPE. */
+    sigset_t pipe_set, old, pending;
+    sigemptyset(&pipe_set);
+    sigaddset(&pipe_set, SIGPIPE);
+    sigprocmask(SIG_BLOCK, &pipe_set, &old);
+    close(q[0]);
+    so = 0;
+    errno = 0;
+    if (splice(in, &so, q[1], NULL, 1, 0) != -1 || errno != EPIPE) f |= 2097152;
+    sigpending(&pending);
+    if (!sigismember(&pending, SIGPIPE)) f |= 4194304;
+    struct timespec zero = {0, 0};
+    sigtimedwait(&pipe_set, NULL, &zero);
+    sigprocmask(SIG_SETMASK, &old, NULL);
+    close(p[0]);
+    close(p[1]);
+    close(q[1]);
+    close(in);
+    close(out);
+    unlink(src);
+    unlink(dst);
+    snprintf(why, sizeof(why), "f=0x%x got=%s errno=%d", f, got, errno);
+    report("sendfile_copy_splice_tee", f == 0, why);
+}
+
 #if defined(__x86_64__)
 /* ustat and sysfs, x86_64 only (group 3 step D1). */
 static void test_ustat_sysfs(void)
@@ -6456,6 +6550,7 @@ int main(int argc, char **argv)
     test_preadv_pwritev();
     test_creat_lchown_fchmodat2();
     test_close_range_and_advice();
+    test_splice_family();
 #if defined(__x86_64__)
     test_ustat_sysfs();
 #endif

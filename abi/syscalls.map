@@ -99,6 +99,11 @@ preadv
 pwritev
 preadv2
 pwritev2
+sendfile
+copy_file_range
+splice
+tee
+vmsplice
 fstat
 stat
 lstat

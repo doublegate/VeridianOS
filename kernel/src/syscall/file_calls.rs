@@ -19,7 +19,7 @@ use super::{
 use crate::fs::{file::File, NodeType};
 
 /// The open file `fd` (an `int`), EBADF if there is none.
-fn open_file(fd: usize) -> Result<Arc<File>, SyscallError> {
+pub(super) fn open_file(fd: usize) -> Result<Arc<File>, SyscallError> {
     let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
     // Lookup only; the lock is not held over the operation (N-118).
     let file = proc.file_table.lock().get(fd as u32 as usize);

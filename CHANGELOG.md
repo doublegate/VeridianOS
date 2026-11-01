@@ -85,6 +85,16 @@
   nothing more, there being no page cache; syncfs and sync_file_range sync every filesystem, as
   fsync does. ustat knows the root filesystem, the device every file reports; sysfs lists the
   filesystem types by their Linux names.
+- sendfile, copy_file_range, splice, tee and vmsplice (they were ENOSYS), following Linux
+  7.3's `fs/read_write.c` and `fs/splice.c`: each checks its descriptors, offsets, flags and
+  file types in Linux's order (ESPIPE for an offset on a pipe, EINVAL for a pipe into itself,
+  O_APPEND output, or neither side a pipe; EBADF, EISDIR, EXDEV, EOVERFLOW and EFBIG for
+  copy_file_range as `generic_copy_file_checks` has them, including overlapping ranges in one
+  file). A given offset moves instead of the file position. Pipes and FIFOs gain a splice read
+  that hands queued bytes on and removes only what the other side took, so a failed write loses
+  nothing, and tee copies without removing. Writes into a pipe nobody reads are EPIPE with
+  SIGPIPE; SPLICE_F_NONBLOCK or O_NONBLOCK makes an empty or full pipe EAGAIN; RLIMIT_FSIZE and
+  the set-ID clearing of a write apply.
 - adjtimex and clock_adjtime (they were ENOSYS), from Linux's `kernel/time/ntp.c` and
   `timekeeping.c` (`timer::ntp`). Everyone may read the NTP state; changing it needs CAP_SYS_TIME,
   checked in Linux's order, and a refused call leaves the struct unwritten. Status, time constant,
