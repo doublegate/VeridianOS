@@ -411,6 +411,10 @@ pub struct Thread {
     /// friends, as Linux's ERESTARTNOHAND and plain EINTR). Set by the
     /// system call dispatcher, consumed by the next signal delivery.
     pub no_restart: AtomicBool,
+    /// What restart_syscall carries on with (`syscall::restart`): set when
+    /// a relative sleep or a timed poll is interrupted, forgotten by
+    /// rt_sigreturn. A new thread has none.
+    pub restart: Mutex<crate::syscall::restart::Restart>,
     /// The alternate signal stack (sigaltstack; N-222). A new thread has
     /// none; fork copies the parent thread's.
     pub altstack: Mutex<super::signals::SigAltStack>,
@@ -582,6 +586,7 @@ impl Thread {
             saved_sigmask: AtomicU64::new(0),
             has_saved_sigmask: AtomicBool::new(false),
             no_restart: AtomicBool::new(false),
+            restart: Mutex::new(crate::syscall::restart::Restart::None),
             altstack: Mutex::new(super::signals::SigAltStack::default()),
             robust_list: AtomicUsize::new(0),
             sched: Mutex::new(SchedParams::default()),

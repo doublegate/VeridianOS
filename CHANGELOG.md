@@ -72,6 +72,14 @@
   EOPNOTSUPP, as Linux's does. LTP creates its 300 MB loop image with fallocate, so the tests
   that ask for a block device now stop at once instead of writing the image until the disk is
   full or the time limit passes.
+- restart_syscall (`syscall::restart`; it was ENOSYS). A relative nanosleep or clock_nanosleep,
+  or a poll with a timeout, that a stop interrupts now carries on to its first deadline once the
+  process continues; it started the whole duration again. As in Linux, the interrupted call
+  leaves a restart block and returns -ERESTART_RESTARTBLOCK inside the kernel, which a caught
+  signal turns into EINTR (SA_RESTART or not, with the time left in `rem`) and a stop, or a
+  return with no signal left, into restart_syscall; rt_sigreturn forgets the block, so
+  restart_syscall without one is EINTR. ppoll (musl's poll on AArch64 and RISC-V) and select
+  run again with the time left that they write back, as in Linux.
 - POSIX timers: timer_create, timer_settime, timer_gettime, timer_getoverrun and timer_delete
   (they were ENOSYS), following Linux's `kernel/time/posix-timers.c` (`process::posix_timer`).
   Timers run on CLOCK_REALTIME (an absolute setting follows the clock when it is set; a

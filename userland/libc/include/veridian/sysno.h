@@ -198,6 +198,7 @@
 #define SYS_rt_sigsuspend                130
 #define SYS_pause                        34
 #define SYS_rt_sigreturn                 15
+#define SYS_restart_syscall              219
 #define SYS_rt_sigpending                127
 #define SYS_rt_sigtimedwait              128
 #define SYS_rt_sigqueueinfo              129
@@ -487,6 +488,7 @@
 #define SYS_rt_sigprocmask               135
 #define SYS_rt_sigsuspend                133
 #define SYS_rt_sigreturn                 139
+#define SYS_restart_syscall              128
 #define SYS_rt_sigpending                136
 #define SYS_rt_sigtimedwait              137
 #define SYS_rt_sigqueueinfo              138
@@ -772,6 +774,7 @@
 #define SYS_rt_sigprocmask               135
 #define SYS_rt_sigsuspend                133
 #define SYS_rt_sigreturn                 139
+#define SYS_restart_syscall              128
 #define SYS_rt_sigpending                136
 #define SYS_rt_sigtimedwait              137
 #define SYS_rt_sigqueueinfo              138

@@ -641,6 +641,11 @@ pub fn sys_sigaltstack(ss: usize, old_ss: usize) -> SyscallResult {
 }
 
 pub fn sys_sigreturn(frame_ptr: usize) -> SyscallResult {
+    // rt_sigreturn forgets the restart block, as Linux's: a restart_syscall
+    // after it is EINTR (`restart`).
+    if let Some(thread) = crate::process::current_thread() {
+        *thread.restart.lock() = super::restart::Restart::None;
+    }
     // A dispatched thread: Linux rt_sigreturn, restoring into the live
     // system call frame (the frame address comes from the user RSP, not
     // from an argument). An unusable frame kills the thread with SIGSEGV.

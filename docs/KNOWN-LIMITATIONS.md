@@ -214,6 +214,11 @@ What remains:
   after every thread has stopped. Orphaned process groups are not exempt from SIGTSTP, SIGTTIN
   and SIGTTOU, and background reads and writes on a terminal raise neither (no line discipline
   yet).
+- **Restarting after a stop is not exactly Linux's.** A relative sleep and a timed poll carry on
+  to their deadline through restart_syscall, as on Linux. Other calls a stop interrupts with
+  EINTR run again with their arguments, including the few that Linux ends with EINTR instead
+  (sigtimedwait, epoll_wait; signal(7)); and a thread whose wait ends with no signal left to act
+  on (another thread took it) returns EINTR where Linux would run the call again.
 - **Handlers save x87/SSE state only.** The signal frame holds an FXSAVE image, so the upper
   halves of AVX registers are not preserved across a handler that uses them.
 - **No I/O siginfo.** SIGIO (F_SETOWN, O_ASYNC) does not exist yet, so no signal arrives with

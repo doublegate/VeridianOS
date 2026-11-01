@@ -427,7 +427,7 @@ pub fn sys_nanosleep(req_ptr: usize, rem_ptr: usize) -> SyscallResult {
             .saturating_mul(1_000_000_000)
             .saturating_add(req.tv_nsec as u64);
         let deadline = crate::sched::dispatch::clock_ns().saturating_add(total);
-        return sleep_until(deadline, rem_ptr);
+        return sleep_until(deadline, rem_ptr, true);
     }
 
     let sleep_ms = (req.tv_sec as u64) * 1000 + (req.tv_nsec as u64) / 1_000_000;
@@ -451,9 +451,12 @@ pub fn sys_nanosleep(req_ptr: usize, rem_ptr: usize) -> SyscallResult {
 /// EINTR, with the time left written to `rem_ptr` (if non-zero) as Linux
 /// does. A completed sleep does not touch `rem_ptr`, as on Linux: writing
 /// zero there made a sleep with a bad `rem` pointer fail with EFAULT after
-/// it had slept (PR #23 review).
+/// it had slept (PR #23 review). A `restartable` (relative) sleep that is
+/// interrupted leaves a restart block instead of plain EINTR, so after a
+/// stop it sleeps to the same deadline (`restart`), as Linux's
+/// hrtimer_nanosleep.
 #[cfg(feature = "alloc")]
-pub(crate) fn sleep_until(deadline: u64, rem_ptr: usize) -> SyscallResult {
+pub(crate) fn sleep_until(deadline: u64, rem_ptr: usize, restartable: bool) -> SyscallResult {
     use crate::sched::dispatch;
     static SLEEP: dispatch::WaitQueue = dispatch::WaitQueue::new();
     let interrupted = matches!(
@@ -468,10 +471,14 @@ pub(crate) fn sleep_until(deadline: u64, rem_ptr: usize) -> SyscallResult {
         };
         super::userspace::write_user(rem_ptr, rem)?;
     }
-    if interrupted {
-        Err(SyscallError::Interrupted)
-    } else {
+    if !interrupted {
         Ok(0)
+    } else if restartable {
+        Err(super::restart::interrupted(
+            super::restart::Restart::Sleep { deadline, rem_ptr },
+        ))
+    } else {
+        Err(SyscallError::Interrupted)
     }
 }
 
@@ -505,7 +512,7 @@ pub fn sys_clock_nanosleep(
     };
     #[cfg(feature = "alloc")]
     if crate::sched::dispatch::current_owner().is_some() {
-        return sleep_until(deadline, 0);
+        return sleep_until(deadline, 0, false);
     }
     while crate::timer::monotonic_ns() < deadline {
         if crate::sched::wait_for_interrupt_in_syscall() {

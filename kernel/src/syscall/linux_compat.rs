@@ -129,6 +129,8 @@ pub(crate) fn to_linux_errno(err: super::SyscallError) -> isize {
         SyscallError::Overflow => LINUX_EOVERFLOW,
         SyscallError::ReadOnlyFilesystem => LINUX_EROFS,
         SyscallError::NoData => LINUX_ENODATA,
+        // Not an errno: the signal return path rewrites it (`restart`).
+        SyscallError::RestartBlock => -516,
     }
 }
 

@@ -342,6 +342,9 @@ mod limits;
 
 // poll, ppoll, select, pselect6
 mod multiplex;
+
+// restart_syscall and the restart block
+pub(crate) mod restart;
 use self::multiplex::{sys_poll, sys_ppoll, sys_pselect6, sys_select};
 
 // Import user space utilities
@@ -492,6 +495,10 @@ pub enum SyscallError {
     ReadOnlyFilesystem = -134,
     /// No such extended attribute (ENODATA, errno 61).
     NoData = -135,
+    /// The call was interrupted and left a restart block (`restart`):
+    /// Linux -ERESTART_RESTARTBLOCK, turned into EINTR or restart_syscall
+    /// on the way back to user mode and never seen there.
+    RestartBlock = -516,
 }
 
 impl From<IpcError> for SyscallError {
@@ -966,6 +973,7 @@ fn handle_syscall(
         // pause(): what musl does on the generic table, which has no pause.
         Syscall::Pause => sys_ppoll(0, 0, 0, 0, 0),
         Syscall::RtSigreturn => sys_sigreturn(arg1),
+        Syscall::RestartSyscall => restart::sys_restart_syscall(),
 
         // POSIX time syscalls
         Syscall::ClockGettime => sys_clock_gettime(arg1, arg2),

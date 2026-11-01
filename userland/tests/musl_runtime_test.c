@@ -5755,18 +5755,20 @@ static void test_posix_timers(void)
     siginfo_t si;
     memset(&si, 0, sizeof(si));
     int taken = sigtimedwait(&set1, &si, &wait) == sig;
-    int overrun = si.si_overrun, getover = timer_getoverrun(t);
     /* Taking the signal re-arms the timer, so on a slow machine its next
-     * expiry can be queued before the second wait: a second signal is a
-     * duplicate only if it came within one period (seen on RISC-V Sv39). */
+     * expiry can be queued before the second wait (seen on RISC-V): a
+     * second signal is a duplicate only if it came before that expiry. */
+    struct itimerspec next;
     struct timespec zero = {0, 0}, w0, w1;
+    long next_ns = timer_gettime(t, &next) == 0 ? next.it_value.tv_nsec : 0;
     clock_gettime(CLOCK_MONOTONIC, &w0);
+    int overrun = si.si_overrun, getover = timer_getoverrun(t);
     errno = 0;
     int again = sigtimedwait(&set1, &si, &zero);
     int eagain = again == -1 && errno == EAGAIN;
     clock_gettime(CLOCK_MONOTONIC, &w1);
     long gap = (w1.tv_sec - w0.tv_sec) * 1000000000L + (w1.tv_nsec - w0.tv_nsec);
-    int once = eagain || (again == sig && gap >= 5000000);
+    int once = eagain || (again == sig && gap + 1000000 >= next_ns);
     int fd = signalfd(-1, &set1, SFD_CLOEXEC);
     struct signalfd_siginfo ssi;
     memset(&ssi, 0, sizeof(ssi));
@@ -5894,6 +5896,113 @@ static void test_posix_timers(void)
            resumed && cpuok && e1 && e2 && e3 && e4 && e5 && child == 1, why);
 }
 
+/* restart_syscall: a relative sleep, or a poll with a timeout, that a stop
+ * interrupts carries on to its first deadline once the process continues,
+ * instead of starting the whole duration again (Linux's restart block).
+ * The child tells the parent it is about to wait, is stopped 50 ms in and
+ * continued at 300 ms; it must then return at once, not 300 ms later.
+ * Where there is no poll syscall (arm64, riscv64) musl's poll is ppoll,
+ * which Linux reruns with the time left when the stop came (fs/select.c
+ * poll_select_finish): about 250 ms more after the continue. */
+enum { RESTART_SLEEP, RESTART_POLL, RESTART_PPOLL };
+static void restart_after_stop(const char *name, int mode)
+{
+    char why[200];
+    int ready[2] = {-1, -1}, result[2] = {-1, -1}, idle[2] = {-1, -1};
+    if (pipe(ready) != 0 || pipe(result) != 0 || pipe(idle) != 0) {
+        report(name, 0, "pipe failed");
+        return;
+    }
+    pid_t pid = fork();
+    if (pid == 0) {
+        long long out[4];
+        char c = 1;
+        write(ready[1], &c, 1);
+        out[0] = mono_ns();
+        if (mode != RESTART_SLEEP) {
+            struct pollfd p = {idle[0], POLLIN, 0};
+            out[2] = poll(&p, 1, 300);
+        } else {
+            struct timespec req = {0, 300000000L}, rem = {0, 0};
+            out[2] = nanosleep(&req, &rem);
+        }
+        out[3] = errno;
+        out[1] = mono_ns();
+        write(result[1], out, sizeof(out));
+        _exit(0);
+    }
+    char c = 0;
+    long long out[4] = {0, 0, -2, 0}, cont = 0;
+    int stopped = 0;
+    if (pid > 0 && read(ready[0], &c, 1) == 1) {
+        usleep(50000);
+        int st = 0;
+        stopped = kill(pid, SIGSTOP) == 0 && waitpid(pid, &st, WUNTRACED) == pid && WIFSTOPPED(st);
+        usleep(250000);
+        cont = mono_ns();
+        kill(pid, SIGCONT);
+        read(result[0], out, sizeof(out));
+        waitpid(pid, NULL, 0);
+    }
+    for (int i = 0; i < 2; i++) {
+        close(ready[i]);
+        close(result[i]);
+        close(idle[i]);
+    }
+    long long slept = (out[1] - out[0]) / 1000000, after = (out[1] - cont) / 1000000;
+    snprintf(why, sizeof(why), "stopped=%d ret=%lld errno=%lld slept=%lldms after_cont=%lldms",
+             stopped, out[2], out[3], slept, after);
+    if (mode == RESTART_PPOLL)
+        report(name, stopped && out[2] == 0 && slept >= 450 && after >= 150 && after < 450, why);
+    else
+        report(name, stopped && out[2] == 0 && slept >= 300 && after < 200, why);
+}
+
+static volatile int restart_alrm;
+static void restart_on_alrm(int sig)
+{
+    (void)sig;
+    restart_alrm++;
+}
+
+static void test_restart_syscall(void)
+{
+    restart_after_stop("nanosleep_stop_keeps_deadline", RESTART_SLEEP);
+#ifdef SYS_poll
+    restart_after_stop("poll_stop_keeps_deadline", RESTART_POLL);
+#else
+    restart_after_stop("ppoll_stop_reruns_time_left", RESTART_PPOLL);
+#endif
+
+    /* With no restart block it is EINTR; a handler, SA_RESTART or not,
+     * makes an interrupted sleep EINTR with the time left in rem, and the
+     * block it left is gone after the handler (rt_sigreturn). */
+    char why[200];
+    errno = 0;
+    long none = syscall(SYS_restart_syscall);
+    int none_eintr = none == -1 && errno == EINTR;
+    struct sigaction sa, old;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = restart_on_alrm;
+    sa.sa_flags = SA_RESTART;
+    sigaction(SIGALRM, &sa, &old);
+    struct itimerval it = {{0, 0}, {0, 50000}};
+    setitimer(ITIMER_REAL, &it, NULL);
+    struct timespec req = {2, 0}, rem = {0, 0};
+    errno = 0;
+    int r = nanosleep(&req, &rem);
+    int e = errno;
+    int left = rem.tv_sec == 1;
+    errno = 0;
+    long after = syscall(SYS_restart_syscall);
+    int after_eintr = after == -1 && errno == EINTR;
+    sigaction(SIGALRM, &old, NULL);
+    snprintf(why, sizeof(why), "none=%ld,%d handler: ret=%d errno=%d alrm=%d rem=%lld.%09ld after=%ld",
+             none, none_eintr, r, e, restart_alrm, (long long)rem.tv_sec, rem.tv_nsec, after);
+    report("restart_syscall_eintr_and_handler",
+           none_eintr && r == -1 && e == EINTR && restart_alrm == 1 && left && after_eintr, why);
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
@@ -5988,6 +6097,7 @@ int main(int argc, char **argv)
     test_utimes();
     test_itimers();
     test_posix_timers();
+    test_restart_syscall();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

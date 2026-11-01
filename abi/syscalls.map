@@ -218,6 +218,7 @@ rt_sigprocmask
 rt_sigsuspend
 pause
 rt_sigreturn
+restart_syscall
 rt_sigpending
 rt_sigtimedwait
 rt_sigqueueinfo

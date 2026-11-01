@@ -657,6 +657,56 @@ impl SigAltStack {
 /// Linux EINTR, as a system call returns it (rax, x0, a0).
 const EINTR_RAX: u64 = (-4i64) as u64;
 
+/// Linux -ERESTART_RESTARTBLOCK, as a system call returns it: the call
+/// left a restart block (`syscall::restart`). User space never sees it.
+const RESTART_BLOCK_RAX: u64 = (-516i64) as u64;
+
+/// restart_syscall's number, which a call with a restart block becomes.
+#[cfg(target_arch = "x86_64")]
+const RESTART_SYSCALL_NR: u64 = 219;
+#[cfg(not(target_arch = "x86_64"))]
+const RESTART_SYSCALL_NR: u64 = 128;
+
+/// How a system call's return to user mode goes on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Return {
+    /// Into a handler; `restart` is its SA_RESTART.
+    Handler { restart: bool },
+    /// After a stop, once the process continues.
+    Stop,
+    /// With no signal to act on (one acted on by another thread, or the
+    /// stop of a process another thread stopped).
+    NoSignal,
+}
+
+/// What the return does with the call's result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OnReturn {
+    Keep,
+    /// Run the call again with its arguments.
+    Rerun,
+    /// Return EINTR.
+    Eintr,
+    /// Run restart_syscall instead.
+    RestartCall,
+}
+
+/// Linux's choice for a system call that returns `ret` (handle_signal and
+/// arch_do_signal_or_restart): EINTR is run again under a handler with
+/// SA_RESTART, unless the call is one that returns EINTR after a handler
+/// regardless (`no_restart`), and after a stop; a restart block is EINTR
+/// under a handler and restart_syscall otherwise. EINTR with no signal
+/// left stays EINTR here.
+fn on_return(ret: u64, how: Return, no_restart: bool) -> OnReturn {
+    match (ret, how) {
+        (EINTR_RAX, Return::Handler { restart }) if restart && !no_restart => OnReturn::Rerun,
+        (EINTR_RAX, Return::Stop) => OnReturn::Rerun,
+        (RESTART_BLOCK_RAX, Return::Handler { .. }) => OnReturn::Eintr,
+        (RESTART_BLOCK_RAX, Return::Stop | Return::NoSignal) => OnReturn::RestartCall,
+        _ => OnReturn::Keep,
+    }
+}
+
 /// What a signal does when it is not caught.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DefaultAction {
@@ -1245,6 +1295,34 @@ mod generic {
     const RET: usize = 0;
     #[cfg(target_arch = "riscv64")]
     const RET: usize = 10;
+    /// The register holding the system call number.
+    #[cfg(target_arch = "aarch64")]
+    const NR: usize = UserFrame::X8;
+    #[cfg(target_arch = "riscv64")]
+    const NR: usize = UserFrame::A7;
+
+    /// Carry out `on_return`'s choice for the return `how` of the system
+    /// call whose first argument was `syscall` (None: not a system call
+    /// return, or one already acted on). Running a call again puts its
+    /// first argument back (the result overwrote it) and rewinds the
+    /// 4-byte `svc`/`ecall`.
+    fn act(f: &mut UserFrame, syscall: Option<u64>, how: Return, no_restart: bool) {
+        let Some(arg0) = syscall else {
+            return;
+        };
+        match on_return(f.x[RET], how, no_restart) {
+            OnReturn::Keep => {}
+            OnReturn::Eintr => f.x[RET] = EINTR_RAX,
+            OnReturn::Rerun => {
+                f.x[RET] = arg0;
+                set_pc(f, pc(f).wrapping_sub(4));
+            }
+            OnReturn::RestartCall => {
+                f.x[NR] = RESTART_SYSCALL_NR;
+                set_pc(f, pc(f).wrapping_sub(4));
+            }
+        }
+    }
 
     /// A zeroed frame on the heap (4.7 KiB on AArch64: too much for a
     /// kernel stack).
@@ -1353,16 +1431,18 @@ mod generic {
             }
         };
 
-        // SA_RESTART: run the interrupted call again, with its first
-        // argument back in place of the EINTR it returned, unless it is one
-        // that returns EINTR after a handler regardless (`no_restart`).
+        // SA_RESTART: run the interrupted call again, unless it is one that
+        // returns EINTR after a handler regardless (`no_restart`); a call
+        // with a restart block returns EINTR (`on_return`).
         let no_restart = thread.no_restart.swap(false, Ordering::AcqRel);
-        if let Some(arg0) = syscall {
-            if f.x[RET] == EINTR_RAX && flags & SA_RESTART != 0 && !no_restart {
-                f.x[RET] = arg0;
-                set_pc(f, pc(f).wrapping_sub(4));
-            }
-        }
+        act(
+            f,
+            syscall,
+            Return::Handler {
+                restart: flags & SA_RESTART != 0,
+            },
+            no_restart,
+        );
 
         // The stack: with SA_ONSTACK the alternate one, from its top, if it
         // is armed and the thread is not already on it; otherwise the
@@ -1510,6 +1590,7 @@ mod generic {
                 let seq = process.cont_seq.load(Ordering::SeqCst);
                 let Some(info) = dequeue(&process, &thread) else {
                     thread.no_restart.store(false, Ordering::Release);
+                    act(f, syscall, Return::NoSignal, false);
                     if thread.has_saved_sigmask.swap(false, Ordering::AcqRel) {
                         set_mask(
                             &process,
@@ -1529,14 +1610,10 @@ mod generic {
                         DefaultAction::Terminate | DefaultAction::CoreDump => Some(sig),
                         DefaultAction::Stop => {
                             // The interrupted call runs again once the
-                            // process continues, as on Linux.
+                            // process continues, as on Linux (or carries
+                            // on, with a restart block).
                             thread.no_restart.store(false, Ordering::Release);
-                            if let Some(arg0) = syscall.take() {
-                                if f.x[RET] == EINTR_RAX {
-                                    f.x[RET] = arg0;
-                                    set_pc(f, pc(f).wrapping_sub(4));
-                                }
-                            }
+                            act(f, syscall.take(), Return::Stop, false);
                             stop_process(&process, sig, seq);
                             None
                         }
@@ -1760,20 +1837,18 @@ mod frame {
             return false;
         }
 
-        // A system call the signal interrupted is restarted with SA_RESTART
-        // (rewind over the 2-byte `syscall`, put the number back in rax),
+        // A system call the signal interrupted is restarted with SA_RESTART,
         // unless it is one that returns EINTR after a handler regardless
-        // (`no_restart`); otherwise it returns EINTR. The context saved
-        // below must be the one the handler returns to.
+        // (`no_restart`); otherwise it returns EINTR (`on_return`). The
+        // context saved below must be the one the handler returns to.
         let no_restart = thread.no_restart.swap(false, Ordering::AcqRel);
-        if f.vector == SYSCALL_VECTOR
-            && f.rax == EINTR_RAX
-            && flags & SA_RESTART != 0
-            && !no_restart
-        {
-            f.rax = f.error_code;
-            f.rip = f.rip.wrapping_sub(2);
-        }
+        act(
+            f,
+            Return::Handler {
+                restart: flags & SA_RESTART != 0,
+            },
+            no_restart,
+        );
 
         // The stack: with SA_ONSTACK the alternate one, from its top, if it
         // is armed and the thread is not already on it (N-222); otherwise
@@ -1910,6 +1985,27 @@ mod frame {
         true
     }
 
+    /// Carry out `on_return`'s choice for the return `how` of `f`, if it
+    /// is a system call frame. Running a call again rewinds over the 2-byte
+    /// `syscall` and puts the number (saved in `error_code`) back in rax.
+    fn act(f: &mut TrapFrame, how: Return, no_restart: bool) {
+        if f.vector != SYSCALL_VECTOR {
+            return;
+        }
+        match on_return(f.rax, how, no_restart) {
+            OnReturn::Keep => {}
+            OnReturn::Eintr => f.rax = EINTR_RAX,
+            OnReturn::Rerun => {
+                f.rax = f.error_code;
+                f.rip = f.rip.wrapping_sub(2);
+            }
+            OnReturn::RestartCall => {
+                f.rax = RESTART_SYSCALL_NR;
+                f.rip = f.rip.wrapping_sub(2);
+            }
+        }
+    }
+
     /// Act on pending signals on the way back to user mode (syscall exit
     /// and trap exit): a fatal one ends the thread's process, a caught one
     /// gets a handler frame. One handler per return; the next pending
@@ -1932,6 +2028,7 @@ mod frame {
                 let seq = process.cont_seq.load(Ordering::SeqCst);
                 let Some(info) = dequeue(&process, &thread) else {
                     thread.no_restart.store(false, Ordering::Release);
+                    act(f, Return::NoSignal, false);
                     // sigsuspend ended without a handler to restore its
                     // mask: put the saved one back now.
                     if thread.has_saved_sigmask.swap(false, Ordering::AcqRel) {
@@ -1955,10 +2052,7 @@ mod frame {
                             // A system call the stop interrupted runs again
                             // once the process continues, as on Linux.
                             thread.no_restart.store(false, Ordering::Release);
-                            if f.vector == SYSCALL_VECTOR && f.rax == EINTR_RAX {
-                                f.rax = f.error_code;
-                                f.rip = f.rip.wrapping_sub(2);
-                            }
+                            act(f, Return::Stop, false);
                             stop_process(&process, sig, seq);
                             None
                         }
@@ -2067,6 +2161,46 @@ mod frame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// EINTR is run again under an SA_RESTART handler (unless the call
+    /// never is) and after a stop, and stays EINTR otherwise; a restart
+    /// block is EINTR under any handler and restart_syscall after a stop
+    /// or with no signal left; any other result is left alone.
+    #[test]
+    fn on_return_restarts_as_linux() {
+        let restart = Return::Handler { restart: true };
+        let plain = Return::Handler { restart: false };
+        assert_eq!(on_return(EINTR_RAX, restart, false), OnReturn::Rerun);
+        assert_eq!(on_return(EINTR_RAX, restart, true), OnReturn::Keep);
+        assert_eq!(on_return(EINTR_RAX, plain, false), OnReturn::Keep);
+        assert_eq!(on_return(EINTR_RAX, Return::Stop, true), OnReturn::Rerun);
+        assert_eq!(
+            on_return(EINTR_RAX, Return::NoSignal, false),
+            OnReturn::Keep
+        );
+        assert_eq!(
+            on_return(RESTART_BLOCK_RAX, restart, false),
+            OnReturn::Eintr
+        );
+        assert_eq!(on_return(RESTART_BLOCK_RAX, plain, false), OnReturn::Eintr);
+        assert_eq!(
+            on_return(RESTART_BLOCK_RAX, Return::Stop, false),
+            OnReturn::RestartCall
+        );
+        assert_eq!(
+            on_return(RESTART_BLOCK_RAX, Return::NoSignal, false),
+            OnReturn::RestartCall
+        );
+        for how in [restart, plain, Return::Stop, Return::NoSignal] {
+            assert_eq!(on_return(0, how, false), OnReturn::Keep);
+            assert_eq!(on_return((-11i64) as u64, how, false), OnReturn::Keep);
+        }
+        assert_eq!(
+            crate::syscall::linux_compat::to_linux_errno(crate::syscall::SyscallError::RestartBlock)
+                as u64,
+            RESTART_BLOCK_RAX
+        );
+    }
 
     #[test]
     fn set_layout_is_linux() {

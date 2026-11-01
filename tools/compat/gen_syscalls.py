@@ -137,6 +137,8 @@ def gen_rust(entries):
         f"//! VeridianOS has uses a private number from {PRIVATE_BASE} up.",
         "",
         "/// System call numbers",
+        "// The variants are Linux's names (restart_syscall -> RestartSyscall).",
+        "#[allow(clippy::enum_variant_names)]",
         "#[repr(usize)]",
         "#[derive(Debug, Clone, Copy, PartialEq, Eq)]",
         "pub enum Syscall {",

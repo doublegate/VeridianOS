@@ -180,6 +180,7 @@ pub mod sysno {
     pub const SYS_rt_sigsuspend: usize = 130;
     pub const SYS_pause: usize = 34;
     pub const SYS_rt_sigreturn: usize = 15;
+    pub const SYS_restart_syscall: usize = 219;
     pub const SYS_rt_sigpending: usize = 127;
     pub const SYS_rt_sigtimedwait: usize = 128;
     pub const SYS_rt_sigqueueinfo: usize = 129;
@@ -444,6 +445,7 @@ pub mod sysno {
     pub const SYS_rt_sigprocmask: usize = 135;
     pub const SYS_rt_sigsuspend: usize = 133;
     pub const SYS_rt_sigreturn: usize = 139;
+    pub const SYS_restart_syscall: usize = 128;
     pub const SYS_rt_sigpending: usize = 136;
     pub const SYS_rt_sigtimedwait: usize = 137;
     pub const SYS_rt_sigqueueinfo: usize = 138;
@@ -704,6 +706,7 @@ pub mod sysno {
     pub const SYS_rt_sigprocmask: usize = 135;
     pub const SYS_rt_sigsuspend: usize = 133;
     pub const SYS_rt_sigreturn: usize = 139;
+    pub const SYS_restart_syscall: usize = 128;
     pub const SYS_rt_sigpending: usize = 136;
     pub const SYS_rt_sigtimedwait: usize = 137;
     pub const SYS_rt_sigqueueinfo: usize = 138;
