@@ -182,6 +182,8 @@
 #define SYS_nanosleep                    35
 #define SYS_gettimeofday                 96
 #define SYS_settimeofday                 164
+#define SYS_adjtimex                     159
+#define SYS_clock_adjtime                305
 #define SYS_time                         201
 #define SYS_times                        100
 #define SYS_getitimer                    36
@@ -475,6 +477,8 @@
 #define SYS_nanosleep                    101
 #define SYS_gettimeofday                 169
 #define SYS_settimeofday                 170
+#define SYS_adjtimex                     171
+#define SYS_clock_adjtime                266
 #define SYS_times                        153
 #define SYS_getitimer                    102
 #define SYS_setitimer                    103
@@ -761,6 +765,8 @@
 #define SYS_nanosleep                    101
 #define SYS_gettimeofday                 169
 #define SYS_settimeofday                 170
+#define SYS_adjtimex                     171
+#define SYS_clock_adjtime                266
 #define SYS_times                        153
 #define SYS_getitimer                    102
 #define SYS_setitimer                    103

@@ -165,6 +165,8 @@ pub mod sysno {
     pub const SYS_nanosleep: usize = 35;
     pub const SYS_gettimeofday: usize = 96;
     pub const SYS_settimeofday: usize = 164;
+    pub const SYS_adjtimex: usize = 159;
+    pub const SYS_clock_adjtime: usize = 305;
     pub const SYS_time: usize = 201;
     pub const SYS_times: usize = 100;
     pub const SYS_getitimer: usize = 36;
@@ -433,6 +435,8 @@ pub mod sysno {
     pub const SYS_nanosleep: usize = 101;
     pub const SYS_gettimeofday: usize = 169;
     pub const SYS_settimeofday: usize = 170;
+    pub const SYS_adjtimex: usize = 171;
+    pub const SYS_clock_adjtime: usize = 266;
     pub const SYS_times: usize = 153;
     pub const SYS_getitimer: usize = 102;
     pub const SYS_setitimer: usize = 103;
@@ -694,6 +698,8 @@ pub mod sysno {
     pub const SYS_nanosleep: usize = 101;
     pub const SYS_gettimeofday: usize = 169;
     pub const SYS_settimeofday: usize = 170;
+    pub const SYS_adjtimex: usize = 171;
+    pub const SYS_clock_adjtime: usize = 266;
     pub const SYS_times: usize = 153;
     pub const SYS_getitimer: usize = 102;
     pub const SYS_setitimer: usize = 103;

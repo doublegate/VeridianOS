@@ -58,6 +58,7 @@
 #include <sys/random.h>
 #include <linux/futex.h>
 #include <sys/timerfd.h>
+#include <sys/timex.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -5958,6 +5959,117 @@ static void restart_after_stop(const char *name, int mode)
         report(name, stopped && out[2] == 0 && slept >= 300 && after < 200, why);
 }
 
+/* adjtimex and clock_adjtime: Linux's NTP state is read by everyone and
+ * changed only with CAP_SYS_TIME; ADJ_SETOFFSET steps CLOCK_REALTIME and
+ * ADJ_TAI sets CLOCK_TAI's offset. */
+static long long ts_ns(struct timespec t)
+{
+    return (long long)t.tv_sec * 1000000000LL + t.tv_nsec;
+}
+
+static void test_adjtimex(void)
+{
+    char why[200];
+    struct timex tx;
+    memset(&tx, 0, sizeof(tx));
+    int state = adjtimex(&tx);
+    memset(&tx, 0, sizeof(tx));
+    int raw = syscall(SYS_adjtimex, &tx);
+    int defaults = tx.tick == 10000 && tx.precision == 1 && tx.tolerance == 32768000 &&
+                   tx.time.tv_sec >= 1700000000;
+    /* An invalid tick is refused before anything is written back. */
+    memset(&tx, 0, sizeof(tx));
+    tx.modes = ADJ_TICK;
+    tx.tick = 1;
+    tx.offset = 12345;
+    errno = 0;
+    int badtick = adjtimex(&tx) == -1 && errno == EINVAL && tx.offset == 12345 && tx.tick == 1;
+    int user = 0;
+    pid_t pid = fork();
+    if (pid == 0) {
+        setresuid(1000, 1000, 1000);
+        struct timex u;
+        memset(&u, 0, sizeof(u));
+        int ok = adjtimex(&u) >= 0;
+        u.modes = ADJ_MAXERROR;
+        errno = 0;
+        ok = ok && adjtimex(&u) == -1 && errno == EPERM;
+        memset(&u, 0, sizeof(u));
+        u.modes = ADJ_OFFSET_SS_READ;
+        ok = ok && adjtimex(&u) >= 0;
+        _exit(ok ? 0 : 1);
+    }
+    int st = 0;
+    if (pid > 0 && waitpid(pid, &st, 0) == pid)
+        user = WIFEXITED(st) && WEXITSTATUS(st) == 0;
+    snprintf(why, sizeof(why), "state=%d raw=%d status=%d tick=%ld tol=%ld defaults=%d badtick=%d user=%d",
+             state, raw, tx.status, tx.tick, tx.tolerance, defaults, badtick, user);
+    report("adjtimex_read_and_permission", state == TIME_ERROR && raw == TIME_ERROR && defaults &&
+                                               badtick && user, why);
+
+    /* adjtime's slew is swapped and read back; ADJ_SETOFFSET steps the
+     * wall clock; ADJ_TAI moves CLOCK_TAI. Each is put back. */
+    memset(&tx, 0, sizeof(tx));
+    tx.modes = ADJ_OFFSET_SINGLESHOT;
+    tx.offset = 250000;
+    int set1 = adjtimex(&tx) >= 0;
+    memset(&tx, 0, sizeof(tx));
+    tx.modes = ADJ_OFFSET_SS_READ;
+    int slew = adjtimex(&tx) >= 0 && tx.offset == 250000;
+    memset(&tx, 0, sizeof(tx));
+    tx.modes = ADJ_OFFSET_SINGLESHOT;
+    slew = slew && set1 && adjtimex(&tx) >= 0 && tx.offset == 250000;
+
+    struct timespec a, b, rt, tai;
+    clock_gettime(CLOCK_REALTIME, &a);
+    memset(&tx, 0, sizeof(tx));
+    tx.modes = ADJ_SETOFFSET | ADJ_NANO;
+    tx.time.tv_sec = 1;
+    int stepped = adjtimex(&tx) >= 0;
+    clock_gettime(CLOCK_REALTIME, &b);
+    long long moved = (ts_ns(b) - ts_ns(a)) / 1000000;
+    memset(&tx, 0, sizeof(tx));
+    tx.modes = ADJ_SETOFFSET | ADJ_NANO;
+    tx.time.tv_sec = -1;
+    stepped = stepped && adjtimex(&tx) >= 0 && moved >= 1000 && moved < 1500;
+    /* The fraction must be within a second. */
+    memset(&tx, 0, sizeof(tx));
+    tx.modes = ADJ_SETOFFSET;
+    tx.time.tv_usec = 1000000;
+    errno = 0;
+    int badfrac = adjtimex(&tx) == -1 && errno == EINVAL;
+
+    memset(&tx, 0, sizeof(tx));
+    tx.modes = ADJ_TAI;
+    tx.constant = 37;
+    int taiset = adjtimex(&tx) >= 0 && tx.tai == 37;
+    clock_gettime(CLOCK_REALTIME, &rt);
+    clock_gettime(CLOCK_TAI, &tai);
+    long long tai_ms = (ts_ns(tai) - ts_ns(rt)) / 1000000;
+    memset(&tx, 0, sizeof(tx));
+    tx.modes = ADJ_TAI;
+    tx.constant = 0;
+    taiset = taiset && adjtimex(&tx) >= 0 && tx.tai == 0 && tai_ms >= 36900 && tai_ms <= 37100;
+    snprintf(why, sizeof(why), "slew=%d stepped=%d moved=%lldms badfrac=%d tai=%d(%lldms)", slew,
+             stepped, moved, badfrac, taiset, tai_ms);
+    report("adjtimex_adjtime_setoffset_tai", slew && stepped && badfrac && taiset, why);
+
+    /* clock_adjtime adjusts CLOCK_REALTIME only. */
+    memset(&tx, 0, sizeof(tx));
+    int real = clock_adjtime(CLOCK_REALTIME, &tx) == TIME_ERROR && tx.tick == 10000;
+    errno = 0;
+    int mono = clock_adjtime(CLOCK_MONOTONIC, &tx) == -1 && errno == EOPNOTSUPP;
+    errno = 0;
+    int cpu = clock_adjtime(CLOCK_PROCESS_CPUTIME_ID, &tx) == -1 && errno == EOPNOTSUPP;
+    errno = 0;
+    int none = clock_adjtime(10, &tx) == -1 && errno == EINVAL;
+    errno = 0;
+    int fault = syscall(SYS_clock_adjtime, CLOCK_REALTIME, (void *)8) == -1 && errno == EFAULT;
+    snprintf(why, sizeof(why), "real=%d mono=%d cpu=%d none=%d fault=%d", real, mono, cpu, none,
+             fault);
+    report("clock_adjtime_clocks", real && mono && cpu && none && fault, why);
+}
+
 static volatile int restart_alrm;
 static void restart_on_alrm(int sig)
 {
@@ -6098,6 +6210,7 @@ int main(int argc, char **argv)
     test_itimers();
     test_posix_timers();
     test_restart_syscall();
+    test_adjtimex();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

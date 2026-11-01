@@ -982,6 +982,8 @@ fn handle_syscall(
         Syscall::Gettimeofday => sys_gettimeofday(arg1, arg2),
         Syscall::Settimeofday => sys_settimeofday(arg1, arg2),
         Syscall::ClockSettime => sys_clock_settime(arg1, arg2),
+        Syscall::Adjtimex => sys_adjtimex(arg1),
+        Syscall::ClockAdjtime => sys_clock_adjtime(arg1, arg2),
         Syscall::Time => sys_time(arg1),
 
         // Identity syscalls

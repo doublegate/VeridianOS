@@ -47,10 +47,17 @@ exposed were fixed (N-182 to N-189); the rest are listed, with their targets, in
 - **Time.** Every Linux clock exists and CLOCK_REALTIME counts from 1970 (N-218, N-219), with
   these differences: a sleep or futex wait until an absolute CLOCK_REALTIME time does not move
   when the clock is set afterwards (timerfds do); sleeping on a process CPU clock is ENOTSUP;
-  there is no leap-second offset, so CLOCK_TAI reads as UTC; BOOTTIME equals MONOTONIC, as there
-  is no suspend; and on AArch64 and RISC-V the wall clock comes from a device-tree PL031 or
-  Goldfish RTC, read once at boot (without one it counts from the epoch). adjtimex and
-  clock_adjtime do not exist.
+  CLOCK_TAI reads UTC plus the offset adjtimex sets, but timers and timerfds on CLOCK_TAI run as
+  on CLOCK_REALTIME, without it; BOOTTIME equals MONOTONIC, as there is no suspend; and on
+  AArch64 and RISC-V the wall clock comes from a device-tree PL031 or Goldfish RTC, read once at
+  boot (without one it counts from the epoch).
+- **adjtimex and clock_adjtime** keep Linux's NTP state and validate, store and report it as
+  Linux does (`timer::ntp`), but only ADJ_SETOFFSET (a step of CLOCK_REALTIME) and ADJ_TAI act on
+  a clock. The frequency, the phase offset the PLL computes, the tick length and an adjtime()
+  slew are kept and read back without changing how fast the clock runs; the phase offset does not
+  decay each second, the clock never leaves TIME_OK on its own, and STA_INS/STA_DEL are stored
+  but no leap second is inserted or deleted (LTP leapsec01 still fails). There is no PPS, and no
+  auxiliary clocks.
 - **Resource usage.** getrusage, times and wait4 report CPU time (split into user and system
   time by tick samples), peak resident set and context switches; page-fault, block I/O, IPC and
   signal counts are zero.

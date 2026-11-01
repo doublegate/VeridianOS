@@ -72,6 +72,15 @@
   EOPNOTSUPP, as Linux's does. LTP creates its 300 MB loop image with fallocate, so the tests
   that ask for a block device now stop at once instead of writing the image until the disk is
   full or the time limit passes.
+- adjtimex and clock_adjtime (they were ENOSYS), from Linux's `kernel/time/ntp.c` and
+  `timekeeping.c` (`timer::ntp`). Everyone may read the NTP state; changing it needs CAP_SYS_TIME,
+  checked in Linux's order, and a refused call leaves the struct unwritten. Status, time constant,
+  error estimates, tick, frequency, the PLL/FLL phase offset and the adjtime() slew are stored and
+  read back with Linux's scaling and clamps, and the call returns TIME_ERROR while
+  unsynchronized. ADJ_SETOFFSET steps CLOCK_REALTIME (timers on it follow; EINVAL before boot)
+  and ADJ_TAI sets the offset CLOCK_TAI now reads; the rest does not steer the clock
+  (KNOWN-LIMITATIONS). clock_adjtime adjusts CLOCK_REALTIME and answers EOPNOTSUPP for every other
+  clock, EINVAL for an ID that names none.
 - restart_syscall (`syscall::restart`; it was ENOSYS). A relative nanosleep or clock_nanosleep,
   or a poll with a timeout, that a stop interrupts now carries on to its first deadline once the
   process continues; it started the whole duration again. As in Linux, the interrupted call

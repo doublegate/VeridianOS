@@ -201,6 +201,8 @@ clock_nanosleep
 nanosleep
 gettimeofday
 settimeofday
+adjtimex
+clock_adjtime
 time
 times
 getitimer

@@ -97,10 +97,11 @@ pub(crate) enum CpuClockKind {
 /// A clock a clock ID names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Clock {
-    /// Wall time (REALTIME, its coarse and alarm forms, TAI: no leap
-    /// second offset is kept, so TAI reads as UTC, as on Linux until one
-    /// is set).
+    /// Wall time (REALTIME, its coarse and alarm forms).
     Realtime,
+    /// TAI: wall time plus the TAI offset adjtimex sets (ADJ_TAI; zero, so
+    /// TAI reads as UTC, until one is set, as on Linux).
+    Tai,
     /// Time since boot (MONOTONIC, RAW, COARSE, BOOTTIME and its alarm
     /// form: there is no suspend to leave out).
     Monotonic,
@@ -131,9 +132,8 @@ impl Clock {
             });
         }
         match id {
-            CLOCK_REALTIME | CLOCK_REALTIME_COARSE | CLOCK_REALTIME_ALARM | CLOCK_TAI => {
-                Ok(Clock::Realtime)
-            }
+            CLOCK_REALTIME | CLOCK_REALTIME_COARSE | CLOCK_REALTIME_ALARM => Ok(Clock::Realtime),
+            CLOCK_TAI => Ok(Clock::Tai),
             CLOCK_MONOTONIC
             | CLOCK_MONOTONIC_RAW
             | CLOCK_MONOTONIC_COARSE
@@ -196,12 +196,18 @@ fn read_cpu_clock(clock: Clock) -> Result<u64, SyscallError> {
 fn clock_now_ns(clock: Clock) -> Result<i64, SyscallError> {
     match clock {
         Clock::Realtime => Ok(crate::timer::realtime::now_ns()),
+        Clock::Tai => Ok(crate::timer::realtime::now_ns().saturating_add(tai_offset_ns())),
         Clock::Monotonic => Ok(crate::timer::monotonic_ns().min(i64::MAX as u64) as i64),
         #[cfg(feature = "alloc")]
         _ => Ok(read_cpu_clock(clock)?.min(i64::MAX as u64) as i64),
         #[cfg(not(feature = "alloc"))]
         _ => Err(SyscallError::InvalidArgument),
     }
+}
+
+/// CLOCK_TAI minus CLOCK_REALTIME, in nanoseconds.
+fn tai_offset_ns() -> i64 {
+    crate::timer::ntp::tai_offset_s() as i64 * 1_000_000_000
 }
 
 /// POSIX timespec structure layout (matches C struct timespec).
@@ -391,6 +397,84 @@ pub fn sys_settimeofday(tv_ptr: usize, tz_ptr: usize) -> SyscallResult {
     Ok(0)
 }
 
+// SAFETY: integers only, the padding named as fields (no implicit
+// padding); every bit pattern is a valid value.
+unsafe impl super::userspace::UserPod for crate::timer::ntp::Timex {}
+
+/// adjtimex on the system clock (Linux's do_adjtimex): validate `tx` as
+/// Linux does (EPERM without CAP_SYS_TIME for anything but reading, EINVAL
+/// for a bad mode), step CLOCK_REALTIME for ADJ_SETOFFSET (EINVAL if it
+/// would read before boot), then apply the modes and fill `tx`. Returns
+/// the clock state.
+fn do_adjtimex(tx: &mut crate::timer::ntp::Timex) -> Result<i32, SyscallError> {
+    use crate::timer::{ntp, realtime};
+    ntp::validate(tx, require_time_privilege().is_ok()).map_err(|refused| match refused {
+        ntp::Refused::Invalid => SyscallError::InvalidArgument,
+        ntp::Refused::NotPermitted => SyscallError::OperationNotPermitted,
+    })?;
+    let (state, moved, tai_moved) = ntp::with(|ntp| {
+        // Linux reports the time read before the step.
+        let now = realtime::now_ns();
+        let moved = if tx.modes & ntp::ADJ_SETOFFSET != 0 {
+            Some(
+                realtime::inject_offset(ntp::setoffset_ns(tx))
+                    .ok_or(SyscallError::InvalidArgument)?,
+            )
+        } else {
+            None
+        };
+        let tai = ntp.tai();
+        let secs = realtime::now_ns().div_euclid(1_000_000_000);
+        let state = ntp.adjtimex(tx, now, secs);
+        Ok::<_, SyscallError>((state, moved, ntp.tai() != tai))
+    })?;
+    if let Some(delta) = moved {
+        clock_was_set(delta);
+    }
+    if tai_moved {
+        crate::timer::realtime::mark_set();
+        clock_was_set(0);
+    }
+    Ok(state)
+}
+
+/// adjtimex (Linux 159): read the kernel's NTP state, or change it with
+/// CAP_SYS_TIME (`timer::ntp`: ADJ_SETOFFSET steps the clock and ADJ_TAI
+/// sets CLOCK_TAI; the rest is stored and read back). The struct is
+/// written back only on success; returns the clock state (TIME_ERROR, 5,
+/// while unsynchronized).
+pub fn sys_adjtimex(tx_ptr: usize) -> SyscallResult {
+    let mut tx: crate::timer::ntp::Timex = super::userspace::read_user(tx_ptr)?;
+    let state = do_adjtimex(&mut tx)?;
+    super::userspace::write_user(tx_ptr, tx)?;
+    Ok(state as usize)
+}
+
+/// What clock_adjtime does with a clock ID (Linux's do_clock_adjtime):
+/// CLOCK_REALTIME is adjtimex; every other clock Linux has cannot be
+/// adjusted (EOPNOTSUPP), CPU clocks included whatever they name; IDs that
+/// name no clock are EINVAL (a posix clock fd, `id & 7 == 3`: there are
+/// none; the auxiliary clocks 16..=23: not configured).
+fn clock_adjtime_target(id: i32) -> Result<(), SyscallError> {
+    match id {
+        CLOCK_REALTIME => Ok(()),
+        id if id < 0 && id & 7 == 3 => Err(SyscallError::InvalidArgument),
+        id if id < 0 => Err(SyscallError::NotSupported),
+        1..=9 | CLOCK_TAI => Err(SyscallError::NotSupported),
+        _ => Err(SyscallError::InvalidArgument),
+    }
+}
+
+/// clock_adjtime (Linux 305): adjtimex on CLOCK_REALTIME
+/// ([`clock_adjtime_target`] for the others).
+pub fn sys_clock_adjtime(clock_id: usize, tx_ptr: usize) -> SyscallResult {
+    let mut tx: crate::timer::ntp::Timex = super::userspace::read_user(tx_ptr)?;
+    clock_adjtime_target(clock_id as i32)?;
+    let state = do_adjtimex(&mut tx)?;
+    super::userspace::write_user(tx_ptr, tx)?;
+    Ok(state as usize)
+}
+
 /// time (Linux 201): the wall time in seconds, also stored at `tloc` if it
 /// is not NULL.
 pub fn sys_time(tloc: usize) -> SyscallResult {
@@ -497,7 +581,7 @@ pub fn sys_clock_nanosleep(
     const TIMER_ABSTIME: usize = 1;
     let clock = Clock::decode(clock_id as i32)?;
     match clock {
-        Clock::Realtime | Clock::Monotonic => {}
+        Clock::Realtime | Clock::Tai | Clock::Monotonic => {}
         Clock::ThreadCpu(..) => return Err(SyscallError::InvalidArgument),
         Clock::ProcessCpu(..) => return Err(SyscallError::NotSupported),
     }
@@ -508,6 +592,7 @@ pub fn sys_clock_nanosleep(
     let at = req.to_ns()?;
     let deadline = match clock {
         Clock::Realtime => crate::timer::realtime::monotonic_at(at),
+        Clock::Tai => crate::timer::realtime::monotonic_at(at.saturating_sub(tai_offset_ns())),
         _ => at as u64,
     };
     #[cfg(feature = "alloc")]
@@ -638,7 +723,9 @@ fn timer_clock(
     }
     let user = |kind| kind == CpuClockKind::Virt;
     Ok(match Clock::decode(id)? {
-        Clock::Realtime => TimerClock::Wall,
+        // A timer on CLOCK_TAI runs as one on CLOCK_REALTIME: it does not
+        // see the TAI offset (docs/KNOWN-LIMITATIONS.md).
+        Clock::Realtime | Clock::Tai => TimerClock::Wall,
         Clock::Monotonic => TimerClock::Mono,
         Clock::ProcessCpu(target, kind) => {
             if target.is_some_and(|target| target != pid) {
@@ -897,7 +984,7 @@ mod tests {
     #[test]
     fn clock_ids_decode_as_linux() {
         assert_eq!(Clock::decode(CLOCK_REALTIME), Ok(Clock::Realtime));
-        assert_eq!(Clock::decode(CLOCK_TAI), Ok(Clock::Realtime));
+        assert_eq!(Clock::decode(CLOCK_TAI), Ok(Clock::Tai));
         assert_eq!(Clock::decode(CLOCK_BOOTTIME_ALARM), Ok(Clock::Monotonic));
         assert_eq!(Clock::decode(CLOCK_MONOTONIC_COARSE), Ok(Clock::Monotonic));
         assert_eq!(
@@ -986,5 +1073,39 @@ mod tests {
         });
         assert_eq!((back[0].tv_sec, back[0].tv_usec), (0, 0));
         assert_eq!((back[1].tv_sec, back[1].tv_usec), (3, 1));
+    }
+
+    /// clock_adjtime adjusts only CLOCK_REALTIME, as Linux: the other
+    /// clocks are EOPNOTSUPP, IDs naming no clock EINVAL.
+    #[test]
+    fn clock_adjtime_targets() {
+        assert_eq!(clock_adjtime_target(CLOCK_REALTIME), Ok(()));
+        for id in [
+            CLOCK_MONOTONIC,
+            CLOCK_BOOTTIME,
+            CLOCK_REALTIME_ALARM,
+            CLOCK_TAI,
+            2,
+            3,
+        ] {
+            assert_eq!(
+                clock_adjtime_target(id),
+                Err(SyscallError::NotSupported),
+                "{id}"
+            );
+        }
+        // A CPU clock, of any process.
+        assert_eq!(
+            clock_adjtime_target(!(12345 << 3) | 2),
+            Err(SyscallError::NotSupported)
+        );
+        // -5 is a posix clock fd (fd 0: `!0 << 3 | 3`).
+        for id in [10, 12, 16, 23, 1000, -5] {
+            assert_eq!(
+                clock_adjtime_target(id),
+                Err(SyscallError::InvalidArgument),
+                "{id}"
+            );
+        }
     }
 }

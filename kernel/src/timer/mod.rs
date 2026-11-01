@@ -32,6 +32,7 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 pub mod ktimerd;
+pub mod ntp;
 pub mod realtime;
 
 use spin::Mutex;
