@@ -105,8 +105,9 @@ Each group lands with its LTP cases. The counts are "missing" entries in the cov
   - Vectored I/O, renameat2 and openat2, close_range and fchmodat2, and execveat (preadv,
     pwritev and their `2` forms, close_range, fchmodat2, openat2 and execveat are
     done).
-  - Handles, xattrs, inotify and fanotify (handles and xattrs are done; handles decode by a walk,
-    KNOWN-LIMITATIONS).
+  - Handles, xattrs, inotify and fanotify (handles, xattrs and inotify are done; handles decode
+    by a walk and inotify follows paths, KNOWN-LIMITATIONS; fanotify stays ENOSYS, as on a
+    kernel built without CONFIG_FANOTIFY).
   - Real statx/statfs/fallocate, and every O_* flag (statx and statfs are done).
 - **memory (23)**
   - msync, mincore, the mlock family, real mremap, pkeys, mseal, membarrier and userfaultfd, plus

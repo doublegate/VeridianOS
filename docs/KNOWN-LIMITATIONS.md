@@ -427,6 +427,15 @@ filesystem.
   descriptor does not count as a writer, so a memfd open for writing can be executed with
   fexecve, which Linux refuses. An exec that grants privilege (file capabilities, set-user-ID or
   set-group-ID) still maps a private copy of the bytes it checked.
+- **inotify follows paths, not dentries.** An event on an open file (a read, a write, its close,
+  fchmod) reaches the watches on the directory of the path it was opened with, looked up again,
+  so after a rename it goes to whatever directory has that path now, or none. A file's
+  IN_DELETE_SELF comes when its last name goes, not at its last close; IN_UNMOUNT is never sent
+  and IN_EXCL_UNLINK suppresses nothing; sendfile, splice, copy_file_range and exec report no
+  access. `max_user_watches` starts at 65536, where Linux scales it with memory, and
+  `/proc/<pid>/fdinfo`, where Linux lists an instance's watches, does not exist.
+- **No fanotify.** fanotify_init and fanotify_mark are ENOSYS, as on a Linux kernel built without
+  CONFIG_FANOTIFY; LTP's fanotify tests report TCONF.
 - **Timestamps have one-second resolution** (`st_*tim.tv_nsec` is 0), and reads move a
   file's access time on ramfs and tmpfs every time (Linux's relatime moves it at most daily).
 

@@ -32,6 +32,7 @@
 #include <string.h>
 #include <sys/file.h>
 #include <termios.h>
+#include <sys/inotify.h>
 #include <sys/ioctl.h>
 #include <sys/fsuid.h>
 #include <sys/mman.h>
@@ -5545,6 +5546,7 @@ static void test_link_errors(void);
 static void test_stat_numbers(void);
 static void test_open_flags(void);
 static void test_text_busy(void);
+static void test_inotify_events(void);
 
 /* Tests `--only NAME` can run alone (for debugging a single test). */
 static const struct {
@@ -5559,6 +5561,7 @@ static const struct {
     {"stat_numbers", test_stat_numbers},
     {"open_flags", test_open_flags},
     {"text_busy", test_text_busy},
+    {"inotify_events", test_inotify_events},
     {"threads", test_threads},
     {"cow_race", test_cow_race},
     {"signals", test_signals},
@@ -7847,6 +7850,141 @@ static void test_text_busy(void)
     report("text_busy", f == 0, why);
 }
 
+/* inotify as Linux 7.3's fs/notify: a watch on a directory reports its
+ * entries' events with their names, one on a file the file's own; a move
+ * is MOVED_FROM and MOVED_TO with one cookie, then MOVE_SELF; removing the
+ * last name is ATTRIB, DELETE_SELF and IGNORED as the watch goes, before
+ * the directory's DELETE; an event
+ * identical to the one last queued merges into it; O_PATH opens report
+ * nothing. Events are read as "wd:mask:name" lines. */
+static int inotify_drain(int fd, char *out, size_t len, unsigned *cookies)
+{
+    char buf[4096] __attribute__((aligned(8)));
+    size_t used = 0;
+    int ncookie = 0;
+    out[0] = 0;
+    for (;;) {
+        ssize_t n = read(fd, buf, sizeof(buf));
+        if (n <= 0) return n < 0 && errno == EAGAIN ? 0 : -1;
+        for (char *p = buf; p < buf + n;) {
+            struct inotify_event *ev = (struct inotify_event *)p;
+            int w = snprintf(out + used, len - used, "%d:%x:%s ", ev->wd, ev->mask,
+                             ev->len ? ev->name : "");
+            if (w < 0 || (size_t)w >= len - used) return -1;
+            used += (size_t)w;
+            if (ev->cookie && ncookie < 4) cookies[ncookie++] = ev->cookie;
+            p += sizeof(*ev) + ev->len;
+        }
+    }
+}
+
+static void test_inotify_events(void)
+{
+    const char *d = "/tmp/musl_inotify";
+    char why[160], got[1024], want[512];
+    unsigned ck[4] = {0, 0, 0, 0};
+    int f = 0;
+
+    unlink("/tmp/musl_inotify/a");
+    unlink("/tmp/musl_inotify/b");
+    rmdir("/tmp/musl_inotify/sub");
+    rmdir(d);
+    if (mkdir(d, 0755) != 0) f |= 1;
+
+    /* Arguments. */
+    int in = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    if (in < 0 || !(fcntl(in, F_GETFL) & O_NONBLOCK) || fcntl(in, F_GETFD) != FD_CLOEXEC)
+        f |= 2;
+    char one;
+    if (!(read(in, &one, 1) == -1 && errno == EAGAIN)) f |= 2;
+    if (!(inotify_init1(0x1234) == -1 && errno == EINVAL)) f |= 2;
+    if (!(inotify_add_watch(in, d, 0) == -1 && errno == EINVAL) ||
+        !(inotify_add_watch(in, d, IN_MASK_ADD | IN_MASK_CREATE | IN_CREATE) == -1 &&
+          errno == EINVAL) ||
+        !(inotify_add_watch(0x7fff, d, IN_CREATE) == -1 && errno == EBADF) ||
+        !(inotify_add_watch(1, d, IN_CREATE) == -1 && errno == EINVAL) ||
+        !(inotify_add_watch(in, "/tmp/musl_inotify/none", IN_CREATE) == -1 && errno == ENOENT) ||
+        !(inotify_rm_watch(in, 12345) == -1 && errno == EINVAL))
+        f |= 2;
+
+    int wd = inotify_add_watch(in, d, IN_ALL_EVENTS);
+    if (wd < 1 || inotify_add_watch(in, d, IN_ALL_EVENTS) != wd ||
+        !(inotify_add_watch(in, d, IN_CREATE | IN_MASK_CREATE) == -1 && errno == EEXIST))
+        f |= 4;
+
+    /* A new file: CREATE, OPEN, one MODIFY for two writes, CLOSE_WRITE. */
+    int w = open("/tmp/musl_inotify/a", O_CREAT | O_WRONLY, 0644);
+    if (w < 0 || write(w, "x", 1) != 1 || write(w, "y", 1) != 1) f |= 8;
+    close(w);
+    int r = open("/tmp/musl_inotify/a", O_RDONLY);
+    if (r < 0 || read(r, &one, 1) != 1) f |= 8;
+    close(r);
+    int p = open("/tmp/musl_inotify/a", O_PATH);
+    close(p);
+    struct pollfd pfd = {in, POLLIN, 0};
+    int avail = 0;
+    if (poll(&pfd, 1, 0) != 1 || !(pfd.revents & POLLIN) || ioctl(in, FIONREAD, &avail) != 0 ||
+        avail != 7 * 32)
+        f |= 16;
+    /* A buffer too small for the next event. */
+    char small[8];
+    if (!(read(in, small, sizeof(small)) == -1 && errno == EINVAL)) f |= 16;
+    if (inotify_drain(in, got, sizeof(got), ck) != 0) f |= 8;
+    snprintf(want, sizeof(want), "%d:100:a %d:20:a %d:2:a %d:8:a %d:20:a %d:1:a %d:10:a ", wd,
+             wd, wd, wd, wd, wd, wd);
+    if (strcmp(got, want) != 0) f |= 8;
+
+    /* A file's own watch: no names. chmod, rename, unlink. */
+    int wf = inotify_add_watch(in, "/tmp/musl_inotify/a", IN_ATTRIB | IN_MOVE_SELF |
+                                                            IN_DELETE_SELF);
+    if (wf < 1 || wf == wd || chmod("/tmp/musl_inotify/a", 0600) != 0 ||
+        rename("/tmp/musl_inotify/a", "/tmp/musl_inotify/b") != 0 ||
+        unlink("/tmp/musl_inotify/b") != 0)
+        f |= 32;
+    if (inotify_drain(in, got, sizeof(got), ck) != 0) f |= 32;
+    snprintf(want, sizeof(want),
+             "%d:4:a %d:4: %d:40:a %d:80:b %d:800: %d:4: %d:400: %d:8000: %d:200:b ", wd, wf,
+             wd, wd, wf, wf, wf, wf, wd);
+    if (strcmp(got, want) != 0 || ck[0] == 0 || ck[0] != ck[1]) f |= 32;
+
+    /* Directories carry IN_ISDIR. */
+    if (mkdir("/tmp/musl_inotify/sub", 0755) != 0 || rmdir("/tmp/musl_inotify/sub") != 0)
+        f |= 64;
+    if (inotify_drain(in, got, sizeof(got), ck) != 0) f |= 64;
+    snprintf(want, sizeof(want), "%d:40000100:sub %d:40000200:sub ", wd, wd);
+    if (strcmp(got, want) != 0) f |= 64;
+
+    /* IN_ONESHOT reports once; inotify_rm_watch queues IN_IGNORED. */
+    int wo = inotify_add_watch(in, d, IN_CREATE | IN_ONESHOT);
+    w = open("/tmp/musl_inotify/a", O_CREAT | O_WRONLY, 0644);
+    close(w);
+    unlink("/tmp/musl_inotify/a");
+    if (wo != wd || inotify_drain(in, got, sizeof(got), ck) != 0) f |= 128;
+    snprintf(want, sizeof(want), "%d:100:a %d:8000: ", wd, wd);
+    if (strcmp(got, want) != 0) f |= 128;
+    int wr = inotify_add_watch(in, d, IN_CREATE);
+    if (wr < 1 || wr == wd || inotify_rm_watch(in, wr) != 0 ||
+        !(inotify_rm_watch(in, wr) == -1 && errno == EINVAL) ||
+        inotify_drain(in, got, sizeof(got), ck) != 0)
+        f |= 256;
+    snprintf(want, sizeof(want), "%d:8000: ", wr);
+    if (strcmp(got, want) != 0) f |= 256;
+
+    /* The limits are where Linux keeps them. */
+    char lim[32] = "";
+    int l = open("/proc/sys/fs/inotify/max_queued_events", O_RDONLY);
+    if (l < 0 || read(l, lim, sizeof(lim) - 1) <= 0 || strcmp(lim, "16384\n") != 0) f |= 512;
+    close(l);
+    l = open("/proc/sys/fs/inotify/max_user_instances", O_RDONLY);
+    if (l < 0) f |= 512;
+    close(l);
+
+    close(in);
+    rmdir(d);
+    snprintf(why, sizeof(why), "f=%#x errno=%d got=%.100s", f, errno, got);
+    report("inotify_events", f == 0, why);
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
@@ -7961,6 +8099,7 @@ int main(int argc, char **argv)
     test_stat_numbers();
     test_open_flags();
     test_text_busy();
+    test_inotify_events();
 #if defined(__x86_64__)
     test_ustat_sysfs();
 #endif

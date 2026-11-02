@@ -28,6 +28,21 @@ struct ProcNode {
     node_type: ProcNodeType,
 }
 
+/// The inotify limit the system file `name` (`sys/fs/inotify/...`) is.
+fn inotify_limit(name: &str) -> Option<crate::fs::inotify::Limit> {
+    crate::fs::inotify::Limit::from_name(name.strip_prefix("sys/fs/inotify/")?)
+}
+
+impl ProcNode {
+    /// The writable sysctl this node is, if it is one.
+    fn sysctl(&self) -> Option<crate::fs::inotify::Limit> {
+        match &self.node_type {
+            ProcNodeType::SystemFile(name) => inotify_limit(name),
+            _ => None,
+        }
+    }
+}
+
 impl ProcNode {
     fn new_root() -> Self {
         Self {
@@ -193,6 +208,9 @@ impl VfsNode for ProcNode {
                         format!("{}\n", crate::process::linux_caps::CAP_LAST_CAP)
                     }
                     "boot_id" => String::from("00000000-0000-0000-0000-000000000001\n"),
+                    name if inotify_limit(name).is_some() => {
+                        format!("{}\n", inotify_limit(name).map_or(0, |l| l.get()))
+                    }
                     "self/maps" => crate::process::current_process()
                         .map(|p| generate_maps(p.pid.0))
                         .unwrap_or_default(),
@@ -274,10 +292,16 @@ impl VfsNode for ProcNode {
         Ok(bytes_to_read)
     }
 
-    fn write(&self, _offset: usize, _data: &[u8]) -> Result<usize, KernelError> {
-        // EACCES, as Linux's read-only /proc files give (EROFS would say
-        // the filesystem is mounted read-only).
-        Err(KernelError::FsError(FsError::PermissionDenied))
+    fn write(&self, _offset: usize, data: &[u8]) -> Result<usize, KernelError> {
+        // The inotify limits are sysctls root may set (the mode decides who
+        // can open them for writing); the rest is EACCES, as Linux's
+        // read-only /proc files give (EROFS would say the filesystem is
+        // mounted read-only).
+        let limit = self
+            .sysctl()
+            .ok_or(KernelError::FsError(FsError::PermissionDenied))?;
+        limit.write(data)?;
+        Ok(data.len())
     }
 
     fn metadata(&self) -> Result<Metadata, KernelError> {
@@ -294,6 +318,7 @@ impl VfsNode for ProcNode {
         let permissions = Permissions::from_mode(match node_type {
             NodeType::Directory => 0o555,
             NodeType::Symlink => 0o777,
+            _ if self.sysctl().is_some() => 0o644,
             _ => 0o444,
         });
         Ok(Metadata {
@@ -397,7 +422,13 @@ impl VfsNode for ProcNode {
             // What lookup finds in /proc/sys and below.
             ProcNodeType::SubDir(dir) if dir.starts_with("sys") => {
                 let listed: &[(&str, NodeType)] = match dir.as_str() {
-                    "sys" => &[("kernel", NodeType::Directory)],
+                    "sys" => &[("fs", NodeType::Directory), ("kernel", NodeType::Directory)],
+                    "sys/fs" => &[("inotify", NodeType::Directory)],
+                    "sys/fs/inotify" => &[
+                        ("max_queued_events", NodeType::File),
+                        ("max_user_instances", NodeType::File),
+                        ("max_user_watches", NodeType::File),
+                    ],
                     "sys/kernel" => &[
                         ("cap_last_cap", NodeType::File),
                         ("core_pattern", NodeType::File),
@@ -482,9 +513,24 @@ impl VfsNode for ProcNode {
                 // Handle /proc/sys/*, /proc/self/*
                 match dir_name.as_str() {
                     "sys" => match name {
-                        "kernel" => Ok(Arc::new(ProcNode {
-                            node_type: ProcNodeType::SubDir(String::from("sys/kernel")),
+                        "fs" | "kernel" => Ok(Arc::new(ProcNode {
+                            node_type: ProcNodeType::SubDir(format!("sys/{}", name)),
                         }) as Arc<dyn VfsNode>),
+                        _ => Err(KernelError::FsError(FsError::NotFound)),
+                    },
+                    "sys/fs" => match name {
+                        "inotify" => Ok(Arc::new(ProcNode {
+                            node_type: ProcNodeType::SubDir(String::from("sys/fs/inotify")),
+                        }) as Arc<dyn VfsNode>),
+                        _ => Err(KernelError::FsError(FsError::NotFound)),
+                    },
+                    "sys/fs/inotify" => match name {
+                        "max_queued_events" | "max_user_instances" | "max_user_watches" => {
+                            Ok(Arc::new(ProcNode::new_system_file(format!(
+                                "sys/fs/inotify/{}",
+                                name
+                            ))) as Arc<dyn VfsNode>)
+                        }
                         _ => Err(KernelError::FsError(FsError::NotFound)),
                     },
                     "sys/kernel" => match name {
@@ -556,8 +602,13 @@ impl VfsNode for ProcNode {
         Err(KernelError::FsError(FsError::PermissionDenied))
     }
 
+    /// A sysctl has no size to change: opening one with O_TRUNC (fopen
+    /// "w") succeeds, as on Linux.
     fn truncate(&self, _size: usize) -> Result<(), KernelError> {
-        Err(KernelError::FsError(FsError::PermissionDenied))
+        match self.sysctl() {
+            Some(_) => Ok(()),
+            None => Err(KernelError::FsError(FsError::PermissionDenied)),
+        }
     }
 }
 
@@ -1034,7 +1085,16 @@ mod tests {
         };
         assert!(names(&ProcNode::new_root()).iter().any(|n| n == "sys"));
         for (dir, want) in [
-            ("sys", &["kernel"][..]),
+            ("sys", &["fs", "kernel"][..]),
+            ("sys/fs", &["inotify"][..]),
+            (
+                "sys/fs/inotify",
+                &[
+                    "max_queued_events",
+                    "max_user_instances",
+                    "max_user_watches",
+                ][..],
+            ),
             (
                 "sys/kernel",
                 &[
@@ -1078,6 +1138,46 @@ mod tests {
         let mut buf = [0u8; 16];
         let n = file.read(0, &mut buf).unwrap();
         assert_eq!(&buf[..n], b"4194304\n");
+    }
+
+    /// The inotify limits are sysctls root may write, mode 0644: a decimal
+    /// integer from 0 to INT_MAX, anything else EINVAL; O_TRUNC is fine.
+    #[test]
+    fn inotify_limits_can_be_written() {
+        let file = ProcNode::new_system_file(String::from("sys/fs/inotify/max_queued_events"));
+        assert_eq!(
+            file.metadata().unwrap().permissions,
+            Permissions::from_mode(0o644)
+        );
+        assert!(file.truncate(0).is_ok());
+        // The value it has, so no other test sees a change.
+        assert_eq!(file.write(0, b"16384\n"), Ok(6));
+        for bad in [&b"-1"[..], b"x", b"2147483648", b""] {
+            assert!(file.write(0, bad).is_err(), "{:?}", bad);
+        }
+        let mut buf = [0u8; 16];
+        let n = file.read(0, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"16384\n");
+        // Other files stay read-only.
+        let uptime = ProcNode::new_system_file(String::from("uptime"));
+        assert!(uptime.write(0, b"1").is_err());
+        assert!(uptime.truncate(0).is_err());
+    }
+
+    /// /proc/sys/fs/inotify has the inotify limits, Linux's defaults.
+    #[test]
+    fn inotify_limits_are_linux_defaults() {
+        let dir = ProcNode {
+            node_type: ProcNodeType::SubDir(String::from("sys/fs/inotify")),
+        };
+        for (name, want) in [
+            ("max_queued_events", &b"16384\n"[..]),
+            ("max_user_instances", &b"128\n"[..]),
+        ] {
+            let mut buf = [0u8; 16];
+            let n = dir.lookup(name).unwrap().read(0, &mut buf).unwrap();
+            assert_eq!(&buf[..n], want, "{}", name);
+        }
     }
 
     /// The RISC-V `mmu` field names the mode, as Linux prints it.

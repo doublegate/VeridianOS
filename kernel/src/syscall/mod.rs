@@ -371,6 +371,9 @@ mod file_calls;
 mod splice;
 // name_to_handle_at and open_by_handle_at
 mod fhandle;
+// inotify_init, inotify_init1, inotify_add_watch and inotify_rm_watch
+#[cfg(feature = "alloc")]
+mod notify;
 pub(crate) use filesystem::rename_paths;
 pub use futex::sys_futex_wake;
 
@@ -1486,9 +1489,14 @@ fn handle_syscall(
         Syscall::Sysfs => file_calls::sys_sysfs(arg1, arg2, arg3),
         #[cfg(feature = "alloc")]
         Syscall::Prlimit64 => limits::sys_prlimit64(arg1, arg2, arg3, arg4),
-        Syscall::InotifyInit1 => Err(SyscallError::NotImplemented),
-        Syscall::InotifyAddWatch => Err(SyscallError::NotImplemented),
-        Syscall::InotifyRmWatch => Err(SyscallError::NotImplemented),
+        #[cfg(feature = "alloc")]
+        Syscall::InotifyInit => notify::sys_inotify_init1(0),
+        #[cfg(feature = "alloc")]
+        Syscall::InotifyInit1 => notify::sys_inotify_init1(arg1),
+        #[cfg(feature = "alloc")]
+        Syscall::InotifyAddWatch => notify::sys_inotify_add_watch(arg1, arg2, arg3),
+        #[cfg(feature = "alloc")]
+        Syscall::InotifyRmWatch => notify::sys_inotify_rm_watch(arg1, arg2),
         #[cfg(feature = "alloc")]
         Syscall::Madvise => memory::sys_madvise(arg1, arg2, arg3),
 
@@ -2037,7 +2045,9 @@ fn sys_fchmodat(dirfd: usize, path_ptr: usize, mode: usize) -> SyscallResult {
     let node = vfs
         .resolve_path(&abs_path)
         .map_err(filesystem::map_resolve_err)?;
-    filesystem::chmod_node(&node, mode)
+    filesystem::chmod_node(&node, mode)?;
+    crate::fs::inotify::on_path(&abs_path, &node, crate::fs::inotify::IN_ATTRIB);
+    Ok(0)
 }
 
 /// fchownat syscall -- chown relative to a directory fd, as Linux's
@@ -2058,10 +2068,12 @@ fn sys_fchownat(
     gid: usize,
     flags: usize,
 ) -> SyscallResult {
-    let node = xattr::path_target(dirfd, path_ptr, flags as u32 as usize)?;
+    let (node, at) = xattr::path_target_located(dirfd, path_ptr, flags as u32 as usize)?;
     // Same rules as chown (root only); this used to report success and
     // change nothing.
-    filesystem::chown_node(&node, uid, gid)
+    filesystem::chown_node(&node, uid, gid)?;
+    crate::fs::inotify::on_target(at.as_deref(), &node, crate::fs::inotify::IN_ATTRIB);
+    Ok(0)
 }
 
 /// linkat syscall -- create a hard link relative to directory fds

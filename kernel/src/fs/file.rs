@@ -228,6 +228,15 @@ pub struct File {
 
 impl Drop for File {
     fn drop(&mut self) {
+        // The last close (`__fput`): IN_CLOSE_WRITE or IN_CLOSE_NOWRITE.
+        crate::fs::inotify::on_file(
+            self,
+            if self.flags.write {
+                crate::fs::inotify::IN_CLOSE_WRITE
+            } else {
+                crate::fs::inotify::IN_CLOSE_NOWRITE
+            },
+        );
         let owner = *self.flock_owner.get_mut();
         if owner != 0 {
             let _ = crate::fs::flock::flock(self.flock_key(), owner, crate::fs::flock::LOCK_UN);

@@ -65,8 +65,10 @@ pub fn sys_fchmodat2(dirfd: usize, path_ptr: usize, mode: usize, flags: usize) -
     if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    let node = xattr::path_target(dirfd, path_ptr, flags)?;
-    filesystem::chmod_node(&node, mode)
+    let (node, at) = xattr::path_target_located(dirfd, path_ptr, flags)?;
+    filesystem::chmod_node(&node, mode)?;
+    crate::fs::inotify::on_target(at.as_deref(), &node, crate::fs::inotify::IN_ATTRIB);
+    Ok(0)
 }
 
 // ---------------------------------------------------------------------------

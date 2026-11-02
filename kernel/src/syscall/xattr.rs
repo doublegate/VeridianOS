@@ -41,7 +41,7 @@ pub(super) fn target(
     at_flags: usize,
     cwd_ok: bool,
 ) -> Result<Arc<dyn VfsNode>, SyscallError> {
-    target_in(dfd, path_ptr, at_flags, cwd_ok, false)
+    target_in(dfd, path_ptr, at_flags, cwd_ok, false).map(|(node, _)| node)
 }
 
 /// [`target`] for the calls that act on what an empty path's descriptor
@@ -52,6 +52,16 @@ pub(super) fn path_target(
     path_ptr: usize,
     at_flags: usize,
 ) -> Result<Arc<dyn VfsNode>, SyscallError> {
+    path_target_located(dfd, path_ptr, at_flags).map(|(node, _)| node)
+}
+
+/// [`path_target`] with the node's absolute path where it has one (a
+/// descriptor's, as it was opened): where inotify reports the change.
+pub(super) fn path_target_located(
+    dfd: usize,
+    path_ptr: usize,
+    at_flags: usize,
+) -> Result<(Arc<dyn VfsNode>, Option<String>), SyscallError> {
     target_in(dfd, path_ptr, at_flags, true, true)
 }
 
@@ -61,7 +71,7 @@ fn target_in(
     at_flags: usize,
     cwd_ok: bool,
     path_fds: bool,
-) -> Result<Arc<dyn VfsNode>, SyscallError> {
+) -> Result<(Arc<dyn VfsNode>, Option<String>), SyscallError> {
     if at_flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
         return Err(SyscallError::InvalidArgument);
     }
@@ -77,7 +87,8 @@ fn target_in(
     let vfs = vfs()?;
     if path.is_empty() {
         if cwd_ok && dfd as u32 as i32 as usize == AT_FDCWD {
-            return vfs.resolve_path(&vfs.get_cwd()).map_err(map_resolve_err);
+            let node = vfs.resolve_path(&vfs.get_cwd()).map_err(map_resolve_err)?;
+            return Ok((node, None));
         }
         let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
         let table = proc.file_table.lock();
@@ -86,15 +97,24 @@ fn target_in(
         } else {
             table.get(dfd as u32 as usize)
         };
-        return Ok(file.ok_or(SyscallError::BadFileDescriptor)?.node.clone());
+        let file = file.ok_or(SyscallError::BadFileDescriptor)?;
+        // The recorded path is in the whole tree; the caller's is inside
+        // its root.
+        let root = vfs.get_root();
+        let at = file
+            .path
+            .as_deref()
+            .map(|path| crate::fs::root_relative(path, &root));
+        return Ok((file.node.clone(), at));
     }
     let abs = resolve_at_path(dfd, &path)?;
-    if at_flags & AT_SYMLINK_NOFOLLOW != 0 {
+    let node = if at_flags & AT_SYMLINK_NOFOLLOW != 0 {
         vfs.resolve_path_no_follow(&abs)
     } else {
         vfs.resolve_path(&abs)
     }
-    .map_err(map_resolve_err)
+    .map_err(map_resolve_err)?;
+    Ok((node, Some(abs)))
 }
 
 /// An attribute name from user memory (Linux's import_xattr_name): empty,
@@ -135,13 +155,14 @@ fn set(
     }
     let mut bytes = alloc::vec![0u8; size];
     userspace::read_user_bytes(value, &mut bytes)?;
-    let node = target(dfd, path, at_flags, true)?;
+    let (node, at) = target_in(dfd, path, at_flags, true, false)?;
     // A file capability must be a v2 or v3 value (cap_convert_nscap,
     // before its CAP_SETFCAP check).
     xattr::check_value(&name, &bytes).map_err(|_| SyscallError::InvalidArgument)?;
     check(&node, &name, true)?;
     node.update_xattrs(&mut |a| a.set(&name, &bytes, flags))
         .map_err(super::map_kernel_error)?;
+    crate::fs::inotify::on_target(at.as_deref(), &node, crate::fs::inotify::IN_ATTRIB);
     Ok(0)
 }
 
@@ -202,10 +223,11 @@ fn list(dfd: usize, path: usize, at_flags: usize, out: usize, size: usize) -> Sy
 
 fn remove(dfd: usize, path: usize, at_flags: usize, name: usize) -> SyscallResult {
     let name = read_name(name)?;
-    let node = target(dfd, path, at_flags, false)?;
+    let (node, at) = target_in(dfd, path, at_flags, false, false)?;
     check(&node, &name, true)?;
     node.update_xattrs(&mut |a| a.remove(&name))
         .map_err(super::map_kernel_error)?;
+    crate::fs::inotify::on_target(at.as_deref(), &node, crate::fs::inotify::IN_ATTRIB);
     Ok(0)
 }
 

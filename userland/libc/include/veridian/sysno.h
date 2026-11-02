@@ -350,6 +350,7 @@
 #define SYS_signalfd                     282
 #define SYS_signalfd4                    289
 /* inotify */
+#define SYS_inotify_init                 253
 #define SYS_inotify_init1                294
 #define SYS_inotify_add_watch            254
 #define SYS_inotify_rm_watch             255

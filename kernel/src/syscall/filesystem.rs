@@ -364,7 +364,9 @@ pub(super) fn open_node(
     } else {
         None
     };
-    if open_flags.truncate && open_flags.write && !created && node_type == NodeType::File {
+    let truncated =
+        open_flags.truncate && open_flags.write && !created && node_type == NodeType::File;
+    if truncated {
         open_truncate(&*node)?;
     }
     // A special file made by mknod opens what it names; a socket file
@@ -386,6 +388,11 @@ pub(super) fn open_node(
     file.write_access = write_access;
     file.status
         .fetch_or(open_status(flags), core::sync::atomic::Ordering::AcqRel);
+    // IN_OPEN, then O_TRUNC's IN_MODIFY, as Linux's do_open.
+    crate::fs::inotify::on_file(&file, crate::fs::inotify::IN_OPEN);
+    if truncated {
+        crate::fs::inotify::on_file(&file, crate::fs::inotify::IN_MODIFY);
+    }
     let file_table = process.file_table.lock();
     file_table
         .open_with_flags(alloc::sync::Arc::new(file), cloexec)
@@ -825,7 +832,7 @@ fn file_read_to_user(file: &crate::fs::file::File, dst: UserSegs<'_>) -> Syscall
     };
     // A regular file is read as one step (see `File::io_lock`).
     let _io = regular.then(|| file.io_lock.lock());
-    super::userspace::produce_to_segs(
+    let read = super::userspace::produce_to_segs(
         dst,
         regular,
         |kbuf| match file.read(kbuf) {
@@ -840,7 +847,11 @@ fn file_read_to_user(file: &crate::fs::file::File, dst: UserSegs<'_>) -> Syscall
                 let _ = file.seek(crate::fs::file::SeekFrom::Current(-(unread as isize)));
             }
         },
-    )
+    )?;
+    if read > 0 {
+        crate::fs::inotify::on_file(file, crate::fs::inotify::IN_ACCESS);
+    }
+    Ok(read)
 }
 
 /// Write up to `src.len()` bytes of user memory `src` to an open file, in
@@ -858,14 +869,19 @@ fn file_write_from_user(file: &crate::fs::file::File, src: UserSegs<'_>) -> Sysc
     // A regular file is written as one step (see `File::io_lock`).
     let _io = (file.node.node_type() == crate::fs::NodeType::File).then(|| file.io_lock.lock());
     let mut first = true;
-    super::userspace::consume_from_segs(src.truncate(count), true, |kbuf| {
-        match file.write_part(kbuf, core::mem::take(&mut first)) {
-            Ok(n) => Ok(n),
-            Err(crate::error::KernelError::BrokenPipe) => Err(SyscallError::BrokenPipe),
-            Err(crate::error::KernelError::WouldBlock) => Err(SyscallError::WouldBlock),
-            Err(e) => Err(super::map_kernel_error(e)),
-        }
-    })
+    let written =
+        super::userspace::consume_from_segs(src.truncate(count), true, |kbuf| {
+            match file.write_part(kbuf, core::mem::take(&mut first)) {
+                Ok(n) => Ok(n),
+                Err(crate::error::KernelError::BrokenPipe) => Err(SyscallError::BrokenPipe),
+                Err(crate::error::KernelError::WouldBlock) => Err(SyscallError::WouldBlock),
+                Err(e) => Err(super::map_kernel_error(e)),
+            }
+        })?;
+    if written > 0 {
+        crate::fs::inotify::on_file(file, crate::fs::inotify::IN_MODIFY);
+    }
+    Ok(written)
 }
 
 /// Seek within a file
@@ -964,6 +980,7 @@ pub fn sys_ftruncate(fd: usize, length: usize) -> SyscallResult {
     }
     crate::fs::check_fsize_truncate(&*file.node, length).map_err(super::map_kernel_error)?;
     crate::fs::truncate_removing_privs(&*file.node, length).map_err(super::map_kernel_error)?;
+    crate::fs::inotify::on_file(&file, crate::fs::inotify::IN_MODIFY);
     Ok(0)
 }
 
@@ -1762,23 +1779,25 @@ fn do_utimes(
     if flags & !allowed != 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    let node = if path_ptr == 0 {
+    // The file, by descriptor or by path (which inotify reports to).
+    let (node, file, path) = if path_ptr == 0 {
         let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
-        let table = proc.file_table.lock();
-        table
+        let file = proc
+            .file_table
+            .lock()
             .get(dirfd as u32 as usize)
-            .ok_or(SyscallError::BadFileDescriptor)?
-            .node
-            .clone()
+            .ok_or(SyscallError::BadFileDescriptor)?;
+        (file.node.clone(), Some(file), None)
     } else {
         let path = resolve_at_path(dirfd, &read_user_path(path_ptr)?)?;
         let vfs = vfs()?;
-        if flags & AT_SYMLINK_NOFOLLOW != 0 {
+        let node = if flags & AT_SYMLINK_NOFOLLOW != 0 {
             vfs.resolve_path_no_follow(&path)
         } else {
             vfs.resolve_path(&path)
         }
-        .map_err(map_resolve_err)?
+        .map_err(map_resolve_err)?;
+        (node, None, Some(path))
     };
     let now = crate::arch::timer::get_timestamp_secs();
     let (atime, mtime) = match specs {
@@ -1801,6 +1820,18 @@ fn do_utimes(
     }
     node.set_times(atime, mtime)
         .map_err(super::map_kernel_error)?;
+    // Both times are a utime (IN_ATTRIB), one alone an access or a
+    // modification, as Linux's fsnotify_change.
+    use crate::fs::inotify::{self, IN_ACCESS, IN_ATTRIB, IN_MODIFY};
+    let mask = match (atime, mtime) {
+        (Some(_), Some(_)) => IN_ATTRIB,
+        (Some(_), None) => IN_ACCESS,
+        _ => IN_MODIFY,
+    };
+    match file {
+        Some(file) => inotify::on_file(&file, mask),
+        None => inotify::on_target(path.as_deref(), &node, mask),
+    }
     Ok(0)
 }
 
@@ -2484,6 +2515,10 @@ fn rename_entry(old: &str, new: &str) -> SyscallResult {
         return Err(SyscallError::CrossDevice);
     }
     let src = old_parent.lookup(&old_name).map_err(map_resolve_err)?;
+    // What `new` names now, which the rename replaces (for inotify).
+    let replaced = crate::fs::inotify::active()
+        .then(|| new_parent.lookup(&new_name).ok())
+        .flatten();
 
     if src.node_type() == crate::fs::NodeType::Directory {
         // A directory cannot move into its own subtree (POSIX: EINVAL).
@@ -2513,6 +2548,22 @@ fn rename_entry(old: &str, new: &str) -> SyscallResult {
     old_parent
         .rename(&old_name, &new_parent, &new_name)
         .map_err(super::map_kernel_error)?;
+    // Two names of one file: Linux's vfs_rename does nothing, and reports
+    // nothing.
+    use crate::fs::write_access::node_key;
+    if replaced
+        .as_ref()
+        .is_none_or(|node| node_key(node) != node_key(&src))
+    {
+        crate::fs::inotify::moved(
+            &old_parent,
+            &old_name,
+            &new_parent,
+            &new_name,
+            &src,
+            replaced.as_ref(),
+        );
+    }
     Ok(0)
 }
 
@@ -3562,11 +3613,12 @@ pub(crate) fn link_at(
     {
         return Err(SyscallError::ResourceNotFound);
     }
-    parent.link(&name, target).map_err(|e| match e {
+    parent.link(&name, target.clone()).map_err(|e| match e {
         crate::error::KernelError::FsError(crate::error::FsError::IsADirectory)
         | crate::error::KernelError::NotImplemented { .. } => SyscallError::OperationNotPermitted,
         e => super::map_kernel_error(e),
     })?;
+    crate::fs::inotify::linked(&parent, &name, &target);
     Ok(0)
 }
 
@@ -3586,6 +3638,7 @@ pub(crate) fn symlink_at(target_ptr: usize, newdirfd: usize, link_ptr: usize) ->
         .symlink(&name, &target)
         .map_err(super::map_kernel_error)?;
     own_new_node(&node);
+    crate::fs::inotify::created(&parent, &name, &node);
     Ok(0)
 }
 
@@ -3625,10 +3678,11 @@ fn new_entry(
 
 /// Change file permissions by path (syscall 185).
 pub fn sys_chmod(path_ptr: usize, mode: usize) -> SyscallResult {
-    let path = read_user_path(path_ptr)?;
-
+    let path = resolve_at_path(AT_FDCWD, &read_user_path(path_ptr)?)?;
     let node = vfs()?.resolve_path(&path).map_err(map_resolve_err)?;
-    chmod_node(&node, mode)
+    chmod_node(&node, mode)?;
+    crate::fs::inotify::on_path(&path, &node, crate::fs::inotify::IN_ATTRIB);
+    Ok(0)
 }
 
 /// Change file permissions by fd (syscall 186).
@@ -3640,7 +3694,9 @@ pub fn sys_fchmod(fd: usize, mode: usize) -> SyscallResult {
         .lock()
         .get(fd)
         .ok_or(SyscallError::BadFileDescriptor)?;
-    chmod_node(&file.node, mode)
+    chmod_node(&file.node, mode)?;
+    crate::fs::inotify::on_file(&file, crate::fs::inotify::IN_ATTRIB);
+    Ok(0)
 }
 
 /// Set file creation mask (syscall 187).
@@ -3668,7 +3724,7 @@ pub fn sys_umask(mask: usize) -> SyscallResult {
 /// it; a negative length is EINVAL before the lookup (N-191).
 pub fn sys_truncate(path_ptr: usize, length: usize) -> SyscallResult {
     let length = file_offset(length)?;
-    let path = read_user_path(path_ptr)?;
+    let path = resolve_at_path(AT_FDCWD, &read_user_path(path_ptr)?)?;
     let node = vfs()?.resolve_path(&path).map_err(map_resolve_err)?;
     match node.node_type() {
         crate::fs::NodeType::File => {}
@@ -3683,6 +3739,7 @@ pub fn sys_truncate(path_ptr: usize, length: usize) -> SyscallResult {
         crate::fs::write_access::WriteAccess::get(&node).map_err(super::map_kernel_error)?;
     crate::fs::check_fsize_truncate(&*node, length).map_err(super::map_kernel_error)?;
     crate::fs::truncate_removing_privs(&*node, length).map_err(super::map_kernel_error)?;
+    crate::fs::inotify::on_path(&path, &node, crate::fs::inotify::IN_MODIFY);
     Ok(0)
 }
 
@@ -4221,9 +4278,15 @@ pub fn sys_unlinkat(dirfd: usize, path_ptr: usize, flags: usize) -> SyscallResul
     }
     let (dir, name) = parent_dir(&abs_path)?;
     check_may_remove(&*dir, &name)?;
+    let victim = crate::fs::inotify::active()
+        .then(|| dir.lookup(&name).ok())
+        .flatten();
     // The type checked above is checked again where the removal happens.
     dir.unlink_kind(&name, remove_dir)
         .map_err(super::map_kernel_error)?;
+    if let Some(victim) = victim {
+        crate::fs::inotify::removed(&dir, &name, &victim);
+    }
     Ok(0)
 }
 
@@ -4326,7 +4389,7 @@ pub(super) fn pread_segs(
     // Read at `offset` through the VfsNode, bypassing the File position,
     // a chunk at a time through a kernel buffer (N-43).
     let mut at = offset;
-    super::userspace::produce_to_segs(
+    let read = super::userspace::produce_to_segs(
         dst,
         true,
         |kbuf| {
@@ -4335,7 +4398,11 @@ pub(super) fn pread_segs(
             Ok(n)
         },
         |_| {},
-    ) // no file position to give bytes back to
+    )?; // no file position to give bytes back to
+    if read > 0 {
+        crate::fs::inotify::on_file(file, crate::fs::inotify::IN_ACCESS);
+    }
+    Ok(read)
 }
 
 /// Write to a file descriptor at a given offset without changing position
@@ -4399,6 +4466,9 @@ pub(super) fn pwrite_segs(
         at += n;
         Ok(n)
     })?;
+    if written > 0 {
+        crate::fs::inotify::on_file(file, crate::fs::inotify::IN_MODIFY);
+    }
     Ok(written)
 }
 
@@ -4496,9 +4566,11 @@ pub(crate) fn chown_node(
 
 /// Change ownership of a file by path (syscall 197).
 pub fn sys_chown(path_ptr: usize, uid: usize, gid: usize) -> SyscallResult {
-    let path = read_user_path(path_ptr)?;
+    let path = resolve_at_path(AT_FDCWD, &read_user_path(path_ptr)?)?;
     let node = vfs()?.resolve_path(&path).map_err(map_resolve_err)?;
-    chown_node(&node, uid, gid)
+    chown_node(&node, uid, gid)?;
+    crate::fs::inotify::on_path(&path, &node, crate::fs::inotify::IN_ATTRIB);
+    Ok(0)
 }
 
 /// Change ownership of a file by file descriptor (syscall 198).
@@ -4509,7 +4581,9 @@ pub fn sys_fchown(fd: usize, uid: usize, gid: usize) -> SyscallResult {
         .lock()
         .get(fd)
         .ok_or(SyscallError::BadFileDescriptor)?;
-    chown_node(&file.node, uid, gid)
+    chown_node(&file.node, uid, gid)?;
+    crate::fs::inotify::on_file(&file, crate::fs::inotify::IN_ATTRIB);
+    Ok(0)
 }
 
 /// mknod(2): mknodat relative to the working directory.

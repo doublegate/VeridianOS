@@ -318,6 +318,7 @@ pub mod sysno {
     pub const SYS_timerfd_gettime: usize = 287;
     pub const SYS_signalfd: usize = 282;
     pub const SYS_signalfd4: usize = 289;
+    pub const SYS_inotify_init: usize = 253;
     pub const SYS_inotify_init1: usize = 294;
     pub const SYS_inotify_add_watch: usize = 254;
     pub const SYS_inotify_rm_watch: usize = 255;

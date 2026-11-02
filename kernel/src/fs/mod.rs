@@ -2083,7 +2083,9 @@ impl Vfs {
         )?;
         check(&*parent)?;
 
-        make(&*parent, name)
+        let node = make(&*parent, name)?;
+        inotify::created(&parent, name, &node);
+        Ok(node)
     }
 
     /// Remove a file or directory

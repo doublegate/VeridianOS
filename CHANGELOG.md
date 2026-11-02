@@ -187,6 +187,18 @@
   executed. Exec denies writes to the program, a `#!` script and the dynamic loader while it
   runs, the process keeps the program's denial until it exits or execs again, and fork copies
   it. Reading, O_PATH and writing again once no process runs the file are unaffected.
+- inotify, as Linux 7.3's `fs/notify/inotify` (the module was a path-based model with no callers,
+  and the system calls were ENOSYS): inotify_init1 (and x86_64's inotify_init), inotify_add_watch
+  and inotify_rm_watch with Linux's argument checks and errors, reads of whole `struct
+  inotify_event` records (EINVAL when the first does not fit), poll and FIONREAD. Watches are on
+  inodes; a directory's also reports its entries' events with their names. Creation, link,
+  unlink and rmdir, rename (MOVED_FROM and MOVED_TO with one cookie, MOVE_SELF), open, read,
+  write, truncate, close, chmod, chown, utimes and the xattr calls report what Linux's fsnotify
+  hooks report, in its order; identical consecutive events merge, a full queue ends in one
+  IN_Q_OVERFLOW, IN_ONESHOT, IN_MASK_ADD, IN_MASK_CREATE, IN_ONLYDIR and IN_DONT_FOLLOW work,
+  and ending a watch queues IN_IGNORED. `/proc/sys/fs/inotify` has the limits, which root may
+  change (16384 queued events, 128 instances and 65536 watches per user to begin with). fanotify
+  stays ENOSYS, as on a kernel built without CONFIG_FANOTIFY.
 - execve of a relative name runs it from the working directory, as on Linux; it searched PATH,
   which is libc's job (execvp). Exec errors keep their errno (EACCES, ENOTDIR, ELOOP) instead of
   all being ENOENT, a script's interpreter is opened the same way, and an empty argv gets "" as
