@@ -159,6 +159,13 @@
   is 0 with any buffer; fchown of a descriptor that is not open is EBADF (it was EINVAL). Path
   lookups report a full filesystem as ENOSPC (it was ENOMEM) and other failures as themselves
   instead of ENOENT (N-206).
+- stat reports real link counts and devices (N-205). `st_nlink` counts a file's names (it was
+  always 1) and is 2 plus the subdirectories for a directory, 0 once a file or directory is
+  removed; linkat with AT_EMPTY_PATH refuses a file with no names left (ENOENT). `st_dev` is an
+  anonymous device per mount, so the root, /proc, /dev and /dev/shm differ (every file was device
+  1), and ustat finds a filesystem by it. On ramfs and tmpfs, chmod, chown and setting the times
+  move the status-change time instead of the modification time, writes and truncation move both,
+  and adding or removing a name moves the directory's times and the file's ctime, as on Linux.
 - execve of a relative name runs it from the working directory, as on Linux; it searched PATH,
   which is libc's job (execvp). Exec errors keep their errno (EACCES, ENOTDIR, ELOOP) instead of
   all being ENOENT, a script's interpreter is opened the same way, and an empty argv gets "" as

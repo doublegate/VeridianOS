@@ -387,6 +387,8 @@ pub struct Metadata {
     pub permissions: Permissions,
     pub uid: u32,
     pub gid: u32,
+    /// The status-change time (`st_ctime`): every filesystem keeps its
+    /// ctime here; none records a birth time.
     pub created: u64,
     pub modified: u64,
     pub accessed: u64,
@@ -818,6 +820,39 @@ pub trait VfsNode: Send + Sync {
     fn fallocate(&self, _request: falloc::Request) -> Result<(), KernelError> {
         Err(KernelError::FsError(crate::error::FsError::NotSupported))
     }
+
+    /// How many names the node has (`st_nlink`, Linux's i_nlink): for a
+    /// directory 2 and one per subdirectory, 0 once it is removed. The
+    /// default, for a node outside a tree that counts them, is 1, or 2 for
+    /// a directory.
+    fn link_count(&self) -> u32 {
+        if self.node_type() == NodeType::Directory {
+            2
+        } else {
+            1
+        }
+    }
+}
+
+/// Record a change of the node with metadata `meta` now: the status-change
+/// time always, and with `contents` the modification time too (a write, a
+/// truncate, an entry added to or removed from a directory), as Linux's
+/// inode_set_ctime_current and inode_set_mtime_to_ts.
+pub(crate) fn note_change(meta: &mut Metadata, contents: bool) {
+    let now = crate::arch::timer::get_timestamp_secs();
+    if contents {
+        meta.modified = now;
+    }
+    meta.created = now;
+}
+
+/// The device number stat reports for files on the mount with `ids`
+/// (`st_dev`): an anonymous device, major 0, numbered by the mount, as
+/// Linux numbers the superblocks of ramfs, tmpfs and procfs (each mount
+/// here is its own filesystem instance). The root is 0:1, and files
+/// outside the tree (pipes, sockets) are 0:0.
+pub const fn mount_dev(ids: MountIds) -> u32 {
+    make_dev(0, ids.id)
 }
 
 /// The major number of a device number in Linux's 32-bit encoding (as
@@ -1735,6 +1770,17 @@ impl Vfs {
         let mount = table.mount_of(&path);
         let ids = table.ids.get(mount).copied().unwrap_or(PSEUDO_MOUNT);
         (ids, path == mount)
+    }
+
+    /// The filesystem whose files stat reports with device number `dev`
+    /// ([`mount_dev`]), as ustat looks one up.
+    pub fn filesystem_with_dev(&self, dev: u32) -> Option<Arc<dyn Filesystem>> {
+        let table = self.snapshot();
+        let (mount, _) = table.ids.iter().find(|(_, ids)| mount_dev(**ids) == dev)?;
+        match mount.as_str() {
+            "/" => table.root_fs.clone(),
+            m => table.mounts.get(m).cloned(),
+        }
     }
 
     /// The filesystem serving `path`, a canonical path in the whole tree,
@@ -3094,6 +3140,37 @@ pub(crate) mod tests {
             0o2744
         );
         assert_eq!(Permissions::from_mode(0o1777).after_chown(), None);
+    }
+
+    /// N-205: st_nlink counts names, as Linux's i_nlink: one per hard link
+    /// of a file, 2 plus the subdirectories of a directory, 0 once removed.
+    fn check_link_counts(fs: &dyn Filesystem) {
+        let root = fs.root();
+        let base = root.link_count();
+        let f = root.create("f", Permissions::default()).unwrap();
+        assert_eq!(f.link_count(), 1);
+        root.link("g", f.clone()).unwrap();
+        assert_eq!(f.link_count(), 2);
+        let d = root.mkdir("d", Permissions::default()).unwrap();
+        assert_eq!(d.link_count(), 2);
+        assert_eq!(root.link_count(), base + 1);
+        let e = d.mkdir("e", Permissions::default()).unwrap();
+        assert_eq!(d.link_count(), 3);
+        // A rename over a name of `f` takes that name away.
+        let h = root.create("h", Permissions::default()).unwrap();
+        root.rename("h", &root, "g").unwrap();
+        assert_eq!((f.link_count(), h.link_count()), (1, 1));
+        root.unlink("f").unwrap();
+        assert_eq!(f.link_count(), 0);
+        d.unlink("e").unwrap();
+        assert_eq!((e.link_count(), d.link_count()), (0, 2));
+    }
+
+    #[test]
+    fn link_counts_follow_names_on_every_tree_filesystem() {
+        check_link_counts(&ramfs::RamFs::new());
+        check_link_counts(&tmpfs::TmpFs::new(0));
+        check_link_counts(&blockfs::BlockFs::format(1000, 100).unwrap());
     }
 
     /// Helper: create a Vfs with a ramfs root filesystem already mounted.

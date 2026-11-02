@@ -5542,6 +5542,7 @@ static void test_record_locks(void);
 static void test_fcntl_flags(void);
 static void test_vectored_io(void);
 static void test_link_errors(void);
+static void test_stat_numbers(void);
 
 /* Tests `--only NAME` can run alone (for debugging a single test). */
 static const struct {
@@ -5553,6 +5554,7 @@ static const struct {
     {"fcntl_flags", test_fcntl_flags},
     {"vectored_io", test_vectored_io},
     {"link_errors", test_link_errors},
+    {"stat_numbers", test_stat_numbers},
     {"threads", test_threads},
     {"cow_race", test_cow_race},
     {"signals", test_signals},
@@ -7568,6 +7570,56 @@ static void test_link_errors(void)
     report("link_errors", f == 0, why);
 }
 
+/* stat's numbers (N-205): st_nlink counts a file's names and a
+ * directory's subdirectories (2 + n, 0 once removed), and st_dev is the
+ * same for files on one mount and differs between mounts (the root and
+ * /proc), fstat and fstatat agreeing. */
+static void test_stat_numbers(void)
+{
+    const char *d = "/tmp/musl_statnum";
+    char why[120];
+    struct stat a, b, c, r, p;
+    int f = 0;
+
+    unlink("/tmp/musl_statnum/f");
+    unlink("/tmp/musl_statnum/g");
+    rmdir("/tmp/musl_statnum/s1");
+    rmdir("/tmp/musl_statnum/s2");
+    rmdir(d);
+    if (mkdir(d, 0755) != 0 || chdir(d) != 0) f |= 1;
+    int fd = open("f", O_CREAT | O_RDWR, 0644);
+    if (fd < 0 || fstat(fd, &a) != 0 || a.st_nlink != 1) f |= 2;
+    if (link("f", "g") != 0 || stat("f", &a) != 0 || a.st_nlink != 2 || fstat(fd, &b) != 0 ||
+        b.st_nlink != 2)
+        f |= 4;
+    if (unlink("f") != 0 || fstat(fd, &b) != 0 || b.st_nlink != 1) f |= 8;
+    if (unlink("g") != 0 || fstat(fd, &b) != 0 || b.st_nlink != 0) f |= 16;
+    /* No new name for a file with none left. */
+    if (!(linkat(fd, "", AT_FDCWD, "f", AT_EMPTY_PATH) == -1 && errno == ENOENT)) f |= 16;
+    if (mkdir("s1", 0755) != 0 || mkdir("s2", 0755) != 0 || stat(".", &c) != 0 ||
+        c.st_nlink != 4)
+        f |= 32;
+    int dfd = open("s2", O_DIRECTORY);
+    if (dfd < 0 || rmdir("s2") != 0 || fstat(dfd, &c) != 0 || c.st_nlink != 0 ||
+        stat(".", &c) != 0 || c.st_nlink != 3)
+        f |= 64;
+    close(dfd);
+    /* One device per mount. */
+    if (stat("/", &r) != 0 || stat("/proc", &p) != 0 || r.st_dev == p.st_dev) f |= 128;
+    struct stat pa, pb;
+    if (stat("/proc/self", &pa) != 0 || fstatat(AT_FDCWD, "/proc/self", &pb, 0) != 0 ||
+        pa.st_dev != pb.st_dev || pa.st_dev != p.st_dev)
+        f |= 256;
+    if (stat(".", &c) != 0 || fstat(fd, &b) != 0 || c.st_dev != b.st_dev) f |= 512;
+    close(fd);
+    rmdir("s1");
+    if (chdir("/") != 0) f |= 1;
+    rmdir(d);
+    snprintf(why, sizeof(why), "f=%#x nlink=%lu dev=%#lx/%#lx", f, (unsigned long)c.st_nlink,
+             (unsigned long)r.st_dev, (unsigned long)p.st_dev);
+    report("stat_numbers", f == 0, why);
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
@@ -7679,6 +7731,7 @@ int main(int argc, char **argv)
     test_fcntl_flags();
     test_vectored_io();
     test_link_errors();
+    test_stat_numbers();
 #if defined(__x86_64__)
     test_ustat_sysfs();
 #endif

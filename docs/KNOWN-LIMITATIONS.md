@@ -64,8 +64,9 @@ exposed were fixed (N-182 to N-189); the rest are listed, with their targets, in
   pipe or socket, where Linux returns EAGAIN instead of waiting; RWF_ATOMIC and RWF_DONTCACHE
   are EOPNOTSUPP. close_range with CLOSE_RANGE_UNSHARE is EINVAL in a process with more than one
   thread, whose threads share one descriptor table that cannot be split yet (with one thread
-  there is nothing to unshare). Every file reports device 1 (`st_dev`), so ustat knows only
-  that device, which it takes for the root filesystem.
+  there is nothing to unshare). `st_dev` is an anonymous device per mount (0:1 for the root),
+  as Linux numbers ramfs and tmpfs; a disk filesystem reports that too, not its block device.
+  Pipes, sockets and memfds report 0:0.
 - **statx reports what stat reports.** No birth time (STATX_BTIME is never set: no filesystem
   records one), the same device, link count and block numbers as stat, and no attributes but
   STATX_ATTR_MOUNT_ROOT. The sync types are accepted and change nothing (every filesystem is
@@ -407,8 +408,7 @@ filesystem.
 - **`O_APPEND` (N-126)** is not atomic across separate opens of a file.
 - **linkat with AT_EMPTY_PATH** needs CAP_DAC_READ_SEARCH. Linux also lets a caller whose
   credentials opened the descriptor link it; an open file here does not record who opened it, so
-  such a caller gets ENOENT. Linking a file whose last name was removed is not refused (ENOENT on
-  Linux), because link counts are not tracked yet (N-205).
+  such a caller gets ENOENT.
 - **Directories and paths (N-130).** No dentry cache (`..` and symlinks re-walk from the root),
   BlockFS directories are scanned linearly and limited to 12 blocks.
 - **On-disk structures are not validated (N-123).** BlockFS checks only the magic number; the ext4
@@ -421,10 +421,8 @@ filesystem.
   from BlockFS see it through the shared page cache. An exec that grants privilege (file
   capabilities, set-user-ID or set-group-ID) maps a private copy of the bytes it checked, so the
   write cannot change what runs privileged (v0.28 queue item 3, file tier).
-- **Status-change time on ramfs and tmpfs.** Their nodes have no ctime field: `stat` reports the
-  creation time as `st_ctime`. Extended-attribute changes move it, but chmod and chown move the
-  modification time instead (Linux moves ctime, not mtime) and writes do not move it. BlockFS
-  inodes keep a real ctime (v0.28 queue item 3, file tier).
+- **Timestamps have one-second resolution** (`st_*tim.tv_nsec` is 0), and reads move a
+  file's access time on ramfs and tmpfs every time (Linux's relatime moves it at most daily).
 
 ### Shared IPC regions are never reclaimed
 

@@ -37,10 +37,13 @@ struct RamNode {
     /// downcast to `RamNode`, so this is what tells two mounts apart.
     fs_id: u64,
 
-    /// Parent directory inode (for ".." entries)
     /// Parent directory inode (".."); changes when a rename moves this
     /// directory.
     parent_inode: core::sync::atomic::AtomicU64,
+
+    /// How many directory entries name this node (1 for the root); see
+    /// [`VfsNode::link_count`].
+    links: core::sync::atomic::AtomicU32,
 }
 
 impl RamNode {
@@ -61,11 +64,29 @@ impl RamNode {
                 }
             }
 
-            children.remove(name);
+            if let Some(node) = children.remove(name) {
+                node.drop_link();
+            }
+            super::note_change(&mut self.metadata.write(), true);
             Ok(())
         } else {
             Err(KernelError::FsError(FsError::NotFound))
         }
+    }
+
+    /// One name of this node went: one link fewer, and a status change.
+    fn drop_link(&self) {
+        let _ = self.links.fetch_update(
+            core::sync::atomic::Ordering::AcqRel,
+            core::sync::atomic::Ordering::Acquire,
+            |n| n.checked_sub(1),
+        );
+        super::note_change(&mut self.metadata.write(), false);
+    }
+
+    /// `name` was added to this directory, naming a new node.
+    fn entry_added(&self) {
+        super::note_change(&mut self.metadata.write(), true);
     }
 
     /// Create a new file node
@@ -90,6 +111,7 @@ impl RamNode {
             rdev: 0,
             fs_id,
             parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
+            links: core::sync::atomic::AtomicU32::new(1),
         }
     }
 
@@ -115,6 +137,7 @@ impl RamNode {
             rdev: 0,
             fs_id,
             parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
+            links: core::sync::atomic::AtomicU32::new(1),
         }
     }
 
@@ -144,6 +167,7 @@ impl RamNode {
             rdev: 0,
             fs_id,
             parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
+            links: core::sync::atomic::AtomicU32::new(1),
         }
     }
 }
@@ -195,8 +219,7 @@ impl VfsNode for RamNode {
         f: &mut dyn FnMut(&mut super::xattr::XattrSet) -> Result<(), KernelError>,
     ) -> Result<(), KernelError> {
         super::xattr::update_in_memory(&mut self.xattrs.write(), f)?;
-        // The status-change time, which stat reports from `created`.
-        self.metadata.write().created = crate::arch::timer::get_timestamp_secs();
+        super::note_change(&mut self.metadata.write(), false);
         Ok(())
     }
 
@@ -236,7 +259,7 @@ impl VfsNode for RamNode {
         // Update metadata
         let mut metadata = self.metadata.write();
         metadata.size = file_data.len();
-        metadata.modified = crate::arch::timer::get_timestamp_secs();
+        super::note_change(&mut metadata, true);
 
         Ok(data.len())
     }
@@ -315,6 +338,7 @@ impl VfsNode for RamNode {
             permissions,
         ));
         children.insert(String::from(name), new_file.clone());
+        self.entry_added();
 
         Ok(new_file as Arc<dyn VfsNode>)
     }
@@ -342,6 +366,7 @@ impl VfsNode for RamNode {
             permissions,
         ));
         children.insert(String::from(name), new_dir.clone());
+        self.entry_added();
 
         Ok(new_dir as Arc<dyn VfsNode>)
     }
@@ -375,7 +400,7 @@ impl VfsNode for RamNode {
 
         let mut metadata = self.metadata.write();
         metadata.size = size;
-        metadata.modified = crate::arch::timer::get_timestamp_secs();
+        super::note_change(&mut metadata, true);
 
         Ok(())
     }
@@ -462,13 +487,23 @@ impl VfsNode for RamNode {
         }
 
         src.remove(old_name);
-        match dst.as_mut() {
+        let replaced = match dst.as_mut() {
             Some(d) => d.insert(String::from(new_name), node.clone()),
             None => src.insert(String::from(new_name), node.clone()),
         };
+        if let Some(replaced) = replaced {
+            replaced.drop_link();
+        }
         if node.node_type == NodeType::Directory {
             node.parent_inode
                 .store(np.inode, core::sync::atomic::Ordering::Relaxed);
+        }
+        // Both directories changed, and the node moved (Linux's
+        // simple_rename_timestamp).
+        super::note_change(&mut node.metadata.write(), false);
+        self.entry_added();
+        if !same_dir {
+            np.entry_added();
         }
         Ok(())
     }
@@ -508,6 +543,7 @@ impl VfsNode for RamNode {
             if devices { rdev } else { 0 },
         ));
         children.insert(String::from(name), node.clone());
+        self.entry_added();
         Ok(node as Arc<dyn VfsNode>)
     }
 
@@ -546,7 +582,12 @@ impl VfsNode for RamNode {
         if children.contains_key(name) {
             return Err(KernelError::FsError(FsError::AlreadyExists));
         }
+        target
+            .links
+            .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+        super::note_change(&mut target.metadata.write(), false);
         children.insert(String::from(name), target);
+        self.entry_added();
         Ok(())
     }
 
@@ -563,8 +604,23 @@ impl VfsNode for RamNode {
         let inode = NEXT_INODE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         let new_symlink = Arc::new(RamNode::new_symlink(inode, self.inode, self.fs_id, target));
         children.insert(String::from(name), new_symlink.clone());
+        self.entry_added();
 
         Ok(new_symlink as Arc<dyn VfsNode>)
+    }
+
+    fn link_count(&self) -> u32 {
+        let links = self.links.load(core::sync::atomic::Ordering::Acquire);
+        if self.node_type != NodeType::Directory || links == 0 {
+            return links;
+        }
+        let subdirs = self
+            .children
+            .read()
+            .values()
+            .filter(|c| c.node_type == NodeType::Directory)
+            .count();
+        2 + subdirs as u32
     }
 
     fn readlink(&self) -> Result<String, KernelError> {
@@ -581,7 +637,7 @@ impl VfsNode for RamNode {
     fn chmod(&self, permissions: Permissions) -> Result<(), KernelError> {
         let mut metadata = self.metadata.write();
         metadata.permissions = permissions;
-        metadata.modified = crate::arch::timer::get_timestamp_secs();
+        super::note_change(&mut metadata, false);
         Ok(())
     }
 
@@ -593,6 +649,8 @@ impl VfsNode for RamNode {
         if let Some(mtime) = mtime {
             metadata.modified = mtime;
         }
+        // Setting the times is a status change (Linux's notify_change).
+        super::note_change(&mut metadata, false);
         Ok(())
     }
 
@@ -604,7 +662,7 @@ impl VfsNode for RamNode {
         if let Some(gid) = gid {
             metadata.gid = gid;
         }
-        metadata.modified = crate::arch::timer::get_timestamp_secs();
+        super::note_change(&mut metadata, false);
         Ok(())
     }
 }
@@ -678,6 +736,50 @@ mod tests {
     use alloc::vec;
 
     use super::*;
+
+    /// chmod, chown and setting the times move only the status-change
+    /// time; a write moves both; a new name moves the directory's times
+    /// and the node's ctime (N-205; chmod and chown used to move mtime).
+    #[test]
+    fn changes_move_ctime_as_linux_does() {
+        use crate::fs::Filesystem;
+        let fs = RamFs::new();
+        let root = fs.root();
+        let f = root.create("f", Permissions::default()).unwrap();
+        let both = |n: &Arc<dyn VfsNode>| {
+            let m = n.metadata().unwrap();
+            (m.modified, m.created)
+        };
+        let set = |n: &Arc<dyn VfsNode>| {
+            let node = n.as_any().unwrap().downcast_ref::<RamNode>().unwrap();
+            let mut m = node.metadata.write();
+            m.modified = u64::MAX;
+            m.created = u64::MAX;
+        };
+        set(&f);
+        f.chmod(Permissions::from_mode(0o600)).unwrap();
+        let (m, c) = both(&f);
+        assert!(m == u64::MAX && c != u64::MAX);
+        set(&f);
+        f.chown(Some(5), None).unwrap();
+        let (m, c) = both(&f);
+        assert!(m == u64::MAX && c != u64::MAX);
+        set(&f);
+        f.set_times(Some(1), None).unwrap();
+        let (m, c) = both(&f);
+        assert!(m == u64::MAX && c != u64::MAX);
+        set(&f);
+        f.write(0, b"x").unwrap();
+        let (m, c) = both(&f);
+        assert!(m != u64::MAX && c != u64::MAX);
+        set(&f);
+        set(&root);
+        root.link("g", f.clone()).unwrap();
+        let (m, c) = both(&f);
+        assert!(m == u64::MAX && c != u64::MAX);
+        let (m, c) = both(&root);
+        assert!(m != u64::MAX && c != u64::MAX);
+    }
 
     /// A committed attribute change moves the status-change time (stat's
     /// st_ctime, the node's `created`); a refused one leaves it (PR #33

@@ -608,6 +608,15 @@ impl VfsNode for BlockFsNode {
         Some((Arc::as_ptr(&self.fs) as u64, self.inode_num as u64))
     }
 
+    /// The inode's own count, kept as ext2 keeps it: one per name, and a
+    /// directory's "." and its subdirectories' "..".
+    fn link_count(&self) -> u32 {
+        let fs = self.fs.read();
+        fs.inode_table
+            .get(self.inode_num as usize)
+            .map_or(0, |inode| u32::from(inode.links_count))
+    }
+
     fn page_cache(&self) -> Option<Arc<crate::mm::page_cache::FileCache>> {
         let fs = self.fs.read();
         let meta = fs.get_metadata(self.inode_num).ok()?;
@@ -2643,8 +2652,10 @@ impl BlockFsInner {
         // Add directory entry
         self.write_dir_entry(dir_inode, target_inode, name, file_type)?;
 
-        // Increment link count on the target inode
-        self.inode_table[target_inode as usize].links_count += 1;
+        // Increment link count on the target inode, a status change.
+        let target = &mut self.inode_table[target_inode as usize];
+        target.links_count += 1;
+        target.ctime = now_secs();
 
         Ok(())
     }

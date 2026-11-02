@@ -797,7 +797,8 @@ pub fn sys_stat(fd: usize, stat_buf: usize) -> SyscallResult {
 
     // Get metadata and write to user buffer
     let metadata = file_desc.node.metadata().map_err(super::map_kernel_error)?;
-    let stat = fill_stat(&metadata, &*file_desc.node);
+    let (mount, _) = mount_of(file_desc.path.as_deref())?;
+    let stat = fill_stat(&metadata, &*file_desc.node, mount);
 
     super::userspace::write_user(stat_buf, stat)?;
     Ok(0)
@@ -1176,19 +1177,35 @@ type FileStat = X86Stat;
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 type FileStat = GenericStat;
 
-/// Helper: populate a FileStat from the VFS metadata of `node`, and its
-/// device number for a device.
-fn fill_stat(metadata: &crate::fs::Metadata, node: &dyn crate::fs::VfsNode) -> FileStat {
+/// Helper: populate a FileStat from the VFS metadata of `node`, on the
+/// mount with `mount`: its link count, and its device number for a device.
+fn fill_stat(
+    metadata: &crate::fs::Metadata,
+    node: &dyn crate::fs::VfsNode,
+    mount: crate::fs::MountIds,
+) -> FileStat {
     let rdev = node
         .device_id()
         .map_or(0, |(major, minor)| crate::fs::make_dev(major, minor));
+    let dev = crate::fs::mount_dev(mount);
     #[allow(clippy::useless_conversion)] // the identity on x86_64
-    let stat = FileStat::from(fill_x86_stat(metadata, rdev));
+    let stat = FileStat::from(fill_x86_stat(metadata, rdev, dev, node.link_count()));
     stat
 }
 
-/// [`fill_stat`] in the x86_64 layout; `rdev` in Linux's encoding.
-fn fill_x86_stat(metadata: &crate::fs::Metadata, rdev: u32) -> X86Stat {
+/// The mount serving the file at canonical path `path` (in the whole
+/// tree), and whether it is that mount's root; a file without a path
+/// (a pipe, a socket) is on the pseudo mount (N-205).
+fn mount_of(path: Option<&str>) -> Result<(crate::fs::MountIds, bool), SyscallError> {
+    Ok(match path {
+        Some(path) => vfs()?.global().mount_ids_of(path),
+        None => (crate::fs::PSEUDO_MOUNT, false),
+    })
+}
+
+/// [`fill_stat`] in the x86_64 layout; `rdev` and `dev` in Linux's
+/// encoding, `nlink` the node's link count.
+fn fill_x86_stat(metadata: &crate::fs::Metadata, rdev: u32, dev: u32, nlink: u32) -> X86Stat {
     // File type bits plus the node's real permission bits; this used to
     // report a fixed 0644/0755 for every file and directory.
     let type_bits = match metadata.node_type {
@@ -1203,9 +1220,9 @@ fn fill_x86_stat(metadata: &crate::fs::Metadata, rdev: u32) -> X86Stat {
     let mode = type_bits | metadata.permissions.to_mode();
     let size = metadata.size as i64;
     X86Stat {
-        st_dev: 1,
+        st_dev: dev as u64,
         st_ino: metadata.inode,
-        st_nlink: 1,
+        st_nlink: nlink as u64,
         st_mode: mode,
         st_uid: metadata.uid,
         st_gid: metadata.gid,
@@ -1295,18 +1312,19 @@ const STATX_ATTR_DAX: u64 = 0x20_0000;
 const AT_STATX_SYNC_TYPE: usize = 0x6000;
 
 /// What statx reports for a node (Linux's vfs_statx_path and cp_statx):
-/// the numbers stat reports, its device's major and minor in `rdev`, the
-/// id of its mount (the unique one when `mask` asks for it) and whether it
-/// is that mount's root. No filesystem records a birth time, so
-/// STATX_BTIME is never in the result.
+/// the numbers stat reports, with `nlink` links, its device's major and
+/// minor in `rdev`, the id of its mount (the unique one when `mask` asks
+/// for it) and whether it is that mount's root. No filesystem records a
+/// birth time, so STATX_BTIME is never in the result.
 fn fill_statx(
     metadata: &crate::fs::Metadata,
     rdev: (u32, u32),
     mount: crate::fs::MountIds,
     mount_root: bool,
     mask: u32,
+    nlink: u32,
 ) -> Statx {
-    let st = fill_x86_stat(metadata, 0);
+    let st = fill_x86_stat(metadata, 0, crate::fs::mount_dev(mount), nlink);
     let time = |sec: i64, nsec: i64| StatxTimestamp {
         tv_sec: sec,
         tv_nsec: nsec as u32,
@@ -3334,8 +3352,9 @@ pub fn sys_link(old_ptr: usize, new_ptr: usize) -> SyscallResult {
 /// working directory for AT_FDCWD), which needs CAP_DAC_READ_SEARCH
 /// (ENOENT): Linux also lets the descriptor's opener through, but a file
 /// does not record who opened it. Then the new name is made as
-/// [`new_entry`] does; then a link into another filesystem is EXDEV, and
-/// one to a directory, or on a filesystem without hard links, EPERM.
+/// [`new_entry`] does; then a file with no name left is ENOENT, a link
+/// into another filesystem EXDEV, and one to a directory, or on a
+/// filesystem without hard links, EPERM.
 pub(crate) fn link_at(
     olddirfd: usize,
     old_ptr: usize,
@@ -3378,6 +3397,11 @@ pub(crate) fn link_at(
         .map_err(map_resolve_err)?
     };
     let (parent, name) = new_entry(newdirfd, &new)?;
+    // A file whose last name is gone (open, through AT_EMPTY_PATH) gets
+    // no new one, as Linux's vfs_link.
+    if target.node_type() != crate::fs::NodeType::Directory && target.link_count() == 0 {
+        return Err(SyscallError::ResourceNotFound);
+    }
     parent.link(&name, target).map_err(|e| match e {
         crate::error::KernelError::FsError(crate::error::FsError::IsADirectory)
         | crate::error::KernelError::NotImplemented { .. } => SyscallError::OperationNotPermitted,
@@ -3782,9 +3806,11 @@ pub fn sys_fstatat(dirfd: usize, path_ptr: usize, stat_buf: usize, flags: usize)
     validate_user_ptr_typed::<FileStat>(stat_buf)?;
 
     let vfs = vfs()?;
-    let node = if rel_path.is_empty() {
+    // The node and its canonical path, for the mount (st_dev).
+    let (node, canonical) = if rel_path.is_empty() {
         if dirfd as u32 as i32 == AT_FDCWD as u32 as i32 {
-            vfs.resolve_path(&vfs.get_cwd()).map_err(map_resolve_err)?
+            let (node, canonical) = vfs.resolve_path_canonical(".").map_err(map_resolve_err)?;
+            (node, Some(canonical))
         } else {
             let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
             let file = proc
@@ -3792,25 +3818,21 @@ pub fn sys_fstatat(dirfd: usize, path_ptr: usize, stat_buf: usize, flags: usize)
                 .lock()
                 .get(dirfd as u32 as usize)
                 .ok_or(SyscallError::BadFileDescriptor)?;
-            file.node.clone()
+            (file.node.clone(), file.path.clone())
         }
     } else {
+        // A trailing slash is followed and needs a directory (resolve_in).
         let abs_path = resolve_at_path(dirfd, &rel_path)?;
-        let trailing_slash = rel_path.ends_with('/');
-        let node = if flags & AT_SYMLINK_NOFOLLOW != 0 && !trailing_slash {
-            vfs.resolve_path_no_follow(&abs_path)
-        } else {
-            vfs.resolve_path(&abs_path)
-        }
-        .map_err(map_resolve_err)?;
-        if trailing_slash && node.node_type() != crate::fs::NodeType::Directory {
-            return Err(SyscallError::NotADirectory);
-        }
-        node
+        let follow = flags & AT_SYMLINK_NOFOLLOW == 0;
+        let (node, canonical) = vfs
+            .resolve_canonical(&abs_path, &vfs.get_cwd(), follow)
+            .map_err(map_resolve_err)?;
+        (node, Some(canonical))
     };
 
     let metadata = node.metadata().map_err(super::map_kernel_error)?;
-    super::userspace::write_user(stat_buf, fill_stat(&metadata, &*node))?;
+    let (mount, _) = mount_of(canonical.as_deref())?;
+    super::userspace::write_user(stat_buf, fill_stat(&metadata, &*node, mount))?;
     Ok(0)
 }
 
@@ -3887,13 +3909,10 @@ pub fn sys_statx(
     };
 
     let metadata = node.metadata().map_err(super::map_kernel_error)?;
-    let (mount, mount_root) = canonical
-        .as_deref()
-        .map_or((crate::fs::PSEUDO_MOUNT, false), |path| {
-            vfs.global().mount_ids_of(path)
-        });
+    let (mount, mount_root) = mount_of(canonical.as_deref())?;
     let rdev = node.device_id().unwrap_or((0, 0));
-    super::userspace::write_user(buf, fill_statx(&metadata, rdev, mount, mount_root, mask))?;
+    let statx = fill_statx(&metadata, rdev, mount, mount_root, mask, node.link_count());
+    super::userspace::write_user(buf, statx)?;
     Ok(0)
 }
 
@@ -4882,7 +4901,7 @@ mod tests {
             id: 3,
             unique: (1 << 31) + 9,
         };
-        let s = fill_statx(&m, (4, 64), mount, false, STATX_BASIC_STATS);
+        let s = fill_statx(&m, (4, 64), mount, false, STATX_BASIC_STATS, 1);
         assert_eq!(s.stx_mask, STATX_BASIC_STATS | STATX_MNT_ID);
         assert_eq!(s.stx_mode, 0o104750);
         assert_eq!((s.stx_uid, s.stx_gid, s.stx_nlink), (1000, 100, 1));
@@ -4894,8 +4913,8 @@ mod tests {
         );
         assert_eq!(s.stx_btime, StatxTimestamp::default());
         assert_eq!((s.stx_rdev_major, s.stx_rdev_minor), (4, 64));
-        // st_dev 1 is device 0:1.
-        assert_eq!((s.stx_dev_major, s.stx_dev_minor), (0, 1));
+        // The mount's anonymous device, 0:3.
+        assert_eq!((s.stx_dev_major, s.stx_dev_minor), (0, 3));
         assert_eq!(s.stx_mnt_id, 3);
         assert_eq!(s.stx_attributes, 0);
         assert_eq!(
@@ -4904,7 +4923,8 @@ mod tests {
         );
         assert_eq!(s.__spare3, [0; 8]);
 
-        let u = fill_statx(&m, (0, 0), mount, true, STATX_MNT_ID_UNIQUE);
+        let u = fill_statx(&m, (0, 0), mount, true, STATX_MNT_ID_UNIQUE, 2);
+        assert_eq!(u.stx_nlink, 2);
         assert_eq!(u.stx_mask, STATX_BASIC_STATS | STATX_MNT_ID_UNIQUE);
         assert_eq!(u.stx_mnt_id, (1 << 31) + 9);
         assert_eq!(u.stx_attributes, STATX_ATTR_MOUNT_ROOT);

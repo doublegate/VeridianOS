@@ -423,11 +423,6 @@ pub fn sys_readahead(fd: usize, offset: usize, count: usize) -> SyscallResult {
 /// long), f_fname[6], f_fpack[6], padded to 8 bytes.
 const USTAT_SIZE: usize = 32;
 
-/// The device number stat reports for every file (`st_dev`; see
-/// KNOWN-LIMITATIONS), which ustat therefore takes for the root
-/// filesystem.
-const ROOT_DEV: u32 = 1;
-
 /// `struct ustat` for a filesystem with `stats`: its free blocks (cut to
 /// an int, as Linux's assignment) and free inodes; the names are empty.
 fn ustat_bytes(stats: &crate::fs::statfs::FsStats) -> [u8; USTAT_SIZE] {
@@ -437,17 +432,17 @@ fn ustat_bytes(stats: &crate::fs::statfs::FsStats) -> [u8; USTAT_SIZE] {
     out
 }
 
-/// ustat(dev, ubuf) (x86_64 only): free space on the filesystem mounted
-/// from `dev`. Every file reports device 1, which is the root here; any
-/// other device has no filesystem (EINVAL).
+/// ustat(dev, ubuf) (x86_64 only): free space on the filesystem whose
+/// files stat reports as on device `dev` (each mount's own, `fs::mount_dev`;
+/// the root's is 0:1); a device with no filesystem is EINVAL.
 pub fn sys_ustat(dev: usize, ubuf: usize) -> SyscallResult {
-    if dev as u32 != ROOT_DEV {
-        return Err(SyscallError::InvalidArgument);
-    }
-    let root = filesystem::vfs()?
-        .resolve_path("/")
-        .map_err(filesystem::map_resolve_err)?;
-    let stats = root.statfs().map_err(super::map_kernel_error)?;
+    // The filesystem whose files stat reports as on `dev` (N-205): EINVAL
+    // for none, as Linux's user_get_super finding no superblock.
+    let fs = filesystem::vfs()?
+        .global()
+        .filesystem_with_dev(dev as u32)
+        .ok_or(SyscallError::InvalidArgument)?;
+    let stats = fs.root().statfs().map_err(super::map_kernel_error)?;
     userspace::write_user_bytes(ubuf, &ustat_bytes(&stats))?;
     Ok(0)
 }
