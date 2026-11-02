@@ -266,6 +266,10 @@ What remains:
 - **PTYs answer only the window-size ioctls.** TCGETS, TCSETS and the rest are ENOTTY on either
   end of a PTY, so tcgetattr fails there (isatty works: musl asks TIOCGWINSZ). The console is the
   only terminal with termios calls.
+- **Record locks are advisory only.** fcntl's POSIX and OFD locks work, but leases (F_SETLEASE,
+  F_GETLEASE) and F_NOTIFY are EINVAL and nothing enforces a lock on read or write (Linux dropped
+  mandatory locking too). As on Linux, deadlock detection follows at most ten waiting owners and
+  ignores OFD waiters.
 - **No I/O siginfo.** SIGIO (F_SETOWN, O_ASYNC) does not exist yet, so no signal arrives with
   POLL_* information, and FIOASYNC refuses to turn it on (ENOTTY, Linux's answer for a file
   that cannot send it); kill, tkill, sigqueue, POSIX timers, SIGCHLD and fault signals carry

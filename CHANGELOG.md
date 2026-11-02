@@ -121,6 +121,15 @@
   (it was EINVAL). FIONREAD (a regular file's size past the position, a pipe's or FIFO's contents
   from either end, a PTY's or the console's input), FIONBIO, FIOCLEX and FIONCLEX work on any
   file; FIOASYNC turning SIGIO on is ENOTTY, since nothing sends it yet (N-198).
+- fcntl record locks work (N-199): F_GETLK, F_SETLK and F_SETLKW, and the open-file-description
+  F_OFD_GETLK, F_OFD_SETLK and F_OFD_SETLKW (they were EINVAL). A POSIX lock belongs to the
+  process's descriptor table, so its threads share it and a fork child does not inherit it, and it
+  goes when the process closes any descriptor of the file or exits; an OFD lock belongs to the open
+  file and goes with its last close. Locks of one owner split and join as on Linux; F_GETLK reports
+  the holder's pid (-1 for an OFD lock); F_SETLKW sleeps until granted (EINTR on a signal) and is
+  EDEADLK when a POSIX waiter would close a cycle of waiting owners. A range is measured from the
+  start, the position or the end, with Linux's EINVAL and EOVERFLOW, and a lock needs a descriptor
+  open for its kind (EBADF).
 - execve of a relative name runs it from the working directory, as on Linux; it searched PATH,
   which is libc's job (execvp). Exec errors keep their errno (EACCES, ENOTDIR, ELOOP) instead of
   all being ENOENT, a script's interpreter is opened the same way, and an empty argv gets "" as

@@ -2633,6 +2633,196 @@ pub fn sys_unlink(path_ptr: usize) -> SyscallResult {
     sys_unlinkat(AT_FDCWD, path_ptr, 0)
 }
 
+/// fcntl's record-lock commands (Linux's numbers on every architecture,
+/// the 64-bit `struct flock` being the only one).
+const F_GETLK: usize = 5;
+const F_SETLK: usize = 6;
+const F_SETLKW: usize = 7;
+const F_OFD_GETLK: usize = 36;
+const F_OFD_SETLK: usize = 37;
+const F_OFD_SETLKW: usize = 38;
+
+/// Linux's `struct flock` (the same on x86_64, AArch64 and RISC-V).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+struct UserFlock {
+    l_type: i16,
+    l_whence: i16,
+    _pad0: u32,
+    l_start: i64,
+    l_len: i64,
+    l_pid: i32,
+    _pad1: u32,
+}
+
+// SAFETY: repr(C) integers only; every bit pattern is a valid value.
+unsafe impl super::userspace::UserPod for UserFlock {}
+
+/// Linux's flock64_to_posix_lock: the inclusive byte range a `struct
+/// flock` names, measured from the start, the file position or the end of
+/// `file`. EINVAL for an unknown whence, a range starting before byte 0 or
+/// an unknown type; EOVERFLOW for one ending past OFFSET_MAX.
+fn flock_range(
+    file: &crate::fs::file::File,
+    fl: &UserFlock,
+) -> Result<(u16, u64, u64), SyscallError> {
+    use crate::fs::flock::{F_RDLCK, F_UNLCK, F_WRLCK, OFFSET_MAX};
+    let max = OFFSET_MAX as i64;
+    let base: i64 = match fl.l_whence {
+        0 => 0,
+        1 => *file.position.read() as i64,
+        2 => file.node.metadata().map_err(super::map_kernel_error)?.size as i64,
+        _ => return Err(SyscallError::InvalidArgument),
+    };
+    if fl.l_start > max - base {
+        return Err(SyscallError::Overflow);
+    }
+    let mut start = base + fl.l_start;
+    if start < 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let end = if fl.l_len > 0 {
+        if fl.l_len - 1 > max - start {
+            return Err(SyscallError::Overflow);
+        }
+        start + (fl.l_len - 1)
+    } else if fl.l_len < 0 {
+        if start + fl.l_len < 0 {
+            return Err(SyscallError::InvalidArgument);
+        }
+        let end = start - 1;
+        start += fl.l_len;
+        end
+    } else {
+        max
+    };
+    let kind = match fl.l_type as u16 {
+        k @ (F_RDLCK | F_WRLCK | F_UNLCK) => k,
+        _ => return Err(SyscallError::InvalidArgument),
+    };
+    Ok((kind, start as u64, end as u64))
+}
+
+/// fcntl's record-lock commands (N-199), as Linux's fcntl_getlk and
+/// fcntl_setlk. A POSIX lock belongs to the caller's descriptor table and
+/// goes when any of its descriptors of the file closes; an OFD lock
+/// belongs to the open file and goes with its last close. F_SETLKW and
+/// F_OFD_SETLKW sleep until the lock is granted (EINTR on a signal), and
+/// a POSIX waiter that would close a cycle of waiters is EDEADLK.
+fn fcntl_record_lock(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
+    use crate::fs::flock::{self, RangeError, RangeLock, F_RDLCK, F_UNLCK, F_WRLCK};
+    let (file, owner, pid) = {
+        let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+        let table = proc.file_table.lock();
+        let file = table.get(fd).ok_or(SyscallError::BadFileDescriptor)?;
+        (file, table.lock_owner(), proc.pid.0 as i32)
+    };
+    let mut fl: UserFlock = super::userspace::read_user(arg)?;
+    let ofd = matches!(cmd, F_OFD_GETLK | F_OFD_SETLK | F_OFD_SETLKW);
+    let key = file.flock_key();
+
+    if matches!(cmd, F_GETLK | F_OFD_GETLK) {
+        if !ofd && !matches!(fl.l_type as u16, F_RDLCK | F_WRLCK) {
+            return Err(SyscallError::InvalidArgument);
+        }
+        let (kind, start, end) = flock_range(&file, &fl)?;
+        if ofd && fl.l_pid != 0 {
+            return Err(SyscallError::InvalidArgument);
+        }
+        let query = RangeLock {
+            kind,
+            start,
+            end,
+            owner: if ofd { ofd_owner(&file) } else { owner },
+            pid: 0,
+            ofd,
+        };
+        match flock::test_lock(key, &query) {
+            Some(held) => {
+                fl.l_type = held.kind as i16;
+                fl.l_whence = 0;
+                fl.l_start = held.start as i64;
+                fl.l_len = if held.end == flock::OFFSET_MAX {
+                    0
+                } else {
+                    (held.end - held.start + 1) as i64
+                };
+                fl.l_pid = held.pid;
+            }
+            None => fl.l_type = F_UNLCK as i16,
+        }
+        super::userspace::write_user(arg, fl)?;
+        return Ok(0);
+    }
+
+    let (kind, start, end) = flock_range(&file, &fl)?;
+    // Linux's check_fmode_for_setlk.
+    if (kind == F_RDLCK && !file.flags.read) || (kind == F_WRLCK && !file.flags.write) {
+        return Err(SyscallError::BadFileDescriptor);
+    }
+    if ofd && fl.l_pid != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let req = RangeLock {
+        kind,
+        start,
+        end,
+        owner: if ofd { ofd_owner(&file) } else { owner },
+        pid: if ofd { -1 } else { pid },
+        ofd,
+    };
+    // Noted before an OFD lock is held, and never cleared, so the open
+    // file's last close always looks (as for flock). A POSIX lock needs no
+    // mark: every close asks the lock table.
+    if kind != F_UNLCK && ofd {
+        file.ofd_locked
+            .store(true, core::sync::atomic::Ordering::Release);
+    }
+    let wait = matches!(cmd, F_SETLKW | F_OFD_SETLKW);
+    let result = match flock::set_lock(key, &req, wait) {
+        #[cfg(feature = "alloc")]
+        Err(RangeError::Conflict) if wait && crate::sched::dispatch::current_owner().is_some() => {
+            let mut outcome = Err(RangeError::Conflict);
+            let waited = crate::sched::dispatch::wait_event(&flock::RANGE_WAITERS, None, || {
+                outcome = flock::set_lock(key, &req, true);
+                outcome != Err(RangeError::Conflict)
+            });
+            if waited.is_err() {
+                flock::stop_waiting(req.owner);
+                return Err(SyscallError::Interrupted);
+            }
+            outcome
+        }
+        other => other,
+    };
+    match result {
+        Ok(()) => {}
+        Err(RangeError::Conflict) => return Err(SyscallError::WouldBlock),
+        Err(RangeError::Deadlock) => return Err(SyscallError::Deadlock),
+    }
+    // A close of the descriptor while the lock was being placed: the
+    // close found nothing to release, so give it up now (Linux's
+    // close/fcntl race check). OFD locks go with the open file instead.
+    if kind != F_UNLCK && !ofd {
+        let still = process::current_process().is_some_and(|proc| {
+            proc.file_table
+                .lock()
+                .get(fd)
+                .is_some_and(|f| alloc::sync::Arc::ptr_eq(&f, &file))
+        });
+        if !still {
+            flock::release_owner(key, owner);
+            return Err(SyscallError::BadFileDescriptor);
+        }
+    }
+    Ok(0)
+}
+
+/// The owner of an open file's OFD locks: the open file itself.
+fn ofd_owner(file: &alloc::sync::Arc<crate::fs::file::File>) -> u64 {
+    alloc::sync::Arc::as_ptr(file) as u64
+}
+
 /// File descriptor control (syscall 158).
 ///
 /// Implements POSIX fcntl operations using the FileTable's cloexec API.
@@ -2738,6 +2928,10 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
                 .add_seals(arg as u32)
                 .map(|_| 0)
                 .map_err(super::map_kernel_error)
+        }
+        F_GETLK | F_SETLK | F_SETLKW | F_OFD_GETLK | F_OFD_SETLK | F_OFD_SETLKW => {
+            drop(file_table);
+            fcntl_record_lock(fd, cmd, arg)
         }
         _ => Err(SyscallError::InvalidArgument),
     }
@@ -4186,6 +4380,45 @@ mod tests {
         let root = vfs.resolve_path("/").unwrap();
         let file = root.create("f", Permissions::from_mode(0o644)).unwrap();
         assert_eq!(file.bytes_readable(), None);
+    }
+
+    /// A `struct flock` names an inclusive range from the start, the file
+    /// position or the end, as Linux's flock64_to_posix_lock.
+    #[test]
+    fn flock_ranges_follow_whence_and_length() {
+        use super::{flock_range, SyscallError, UserFlock};
+        use crate::fs::flock::{F_RDLCK, F_UNLCK, F_WRLCK, OFFSET_MAX};
+        let vfs = make_vfs_with_root();
+        let root = vfs.resolve_path("/").unwrap();
+        let node = root.create("f", Permissions::from_mode(0o644)).unwrap();
+        node.write(0, &[0u8; 100]).unwrap();
+        let file = crate::fs::file::File::new(node, crate::fs::file::OpenFlags::read_write());
+        *file.position.write() = 10;
+        let fl = |l_type: u16, l_whence: i16, l_start: i64, l_len: i64| UserFlock {
+            l_type: l_type as i16,
+            l_whence,
+            l_start,
+            l_len,
+            ..UserFlock::default()
+        };
+        let range = |f| flock_range(&file, &f);
+        assert_eq!(range(fl(F_RDLCK, 0, 5, 10)), Ok((F_RDLCK, 5, 14)));
+        assert_eq!(range(fl(F_WRLCK, 1, 0, 0)), Ok((F_WRLCK, 10, OFFSET_MAX)));
+        assert_eq!(range(fl(F_UNLCK, 2, -20, 5)), Ok((F_UNLCK, 80, 84)));
+        // A negative length runs back from the start, which is excluded.
+        assert_eq!(range(fl(F_WRLCK, 0, 10, -4)), Ok((F_WRLCK, 6, 9)));
+        let inval = Err(SyscallError::InvalidArgument);
+        assert_eq!(range(fl(F_WRLCK, 0, 3, -4)), inval);
+        assert_eq!(range(fl(F_WRLCK, 1, -11, 1)), inval);
+        assert_eq!(range(fl(F_WRLCK, 3, 0, 1)), inval);
+        assert_eq!(range(fl(7, 0, 0, 1)), inval);
+        let over = Err(SyscallError::Overflow);
+        assert_eq!(range(fl(F_WRLCK, 2, i64::MAX, 1)), over);
+        assert_eq!(range(fl(F_WRLCK, 0, i64::MAX, 2)), over);
+        assert_eq!(
+            range(fl(F_WRLCK, 0, i64::MAX, 1)),
+            Ok((F_WRLCK, OFFSET_MAX, OFFSET_MAX))
+        );
     }
 
     /// openat2's `how` checks, in build_open_flags' order.

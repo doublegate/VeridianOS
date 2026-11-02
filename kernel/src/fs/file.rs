@@ -158,6 +158,10 @@ pub struct File {
     /// never cleared, so the last close releases whatever the file holds
     /// (review of N-120 and N-207).
     pub flock_owner: AtomicU64,
+
+    /// The file has been given an OFD record lock (F_OFD_SETLK), which its
+    /// last close releases.
+    pub ofd_locked: AtomicBool,
 }
 
 impl Drop for File {
@@ -165,6 +169,9 @@ impl Drop for File {
         let owner = *self.flock_owner.get_mut();
         if owner != 0 {
             let _ = crate::fs::flock::flock(self.flock_key(), owner, crate::fs::flock::LOCK_UN);
+        }
+        if *self.ofd_locked.get_mut() {
+            crate::fs::flock::release_owner(self.flock_key(), self as *const File as u64);
         }
     }
 }
@@ -200,6 +207,7 @@ impl File {
             refcount: RwLock::new(1),
             path: None,
             flock_owner: AtomicU64::new(0),
+            ofd_locked: AtomicBool::new(false),
         }
     }
 
@@ -215,6 +223,7 @@ impl File {
             refcount: RwLock::new(1),
             path: Some(path),
             flock_owner: AtomicU64::new(0),
+            ofd_locked: AtomicBool::new(false),
         }
     }
 
@@ -467,6 +476,23 @@ impl FileTable {
         }
     }
 
+    /// The owner of the POSIX record locks taken through this table (Linux's
+    /// `current->files`, so threads share them and a fork child, with its
+    /// own table, does not): the table's address, stable while its process
+    /// lives.
+    pub fn lock_owner(&self) -> u64 {
+        self as *const Self as u64
+    }
+
+    /// A descriptor of `file` left the table: the table's POSIX record
+    /// locks on the file go, as on Linux, where closing any descriptor of
+    /// the file drops the owner's locks on it, those placed through
+    /// another open of it too (so this asks the lock table, not the open
+    /// file).
+    fn closing(&self, file: &File) {
+        crate::fs::flock::release_owner(file.flock_key(), self.lock_owner());
+    }
+
     /// Install `file` at exactly descriptor `fd`, replacing whatever was
     /// there (including the implicit console). Used to set up a new
     /// process's standard descriptors, which `open` would never hand out
@@ -480,6 +506,7 @@ impl FileTable {
             files.push(None);
         }
         if let Some(existing) = files[fd].take() {
+            self.closing(&existing.file);
             existing.file.dec_ref();
         }
         self.release_console_fd(fd);
@@ -573,6 +600,7 @@ impl FileTable {
 
         if let Some(entry) = files[fd].take() {
             self.note_freed(fd);
+            self.closing(&entry.file);
             // Decrement reference count
             if entry.file.dec_ref() == 0 {
                 // Last reference, file will be dropped
@@ -682,6 +710,7 @@ impl FileTable {
 
         // Close existing file at new_fd if any
         if let Some(existing) = files[new_fd].take() {
+            self.closing(&existing.file);
             existing.file.dec_ref();
         }
 
@@ -728,6 +757,7 @@ impl FileTable {
 
         // Close existing file at new_fd if any
         if let Some(existing) = files[new_fd].take() {
+            self.closing(&existing.file);
             existing.file.dec_ref();
         }
 
@@ -779,6 +809,7 @@ impl FileTable {
                     // Close this descriptor
                     if let Some(entry) = slot.take() {
                         self.note_freed(fd);
+                        self.closing(&entry.file);
                         entry.file.dec_ref();
                     }
                 }
@@ -833,6 +864,7 @@ impl FileTable {
 
         for slot in files.iter_mut() {
             if let Some(entry) = slot.take() {
+                self.closing(&entry.file);
                 entry.file.dec_ref();
             }
         }
@@ -847,6 +879,40 @@ mod tests {
 
     fn some_file() -> Arc<File> {
         Arc::new(File::new(RamFs::new().root(), OpenFlags::read_only()))
+    }
+
+    /// Closing any descriptor of a file drops the table's POSIX record
+    /// locks on it (Linux's locks_remove_posix), and only that table's.
+    #[test]
+    fn closing_a_descriptor_releases_the_tables_record_locks() {
+        use crate::fs::flock::{set_lock, test_lock, RangeLock, F_WRLCK};
+        let file = some_file();
+        // Another open of the same file, through which nothing was locked.
+        let reopened = Arc::new(File::new(file.node.clone(), OpenFlags::read_only()));
+        let key = file.flock_key();
+        assert_eq!(reopened.flock_key(), key);
+        let (mine, other) = (FileTable::new(), FileTable::new());
+        let fd = mine.open(file.clone()).unwrap();
+        let dup = mine.open(reopened).unwrap();
+        let lock = |owner: u64, start: u64| RangeLock {
+            kind: F_WRLCK,
+            start,
+            end: start,
+            owner,
+            pid: 1,
+            ofd: false,
+        };
+        set_lock(key, &lock(mine.lock_owner(), 0), false).unwrap();
+        set_lock(key, &lock(other.lock_owner(), 1), false).unwrap();
+        let probe = lock(0, 0);
+        mine.close(dup).unwrap();
+        assert_eq!(test_lock(key, &probe), None);
+        assert_eq!(
+            test_lock(key, &lock(0, 1)).map(|l| l.owner),
+            Some(other.lock_owner())
+        );
+        crate::fs::flock::release_owner(key, other.lock_owner());
+        mine.close(fd).unwrap();
     }
 
     /// Reference: the lowest fd that is neither open nor still the console.

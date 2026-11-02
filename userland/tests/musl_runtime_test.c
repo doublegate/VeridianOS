@@ -5538,12 +5538,15 @@ static void test_statfs(void)
     report("statfs_errors", ok, why);
 }
 
+static void test_record_locks(void);
+
 /* Tests `--only NAME` can run alone (for debugging a single test). */
 static const struct {
     const char *name;
     void (*fn)(void);
 } only_tests[] = {
     {"review_fixes", test_review_fixes},
+    {"record_locks", test_record_locks},
     {"threads", test_threads},
     {"cow_race", test_cow_race},
     {"signals", test_signals},
@@ -7195,6 +7198,140 @@ static void test_ioctl(void)
     report("ioctl", f == 0, why);
 }
 
+/* One fcntl record-lock request on [start, start + len). */
+static int setlk(int fd, int cmd, short type, off_t start, off_t len)
+{
+    struct flock fl = {.l_type = type, .l_whence = SEEK_SET, .l_start = start, .l_len = len};
+    return fcntl(fd, cmd, &fl);
+}
+
+/* The lock F_GETLK (or F_OFD_GETLK) finds in the way of a write lock on
+ * [start, start + len), in *fl. */
+static int getlk(int fd, int cmd, off_t start, off_t len, struct flock *fl)
+{
+    memset(fl, 0, sizeof(*fl));
+    fl->l_type = F_WRLCK;
+    fl->l_whence = SEEK_SET;
+    fl->l_start = start;
+    fl->l_len = len;
+    return fcntl(fd, cmd, fl);
+}
+
+/* fcntl record locks (N-199): POSIX locks belong to the descriptor table
+ * and go with any close of the file, OFD locks to the open file; a cycle
+ * of F_SETLKW waiters is EDEADLK for the one that would close it. */
+static void test_record_locks(void)
+{
+    const char *path = "/tmp/musl_reclock";
+    struct flock fl;
+    char why[96];
+    int f = 0, child = -1;
+
+    int fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0644);
+    /* [0, 100) less [40, 60): two locks with a hole. */
+    if (fd < 0 || setlk(fd, F_SETLK, F_WRLCK, 0, 100) != 0 ||
+        setlk(fd, F_SETLK, F_UNLCK, 40, 20) != 0)
+        f |= 1;
+    /* An owner's own locks are never in its way. */
+    if (getlk(fd, F_GETLK, 0, 100, &fl) != 0 || fl.l_type != F_UNLCK) f |= 1;
+    pid_t parent = getpid();
+    pid_t pid = fork();
+    if (pid == 0) {
+        int g = 0;
+        /* The inherited descriptor is in another table: the locks are
+         * the parent's. */
+        if (getlk(fd, F_GETLK, 10, 1, &fl) != 0 || fl.l_type != F_WRLCK || fl.l_pid != parent ||
+            fl.l_start != 0 || fl.l_len != 40)
+            g |= 1;
+        errno = 0;
+        if (!fails_with(setlk(fd, F_SETLK, F_RDLCK, 70, 1), EAGAIN)) g |= 2;
+        if (setlk(fd, F_SETLK, F_WRLCK, 45, 10) != 0) g |= 4;
+        _exit(g);
+    }
+    int st = 0;
+    if (pid < 0 || waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+        f |= 2;
+        child = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+    }
+    /* The child's lock went with it. */
+    if (getlk(fd, F_GETLK, 40, 20, &fl) != 0 || fl.l_type != F_UNLCK) f |= 4;
+
+    /* Closing any descriptor of the file drops the table's locks. */
+    int other = open(path, O_RDONLY);
+    if (other < 0 || close(other) != 0) f |= 8;
+    pid = fork();
+    if (pid == 0)
+        _exit(setlk(fd, F_SETLK, F_WRLCK, 0, 0) == 0 ? 0 : 1);
+    if (pid < 0 || waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 0) f |= 8;
+
+    /* An OFD lock conflicts with the same process's POSIX lock, and the
+     * POSIX lock's holder is reported; its own holder is -1. */
+    int ofd = open(path, O_RDWR);
+    if (ofd < 0 || setlk(fd, F_SETLK, F_WRLCK, 0, 10) != 0) f |= 16;
+    errno = 0;
+    if (!fails_with(setlk(ofd, F_OFD_SETLK, F_WRLCK, 5, 1), EAGAIN)) f |= 16;
+    if (getlk(ofd, F_OFD_GETLK, 5, 1, &fl) != 0 || fl.l_type != F_WRLCK || fl.l_pid != parent)
+        f |= 16;
+    if (setlk(ofd, F_OFD_SETLK, F_RDLCK, 200, 0) != 0) f |= 32;
+    errno = 0;
+    if (!fails_with(setlk(fd, F_SETLK, F_WRLCK, 300, 1), EAGAIN)) f |= 32;
+    if (getlk(fd, F_GETLK, 300, 1, &fl) != 0 || fl.l_type != F_RDLCK || fl.l_pid != -1 ||
+        fl.l_start != 200 || fl.l_len != 0)
+        f |= 32;
+    /* An OFD request naming a pid is EINVAL; closing the open file drops
+     * its lock. */
+    struct flock bad = {.l_type = F_RDLCK, .l_whence = SEEK_SET, .l_pid = 1};
+    errno = 0;
+    if (!fails_with(fcntl(ofd, F_OFD_SETLK, &bad), EINVAL)) f |= 64;
+    close(ofd);
+    if (setlk(fd, F_SETLK, F_WRLCK, 300, 1) != 0) f |= 64;
+
+    /* The descriptor must be open for the lock's kind, and F_GETLK asks
+     * about a read or a write lock. */
+    int ro = open(path, O_RDONLY);
+    errno = 0;
+    if (ro < 0 || !fails_with(setlk(ro, F_SETLK, F_WRLCK, 500, 1), EBADF)) f |= 128;
+    close(ro);
+    if (setlk(fd, F_SETLK, F_UNLCK, 0, 0) != 0) f |= 128;
+    struct flock unl = {.l_type = F_UNLCK, .l_whence = SEEK_SET};
+    errno = 0;
+    if (!fails_with(fcntl(fd, F_GETLK, &unl), EINVAL)) f |= 128;
+
+    /* Deadlock: the parent holds byte 0, the child byte 1, and each asks
+     * for the other's. Whichever asks second closes the cycle and gets
+     * EDEADLK, then gives its byte up so the other is granted. */
+    int sync[2];
+    if (pipe(sync) != 0 || setlk(fd, F_SETLK, F_WRLCK, 0, 1) != 0) f |= 256;
+    pid = fork();
+    if (pid == 0) {
+        char c = 'r';
+        if (setlk(fd, F_SETLK, F_WRLCK, 1, 1) != 0 || write(sync[1], &c, 1) != 1) _exit(2);
+        if (setlk(fd, F_SETLKW, F_WRLCK, 0, 1) == 0) _exit(0);
+        int e = errno;
+        setlk(fd, F_SETLK, F_UNLCK, 1, 1);
+        _exit(e == EDEADLK ? 1 : 3);
+    }
+    char c;
+    int parent_deadlk = 0;
+    if (pid < 0 || read(sync[0], &c, 1) != 1) f |= 256;
+    if (setlk(fd, F_SETLKW, F_WRLCK, 1, 1) != 0) {
+        parent_deadlk = errno == EDEADLK ? 1 : 2;
+        setlk(fd, F_SETLK, F_UNLCK, 0, 1);
+    }
+    st = 0;
+    int child_deadlk = pid > 0 && waitpid(pid, &st, 0) == pid && WIFEXITED(st) ? WEXITSTATUS(st) : 9;
+    if (!((parent_deadlk == 1 && child_deadlk == 0) || (parent_deadlk == 0 && child_deadlk == 1)))
+        f |= 512;
+    close(sync[0]);
+    close(sync[1]);
+    close(fd);
+    unlink(path);
+
+    snprintf(why, sizeof(why), "f=0x%x child=%d deadlk=%d/%d errno=%d", f, child, parent_deadlk,
+             child_deadlk, errno);
+    report("record_locks", f == 0, why);
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
@@ -7302,6 +7439,7 @@ int main(int argc, char **argv)
     test_execveat();
     test_fhandle();
     test_ioctl();
+    test_record_locks();
 #if defined(__x86_64__)
     test_ustat_sysfs();
 #endif
