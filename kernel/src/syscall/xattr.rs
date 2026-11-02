@@ -34,12 +34,33 @@ const XATTR_ARGS_SIZE_VER0: usize = 16;
 /// Linux's path_getxattrat and path_setxattrat look the empty name up for
 /// a negative fd); list and remove always take the fd, so it is EBADF.
 /// Flags other than AT_SYMLINK_NOFOLLOW and AT_EMPTY_PATH are EINVAL.
-/// fchownat and fchmodat2 find their node the same way.
+/// An O_PATH descriptor is EBADF here, as Linux's fd-based xattr calls.
 pub(super) fn target(
     dfd: usize,
     path_ptr: usize,
     at_flags: usize,
     cwd_ok: bool,
+) -> Result<Arc<dyn VfsNode>, SyscallError> {
+    target_in(dfd, path_ptr, at_flags, cwd_ok, false)
+}
+
+/// [`target`] for the calls that act on what an empty path's descriptor
+/// names, O_PATH descriptors too, the working directory for AT_FDCWD:
+/// fchownat, fchmodat2 and readlinkat.
+pub(super) fn path_target(
+    dfd: usize,
+    path_ptr: usize,
+    at_flags: usize,
+) -> Result<Arc<dyn VfsNode>, SyscallError> {
+    target_in(dfd, path_ptr, at_flags, true, true)
+}
+
+fn target_in(
+    dfd: usize,
+    path_ptr: usize,
+    at_flags: usize,
+    cwd_ok: bool,
+    path_fds: bool,
 ) -> Result<Arc<dyn VfsNode>, SyscallError> {
     if at_flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
         return Err(SyscallError::InvalidArgument);
@@ -59,12 +80,13 @@ pub(super) fn target(
             return vfs.resolve_path(&vfs.get_cwd()).map_err(map_resolve_err);
         }
         let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
-        let file = proc
-            .file_table
-            .lock()
-            .get(dfd as u32 as usize)
-            .ok_or(SyscallError::BadFileDescriptor)?;
-        return Ok(file.node.clone());
+        let table = proc.file_table.lock();
+        let file = if path_fds {
+            table.get_path(dfd as u32 as usize)
+        } else {
+            table.get(dfd as u32 as usize)
+        };
+        return Ok(file.ok_or(SyscallError::BadFileDescriptor)?.node.clone());
     }
     let abs = resolve_at_path(dfd, &path)?;
     if at_flags & AT_SYMLINK_NOFOLLOW != 0 {

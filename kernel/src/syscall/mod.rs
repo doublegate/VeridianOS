@@ -2054,7 +2054,7 @@ fn sys_fchownat(
     gid: usize,
     flags: usize,
 ) -> SyscallResult {
-    let node = xattr::target(dirfd, path_ptr, flags as u32 as usize, true)?;
+    let node = xattr::path_target(dirfd, path_ptr, flags as u32 as usize)?;
     // Same rules as chown (root only); this used to report success and
     // change nothing.
     filesystem::chown_node(&node, uid, gid)
@@ -2079,6 +2079,9 @@ fn sys_symlinkat(target_ptr: usize, newdirfd: usize, linkpath_ptr: usize) -> Sys
 }
 
 /// readlinkat syscall -- read symlink target relative to a directory fd.
+/// An empty path reads the symlink `dirfd` names (an O_PATH|O_NOFOLLOW
+/// descriptor), ENOENT if it is not one, as Linux's do_readlinkat; a
+/// named file that is not a symlink is EINVAL.
 ///
 /// # Arguments
 /// - `dirfd`: Directory fd (AT_FDCWD for CWD-relative).
@@ -2089,17 +2092,25 @@ fn sys_readlinkat(dirfd: usize, path_ptr: usize, buf_ptr: usize, buf_size: usize
     if buf_size == 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    let rel_path = filesystem::read_user_path(path_ptr)?;
-    let abs_path = filesystem::resolve_at_path(dirfd, &rel_path)?;
+    let rel_path = filesystem::read_user_path_or_empty(path_ptr)?;
+    let empty = rel_path.is_empty();
+    let node = if empty {
+        xattr::path_target(dirfd, 0, filesystem::AT_EMPTY_PATH)?
+    } else {
+        let abs_path = filesystem::resolve_at_path(dirfd, &rel_path)?;
+        // readlinkat must not follow the final symlink
+        filesystem::vfs()?
+            .resolve_path_no_follow(&abs_path)
+            .map_err(filesystem::map_resolve_err)?
+    };
     validate_user_buffer(buf_ptr, buf_size)?;
-
-    let vfs = filesystem::vfs()?;
-
-    // readlinkat must not follow the final symlink
-    let node = vfs
-        .resolve_path_no_follow(&abs_path)
-        .map_err(filesystem::map_resolve_err)?;
-    let target = node.readlink().map_err(|_| SyscallError::InvalidArgument)?;
+    let target = node.readlink().map_err(|_| {
+        if empty {
+            SyscallError::ResourceNotFound
+        } else {
+            SyscallError::InvalidArgument
+        }
+    })?;
 
     let bytes = target.as_bytes();
     let copy_len = bytes.len().min(buf_size);
@@ -2327,8 +2338,9 @@ fn files_for_fds(fds: &[i32]) -> Result<crate::net::unix_socket::ScmRights, Sysc
     let files = fds
         .iter()
         .map(|&fd| {
+            // O_PATH descriptors pass too, as Linux's scm_fp_copy.
             table
-                .get(scm_fd_index(fd)?)
+                .get_path(scm_fd_index(fd)?)
                 .ok_or(SyscallError::BadFileDescriptor)
         })
         .collect::<Result<alloc::vec::Vec<_>, _>>()?;

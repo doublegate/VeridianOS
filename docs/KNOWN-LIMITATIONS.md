@@ -75,8 +75,11 @@ exposed were fixed (N-182 to N-189); the rest are listed, with their targets, in
 - **openat2's resolve flags have no cache to work with.** RESOLVE_CACHED refuses what it must
   (a creation or truncation is EAGAIN) but otherwise runs the whole walk, since there is no dentry
   cache whose miss it could report. /proc/self/exe is the only magic link (there is no
-  /proc/<pid>/fd yet), so RESOLVE_NO_MAGICLINKS has one link to refuse. O_EMPTYPATH is accepted
-  but an empty name is still ENOENT; reopening a descriptor by it comes with O_PATH.
+  /proc/<pid>/fd yet), so RESOLVE_NO_MAGICLINKS has one link to refuse. O_EMPTYPATH reopens
+  what a descriptor names, but not a pipe or socket, which records no path (ENXIO).
+- **O_TMPFILE needs ramfs or tmpfs** (/dev/shm). BlockFS, the root filesystem, has no unnamed
+  files and answers EOPNOTSUPP, as Linux does for a filesystem without `tmpfile`; callers fall
+  back to a named temporary file.
 - **There is no /dev/fd.** execveat of a descriptor names the program `/dev/fd/N` (or
   `/dev/fd/N/name`), as Linux does, but nothing serves that path, since /proc/self/fd does not
   exist yet; a script run from a descriptor that stays open across the exec therefore starts an
@@ -406,9 +409,10 @@ filesystem.
 - **Directory listing (N-124).** `getdents64` re-reads the directory and seeks by index, so
   removing entries while listing (`rm -r`) skips entries; listing is O(n^2).
 - **`O_APPEND` (N-126)** is not atomic across separate opens of a file.
-- **linkat with AT_EMPTY_PATH** needs CAP_DAC_READ_SEARCH. Linux also lets a caller whose
-  credentials opened the descriptor link it; an open file here does not record who opened it, so
-  such a caller gets ENOENT.
+- **linkat with AT_EMPTY_PATH** links a descriptor for a caller with CAP_DAC_READ_SEARCH or with
+  the credentials it was opened with. Linux compares the credential object itself, so a process
+  that received the descriptor from another with identical credentials and capabilities gets
+  ENOENT there and the link here.
 - **Directories and paths (N-130).** No dentry cache (`..` and symlinks re-walk from the root),
   BlockFS directories are scanned linearly and limited to 12 blocks.
 - **On-disk structures are not validated (N-123).** BlockFS checks only the magic number; the ext4

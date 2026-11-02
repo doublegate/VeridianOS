@@ -524,6 +524,26 @@ pub trait VfsNode: Send + Sync {
         })
     }
 
+    /// O_TMPFILE: a new regular file of this directory's filesystem with
+    /// no name (link count 0), which [`Self::link`] may name later only if
+    /// `linkable` ([`Self::tmpfile_linkable`]); it is freed when the last
+    /// reference goes. EOPNOTSUPP by default, as Linux answers for a
+    /// filesystem without `tmpfile` (BlockFS here).
+    fn tmpfile(
+        &self,
+        _permissions: Permissions,
+        _linkable: bool,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotSupported))
+    }
+
+    /// Whether this node, an O_TMPFILE file not yet named, may be linked
+    /// although it has no name (Linux's I_LINKABLE): made without O_EXCL
+    /// and not linked since.
+    fn tmpfile_linkable(&self) -> bool {
+        false
+    }
+
     /// A stable identity for the file this node names, `(filesystem,
     /// inode)`, for filesystems that build a new node object on every
     /// lookup (BlockFS). `None` (the default) means node objects are shared,
@@ -3171,6 +3191,42 @@ pub(crate) mod tests {
         check_link_counts(&ramfs::RamFs::new());
         check_link_counts(&tmpfs::TmpFs::new(0));
         check_link_counts(&blockfs::BlockFs::format(1000, 100).unwrap());
+    }
+
+    /// O_TMPFILE's file (N-206): ramfs and tmpfs make one with no name,
+    /// which a link names only if it was made linkable, and then never
+    /// again once unnamed; BlockFS has none (EOPNOTSUPP).
+    fn check_tmpfile(fs: &dyn Filesystem) {
+        let root = fs.root();
+        let t = root.tmpfile(Permissions::from_mode(0o600), true).unwrap();
+        assert_eq!(t.node_type(), NodeType::File);
+        assert_eq!(t.link_count(), 0);
+        assert!(t.tmpfile_linkable());
+        assert!(root.lookup("t").is_err());
+        t.write(0, b"data").unwrap();
+        root.link("t", t.clone()).unwrap();
+        assert_eq!(t.link_count(), 1);
+        assert!(!t.tmpfile_linkable());
+        let mut buf = [0u8; 4];
+        assert_eq!(root.lookup("t").unwrap().read(0, &mut buf).unwrap(), 4);
+        assert_eq!(&buf, b"data");
+        root.unlink("t").unwrap();
+        assert!(t.link_count() == 0 && !t.tmpfile_linkable());
+        let excl = root.tmpfile(Permissions::from_mode(0o600), false).unwrap();
+        assert!(excl.link_count() == 0 && !excl.tmpfile_linkable());
+        // Only a directory makes them.
+        assert!(t.tmpfile(Permissions::from_mode(0o600), true).is_err());
+    }
+
+    #[test]
+    fn tmpfiles_are_unnamed_until_linked() {
+        check_tmpfile(&ramfs::RamFs::new());
+        check_tmpfile(&tmpfs::TmpFs::new(0));
+        let blockfs = blockfs::BlockFs::format(1000, 100).unwrap();
+        assert!(matches!(
+            blockfs.root().tmpfile(Permissions::from_mode(0o600), true),
+            Err(KernelError::FsError(crate::error::FsError::NotSupported))
+        ));
     }
 
     /// Helper: create a Vfs with a ramfs root filesystem already mounted.

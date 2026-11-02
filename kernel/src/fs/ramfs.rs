@@ -44,6 +44,9 @@ struct RamNode {
     /// How many directory entries name this node (1 for the root); see
     /// [`VfsNode::link_count`].
     links: core::sync::atomic::AtomicU32,
+    /// An O_TMPFILE file that linkat may still name
+    /// ([`VfsNode::tmpfile_linkable`]).
+    linkable: core::sync::atomic::AtomicBool,
 }
 
 impl RamNode {
@@ -112,6 +115,7 @@ impl RamNode {
             fs_id,
             parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
             links: core::sync::atomic::AtomicU32::new(1),
+            linkable: core::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -138,6 +142,7 @@ impl RamNode {
             fs_id,
             parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
             links: core::sync::atomic::AtomicU32::new(1),
+            linkable: core::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -168,6 +173,7 @@ impl RamNode {
             fs_id,
             parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
             links: core::sync::atomic::AtomicU32::new(1),
+            linkable: core::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -586,9 +592,33 @@ impl VfsNode for RamNode {
             .links
             .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
         super::note_change(&mut target.metadata.write(), false);
+        // Named now: once unlinked again it stays unnamed.
+        target
+            .linkable
+            .store(false, core::sync::atomic::Ordering::Release);
         children.insert(String::from(name), target);
         self.entry_added();
         Ok(())
+    }
+
+    fn tmpfile(
+        &self,
+        permissions: Permissions,
+        linkable: bool,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        if self.node_type != NodeType::Directory {
+            return Err(KernelError::FsError(FsError::NotADirectory));
+        }
+        let inode = NEXT_INODE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let node = RamNode::new_file(inode, self.inode, self.fs_id, permissions);
+        node.links.store(0, core::sync::atomic::Ordering::Release);
+        node.linkable
+            .store(linkable, core::sync::atomic::Ordering::Release);
+        Ok(Arc::new(node))
+    }
+
+    fn tmpfile_linkable(&self) -> bool {
+        self.linkable.load(core::sync::atomic::Ordering::Acquire)
     }
 
     fn symlink(&self, name: &str, target: &str) -> Result<Arc<dyn VfsNode>, KernelError> {

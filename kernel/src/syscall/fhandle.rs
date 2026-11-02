@@ -9,7 +9,7 @@
 use alloc::{string::String, sync::Arc};
 
 use super::{
-    file_calls::open_file,
+    file_calls::path_file,
     filesystem::{
         map_resolve_err, open_node, read_user_path, read_user_path_or_empty, resolve_at_path, vfs,
         AT_EMPTY_PATH, AT_FDCWD,
@@ -117,7 +117,7 @@ fn lookup(
             let (node, canonical) = vfs.resolve_path_canonical(".").map_err(map_resolve_err)?;
             return Ok((node, Some(canonical)));
         }
-        let file = open_file(dirfd)?;
+        let file = path_file(dirfd)?;
         return Ok((file.node.clone(), file.path.clone()));
     }
     let abs = resolve_at_path(dirfd, &name)?;
@@ -229,7 +229,7 @@ pub fn sys_open_by_handle_at(mount_fd: usize, handle_ptr: usize, flags: usize) -
     }
     let fd = mount_fd as u32 as i32;
     let anchor = if fd >= 0 {
-        open_file(fd as usize)?.path.clone()
+        path_file(fd as usize)?.path.clone()
     } else if fd == AT_FDCWD as u32 as i32 {
         vfs()?
             .resolve_path_canonical(".")

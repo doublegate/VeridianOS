@@ -85,6 +85,19 @@ impl OpenFlags {
         }
     }
 
+    /// An O_PATH descriptor's: no access at all.
+    pub fn path_only() -> Self {
+        Self {
+            read: false,
+            write: false,
+            append: false,
+            create: false,
+            truncate: false,
+            exclusive: false,
+            nonblock: false,
+        }
+    }
+
     /// Create from bits (for syscall interface).
     ///
     /// Flag values match the Linux x86_64 ABI (`<fcntl.h>`) so musl-compiled
@@ -131,6 +144,19 @@ pub mod status {
     pub const DIRECT: u32 = 0x4000;
     /// Do not update the access time.
     pub const NOATIME: u32 = 0x4_0000;
+    /// Writes are synchronous for data (recorded: every write already
+    /// reaches the filesystem before it returns).
+    pub const DSYNC: u32 = 0x1000;
+    /// Writes are synchronous for data and metadata (Linux's O_SYNC,
+    /// __O_SYNC with O_DSYNC; recorded as DSYNC is).
+    pub const SYNC: u32 = 0x10_1000;
+    /// An O_PATH descriptor: it names a file without opening it (Linux's
+    /// FMODE_PATH), so only path operations take it
+    /// ([`super::FileTable::get_path`]).
+    pub const PATH: u32 = 0x20_0000;
+    /// What open records from its flags besides O_APPEND (F_GETFL reports
+    /// them; F_SETFL changes only [`SETFL`]).
+    pub const OPEN: u32 = ASYNC | DIRECT | NOATIME | SYNC | PATH;
     /// What F_SETFL sets and clears here (Linux's SETFL_MASK less
     /// O_NONBLOCK, which [`super::File::nonblock`] holds).
     pub const SETFL: u32 = APPEND | ASYNC | DIRECT | NOATIME;
@@ -187,6 +213,11 @@ pub struct File {
     /// The file has been given an OFD record lock (F_OFD_SETLK), which its
     /// last close releases.
     pub ofd_locked: AtomicBool,
+
+    /// Who opened the file by name (open, openat, openat2), as Linux's
+    /// f_cred: linkat with AT_EMPTY_PATH links it for that caller. `None`
+    /// for files made otherwise (pipes, sockets, memfds).
+    pub opener: Option<alloc::boxed::Box<crate::process::creds::Caller>>,
 }
 
 impl Drop for File {
@@ -220,6 +251,11 @@ impl File {
         }
     }
 
+    /// Whether this is an O_PATH descriptor ([`status::PATH`]).
+    pub fn is_path(&self) -> bool {
+        self.status.load(Ordering::Acquire) & status::PATH != 0
+    }
+
     /// Whether writes go to the end of the file (O_APPEND, as open or
     /// F_SETFL last left it).
     pub fn is_append(&self) -> bool {
@@ -240,6 +276,7 @@ impl File {
             path: None,
             flock_owner: AtomicU64::new(0),
             ofd_locked: AtomicBool::new(false),
+            opener: None,
         }
     }
 
@@ -257,6 +294,7 @@ impl File {
             path: Some(path),
             flock_owner: AtomicU64::new(0),
             ofd_locked: AtomicBool::new(false),
+            opener: None,
         }
     }
 
@@ -596,13 +634,26 @@ impl FileTable {
         Ok(fd)
     }
 
-    /// Get a file by descriptor
+    /// The file open at `fd` for I/O and the other calls on open files,
+    /// as Linux's fdget: an O_PATH descriptor is not one (the caller
+    /// reports EBADF), so a call that does not ask for O_PATH files
+    /// refuses them.
     pub fn get(&self, fd: FileDescriptor) -> Option<Arc<File>> {
+        self.get_path(fd).filter(|file| !file.is_path())
+    }
+
+    /// The file at `fd`, O_PATH descriptors included (Linux's fdget_raw),
+    /// for the calls that act on what a descriptor names: fstat, fchdir,
+    /// fstatfs, directory descriptors of the `*at` calls and their
+    /// AT_EMPTY_PATH forms, dup, passing descriptors over a socket.
+    pub fn get_path(&self, fd: FileDescriptor) -> Option<Arc<File>> {
         let files = self.files.read();
         files.get(fd)?.as_ref().map(|entry| entry.file.clone())
     }
 
-    /// Get a file entry by descriptor (includes flags)
+    /// Get a file entry by descriptor (includes flags), O_PATH descriptors
+    /// included as [`Self::get_path`] (fcntl answers the commands an
+    /// O_PATH descriptor takes, execveat runs what one names).
     pub fn get_entry(&self, fd: FileDescriptor) -> Option<(Arc<File>, bool)> {
         let files = self.files.read();
         files
@@ -654,7 +705,7 @@ impl FileTable {
     /// Duplicate a file descriptor
     pub fn dup(&self, fd: FileDescriptor) -> Result<FileDescriptor, KernelError> {
         let file = self
-            .get(fd)
+            .get_path(fd)
             .ok_or(KernelError::FsError(FsError::BadFileDescriptor))?;
         file.inc_ref();
         // Duplicated FDs don't inherit close-on-exec
@@ -664,7 +715,7 @@ impl FileTable {
     /// Duplicate a file descriptor with close-on-exec flag
     pub fn dup_cloexec(&self, fd: FileDescriptor) -> Result<FileDescriptor, KernelError> {
         let file = self
-            .get(fd)
+            .get_path(fd)
             .ok_or(KernelError::FsError(FsError::BadFileDescriptor))?;
         file.inc_ref();
         self.open_with_flags(file, true)
@@ -687,7 +738,7 @@ impl FileTable {
             });
         }
         let file = self
-            .get(fd)
+            .get_path(fd)
             .ok_or(KernelError::FsError(FsError::BadFileDescriptor))?;
         file.inc_ref();
 
@@ -725,7 +776,7 @@ impl FileTable {
         // If old_fd == new_fd, just return success without doing anything
         if old_fd == new_fd {
             // Verify old_fd is valid
-            if self.get(old_fd).is_none() {
+            if self.get_path(old_fd).is_none() {
                 return Err(KernelError::FsError(FsError::BadFileDescriptor));
             }
             return Ok(());
@@ -737,7 +788,7 @@ impl FileTable {
             return Err(KernelError::FsError(FsError::BadFileDescriptor));
         }
         let file = self
-            .get(old_fd)
+            .get_path(old_fd)
             .ok_or(KernelError::FsError(FsError::BadFileDescriptor))?;
         file.inc_ref();
 
@@ -784,7 +835,7 @@ impl FileTable {
             return Err(KernelError::FsError(FsError::BadFileDescriptor));
         }
         let file = self
-            .get(old_fd)
+            .get_path(old_fd)
             .ok_or(KernelError::FsError(FsError::BadFileDescriptor))?;
         file.inc_ref();
 
@@ -919,6 +970,28 @@ mod tests {
 
     fn some_file() -> Arc<File> {
         Arc::new(File::new(RamFs::new().root(), OpenFlags::read_only()))
+    }
+
+    /// An O_PATH descriptor is not an open file for `get` (EBADF for I/O),
+    /// but `get_path`, `get_entry` and the duplication calls take it (N-206).
+    #[test]
+    fn path_descriptors_serve_only_path_lookups() {
+        let table = FileTable::new();
+        let file = Arc::new(File::new(RamFs::new().root(), OpenFlags::path_only()));
+        file.status.fetch_or(status::PATH, Ordering::AcqRel);
+        assert!(file.is_path() && !some_file().is_path());
+        let fd = table.open(file.clone()).unwrap();
+        assert!(table.get(fd).is_none());
+        assert!(Arc::ptr_eq(&table.get_path(fd).unwrap(), &file));
+        assert!(table.get_entry(fd).is_some());
+        let dup = table.dup(fd).unwrap();
+        assert!(table.get(dup).is_none() && table.get_path(dup).unwrap().is_path());
+        table.dup2(fd, 9).unwrap();
+        assert!(table.get_path(9).is_some());
+        assert!(table.dup_at_least(fd, 20, true).unwrap() >= 20);
+        // An ordinary file is found by both.
+        let other = table.open(some_file()).unwrap();
+        assert!(table.get(other).is_some() && table.get_path(other).is_some());
     }
 
     /// A position past i64::MAX is EINVAL, as Linux's vfs_setpos, so no

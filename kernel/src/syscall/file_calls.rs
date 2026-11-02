@@ -26,6 +26,14 @@ pub(super) fn open_file(fd: usize) -> Result<Arc<File>, SyscallError> {
     file.ok_or(SyscallError::BadFileDescriptor)
 }
 
+/// The file `fd` names, O_PATH descriptors included
+/// ([`crate::fs::file::FileTable::get_path`]), EBADF if there is none.
+pub(super) fn path_file(fd: usize) -> Result<Arc<File>, SyscallError> {
+    let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    let file = proc.file_table.lock().get_path(fd as u32 as usize);
+    file.ok_or(SyscallError::BadFileDescriptor)
+}
+
 /// A 64-bit file offset from a register (`loff_t`).
 fn loff(value: usize) -> i64 {
     value as i64
@@ -57,7 +65,7 @@ pub fn sys_fchmodat2(dirfd: usize, path_ptr: usize, mode: usize, flags: usize) -
     if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    let node = xattr::target(dirfd, path_ptr, flags, true)?;
+    let node = xattr::path_target(dirfd, path_ptr, flags)?;
     filesystem::chmod_node(&node, mode)
 }
 

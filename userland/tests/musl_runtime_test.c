@@ -5543,6 +5543,7 @@ static void test_fcntl_flags(void);
 static void test_vectored_io(void);
 static void test_link_errors(void);
 static void test_stat_numbers(void);
+static void test_open_flags(void);
 
 /* Tests `--only NAME` can run alone (for debugging a single test). */
 static const struct {
@@ -5555,6 +5556,7 @@ static const struct {
     {"vectored_io", test_vectored_io},
     {"link_errors", test_link_errors},
     {"stat_numbers", test_stat_numbers},
+    {"open_flags", test_open_flags},
     {"threads", test_threads},
     {"cow_race", test_cow_race},
     {"signals", test_signals},
@@ -7620,6 +7622,147 @@ static void test_stat_numbers(void)
     report("stat_numbers", f == 0, why);
 }
 
+/* Open flags as Linux 7.3 handles them (N-206): an O_PATH descriptor names
+ * a file without opening it -- no permission check, truncation or FIFO
+ * wait, other flags dropped by open(2) -- and serves only path operations
+ * (fstat, *at directories and AT_EMPTY_PATH, fchdir, dup, F_GETFD/F_SETFD/
+ * F_GETFL); read, write, lseek, ioctl, mmap, getdents64, fsync, fchmod and
+ * F_SETFL are EBADF (fchmod by its system call: musl's falls back to
+ * /proc/self/fd for an O_PATH descriptor, and musl's O_ACCMODE includes
+ * O_PATH, so the access mode is the low two bits). O_TMPFILE makes an
+ * unnamed file in a directory (no links) that linkat with AT_EMPTY_PATH can
+ * name unless O_EXCL was given; it needs O_DIRECTORY and write access
+ * (EINVAL) and a directory (ENOTDIR). O_NOATIME needs the file's owner
+ * (EPERM). */
+static void test_open_flags(void)
+{
+    const char *d = "/tmp/musl_oflags";
+    char why[96], buf[64];
+    struct stat st;
+    int f = 0;
+
+    unlink("/tmp/musl_oflags/file");
+    unlink("/tmp/musl_oflags/sl");
+    unlink("/tmp/musl_oflags/fifo");
+    unlink("/tmp/musl_oflags/viapath");
+    rmdir("/tmp/musl_oflags/sub");
+    rmdir(d);
+    if (mkdir(d, 0755) != 0 || chdir(d) != 0) f |= 1;
+    int w = open("file", O_CREAT | O_WRONLY, 0644);
+    if (w < 0 || write(w, "hello", 5) != 5) f |= 1;
+    close(w);
+    if (mkdir("sub", 0755) != 0 || symlink("file", "sl") != 0 || mkfifo("fifo", 0644) != 0)
+        f |= 1;
+
+    /* O_PATH: other flags dropped (no truncation), no I/O. */
+    int p = open("file", O_PATH | O_RDWR | O_TRUNC);
+    int fl = p < 0 ? 0 : fcntl(p, F_GETFL);
+    if (p < 0 || stat("file", &st) != 0 || st.st_size != 5 || !(fl & O_PATH) ||
+        (fl & 3) != 0)
+        f |= 2;
+    if (!errno_is((int)read(p, buf, 1), EBADF) || !errno_is((int)write(p, "x", 1), EBADF) ||
+        !errno_is((int)lseek(p, 0, SEEK_SET), EBADF) || !errno_is((int)fsync(p), EBADF) ||
+        !errno_is((int)syscall(SYS_fchmod, p, 0600), EBADF) || !errno_is((int)ioctl(p, FIONREAD, &fl), EBADF))
+        f |= 4;
+    if (mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, p, 0) != MAP_FAILED || errno != EBADF) f |= 4;
+    if (!errno_is((int)fcntl(p, F_SETFL, O_NONBLOCK), EBADF) || fcntl(p, F_GETFD) != 0 ||
+        fcntl(p, F_SETFD, FD_CLOEXEC) != 0 || fcntl(p, F_GETFD) != FD_CLOEXEC)
+        f |= 8;
+    /* Path operations work. */
+    int p2 = dup(p);
+    if (p2 < 0 || fstat(p2, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size != 5) f |= 16;
+    if (fstatat(p, "", &st, AT_EMPTY_PATH) != 0 || st.st_size != 5) f |= 16;
+    if (linkat(p, "", AT_FDCWD, "viapath", AT_EMPTY_PATH) != 0 || stat("viapath", &st) != 0 ||
+        st.st_nlink != 2)
+        f |= 32;
+    close(p2);
+    close(p);
+
+    /* An O_PATH directory: a dirfd and fchdir, but no getdents64. */
+    int pd = open("sub", O_PATH | O_DIRECTORY);
+    int made = pd < 0 ? -1 : openat(pd, "inner", O_CREAT | O_WRONLY, 0644);
+    if (made < 0 || fstatat(pd, "inner", &st, 0) != 0) f |= 64;
+    close(made);
+    if (!errno_is((int)syscall(SYS_getdents64, pd, buf, sizeof(buf)), EBADF)) f |= 64;
+    if (fchdir(pd) != 0 || stat("inner", &st) != 0 || chdir(d) != 0) f |= 64;
+    unlinkat(pd, "inner", 0);
+    close(pd);
+    if (!errno_is((int)open("file", O_PATH | O_DIRECTORY), ENOTDIR)) f |= 64;
+
+    /* O_PATH|O_NOFOLLOW names a symlink itself; a FIFO opens at once. */
+    int ps = open("sl", O_PATH | O_NOFOLLOW);
+    long n = ps < 0 ? -1 : readlinkat(ps, "", buf, sizeof(buf));
+    if (ps < 0 || fstat(ps, &st) != 0 || !S_ISLNK(st.st_mode) || n != 4 ||
+        memcmp(buf, "file", 4) != 0)
+        f |= 128;
+    close(ps);
+    int pf = open("fifo", O_PATH);
+    if (pf < 0 || fstat(pf, &st) != 0 || !S_ISFIFO(st.st_mode)) f |= 128;
+    close(pf);
+
+    /* O_TMPFILE, in a tmpfs. */
+    int t = open("/dev/shm", O_TMPFILE | O_RDWR, 0600);
+    if (t < 0 || write(t, "tmp", 3) != 3 || fstat(t, &st) != 0 || st.st_nlink != 0 ||
+        !S_ISREG(st.st_mode))
+        f |= 256;
+    unlink("/dev/shm/musl_oflags_tmp");
+    if (linkat(t, "", AT_FDCWD, "/dev/shm/musl_oflags_tmp", AT_EMPTY_PATH) != 0 ||
+        fstat(t, &st) != 0 || st.st_nlink != 1)
+        f |= 512;
+    int r = open("/dev/shm/musl_oflags_tmp", O_RDONLY);
+    if (r < 0 || read(r, buf, sizeof(buf)) != 3 || memcmp(buf, "tmp", 3) != 0) f |= 512;
+    close(r);
+    close(t);
+    unlink("/dev/shm/musl_oflags_tmp");
+    int te = open("/dev/shm", O_TMPFILE | O_RDWR | O_EXCL, 0600);
+    if (te < 0 || !errno_is((int)linkat(te, "", AT_FDCWD, "/dev/shm/musl_oflags_tmp",
+                                      AT_EMPTY_PATH),
+                               ENOENT))
+        f |= 1024;
+    close(te);
+    if (!errno_is((int)open("/dev/shm", O_TMPFILE | O_RDONLY, 0600), EINVAL) ||
+        !errno_is((int)open("file", O_TMPFILE | O_RDWR, 0600), ENOTDIR))
+        f |= 1024;
+
+    /* O_NOATIME: the owner may, another user may not. Without
+     * CAP_DAC_READ_SEARCH, linkat with AT_EMPTY_PATH links what the caller
+     * opened itself, not a descriptor opened with other credentials. */
+    int na = open("file", O_RDONLY | O_NOATIME);
+    if (na < 0 || !(fcntl(na, F_GETFL) & O_NOATIME)) f |= 2048;
+    close(na);
+    int tp = open("/dev/shm", O_TMPFILE | O_RDWR, 0600);
+    pid_t pid = fork();
+    if (pid == 0) {
+        int dropped = getuid() == 0;
+        if (dropped && setuid(65534) != 0) _exit(2);
+        int o = open("/", O_RDONLY | O_NOATIME);
+        if (!(o == -1 && errno == EPERM)) _exit(1);
+        char nm[48];
+        snprintf(nm, sizeof(nm), "/dev/shm/musl_oflags_u%d", (int)getpid());
+        int u = open("/dev/shm", O_TMPFILE | O_RDWR, 0600);
+        if (u < 0 || linkat(u, "", AT_FDCWD, nm, AT_EMPTY_PATH) != 0) _exit(3);
+        unlink(nm);
+        if (dropped && !(linkat(tp, "", AT_FDCWD, nm, AT_EMPTY_PATH) == -1 && errno == ENOENT))
+            _exit(4);
+        _exit(0);
+    }
+    int status = 0;
+    if (tp < 0 || pid < 0 || waitpid(pid, &status, 0) != pid || !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 0)
+        f |= 4096;
+    close(tp);
+
+    unlink("file");
+    unlink("viapath");
+    unlink("sl");
+    unlink("fifo");
+    rmdir("sub");
+    if (chdir("/") != 0) f |= 1;
+    rmdir(d);
+    snprintf(why, sizeof(why), "f=%#x errno=%d", f, errno);
+    report("open_flags", f == 0, why);
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
@@ -7732,6 +7875,7 @@ int main(int argc, char **argv)
     test_vectored_io();
     test_link_errors();
     test_stat_numbers();
+    test_open_flags();
 #if defined(__x86_64__)
     test_ustat_sysfs();
 #endif

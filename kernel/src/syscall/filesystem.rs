@@ -158,7 +158,10 @@ use alloc::vec::Vec;
 /// # Returns
 /// File descriptor on success
 pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
-    let path_owned = read_user_path(path)?;
+    let path_owned = read_open_path(path, flags)?;
+    if path_owned.is_empty() {
+        return open_empty_path(AT_FDCWD, flags, mode, false);
+    }
     let path_str = path_owned.as_str();
 
     // Trace ALL open calls during kwin bringup
@@ -188,7 +191,10 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
 ///   through openat) and reports a failure;
 /// - O_NOFOLLOW refuses a final symlink (ELOOP), O_DIRECTORY anything but a
 ///   directory (ENOTDIR), and a directory cannot be opened for writing (EISDIR)
-///   (N-116).
+///   (N-116);
+/// - O_PATH keeps only O_DIRECTORY, O_NOFOLLOW and O_CLOEXEC (and O_EMPTYPATH),
+///   as Linux's build_open_how, and O_TMPFILE makes an unnamed file in the
+///   directory `path` names (N-206).
 fn open_path(
     view: &crate::fs::CallerView<'_>,
     path: &str,
@@ -196,6 +202,8 @@ fn open_path(
     mode: usize,
     regular: bool,
 ) -> SyscallResult {
+    let flags = open_how_flags(flags);
+    check_open_flags(flags)?;
     // arm64 has its own values (its O_LARGEFILE, 0x2_0000, which musl adds
     // to every open, is x86_64's O_NOFOLLOW); riscv64 has x86_64's.
     #[cfg(target_arch = "aarch64")]
@@ -210,11 +218,18 @@ fn open_path(
 
     let open_flags = OpenFlags::from_bits(flags as u32).ok_or(SyscallError::InvalidArgument)?;
     let follow = flags & O_NOFOLLOW == 0;
-    // O_CREAT with O_DIRECTORY is EINVAL whether the name exists or not,
-    // as on Linux since 6.4: it made a regular file, then failed with
-    // ENOTDIR and left the file behind (PR #23 review).
-    if open_flags.create && flags & O_DIRECTORY != 0 {
-        return Err(SyscallError::InvalidArgument);
+    if flags & O_TMPFILE_BIT as usize != 0 {
+        // The directory is looked up as an open for writing is, so the
+        // MAC check is a write to it.
+        let dir_flags = OpenFlags {
+            read: false,
+            write: true,
+            ..open_flags
+        };
+        let (dir, canonical) = view
+            .open_follow_canonical(path, dir_flags, true)
+            .map_err(map_resolve_err)?;
+        return open_tmpfile(dir, &canonical, flags, mode);
     }
 
     let (node, created, canonical) = match view.open_follow_canonical(path, open_flags, follow) {
@@ -298,9 +313,29 @@ pub(super) fn open_node(
     use crate::fs::NodeType;
 
     let process = process::current_process().ok_or(SyscallError::InvalidState)?;
-    let open_flags = OpenFlags::from_bits(flags as u32).ok_or(SyscallError::InvalidArgument)?;
     let cloexec = flags & O_CLOEXEC != 0;
     let node_type = node.node_type();
+    if flags & O_PATH as usize != 0 {
+        // An O_PATH open only names the file (Linux's do_o_path): no
+        // permission check, truncation or device or FIFO open, a final
+        // symlink kept when not followed; only O_DIRECTORY is checked.
+        if flags & O_DIRECTORY != 0 && node_type != NodeType::Directory {
+            return Err(SyscallError::NotADirectory);
+        }
+        let mut file =
+            crate::fs::file::File::new_with_path(node, OpenFlags::path_only(), canonical);
+        file.opener = Some(alloc::boxed::Box::new(Caller::current()));
+        file.status.fetch_or(
+            crate::fs::file::status::PATH,
+            core::sync::atomic::Ordering::AcqRel,
+        );
+        return process
+            .file_table
+            .lock()
+            .open_with_flags(alloc::sync::Arc::new(file), cloexec)
+            .map_err(super::map_kernel_error);
+    }
+    let open_flags = OpenFlags::from_bits(flags as u32).ok_or(SyscallError::InvalidArgument)?;
     // O_CREAT names a file: an existing directory is EISDIR even read-only.
     if open_flags.create && !created && node_type == NodeType::Directory {
         return Err(SyscallError::IsADirectory);
@@ -321,6 +356,7 @@ pub(super) fn open_node(
     if !created {
         require_open_access(&node, &open_flags)?;
     }
+    check_open_status(&*node, flags)?;
     if open_flags.truncate && open_flags.write && !created && node_type == NodeType::File {
         open_truncate(&*node)?;
     }
@@ -338,11 +374,102 @@ pub(super) fn open_node(
         node
     };
 
-    let file = crate::fs::file::File::new_with_path(node, open_flags, canonical);
+    let mut file = crate::fs::file::File::new_with_path(node, open_flags, canonical);
+    file.opener = Some(alloc::boxed::Box::new(Caller::current()));
+    file.status
+        .fetch_or(open_status(flags), core::sync::atomic::Ordering::AcqRel);
     let file_table = process.file_table.lock();
     file_table
         .open_with_flags(alloc::sync::Arc::new(file), cloexec)
         .map_err(super::map_kernel_error)
+}
+
+/// The flags open(2) and openat(2) act on, as Linux's build_open_how:
+/// with O_PATH only O_DIRECTORY, O_NOFOLLOW, O_PATH, O_CLOEXEC and
+/// O_EMPTYPATH remain (openat2 refuses the rest in [`check_open_how`]).
+fn open_how_flags(flags: usize) -> usize {
+    if flags as u64 & O_PATH != 0 {
+        flags & (O_DIRECTORY_64 | O_NOFOLLOW_64 | O_PATH | O_CLOEXEC | O_EMPTYPATH) as usize
+    } else {
+        flags
+    }
+}
+
+/// The flag combinations open refuses (EINVAL), in Linux's
+/// build_open_flags order: O_CREAT with O_DIRECTORY, whether the name
+/// exists or not, as on Linux since 6.4 (it made a regular file, then
+/// failed with ENOTDIR and left the file behind; PR #23 review); then
+/// O_TMPFILE (which includes O_DIRECTORY) without both its bits or without
+/// a write access mode.
+fn check_open_flags(flags: usize) -> Result<(), SyscallError> {
+    let flags = flags as u64;
+    if flags & (O_DIRECTORY_64 | O_CREAT) == O_DIRECTORY_64 | O_CREAT {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if flags & O_TMPFILE_BIT != 0 && (flags & O_DIRECTORY_64 == 0 || flags & 3 == 0) {
+        return Err(SyscallError::InvalidArgument);
+    }
+    Ok(())
+}
+
+/// The file status flags an open records from `flags` (F_GETFL reports
+/// them): O_ASYNC, O_DIRECT, O_NOATIME, O_DSYNC and O_SYNC, which implies
+/// O_DSYNC as on Linux. O_APPEND comes with the open flags.
+fn open_status(flags: usize) -> u32 {
+    use crate::fs::file::status;
+    let mut bits = flags as u32 & (status::OPEN & !status::PATH);
+    if bits & status::SYNC != 0 {
+        bits |= status::DSYNC;
+    }
+    bits
+}
+
+/// The status flags' own checks at open, after the permission check as in
+/// Linux's may_open and do_dentry_open: O_NOATIME needs the file's owner
+/// or CAP_FOWNER (EPERM), and O_DIRECT a regular file (EINVAL, as for
+/// F_SETFL).
+fn check_open_status(node: &dyn crate::fs::VfsNode, flags: usize) -> Result<(), SyscallError> {
+    use crate::fs::file::status;
+    if flags as u32 & status::NOATIME != 0 {
+        let uid = node.metadata().map_err(super::map_kernel_error)?.uid;
+        if !Caller::current().owner_or_capable(uid) {
+            return Err(SyscallError::OperationNotPermitted);
+        }
+    }
+    if flags as u32 & status::DIRECT != 0 && node.node_type() != crate::fs::NodeType::File {
+        return Err(SyscallError::InvalidArgument);
+    }
+    Ok(())
+}
+
+/// O_TMPFILE (N-206): an unnamed regular file in directory `dir` (whose
+/// canonical path is `canonical`), as Linux's vfs_tmpfile: write and search
+/// permission on the directory (EACCES), a filesystem that makes such files
+/// (EOPNOTSUPP: ramfs and tmpfs do, BlockFS does not), the mode less the
+/// umask. It has no name until linkat with AT_EMPTY_PATH gives it one,
+/// which O_EXCL forbids; its last close frees it. The descriptor records
+/// `<dir>/#<inode>` as its path, as Linux shows such a file, so the mount
+/// is known and nothing finds the file by that name.
+fn open_tmpfile(
+    dir: alloc::sync::Arc<dyn crate::fs::VfsNode>,
+    canonical: &str,
+    flags: usize,
+    mode: usize,
+) -> SyscallResult {
+    const O_EXCL: usize = 0x80;
+    if dir.node_type() != crate::fs::NodeType::Directory {
+        return Err(SyscallError::NotADirectory);
+    }
+    check_dir_write(&*dir)?;
+    let node = dir
+        .tmpfile(creation_perms(mode), flags & O_EXCL == 0)
+        .map_err(super::map_kernel_error)?;
+    own_new_node(&node);
+    let inode = node.metadata().map_err(super::map_kernel_error)?.inode;
+    let path = alloc::format!("{}/#{}", canonical.trim_end_matches('/'), inode);
+    // O_DIRECTORY is part of O_TMPFILE, not a request for a directory.
+    let flags = flags & !(O_TMPFILE_BIT | O_DIRECTORY_64) as usize;
+    open_node(node, true, path, flags, false, true)
 }
 
 /// Open FIFO `inode` (`fs::fifo`): a blocking open of one end sleeps until
@@ -792,7 +919,7 @@ pub fn sys_stat(fd: usize, stat_buf: usize) -> SyscallResult {
     let file_desc = process
         .file_table
         .lock()
-        .get(fd)
+        .get_path(fd)
         .ok_or(SyscallError::BadFileDescriptor)?;
 
     // Get metadata and write to user buffer
@@ -1705,7 +1832,7 @@ pub fn sys_fchdir(fd: usize) -> SyscallResult {
     let file = proc
         .file_table
         .lock()
-        .get(fd as u32 as usize)
+        .get_path(fd as u32 as usize)
         .ok_or(SyscallError::BadFileDescriptor)?;
     let (node, path) = (file.node.clone(), fd_directory_path(&file)?);
     // `path` is relative to the root; enter_directory wants the whole-tree
@@ -2859,6 +2986,10 @@ const O_NONBLOCK_FL: u32 = 0x800;
 
 /// F_GETFL: the access mode and status flags of an open file.
 fn file_status_flags(file: &crate::fs::file::File) -> u32 {
+    // An O_PATH open keeps none of the other flags, O_LARGEFILE included.
+    if file.is_path() {
+        return file.status.load(core::sync::atomic::Ordering::Acquire);
+    }
     let access = match (file.flags.read, file.flags.write) {
         (true, true) => 2,
         (false, true) => 1,
@@ -2911,7 +3042,9 @@ fn set_file_status_flags(
 /// open is EBADF, as Linux's do_fcntl; an unknown command on an open one
 /// is EINVAL. A standard descriptor that is still the implicit console
 /// answers the descriptor and status flag commands as a terminal open for
-/// reading and writing would.
+/// reading and writing would. An O_PATH descriptor takes only the
+/// duplication, descriptor flag and F_GETFL commands (EBADF otherwise, as
+/// Linux's check_fcntl_cmd).
 pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
     const F_DUPFD: usize = 0;
     const F_GETFD: usize = 1;
@@ -2938,6 +3071,15 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
         };
     };
 
+    if file.is_path()
+        && !matches!(
+            cmd,
+            F_DUPFD | F_DUPFD_CLOEXEC | F_DUPFD_QUERY | F_GETFD | F_SETFD | F_GETFL
+        )
+    {
+        return Err(SyscallError::BadFileDescriptor);
+    }
+
     match cmd {
         F_DUPFD | F_DUPFD_CLOEXEC => file_table
             .dup_at_least(fd, arg, cmd == F_DUPFD_CLOEXEC)
@@ -2957,7 +3099,9 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
         }
         // Whether `arg` is a descriptor of the same open file (Linux 6.10).
         F_DUPFD_QUERY => {
-            let other = file_table.get(arg).ok_or(SyscallError::BadFileDescriptor)?;
+            let other = file_table
+                .get_path(arg)
+                .ok_or(SyscallError::BadFileDescriptor)?;
             Ok(usize::from(alloc::sync::Arc::ptr_eq(&other, &file)))
         }
         // Seals (N-229): only a memfd has them (EINVAL otherwise); adding
@@ -3349,12 +3493,13 @@ pub fn sys_link(old_ptr: usize, new_ptr: usize) -> SyscallResult {
 /// other than AT_SYMLINK_FOLLOW and AT_EMPTY_PATH are EINVAL; the old name
 /// is looked up, its final symlink followed only with AT_SYMLINK_FOLLOW,
 /// and with AT_EMPTY_PATH an empty one names `olddirfd` itself (the
-/// working directory for AT_FDCWD), which needs CAP_DAC_READ_SEARCH
-/// (ENOENT): Linux also lets the descriptor's opener through, but a file
-/// does not record who opened it. Then the new name is made as
-/// [`new_entry`] does; then a file with no name left is ENOENT, a link
-/// into another filesystem EXDEV, and one to a directory, or on a
-/// filesystem without hard links, EPERM.
+/// working directory for AT_FDCWD), which needs CAP_DAC_READ_SEARCH or
+/// the credentials the descriptor was opened with (`File::opener`; ENOENT
+/// otherwise), as Linux 6.10's LOOKUP_LINKAT_EMPTY. Then the new name is
+/// made as [`new_entry`] does; then a file with no name left (unless an
+/// O_TMPFILE file made to be named) is ENOENT, a link into another
+/// filesystem EXDEV, and one to a directory, or on a filesystem without
+/// hard links, EPERM.
 pub(crate) fn link_at(
     olddirfd: usize,
     old_ptr: usize,
@@ -3380,9 +3525,12 @@ pub(crate) fn link_at(
             let file = proc
                 .file_table
                 .lock()
-                .get(olddirfd as u32 as usize)
+                .get_path(olddirfd as u32 as usize)
                 .ok_or(SyscallError::BadFileDescriptor)?;
-            if !Caller::current().capable(crate::process::linux_caps::CAP_DAC_READ_SEARCH) {
+            let caller = Caller::current();
+            if !caller.capable(crate::process::linux_caps::CAP_DAC_READ_SEARCH)
+                && file.opener.as_deref() != Some(&caller)
+            {
                 return Err(SyscallError::ResourceNotFound);
             }
             file.node.clone()
@@ -3398,8 +3546,12 @@ pub(crate) fn link_at(
     };
     let (parent, name) = new_entry(newdirfd, &new)?;
     // A file whose last name is gone (open, through AT_EMPTY_PATH) gets
-    // no new one, as Linux's vfs_link.
-    if target.node_type() != crate::fs::NodeType::Directory && target.link_count() == 0 {
+    // no new one, as Linux's vfs_link, unless it is an O_TMPFILE file made
+    // to be named.
+    if target.node_type() != crate::fs::NodeType::Directory
+        && target.link_count() == 0
+        && !target.tmpfile_linkable()
+    {
         return Err(SyscallError::ResourceNotFound);
     }
     parent.link(&name, target).map_err(|e| match e {
@@ -3626,7 +3778,7 @@ pub(crate) fn resolve_at_path(
         let file = proc
             .file_table
             .lock()
-            .get(dirfd as u32 as usize)
+            .get_path(dirfd as u32 as usize)
             .ok_or(SyscallError::BadFileDescriptor)?;
         let dir_path = fd_directory_path(&file)?;
 
@@ -3640,7 +3792,10 @@ pub(crate) fn resolve_at_path(
 
 /// Open a file relative to a directory fd (syscall 190).
 pub fn sys_openat(dirfd: usize, path_ptr: usize, flags: usize, mode: usize) -> SyscallResult {
-    let rel_path = read_user_path(path_ptr)?;
+    let rel_path = read_open_path(path_ptr, flags)?;
+    if rel_path.is_empty() {
+        return open_empty_path(dirfd, flags, mode, false);
+    }
     let abs_path = resolve_at_path(dirfd, &rel_path)?;
 
     // Trace openat calls (kwin bring-up aid; `trace` feature only).
@@ -3658,6 +3813,44 @@ pub fn sys_openat(dirfd: usize, path_ptr: usize, flags: usize, mode: usize) -> S
     }
 
     open_path(&vfs()?, &abs_path, flags, mode, false)
+}
+
+/// An open's path argument: empty only with O_EMPTYPATH (ENOENT otherwise).
+fn read_open_path(ptr: usize, flags: usize) -> Result<alloc::string::String, SyscallError> {
+    if flags as u64 & O_EMPTYPATH != 0 {
+        read_user_path_or_empty(ptr)
+    } else {
+        read_user_path(ptr)
+    }
+}
+
+/// open, openat and openat2 with O_EMPTYPATH and an empty path (Linux's
+/// LOOKUP_EMPTY): the file `dirfd` names, O_PATH descriptors included (the
+/// working directory for AT_FDCWD), is opened again with the checks of an
+/// open by name, a symlink not followed; with O_TMPFILE the file is made in
+/// it. A descriptor without a recorded path (a pipe or socket) cannot be
+/// reopened (ENXIO, as Linux for a socket).
+fn open_empty_path(dirfd: usize, flags: usize, mode: usize, regular: bool) -> SyscallResult {
+    let flags = open_how_flags(flags);
+    check_open_flags(flags)?;
+    let (node, canonical) = if dirfd as u32 as i32 == AT_FDCWD as u32 as i32 {
+        vfs()?
+            .resolve_path_canonical(".")
+            .map_err(map_resolve_err)?
+    } else {
+        let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+        let file = proc
+            .file_table
+            .lock()
+            .get_path(dirfd as u32 as usize)
+            .ok_or(SyscallError::BadFileDescriptor)?;
+        let canonical = file.path.clone().ok_or(SyscallError::NoDeviceOrAddress)?;
+        (file.node.clone(), canonical)
+    };
+    if flags as u64 & O_TMPFILE_BIT != 0 {
+        return open_tmpfile(node, &canonical, flags, mode);
+    }
+    open_node(node, false, canonical, flags, regular, false)
 }
 
 /// openat2's `struct open_how` (its first version, the only one).
@@ -3761,7 +3954,10 @@ pub fn sys_openat2(dirfd: usize, path_ptr: usize, how: usize, size: usize) -> Sy
     let regular = flags & OPENAT2_REGULAR != 0;
     let flags = (flags & VALID_OPEN_FLAGS) as usize;
 
-    let path = read_user_path(path_ptr)?;
+    let path = read_open_path(path_ptr, flags)?;
+    if path.is_empty() {
+        return open_empty_path(dirfd, flags, mode as usize, regular);
+    }
     if resolve == 0 {
         let abs_path = resolve_at_path(dirfd, &path)?;
         return open_path(&vfs()?, &abs_path, flags, mode as usize, regular);
@@ -3778,7 +3974,7 @@ pub fn sys_openat2(dirfd: usize, path_ptr: usize, how: usize, size: usize) -> Sy
         let file = proc
             .file_table
             .lock()
-            .get(dirfd as u32 as usize)
+            .get_path(dirfd as u32 as usize)
             .ok_or(SyscallError::BadFileDescriptor)?;
         fd_directory_path(&file)?
     };
@@ -3816,7 +4012,7 @@ pub fn sys_fstatat(dirfd: usize, path_ptr: usize, stat_buf: usize, flags: usize)
             let file = proc
                 .file_table
                 .lock()
-                .get(dirfd as u32 as usize)
+                .get_path(dirfd as u32 as usize)
                 .ok_or(SyscallError::BadFileDescriptor)?;
             (file.node.clone(), file.path.clone())
         }
@@ -3874,7 +4070,7 @@ pub fn sys_statx(
             let file = proc
                 .file_table
                 .lock()
-                .get(dfd as usize)
+                .get_path(dfd as usize)
                 .ok_or(SyscallError::BadFileDescriptor)?;
             (file.node.clone(), file.path.clone())
         }
@@ -3949,7 +4145,7 @@ pub fn sys_fstatfs(fd: usize, buf: usize) -> SyscallResult {
     let file = proc
         .file_table
         .lock()
-        .get(fd as u32 as usize)
+        .get_path(fd as u32 as usize)
         .ok_or(SyscallError::BadFileDescriptor)?;
     write_statfs(&*file.node, buf)
 }

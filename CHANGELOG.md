@@ -166,6 +166,21 @@
   1), and ustat finds a filesystem by it. On ramfs and tmpfs, chmod, chown and setting the times
   move the status-change time instead of the modification time, writes and truncation move both,
   and adding or removing a name moves the directory's times and the file's ctime, as on Linux.
+- Open flags as Linux 7.3 handles them (N-206). An O_PATH descriptor names a file without opening
+  it: no permission check, truncation, FIFO wait or device open, a final symlink kept with
+  O_NOFOLLOW, and open(2) drops every other flag. Only path operations take one (fstat, fstatat
+  and statx with AT_EMPTY_PATH, fstatfs, fchdir, the directory of any `*at` call, fchownat,
+  fchmodat2, linkat, readlinkat of an empty name, execveat, name_to_handle_at, dup and passing it
+  over a socket); read, write, lseek, ioctl, mmap, getdents, fsync, fchmod, fchown, xattrs and
+  the rest are EBADF, and fcntl takes only the duplication, descriptor-flag and F_GETFL commands
+  (F_GETFL reports O_PATH). O_TMPFILE makes an unnamed file in a ramfs or tmpfs directory
+  (EOPNOTSUPP on BlockFS), with write and search permission on it, which linkat with
+  AT_EMPTY_PATH names unless O_EXCL was given; without O_DIRECTORY or a write mode it is EINVAL.
+  O_EMPTYPATH with an empty name opens the descriptor's file again. O_NOATIME needs the file's
+  owner or CAP_FOWNER (EPERM) and O_DIRECT a regular file (EINVAL), and F_GETFL now reports
+  O_ASYNC, O_DIRECT, O_NOATIME, O_DSYNC and O_SYNC given at open. linkat with AT_EMPTY_PATH also
+  links a file for the credentials it was opened with, as Linux 6.10 does, so an unprivileged
+  program can name its O_TMPFILE file.
 - execve of a relative name runs it from the working directory, as on Linux; it searched PATH,
   which is libc's job (execvp). Exec errors keep their errno (EACCES, ENOTDIR, ELOOP) instead of
   all being ENOENT, a script's interpreter is opened the same way, and an empty argv gets "" as
