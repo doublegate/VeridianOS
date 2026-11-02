@@ -11,7 +11,7 @@ use alloc::{sync::Arc, vec::Vec};
 
 use super::{
     filesystem::{
-        self, file_size, pread_file, pwrite_file, read_iovecs, read_user_path_or_empty,
+        self, file_size, pread_segs, pwrite_segs, read_iovecs, read_user_path_or_empty,
         AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW,
     },
     userspace, xattr, SyscallError, SyscallResult,
@@ -171,7 +171,7 @@ pub fn sys_preadv2(
 /// The vectored read at `pos` of preadv and preadv2, in Linux's order:
 /// a negative offset is EINVAL; no fd EBADF; a stream ESPIPE; a file not
 /// open for reading EBADF; then the iovec array (EINVAL, EFAULT) and the
-/// flags. The buffers are filled in turn until one comes back short.
+/// flags. The buffers are filled as one read.
 fn preadv_at(fd: usize, iov_ptr: usize, iovcnt: usize, pos: i64, flags: u32) -> SyscallResult {
     if pos < 0 {
         return Err(SyscallError::InvalidArgument);
@@ -185,23 +185,7 @@ fn preadv_at(fd: usize, iov_ptr: usize, iovcnt: usize, pos: i64, flags: u32) -> 
         return Ok(0);
     }
     Rwf::parse(flags, false, false)?;
-    let mut done = 0usize;
-    for (base, len) in iovs {
-        if len == 0 {
-            continue;
-        }
-        match pread_file(&file, base, len, pos as usize + done) {
-            Ok(n) => {
-                done += n;
-                if n < len {
-                    break;
-                }
-            }
-            Err(_) if done > 0 => break,
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(done)
+    pread_segs(&file, userspace::UserSegs::new(&iovs), pos as usize)
 }
 
 /// pwritev(fd, iov, iovcnt, pos_l, pos_h): writev at offset `pos_l`,
@@ -292,38 +276,12 @@ fn pwritev_file(file: &File, iov_ptr: usize, iovcnt: usize, at: usize) -> Syscal
     write_iovs(file, &iovs, at)
 }
 
-/// Write `iovs` in turn at `at` of `file` until one goes in short.
-/// RLIMIT_FSIZE applies to them as one write, as for writev: only one
-/// that starts at the limit is refused (EFBIG and SIGXFSZ), and the
-/// buffers stop where it is reached.
+/// Write `iovs` at `at` of `file` as one write: RLIMIT_FSIZE applies to
+/// them together, as for writev (only a write that starts at the limit is
+/// refused, EFBIG and SIGXFSZ, and the data stops where it is reached),
+/// and the file loses its set-ID bits once.
 fn write_iovs(file: &File, iovs: &[(usize, usize)], at: usize) -> SyscallResult {
-    let total = iovs
-        .iter()
-        .fold(0usize, |t, &(_, len)| t.saturating_add(len));
-    let mut room =
-        crate::fs::check_fsize(&*file.node, at, total).map_err(super::map_kernel_error)?;
-    let mut done = 0usize;
-    for &(base, len) in iovs {
-        let len = len.min(room);
-        if len == 0 {
-            if room == 0 {
-                break;
-            }
-            continue;
-        }
-        match pwrite_file(file, base, len, at + done) {
-            Ok(n) => {
-                done += n;
-                room -= n.min(room);
-                if n < len {
-                    break;
-                }
-            }
-            Err(_) if done > 0 => break,
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(done)
+    pwrite_segs(file, userspace::UserSegs::new(iovs), at)
 }
 
 // ---------------------------------------------------------------------------

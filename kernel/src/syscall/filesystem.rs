@@ -11,7 +11,10 @@
 
 #![allow(clippy::unnecessary_cast)]
 
-use super::multiplex::{POLLERR, POLLHUP, POLLIN, POLLOUT};
+use super::{
+    multiplex::{POLLERR, POLLHUP, POLLIN, POLLOUT},
+    userspace::UserSegs,
+};
 #[allow(unused_imports)]
 use super::{
     validate_user_buffer, validate_user_ptr_typed, validate_user_string_ptr, SyscallError,
@@ -404,19 +407,30 @@ pub fn sys_close(fd: usize) -> SyscallResult {
 /// embedded shell to accept keyboard input before a full console subsystem
 /// is initialized.
 pub fn sys_read(fd: usize, buffer: usize, count: usize) -> SyscallResult {
-    let result = read_fd(fd, buffer, count);
+    if count != 0 {
+        // Validate buffer is in user space
+        if let Err(e) = validate_user_buffer(buffer, count) {
+            crate::drivers::console_input::end_read();
+            return Err(e);
+        }
+    }
+    read_segs(fd, UserSegs::new(&[(buffer, count)]))
+}
+
+/// read(2) and readv(2) of `fd` into `dst`, as one read.
+fn read_segs(fd: usize, dst: UserSegs<'_>) -> SyscallResult {
+    let result = read_fd(fd, dst);
     // However the read ended (data, EINTR, EAGAIN), a console read's VTIME
     // timer ends with it.
     crate::drivers::console_input::end_read();
     result
 }
 
-fn read_fd(fd: usize, buffer: usize, count: usize) -> SyscallResult {
-    if count == 0 {
+fn read_fd(fd: usize, dst: UserSegs<'_>) -> SyscallResult {
+    if dst.is_empty() {
         return Ok(0);
     }
-    // Validate buffer is in user space
-    validate_user_buffer(buffer, count)?;
+    dst.validate()?;
 
     // For stdin (fd 0): an open file (a pipe, a tty) is read like any other
     // fd below -- including waiting for a pipe writer, which returning here
@@ -429,11 +443,11 @@ fn read_fd(fd: usize, buffer: usize, count: usize) -> SyscallResult {
             return Err(SyscallError::BadFileDescriptor);
         }
         // Fallback: the console, through its shared line discipline.
-        let read_count = count.min(SERIAL_IO_MAX_SIZE);
+        let read_count = dst.len().min(SERIAL_IO_MAX_SIZE);
         // Bytes are gathered in a kernel buffer and copied out once (N-43).
         let mut line = alloc::vec![0u8; read_count];
         let n = read_console_waiting(&mut line)?;
-        super::userspace::write_user_bytes(buffer, &line[..n])?;
+        dst.copy_out(0, &line[..n]).map_err(|(_, e)| e)?;
         return Ok(n);
     }
 
@@ -450,7 +464,7 @@ fn read_fd(fd: usize, buffer: usize, count: usize) -> SyscallResult {
             .lock()
             .get(fd)
             .ok_or(SyscallError::BadFileDescriptor)?;
-        match file_read_to_user(&file_desc, buffer, count) {
+        match file_read_to_user(&file_desc, dst) {
             Err(SyscallError::WouldBlock) => {
                 // Pipe empty with write end open -- fall through to try
                 // dispatching children in boot context.
@@ -482,7 +496,7 @@ fn read_fd(fd: usize, buffer: usize, count: usize) -> SyscallResult {
             {
                 return Err(SyscallError::WouldBlock);
             }
-            match file_read_to_user(&file_desc, buffer, count) {
+            match file_read_to_user(&file_desc, dst) {
                 Err(SyscallError::WouldBlock) => {}
                 other => return other,
             }
@@ -518,13 +532,22 @@ pub fn sys_write(fd: usize, buffer: usize, count: usize) -> SyscallResult {
     }
     // Validate buffer is in user space
     validate_user_buffer(buffer, count)?;
+    write_segs(fd, UserSegs::new(&[(buffer, count)]), false)
+}
 
+/// write(2) and writev(2) of `src` to `fd`, as one write; `nosignal`
+/// (pwritev2's RWF_NOSIGNAL) keeps a pipe that loses its reader part way
+/// from raising SIGPIPE.
+fn write_segs(fd: usize, src: UserSegs<'_>, nosignal: bool) -> SyscallResult {
+    if src.is_empty() {
+        return Ok(0);
+    }
     // For stdout (fd 1) and stderr (fd 2), try file table first, then
     // fall back to serial output
     if fd == 1 || fd == 2 {
         // Try the file table first if we have a process context
         if let Some(proc) = process::current_process() {
-            if let Some(result) = write_fd(&proc, fd, buffer, count) {
+            if let Some(result) = write_fd(&proc, fd, src, nosignal) {
                 return result;
             }
         }
@@ -533,10 +556,11 @@ pub fn sys_write(fd: usize, buffer: usize, count: usize) -> SyscallResult {
             return Err(SyscallError::BadFileDescriptor);
         }
         // Fallback: write directly to serial UART
-        let write_count = count.min(SERIAL_IO_MAX_SIZE);
+        let write_count = src.len().min(SERIAL_IO_MAX_SIZE);
+        src.validate()?;
         // Copied in once through the fault-tolerant reader (N-43).
         let mut out = alloc::vec![0u8; write_count];
-        super::userspace::read_user_bytes(buffer, &mut out)?;
+        src.copy_in(0, &mut out).map_err(|(_, e)| e)?;
         for &byte in &out {
             serial_write_byte(byte);
         }
@@ -546,20 +570,20 @@ pub fn sys_write(fd: usize, buffer: usize, count: usize) -> SyscallResult {
 
     // Non-stdout/stderr: use file table normally
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
-    write_fd(&proc, fd, buffer, count).unwrap_or(Err(SyscallError::BadFileDescriptor))
+    write_fd(&proc, fd, src, nosignal).unwrap_or(Err(SyscallError::BadFileDescriptor))
 }
 
-/// Write `count` bytes from `buffer` to `fd` of `proc` (`None`: no such
-/// fd). A dispatched writer (stage D2) to a full pipe or socket waits for
-/// room, as POSIX requires of a blocking descriptor, instead of getting
-/// EAGAIN; O_NONBLOCK still gets it (N-119). No lock is held while waiting,
-/// and a signal ends the wait (EINTR).
+/// Write `src` to `fd` of `proc` (`None`: no such fd). A dispatched writer
+/// (stage D2) to a full pipe or socket waits for room, as POSIX requires of a
+/// blocking descriptor, instead of getting EAGAIN; O_NONBLOCK still gets it
+/// (N-119). No lock is held while waiting, and a signal ends the wait (EINTR).
 fn write_fd(
     proc: &crate::process::Process,
     fd: usize,
-    buffer: usize,
-    count: usize,
+    src: UserSegs<'_>,
+    nosignal: bool,
 ) -> Option<SyscallResult> {
+    let count = src.len();
     #[cfg(feature = "alloc")]
     let mut retry_now = false;
     // A blocking write to a stream (pipe, socket, terminal) waits until all
@@ -577,7 +601,7 @@ fn write_fd(
             file_desc.node.node_type(),
             crate::fs::NodeType::File | crate::fs::NodeType::Directory
         );
-        let result = file_write_from_user(&file_desc, buffer + done, count - done);
+        let result = file_write_from_user(&file_desc, src.advance(done));
         #[cfg(feature = "alloc")]
         let dispatched = crate::sched::dispatch::current_owner().is_some();
         #[cfg(not(feature = "alloc"))]
@@ -587,7 +611,9 @@ fn write_fd(
             Ok(n) => return Some(Ok(done + n)),
             Err(SyscallError::WouldBlock) if blocking && dispatched => {}
             Err(e) if done > 0 => {
-                sigpipe_after_partial_write(&file_desc, e);
+                if !nosignal {
+                    sigpipe_after_partial_write(&file_desc, e);
+                }
                 return Some(Ok(done));
             }
             Err(e) => return Some(Err(e)),
@@ -647,11 +673,11 @@ pub(super) fn wait_ready(
     }
 }
 
-/// Read up to `count` bytes from an open file into user memory at `buf`.
+/// Read up to `dst.len()` bytes from an open file into user memory `dst`.
 /// A regular file is read in chunks until `count` or end of file; anything
 /// else (pipe, tty, socket, device) gets exactly one underlying read, so its
 /// blocking and short-read behaviour is unchanged. EOF on a pipe is 0.
-fn file_read_to_user(file: &crate::fs::file::File, buf: usize, count: usize) -> SyscallResult {
+fn file_read_to_user(file: &crate::fs::file::File, dst: UserSegs<'_>) -> SyscallResult {
     // Not open for reading is EBADF (it was EACCES), a directory EISDIR
     // (N-197).
     if !file.flags.read {
@@ -664,9 +690,8 @@ fn file_read_to_user(file: &crate::fs::file::File, buf: usize, count: usize) -> 
     };
     // A regular file is read as one step (see `File::io_lock`).
     let _io = regular.then(|| file.io_lock.lock());
-    super::userspace::produce_to_user(
-        buf,
-        count,
+    super::userspace::produce_to_segs(
+        dst,
         regular,
         |kbuf| match file.read(kbuf) {
             Ok(n) => Ok(n),
@@ -683,19 +708,22 @@ fn file_read_to_user(file: &crate::fs::file::File, buf: usize, count: usize) -> 
     )
 }
 
-/// Write up to `count` bytes of user memory at `buf` to an open file, in
-/// chunks; a short write (a full pipe) ends the transfer with the count so
-/// far.
-fn file_write_from_user(file: &crate::fs::file::File, buf: usize, count: usize) -> SyscallResult {
+/// Write up to `src.len()` bytes of user memory `src` to an open file, in
+/// chunks (the first gathers every segment of a vector, so a writev of up
+/// to PIPE_BUF bytes is one atomic pipe write); a short write (a full
+/// pipe) ends the transfer with the count so far.
+fn file_write_from_user(file: &crate::fs::file::File, src: UserSegs<'_>) -> SyscallResult {
     // Not open for writing is EBADF, as on Linux (N-197).
     if !file.flags.write {
         return Err(SyscallError::BadFileDescriptor);
     }
-    let count = file.fsize_room(count).map_err(super::map_kernel_error)?;
+    let count = file
+        .fsize_room(src.len())
+        .map_err(super::map_kernel_error)?;
     // A regular file is written as one step (see `File::io_lock`).
     let _io = (file.node.node_type() == crate::fs::NodeType::File).then(|| file.io_lock.lock());
     let mut first = true;
-    super::userspace::consume_from_user(buf, count, true, |kbuf| {
+    super::userspace::consume_from_segs(src.truncate(count), true, |kbuf| {
         match file.write_part(kbuf, core::mem::take(&mut first)) {
             Ok(n) => Ok(n),
             Err(crate::error::KernelError::BrokenPipe) => Err(SyscallError::BrokenPipe),
@@ -3249,67 +3277,20 @@ pub(super) fn read_iovecs(
     Ok(iovs)
 }
 
-/// Read from a file descriptor into multiple buffers (SYS_readv = 19).
-///
-/// # Arguments
-/// - `fd`: File descriptor to read from.
-/// - `iov_ptr`: Pointer to an array of `struct iovec`.
-/// - `iovcnt`: Number of iovec entries.
-///
-/// # Returns
-/// Total number of bytes read across all buffers.
+/// readv(fd, iov, iovcnt): read into the `iovcnt` buffers at `iov` as
+/// one read (N-200): a pipe, socket or terminal is read once, so a readv
+/// never waits again for a later buffer, as Linux's do_readv. The
+/// descriptor is checked before the array (EBADF before EINVAL or
+/// EFAULT), and every buffer's range before anything is read.
 pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
-    if iovcnt == 0 {
-        return Ok(0);
-    }
-    if iovcnt > IOV_MAX {
-        return Err(SyscallError::InvalidArgument);
-    }
-
-    // Validate the iovec array itself
-    let iov_size = iovcnt * core::mem::size_of::<Iovec>();
-    validate_user_buffer(iov_ptr, iov_size)?;
-
-    let mut total_read = 0usize;
-
-    for i in 0..iovcnt {
-        let iov: Iovec = super::userspace::read_user_index(iov_ptr, i)?;
-
-        if iov.iov_len == 0 {
-            continue;
-        }
-
-        // Delegate to existing sys_read for each segment
-        match sys_read(fd, iov.iov_base, iov.iov_len) {
-            Ok(n) => {
-                total_read += n;
-                // Short read means EOF or no more data available
-                if n < iov.iov_len {
-                    break;
-                }
-            }
-            Err(e) => {
-                // If we already read some data, return what we have
-                if total_read > 0 {
-                    break;
-                }
-                return Err(e);
-            }
-        }
-    }
-
-    Ok(total_read)
+    vectored_fd(fd, false)?;
+    let iovs = read_iovecs(iov_ptr, iovcnt)?;
+    read_segs(fd, UserSegs::new(&iovs))
 }
 
-/// Write to a file descriptor from multiple buffers (SYS_writev = 20).
-///
-/// # Arguments
-/// - `fd`: File descriptor to write to.
-/// - `iov_ptr`: Pointer to an array of `struct iovec`.
-/// - `iovcnt`: Number of iovec entries.
-///
-/// # Returns
-/// Total number of bytes written across all buffers.
+/// writev(fd, iov, iovcnt): write the `iovcnt` buffers at `iov` as one
+/// write (N-200), so one of at most PIPE_BUF bytes to a pipe goes in
+/// whole or not at all; checked in readv's order.
 pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
     writev(fd, iov_ptr, iovcnt, false)
 }
@@ -3317,72 +3298,34 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
 /// writev, and pwritev2 at the file position: `nosignal` (RWF_NOSIGNAL)
 /// keeps a pipe that loses its reader part way from raising SIGPIPE.
 pub(super) fn writev(fd: usize, iov_ptr: usize, iovcnt: usize, nosignal: bool) -> SyscallResult {
-    if iovcnt == 0 {
-        return Ok(0);
-    }
-    if iovcnt > IOV_MAX {
-        return Err(SyscallError::InvalidArgument);
-    }
+    vectored_fd(fd, true)?;
+    let iovs = read_iovecs(iov_ptr, iovcnt)?;
+    write_segs(fd, UserSegs::new(&iovs), nosignal)
+}
 
-    // Validate the iovec array itself
-    let iov_size = iovcnt * core::mem::size_of::<Iovec>();
-    validate_user_buffer(iov_ptr, iov_size)?;
-
-    let mut total_written = 0usize;
-    let iovs = (0..iovcnt)
-        .map(|i| super::userspace::read_user_index::<Iovec>(iov_ptr, i))
-        .collect::<Result<alloc::vec::Vec<_>, _>>()?;
-
-    // RLIMIT_FSIZE applies to the vector as one write: only a write that
-    // starts at the limit is refused (EFBIG, SIGXFSZ), and the segments
-    // stop where it is reached.
-    let total = iovs
-        .iter()
-        .fold(0usize, |t, iov| t.saturating_add(iov.iov_len));
-    let file = process::current_process().and_then(|p| p.file_table.lock().get(fd));
-    let mut room = match file {
-        Some(file) if file.flags.write => {
-            file.fsize_room(total).map_err(super::map_kernel_error)?
+/// readv's and writev's descriptor check, made before the iovec array is
+/// read (Linux's vfs_readv): no such descriptor, or one not open for
+/// reading (`write`: writing), is EBADF. The implicit console of a process
+/// without descriptors 0-2 passes, as it does for read and write.
+fn vectored_fd(fd: usize, write: bool) -> Result<(), SyscallError> {
+    match process::current_process().and_then(|p| p.file_table.lock().get(fd)) {
+        Some(file)
+            if (if write {
+                file.flags.write
+            } else {
+                file.flags.read
+            }) =>
+        {
+            Ok(())
         }
-        _ => total,
-    };
-
-    for iov in iovs {
-        let len = iov.iov_len.min(room);
-        if len == 0 {
-            if room == 0 {
-                break;
-            }
-            continue;
+        Some(_) => Err(SyscallError::BadFileDescriptor),
+        None if (if write { fd == 1 || fd == 2 } else { fd == 0 })
+            && console_fallback_allowed(fd) =>
+        {
+            Ok(())
         }
-
-        // Delegate to existing sys_write for each segment
-        match sys_write(fd, iov.iov_base, len) {
-            Ok(n) => {
-                total_written += n;
-                room -= n.min(room);
-                // Short write means buffer full or error
-                if n < iov.iov_len {
-                    break;
-                }
-            }
-            Err(e) => {
-                // If we already wrote some data, return what we have
-                if total_written > 0 {
-                    if let Some(file) = process::current_process()
-                        .and_then(|p| p.file_table.lock().get(fd))
-                        .filter(|_| !nosignal)
-                    {
-                        sigpipe_after_partial_write(&file, e);
-                    }
-                    break;
-                }
-                return Err(e);
-            }
-        }
+        None => Err(SyscallError::BadFileDescriptor),
     }
-
-    Ok(total_written)
 }
 
 // ============================================================================
@@ -4054,9 +3997,8 @@ pub fn sys_pread(fd: usize, buf: usize, count: usize, offset: usize) -> SyscallR
 }
 
 /// Read `count` bytes at `offset` of `file` (open for reading, with an
-/// offset) into `buf`, leaving its position alone: pread and each buffer
-/// of preadv.
-pub(super) fn pread_file(
+/// offset) into `buf`, leaving its position alone (pread).
+fn pread_file(
     file: &crate::fs::file::File,
     buf: usize,
     count: usize,
@@ -4069,13 +4011,24 @@ pub(super) fn pread_file(
         return Ok(0);
     }
     validate_user_buffer(buf, count)?;
+    pread_segs(file, UserSegs::new(&[(buf, count)]), offset)
+}
 
+/// Read at `offset` of `file` into `dst`, leaving its position alone:
+/// pread, and preadv as one read.
+pub(super) fn pread_segs(
+    file: &crate::fs::file::File,
+    dst: UserSegs<'_>,
+    offset: usize,
+) -> SyscallResult {
+    if file.node.node_type() == crate::fs::NodeType::Directory {
+        return Err(SyscallError::IsADirectory);
+    }
     // Read at `offset` through the VfsNode, bypassing the File position,
     // a chunk at a time through a kernel buffer (N-43).
     let mut at = offset;
-    super::userspace::produce_to_user(
-        buf,
-        count,
+    super::userspace::produce_to_segs(
+        dst,
         true,
         |kbuf| {
             let n = file.node.read(at, kbuf).map_err(super::map_kernel_error)?;
@@ -4109,9 +4062,8 @@ pub(super) fn file_size(file: &crate::fs::file::File) -> Result<usize, SyscallEr
 }
 
 /// Write `count` bytes from `buf` at `offset` of `file` (open for writing,
-/// with an offset), leaving its position alone: pwrite and each buffer of
-/// pwritev.
-pub(super) fn pwrite_file(
+/// with an offset), leaving its position alone (pwrite).
+fn pwrite_file(
     file: &crate::fs::file::File,
     buf: usize,
     count: usize,
@@ -4121,16 +4073,29 @@ pub(super) fn pwrite_file(
         return Ok(0);
     }
     validate_user_buffer(buf, count)?;
+    pwrite_segs(file, UserSegs::new(&[(buf, count)]), offset)
+}
 
-    // RLIMIT_FSIZE for the whole write, then at `offset` through the
-    // VfsNode, a chunk at a time (N-43).
+/// Write `src` at `offset` of `file`, leaving its position alone: pwrite,
+/// and pwritev as one write.
+pub(super) fn pwrite_segs(
+    file: &crate::fs::file::File,
+    src: UserSegs<'_>,
+    offset: usize,
+) -> SyscallResult {
+    if src.is_empty() {
+        return Ok(0);
+    }
+    // RLIMIT_FSIZE for the whole write (only one starting at the limit is
+    // refused, EFBIG and SIGXFSZ), then at `offset` through the VfsNode, a
+    // chunk at a time (N-43).
     let count =
-        crate::fs::check_fsize(&*file.node, offset, count).map_err(super::map_kernel_error)?;
+        crate::fs::check_fsize(&*file.node, offset, src.len()).map_err(super::map_kernel_error)?;
     if count != 0 {
         crate::fs::remove_privs(&*file.node).map_err(super::map_kernel_error)?;
     }
     let mut at = offset;
-    let written = super::userspace::consume_from_user(buf, count, true, |kbuf| {
+    let written = super::userspace::consume_from_segs(src.truncate(count), true, |kbuf| {
         let n = file.node.write(at, kbuf).map_err(super::map_kernel_error)?;
         at += n;
         Ok(n)

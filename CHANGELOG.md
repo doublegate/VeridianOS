@@ -137,6 +137,13 @@
   turning O_NOATIME on needs the file's owner or CAP_FOWNER (EPERM), and O_DIRECT a regular file
   (EINVAL). New: F_DUPFD_QUERY (N-199). lseek refuses a position past the largest file offset
   (EINVAL, as Linux's vfs_setpos), and a record-lock range measured from one is EOVERFLOW.
+- readv, writev, preadv and pwritev move their buffers as one transfer (N-200); they made one
+  read or write per buffer. A readv of a pipe, socket or terminal returns what is there instead of
+  waiting again for a later buffer, and a writev of at most PIPE_BUF bytes to a pipe goes in whole
+  or not at all (on a full O_NONBLOCK pipe EAGAIN, where the first buffers used to go in). Every
+  buffer's address range is checked before anything moves (EFAULT with the data left in place, as
+  Linux's import_iovec), and the descriptor before the iovec array, so a bad one is EBADF even
+  with no buffers (it returned 0).
 - execve of a relative name runs it from the working directory, as on Linux; it searched PATH,
   which is libc's job (execvp). Exec errors keep their errno (EACCES, ENOTDIR, ELOOP) instead of
   all being ENOENT, a script's interpreter is opened the same way, and an empty argv gets "" as

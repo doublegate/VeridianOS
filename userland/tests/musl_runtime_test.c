@@ -5540,6 +5540,7 @@ static void test_statfs(void)
 
 static void test_record_locks(void);
 static void test_fcntl_flags(void);
+static void test_vectored_io(void);
 
 /* Tests `--only NAME` can run alone (for debugging a single test). */
 static const struct {
@@ -5549,6 +5550,7 @@ static const struct {
     {"review_fixes", test_review_fixes},
     {"record_locks", test_record_locks},
     {"fcntl_flags", test_fcntl_flags},
+    {"vectored_io", test_vectored_io},
     {"threads", test_threads},
     {"cow_race", test_cow_race},
     {"signals", test_signals},
@@ -7397,6 +7399,74 @@ static void test_fcntl_flags(void)
     report("fcntl_flags", f == 0, why);
 }
 
+/* readv and writev are one transfer each (N-200): a readv of a pipe takes
+ * what is there instead of waiting again for a later buffer, a writev of
+ * at most PIPE_BUF bytes to a pipe goes in whole or not at all, buffers
+ * are filled and drained in order, and a buffer outside user space is
+ * EFAULT before anything is read. The descriptor is checked first. */
+static void test_vectored_io(void)
+{
+    static char page[4096];
+    char why[96], a[8], b[128], x[50], y[100];
+    int f = 0, p[2];
+
+    /* Five bytes in the pipe, buffers of 5 and 100, a writer still open:
+     * readv returns 5 instead of waiting for the second buffer. */
+    if (pipe(p) != 0) f |= 1;
+    pid_t pid = fork();
+    if (pid == 0) {
+        alarm(5);
+        struct iovec r[2] = {{a, 5}, {b, 100}};
+        if (write(p[1], "hello", 5) != 5) _exit(90);
+        ssize_t n = readv(p[0], r, 2);
+        _exit(n == 5 && memcmp(a, "hello", 5) == 0 ? 0 : 91);
+    }
+    int st = 0;
+    if (pid < 0 || waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 0)
+        f |= 2;
+
+    /* In order across buffers, both ways. */
+    struct iovec w2[2] = {{"ab", 2}, {"cde", 3}};
+    struct iovec r2[2] = {{a, 3}, {b, 10}};
+    if (writev(p[1], w2, 2) != 5 || readv(p[0], r2, 2) != 5 || memcmp(a, "abc", 3) ||
+        memcmp(b, "de", 2))
+        f |= 4;
+
+    /* A buffer in kernel space: EFAULT, and the data stays in the pipe. */
+    struct iovec bad[2] = {{a, 2}, {(void *)(uintptr_t)-4096, 3}};
+    errno = 0;
+    if (write(p[1], "hello", 5) != 5 || readv(p[0], bad, 2) != -1 || errno != EFAULT ||
+        read(p[0], b, sizeof(b)) != 5)
+        f |= 8;
+    close(p[0]);
+    close(p[1]);
+
+    /* A full O_NONBLOCK pipe with 100 bytes read out: a writev of 150
+     * bytes (under PIPE_BUF) is EAGAIN, not the first buffer's 50. */
+    int full = 0;
+    if (pipe2(p, O_NONBLOCK) != 0) f |= 1;
+    for (int i = 0; i < 1024 && !full; i++)
+        if (write(p[1], page, sizeof(page)) < 0) full = errno == EAGAIN;
+    memset(x, 'x', sizeof(x));
+    memset(y, 'y', sizeof(y));
+    struct iovec w[2] = {{x, sizeof(x)}, {y, sizeof(y)}};
+    errno = 0;
+    ssize_t n = 0;
+    if (!full || read(p[0], b, 100) != 100 || (n = writev(p[1], w, 2)) != -1 || errno != EAGAIN)
+        f |= 16;
+    close(p[0]);
+    close(p[1]);
+
+    /* A bad descriptor is EBADF even with no buffers. */
+    errno = 0;
+    if (readv(-1, NULL, 0) != -1 || errno != EBADF) f |= 32;
+    errno = 0;
+    if (writev(-1, NULL, 0) != -1 || errno != EBADF) f |= 32;
+
+    snprintf(why, sizeof(why), "f=%#x st=%#x n=%zd errno=%d", f, st, n, errno);
+    report("vectored_io", f == 0, why);
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
@@ -7506,6 +7576,7 @@ int main(int argc, char **argv)
     test_ioctl();
     test_record_locks();
     test_fcntl_flags();
+    test_vectored_io();
 #if defined(__x86_64__)
     test_ustat_sysfs();
 #endif
