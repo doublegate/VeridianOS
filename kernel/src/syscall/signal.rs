@@ -321,20 +321,42 @@ pub fn sys_rt_sigqueueinfo(tgid: usize, sig: usize, uinfo: usize) -> SyscallResu
     if sig == 0 {
         return Ok(0);
     }
-    if let Some(target) = process::get_process(pid) {
-        if target
-            .dispatched
-            .load(core::sync::atomic::Ordering::Acquire)
-        {
-            return match crate::process::signals::send_info_to_process(&target, info) {
-                Ok(true) => Ok(0),
-                Ok(false) => super::filesystem::send_info(pid, sig as i32, info),
-                Err(crate::error::KernelError::WouldBlock) => Err(SyscallError::WouldBlock),
-                Err(_) => Err(SyscallError::ProcessNotFound),
-            };
-        }
+    let target = process::get_process(pid).ok_or(SyscallError::ProcessNotFound)?;
+    deliver(&target, None, info)
+}
+
+/// Make the signal `info` names pending for `target` (the caller checked
+/// existence and permission), for its thread `thread` if given: a
+/// dispatched process takes it through its threads' masks, others through
+/// the old path. EAGAIN when a queued real-time signal would exceed
+/// RLIMIT_SIGPENDING.
+#[cfg(feature = "alloc")]
+pub(super) fn deliver(
+    target: &alloc::sync::Arc<process::Process>,
+    thread: Option<&alloc::sync::Arc<process::Thread>>,
+    info: crate::process::signals::SigInfo,
+) -> SyscallResult {
+    let sig = info.si_signo;
+    let errno = |e| match e {
+        crate::error::KernelError::WouldBlock => SyscallError::WouldBlock,
+        _ => SyscallError::ProcessNotFound,
+    };
+    if !target
+        .dispatched
+        .load(core::sync::atomic::Ordering::Acquire)
+    {
+        return super::filesystem::send_info(target.pid, sig, info);
     }
-    super::filesystem::send_info(pid, sig as i32, info)
+    match thread {
+        Some(thread) => crate::process::signals::send_to_thread(target, thread, info)
+            .map(|_| 0)
+            .map_err(errno),
+        None => match crate::process::signals::send_info_to_process(target, info) {
+            Ok(true) => Ok(0),
+            Ok(false) => super::filesystem::send_info(target.pid, sig, info),
+            Err(e) => Err(errno(e)),
+        },
+    }
 }
 
 /// rt_tgsigqueueinfo(tgid, tid, sig, info): as rt_sigqueueinfo, to thread
@@ -355,21 +377,10 @@ pub fn sys_rt_tgsigqueueinfo(tgid: usize, tid: usize, sig: usize, uinfo: usize) 
         return Ok(0);
     }
     let target = process::get_process(pid).ok_or(SyscallError::ProcessNotFound)?;
-    if target
-        .dispatched
-        .load(core::sync::atomic::Ordering::Acquire)
-    {
-        let thread = target
-            .get_thread(process::ThreadId(tid as u64))
-            .ok_or(SyscallError::ProcessNotFound)?;
-        return crate::process::signals::send_to_thread(&target, &thread, info)
-            .map(|_| 0)
-            .map_err(|e| match e {
-                crate::error::KernelError::WouldBlock => SyscallError::WouldBlock,
-                _ => SyscallError::ProcessNotFound,
-            });
-    }
-    super::filesystem::send_info(pid, sig as i32, info)
+    let thread = target
+        .get_thread(process::ThreadId(tid as u64))
+        .ok_or(SyscallError::ProcessNotFound)?;
+    deliver(&target, Some(&thread), info)
 }
 
 /// rt_sigtimedwait(set, info, timeout, sigsetsize): take one of the

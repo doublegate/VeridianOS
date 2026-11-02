@@ -29,6 +29,9 @@ const CLONE_CHILD_CLEARTID: usize = 0x0020_0000;
 const CLONE_DETACHED: usize = 0x0040_0000;
 const CLONE_CHILD_SETTID: usize = 0x0100_0000;
 const CLONE_VFORK: usize = 0x0000_4000;
+/// Return a pidfd for the child through `parent_tid` (a PIDFD_THREAD one
+/// for a thread), as Linux 5.2+.
+const CLONE_PIDFD: usize = 0x0000_1000;
 /// clone's low byte: the signal the parent gets when a new process exits.
 const CSIGNAL: usize = 0xFF;
 
@@ -61,10 +64,12 @@ fn process_clone(
         | CLONE_PARENT_SETTID
         | CLONE_CHILD_SETTID
         | CLONE_CHILD_CLEARTID
-        | CLONE_DETACHED;
+        | CLONE_DETACHED
+        | CLONE_PIDFD;
     if flags & !supported != 0 {
         return Err(SyscallError::InvalidArgument);
     }
+    pidfd_flags_valid(flags)?;
     let exit_signal = flags & CSIGNAL;
     if exit_signal > crate::process::signals::NSIG {
         return Err(SyscallError::InvalidArgument);
@@ -97,7 +102,18 @@ fn process_clone(
         parent_settid: on(CLONE_PARENT_SETTID).then_some(parent_tid_ptr),
         child_settid: on(CLONE_CHILD_SETTID).then_some(child_tid_ptr),
         child_cleartid: on(CLONE_CHILD_CLEARTID).then_some(child_tid_ptr),
+        pidfd: on(CLONE_PIDFD).then_some(parent_tid_ptr),
     })
+}
+
+/// CLONE_PIDFD's own rules (Linux's copy_process and kernel_clone): not
+/// with CLONE_DETACHED, nor with CLONE_PARENT_SETTID, whose `parent_tid`
+/// the pidfd takes in clone(2).
+fn pidfd_flags_valid(flags: usize) -> Result<(), SyscallError> {
+    if flags & CLONE_PIDFD != 0 && flags & (CLONE_DETACHED | CLONE_PARENT_SETTID) != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    Ok(())
 }
 
 /// Create a new thread sharing the current process's address space and
@@ -161,10 +177,12 @@ pub fn sys_thread_clone(
             | CLONE_PARENT_SETTID
             | CLONE_CHILD_CLEARTID
             | CLONE_DETACHED
-            | CLONE_CHILD_SETTID);
+            | CLONE_CHILD_SETTID
+            | CLONE_PIDFD);
     if unsupported != 0 {
         return Err(SyscallError::InvalidArgument);
     }
+    pidfd_flags_valid(flags)?;
     // Share FS? (CWD and umask). If not set, clone gets its own copy.
     let share_fs = flags & CLONE_FS != 0;
 
@@ -343,13 +361,31 @@ pub fn sys_thread_clone(
         }
     }
 
+    // CLONE_PIDFD: a PIDFD_THREAD pidfd for the new thread, stored before
+    // it runs (EFAULT if the store faults; the thread never starts).
+    #[cfg(feature = "alloc")]
+    let pidfd = if flags & CLONE_PIDFD != 0 {
+        Some(super::pidfd::install_at(&proc, Some(tid), parent_tid_ptr)?)
+    } else {
+        None
+    };
+    #[cfg(feature = "alloc")]
+    let undo_pidfd = || {
+        if let Some(fd) = pidfd {
+            super::pidfd::uninstall(fd);
+        }
+    };
+    #[cfg(not(feature = "alloc"))]
+    let undo_pidfd = || {};
+
     // Add to the process first: the task keeps a pointer to the thread, so
     // it must be created from the thread's final, shared (Arc) location.
     // It used to be created from this local, which add_thread() then moved,
     // leaving the task's thread_ref pointing at a dead stack slot.
-    let thread = proc
-        .add_thread(thread)
-        .map_err(|_| SyscallError::InvalidState)?;
+    let thread = proc.add_thread(thread).map_err(|_| {
+        undo_pidfd();
+        SyscallError::InvalidState
+    })?;
     // A set*id call on another thread fixes every thread's sets under the
     // thread map (`Process::change_uids`). Copied again under the map, the
     // new thread's sets either went through that fixup or are taken from a
@@ -369,7 +405,27 @@ pub fn sys_thread_clone(
         // finish exiting (N-46).
         drop(thread);
         let _ = crate::process::exit::cleanup_thread(&proc, tid);
+        undo_pidfd();
         return Err(SyscallError::OutOfMemory);
     }
     Ok(tid.0 as usize)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clone_pidfd_excludes_detached_and_parent_settid() {
+        assert!(pidfd_flags_valid(CLONE_PIDFD | 17).is_ok());
+        assert!(pidfd_flags_valid(CLONE_DETACHED).is_ok());
+        assert_eq!(
+            pidfd_flags_valid(CLONE_PIDFD | CLONE_DETACHED),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(
+            pidfd_flags_valid(CLONE_PIDFD | CLONE_PARENT_SETTID),
+            Err(SyscallError::InvalidArgument)
+        );
+    }
 }

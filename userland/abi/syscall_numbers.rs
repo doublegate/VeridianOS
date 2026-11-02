@@ -62,6 +62,9 @@ pub mod sysno {
     pub const SYS_arch_prctl: usize = 158;
     pub const SYS_tkill: usize = 200;
     pub const SYS_tgkill: usize = 234;
+    pub const SYS_pidfd_open: usize = 434;
+    pub const SYS_pidfd_send_signal: usize = 424;
+    pub const SYS_pidfd_getfd: usize = 438;
     pub const SYS_open: usize = 2;
     pub const SYS_openat: usize = 257;
     pub const SYS_openat2: usize = 437;
@@ -379,6 +382,9 @@ pub mod sysno {
     pub const SYS_rseq: usize = 293;
     pub const SYS_tkill: usize = 130;
     pub const SYS_tgkill: usize = 131;
+    pub const SYS_pidfd_open: usize = 434;
+    pub const SYS_pidfd_send_signal: usize = 424;
+    pub const SYS_pidfd_getfd: usize = 438;
     pub const SYS_openat: usize = 56;
     pub const SYS_openat2: usize = 437;
     pub const SYS_name_to_handle_at: usize = 264;
@@ -660,6 +666,9 @@ pub mod sysno {
     pub const SYS_rseq: usize = 293;
     pub const SYS_tkill: usize = 130;
     pub const SYS_tgkill: usize = 131;
+    pub const SYS_pidfd_open: usize = 434;
+    pub const SYS_pidfd_send_signal: usize = 424;
+    pub const SYS_pidfd_getfd: usize = 438;
     pub const SYS_openat: usize = 56;
     pub const SYS_openat2: usize = 437;
     pub const SYS_name_to_handle_at: usize = 264;

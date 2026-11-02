@@ -2323,6 +2323,17 @@ fn kill_matching(
     sig: i32,
     pred: impl Fn(&crate::process::Process) -> bool,
 ) -> SyscallResult {
+    signal_matching(caller, sig, None, pred)
+}
+
+/// As [`kill_matching`], each target seeing `info` when given (the caller
+/// built or checked it) rather than kill's SI_USER from the caller.
+pub(crate) fn signal_matching(
+    caller: &crate::process::Process,
+    sig: i32,
+    info: Option<crate::process::signals::SigInfo>,
+    pred: impl Fn(&crate::process::Process) -> bool,
+) -> SyscallResult {
     let mut targets = alloc::vec::Vec::new();
     crate::process::table::PROCESS_TABLE.for_each(|p| {
         if p.is_alive() && pred(p) {
@@ -2336,7 +2347,15 @@ fn kill_matching(
     targets.sort_by_key(|&p| p == caller.pid);
     let mut sent = false;
     for pid in targets {
-        if kill_one(caller, pid, sig).is_ok() {
+        let done = match info {
+            Some(info) if sig != 0 => kill_one(caller, pid, 0).and_then(|_| {
+                let target =
+                    crate::process::table::get_process(pid).ok_or(SyscallError::ProcessNotFound)?;
+                super::signal::deliver(&target, None, info)
+            }),
+            _ => kill_one(caller, pid, sig),
+        };
+        if done.is_ok() {
             sent = true;
         }
     }

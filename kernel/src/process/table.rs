@@ -303,7 +303,12 @@ pub fn add_process(process: Process) -> Result<ProcessId, KernelError> {
 /// Remove a process from the table
 #[cfg(feature = "alloc")]
 pub fn remove_process(pid: ProcessId) -> Option<Arc<Process>> {
-    PROCESS_TABLE.remove_process(pid)
+    let removed = PROCESS_TABLE.remove_process(pid);
+    // Reaped: its pidfds poll hung up.
+    if removed.is_some() {
+        crate::sched::dispatch::io_event();
+    }
+    removed
 }
 
 /// Check if a process exists

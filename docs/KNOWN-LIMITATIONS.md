@@ -313,6 +313,13 @@ What remains:
   creates more than 4194303 processes and threads gets ids above `pid_max`, and an id past
   2147483647 no longer fits in `pid_t`. Programs that read `pid_max` to size a table, or that use
   it as an id no process has (LTP's `tst_get_unused_pid`), work until then.
+- **pidfds have no ioctls and no fdinfo.** pidfd_open, pidfd_send_signal, pidfd_getfd,
+  waitid(P_PIDFD) and clone(CLONE_PIDFD) work as on Linux, but PIDFD_GET_INFO and the namespace
+  ioctls are not implemented and `/proc/<pid>/fdinfo` (where Linux shows a pidfd's pid) does not exist.
+  A process that has exited but is not yet reaped refuses signals with ESRCH, through kill and
+  pidfd_send_signal alike, where Linux accepts and discards them. An open `/proc/self` stands for
+  whichever process uses it, not the one that opened it, so pidfd_send_signal on one passed to
+  another process signals that process.
 - **chroot (N-250):** a working directory outside the new root is moved to the root, where Linux
   would leave it outside.
 - **uname says `VeridianOS`, not `Linux`, by default (ADR 0021).** Programs that test the

@@ -84,6 +84,9 @@ rseq
 arch_prctl
 tkill
 tgkill
+pidfd_open
+pidfd_send_signal
+pidfd_getfd
 
 ## Files
 open

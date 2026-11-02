@@ -15,6 +15,8 @@ pub const EXT4_SUPER_MAGIC: u64 = 0xEF53;
 pub const MSDOS_SUPER_MAGIC: u64 = 0x4d44;
 pub const DEVPTS_SUPER_MAGIC: u64 = 0x1cd1;
 pub const PIPEFS_MAGIC: u64 = 0x5049_5045;
+/// pidfs, the filesystem of pidfds ("PIDF").
+pub const PID_FS_MAGIC: u64 = 0x5049_4446;
 pub const SOCKFS_MAGIC: u64 = 0x534F_434B;
 /// eventfd, signalfd, timerfd and epoll: Linux's anonymous inodes.
 pub const ANON_INODE_FS_MAGIC: u64 = 0x0904_1934;

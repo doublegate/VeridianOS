@@ -112,7 +112,25 @@ impl ProcNode {
     }
 }
 
+/// The process a `/proc/<pid>` directory names, which pidfd_send_signal
+/// takes in place of a pidfd (Linux's tgid_pidfd_to_pid). `/proc/self`
+/// names the caller: that node is not bound to the process that opened it.
+pub fn process_dir_pid(node: &dyn VfsNode) -> Option<u64> {
+    let node = node.as_any()?.downcast_ref::<ProcNode>()?;
+    match &node.node_type {
+        ProcNodeType::ProcessDir(pid) => Some(*pid),
+        ProcNodeType::SubDir(dir) if dir == "self" => {
+            crate::process::current_process().map(|p| p.pid.0)
+        }
+        _ => None,
+    }
+}
+
 impl VfsNode for ProcNode {
+    fn as_any(&self) -> Option<&dyn core::any::Any> {
+        Some(self)
+    }
+
     /// procfs: `simple_statfs`, no counts.
     fn statfs(&self) -> Result<crate::fs::statfs::FsStats, crate::error::KernelError> {
         Ok(crate::fs::statfs::FsStats::simple(

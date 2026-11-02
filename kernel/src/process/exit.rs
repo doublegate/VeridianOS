@@ -593,6 +593,9 @@ pub fn exit_dispatched(exit_code: i32, group: bool) -> ! {
             );
         }
         dispatch::PROCESS_EVENTS.wake_all();
+        // A pidfd for the thread, or for the process now a zombie, polls
+        // readable.
+        dispatch::io_event();
     }
     dispatch::exit_current_task()
 }
@@ -673,6 +676,9 @@ fn force_terminate_process(process: &Process, signal: i32) -> Result<(), KernelE
     // Clean up and mark as zombie
     cleanup_process(process);
     process.set_state(ProcessState::Zombie);
+    // Its pidfds poll readable.
+    #[cfg(feature = "alloc")]
+    sched::dispatch::io_event();
 
     // Wake up parent if waiting
     if let Some(parent_pid) = process.parent() {

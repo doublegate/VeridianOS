@@ -199,6 +199,14 @@
   and ending a watch queues IN_IGNORED. `/proc/sys/fs/inotify` has the limits, which root may
   change (16384 queued events, 128 instances and 65536 watches per user to begin with). fanotify
   stays ENOSYS, as on a kernel built without CONFIG_FANOTIFY.
+- pidfds, as Linux 7.3's `kernel/pid.c` and `fs/pidfs.c`: pidfd_open (PIDFD_NONBLOCK and
+  PIDFD_THREAD), pidfd_send_signal (the scope flags, PIDFD_SELF_THREAD and
+  PIDFD_SELF_THREAD_GROUP, a caller's siginfo under sigqueue's rules, and `/proc/<pid>`
+  directories in place of a pidfd) and pidfd_getfd (for a caller that may ptrace the target).
+  A pidfd is close-on-exec, polls readable once its process has exited and hung up once it is
+  reaped, and its reads are EINVAL. waitid takes P_PIDFD (an O_NONBLOCK pidfd waits as WNOHANG,
+  and EAGAIN when nothing is ready) and now checks its options before its id, as Linux; clone
+  takes CLONE_PIDFD for processes and threads, returning the pidfd through `parent_tid`.
 - execve of a relative name runs it from the working directory, as on Linux; it searched PATH,
   which is libc's job (execvp). Exec errors keep their errno (EACCES, ENOTDIR, ELOOP) instead of
   all being ENOENT, a script's interpreter is opened the same way, and an empty argv gets "" as

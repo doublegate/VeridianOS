@@ -23,6 +23,8 @@ pub mod flock;
 pub mod inotify;
 #[cfg(feature = "alloc")]
 pub mod memfd;
+#[cfg(feature = "alloc")]
+pub mod pidfd;
 pub mod pipe;
 pub mod procfs;
 pub mod pty;

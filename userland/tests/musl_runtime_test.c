@@ -5547,6 +5547,7 @@ static void test_stat_numbers(void);
 static void test_open_flags(void);
 static void test_text_busy(void);
 static void test_inotify_events(void);
+static void test_pidfd(void);
 
 /* Tests `--only NAME` can run alone (for debugging a single test). */
 static const struct {
@@ -5562,6 +5563,7 @@ static const struct {
     {"open_flags", test_open_flags},
     {"text_busy", test_text_busy},
     {"inotify_events", test_inotify_events},
+    {"pidfd", test_pidfd},
     {"threads", test_threads},
     {"cow_race", test_cow_race},
     {"signals", test_signals},
@@ -7985,6 +7987,123 @@ static void test_inotify_events(void)
     report("inotify_events", f == 0, why);
 }
 
+/* pidfd_open, pidfd_send_signal, pidfd_getfd, waitid(P_PIDFD) and
+ * clone(CLONE_PIDFD), as Linux 7.3: a pidfd is close-on-exec, polls
+ * readable once its process has exited, signals and waits for that process
+ * only, and copies a descriptor from a process the caller may trace. */
+#ifndef P_PIDFD
+#define P_PIDFD 3
+#endif
+#ifndef PIDFD_NONBLOCK
+#define PIDFD_NONBLOCK O_NONBLOCK
+#endif
+#ifndef PIDFD_THREAD
+#define PIDFD_THREAD O_EXCL
+#endif
+#ifndef CLONE_PIDFD
+#define CLONE_PIDFD 0x1000
+#endif
+static int sys_pidfd_open(pid_t pid, unsigned flags)
+{
+    return (int)syscall(SYS_pidfd_open, pid, flags);
+}
+
+static int sys_pidfd_send_signal(int pidfd, int sig, siginfo_t *info, unsigned flags)
+{
+    return (int)syscall(SYS_pidfd_send_signal, pidfd, sig, info, flags);
+}
+
+static int sys_pidfd_getfd(int pidfd, int fd, unsigned flags)
+{
+    return (int)syscall(SYS_pidfd_getfd, pidfd, fd, flags);
+}
+
+static void test_pidfd(void)
+{
+    char why[160];
+    int f = 0;
+
+    /* Arguments. */
+    if (!(sys_pidfd_open(getpid(), 0x4) == -1 && errno == EINVAL) ||
+        !(sys_pidfd_open(0, 0) == -1 && errno == EINVAL) ||
+        !(sys_pidfd_open(-1, 0) == -1 && errno == EINVAL) ||
+        !(sys_pidfd_open(0x3ffffff0, 0) == -1 && errno == ESRCH))
+        f |= 1;
+    int self = sys_pidfd_open(getpid(), 0);
+    if (self < 0 || fcntl(self, F_GETFD) != FD_CLOEXEC || (fcntl(self, F_GETFL) & O_ACCMODE) != O_RDWR)
+        f |= 2;
+    char c;
+    if (!(read(self, &c, 1) == -1 && errno == EINVAL)) f |= 2;
+    if (!(sys_pidfd_send_signal(self, 0, NULL, 0x8) == -1 && errno == EINVAL) ||
+        !(sys_pidfd_send_signal(self, 0, NULL, 0x3) == -1 && errno == EINVAL) ||
+        !(sys_pidfd_send_signal(0x7fff, 0, NULL, 0) == -1 && errno == EBADF) ||
+        !(sys_pidfd_send_signal(1, 0, NULL, 0) == -1 && errno == EBADF) ||
+        sys_pidfd_send_signal(self, 0, NULL, 0) != 0)
+        f |= 4;
+    struct pollfd pfd = {self, POLLIN, 0};
+    if (poll(&pfd, 1, 0) != 0) f |= 8;
+
+    /* A child that waits for a signal: it is signalled through its pidfd,
+     * which then polls readable, and waitid reaps it through the pidfd. */
+    int pipefd[2];
+    if (pipe(pipefd) != 0) f |= 16;
+    pid_t pid = fork();
+    if (pid == 0) {
+        close(pipefd[0]);
+        pause();
+        _exit(1);
+    }
+    close(pipefd[1]);
+    int pfd_child = sys_pidfd_open(pid, PIDFD_NONBLOCK);
+    if (pfd_child < 0 || !(fcntl(pfd_child, F_GETFL) & O_NONBLOCK)) f |= 32;
+    /* Copy its write end of the pipe: the copy is close-on-exec. */
+    int got = sys_pidfd_getfd(pfd_child, pipefd[1], 0);
+    if (got < 0 || fcntl(got, F_GETFD) != FD_CLOEXEC) f |= 64;
+    if (!(sys_pidfd_getfd(pfd_child, pipefd[1], 1) == -1 && errno == EINVAL) ||
+        !(sys_pidfd_getfd(pfd_child, 0x7ffe, 0) == -1 && errno == EBADF))
+        f |= 64;
+    if (got >= 0) {
+        if (write(got, "x", 1) != 1) f |= 64;
+        close(got);
+        if (read(pipefd[0], &c, 1) != 1 || c != 'x') f |= 64;
+    }
+    siginfo_t si;
+    memset(&si, 0, sizeof(si));
+    /* Nothing to report yet on a nonblocking pidfd: EAGAIN. */
+    if (!(waitid(P_PIDFD, pfd_child, &si, WEXITED) == -1 && errno == EAGAIN)) f |= 128;
+    if (sys_pidfd_send_signal(pfd_child, SIGTERM, NULL, 0) != 0) f |= 256;
+    pfd.fd = pfd_child;
+    pfd.revents = 0;
+    if (poll(&pfd, 1, 5000) != 1 || !(pfd.revents & POLLIN)) f |= 512;
+    memset(&si, 0, sizeof(si));
+    if (waitid(P_PIDFD, pfd_child, &si, WEXITED) != 0 || si.si_pid != pid ||
+        si.si_code != CLD_KILLED || si.si_status != SIGTERM)
+        f |= 1024;
+    /* Reaped: polls readable and hung up; signals are ESRCH. */
+    pfd.revents = 0;
+    if (poll(&pfd, 1, 0) != 1 || !(pfd.revents & POLLHUP)) f |= 2048;
+    if (!(sys_pidfd_send_signal(pfd_child, SIGTERM, NULL, 0) == -1 && errno == ESRCH)) f |= 2048;
+    close(pfd_child);
+    close(pipefd[0]);
+
+    /* clone(CLONE_PIDFD): the pidfd comes back through parent_tid. */
+    int cfd = -1;
+    long cpid = syscall(SYS_clone, CLONE_PIDFD | SIGCHLD, 0, &cfd, 0, 0);
+    if (cpid == 0)
+        _exit(7);
+    if (cpid < 0 || cfd < 0 || fcntl(cfd, F_GETFD) != FD_CLOEXEC) f |= 4096;
+    memset(&si, 0, sizeof(si));
+    if (cfd >= 0 && (waitid(P_PIDFD, cfd, &si, WEXITED) != 0 || si.si_pid != cpid ||
+                     si.si_code != CLD_EXITED || si.si_status != 7))
+        f |= 4096;
+    if (cfd >= 0) close(cfd);
+    if (cpid > 0) waitpid((pid_t)cpid, NULL, WNOHANG);
+    close(self);
+
+    snprintf(why, sizeof(why), "f=%#x errno=%d", f, errno);
+    report("pidfd", f == 0, why);
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
@@ -8100,6 +8219,7 @@ int main(int argc, char **argv)
     test_open_flags();
     test_text_busy();
     test_inotify_events();
+    test_pidfd();
 #if defined(__x86_64__)
     test_ustat_sysfs();
 #endif

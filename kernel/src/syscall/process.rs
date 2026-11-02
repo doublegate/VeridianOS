@@ -54,6 +54,21 @@ pub(crate) fn sys_fork_with(opts: &crate::process::fork::ForkOptions) -> Syscall
                 drop(child_cap_space);
                 drop(parent_cap_space);
 
+                // CLONE_PIDFD: the parent's pidfd for the child, stored
+                // before the child runs; a store that faults is EFAULT and
+                // the child never runs, as Linux's copy_process.
+                #[cfg(feature = "alloc")]
+                let pidfd = match opts.pidfd {
+                    Some(ptr) => match super::pidfd::install_at(&child_process, None, ptr) {
+                        Ok(fd) => Some(fd),
+                        Err(e) => {
+                            crate::process::exit::discard_unstarted(&child_process);
+                            return Err(e);
+                        }
+                    },
+                    None => None,
+                };
+
                 // A dispatched parent's child runs as its own task, from the
                 // parent's registers at this syscall (rax = 0) and a copy of
                 // its vector state (on every architecture since sprint E).
@@ -64,6 +79,9 @@ pub(crate) fn sys_fork_with(opts: &crate::process::fork::ForkOptions) -> Syscall
                         crate::process::start_thread(&child_process, &t, true).is_ok()
                     });
                     if !started {
+                        if let Some(fd) = pidfd {
+                            super::pidfd::uninstall(fd);
+                        }
                         // Freed whole, not just unlisted (N-46).
                         crate::process::exit::discard_unstarted(&child_process);
                         return Err(SyscallError::OutOfMemory);
@@ -1480,8 +1498,11 @@ pub(super) fn positive_id(raw: usize) -> Result<usize, SyscallError> {
     }
 }
 
-/// waitid(2) for P_ALL and P_PID, with WEXITED, WSTOPPED, WCONTINUED and
-/// WNOHANG (N-103). The result is written as a Linux `siginfo_t`.
+/// waitid(2) for P_ALL, P_PID, P_PGID and P_PIDFD, with WEXITED, WSTOPPED,
+/// WCONTINUED, WNOWAIT and WNOHANG (N-103). The options are checked first,
+/// as Linux's kernel_waitid_prepare. A pidfd that is not one is EBADF; an
+/// O_NONBLOCK pidfd waits as WNOHANG, and with nothing to report the call
+/// is EAGAIN. The result is written as a Linux `siginfo_t`.
 pub fn sys_waitid(
     idtype: usize,
     id: usize,
@@ -1493,14 +1514,21 @@ pub fn sys_waitid(
     const P_ALL: usize = 0;
     const P_PID: usize = 1;
     const P_PGID: usize = 2;
+    const P_PIDFD: usize = 3;
     const WNOHANG: usize = 1;
     const WSTOPPED: usize = 2;
     const WEXITED: usize = 4;
     const WCONTINUED: usize = 8;
     const WNOWAIT: usize = 0x0100_0000;
 
+    if options & (WEXITED | WSTOPPED | WCONTINUED) == 0
+        || options & !(WNOHANG | WSTOPPED | WEXITED | WCONTINUED | WNOWAIT) != 0
+    {
+        return Err(SyscallError::InvalidArgument);
+    }
     // id is a pid_t: its low 32 bits (N-212).
     let id = id as u32 as i32;
+    let mut nonblock_pidfd = false;
     let filter = match idtype {
         P_ALL => WaitFilter::Any,
         P_PID if id > 0 => WaitFilter::Pid(ProcessId(id as u64)),
@@ -1512,18 +1540,20 @@ pub fn sys_waitid(
                 .load(core::sync::atomic::Ordering::Acquire),
         ),
         P_PGID if id > 0 => WaitFilter::Group(id as u64),
-        // A negative id, or a pidfd (P_PIDFD, not yet supported): EINVAL.
+        #[cfg(feature = "alloc")]
+        P_PIDFD if id >= 0 => {
+            let (file, pid, _) = super::pidfd::target(id as usize)?;
+            nonblock_pidfd = file.nonblock.load(core::sync::atomic::Ordering::Acquire);
+            WaitFilter::Pid(pid)
+        }
+        // A negative id or an unknown idtype: EINVAL.
         _ => return Err(SyscallError::InvalidArgument),
     };
-    if options & (WEXITED | WSTOPPED | WCONTINUED) == 0
-        || options & !(WNOHANG | WSTOPPED | WEXITED | WCONTINUED | WNOWAIT) != 0
-    {
-        return Err(SyscallError::InvalidArgument);
-    }
+    let no_hang = options & WNOHANG != 0;
     let waited = crate::process::exit::wait_children(
         filter,
         WaitOptions {
-            no_hang: options & WNOHANG != 0,
+            no_hang: no_hang || nonblock_pidfd,
             untraced: options & WSTOPPED != 0,
             continued: options & WCONTINUED != 0,
             skip_exited: options & WEXITED == 0,
@@ -1532,6 +1562,9 @@ pub fn sys_waitid(
         },
     )
     .map_err(wait_error)?;
+    if waited.pid.0 == 0 && nonblock_pidfd && !no_hang {
+        return Err(SyscallError::WouldBlock);
+    }
 
     if infop != 0 {
         let info = waitid_siginfo(waited.pid.0, waited.status);

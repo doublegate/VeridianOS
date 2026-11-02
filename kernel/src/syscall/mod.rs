@@ -374,6 +374,8 @@ mod fhandle;
 // inotify_init, inotify_init1, inotify_add_watch and inotify_rm_watch
 #[cfg(feature = "alloc")]
 mod notify;
+#[cfg(feature = "alloc")]
+mod pidfd;
 pub(crate) use filesystem::rename_paths;
 pub use futex::sys_futex_wake;
 
@@ -1497,6 +1499,12 @@ fn handle_syscall(
         Syscall::InotifyAddWatch => notify::sys_inotify_add_watch(arg1, arg2, arg3),
         #[cfg(feature = "alloc")]
         Syscall::InotifyRmWatch => notify::sys_inotify_rm_watch(arg1, arg2),
+        #[cfg(feature = "alloc")]
+        Syscall::PidfdOpen => pidfd::sys_pidfd_open(arg1, arg2),
+        #[cfg(feature = "alloc")]
+        Syscall::PidfdSendSignal => pidfd::sys_pidfd_send_signal(arg1, arg2, arg3, arg4),
+        #[cfg(feature = "alloc")]
+        Syscall::PidfdGetfd => pidfd::sys_pidfd_getfd(arg1, arg2, arg3),
         #[cfg(feature = "alloc")]
         Syscall::Madvise => memory::sys_madvise(arg1, arg2, arg3),
 

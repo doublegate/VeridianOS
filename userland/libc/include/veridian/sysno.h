@@ -72,6 +72,9 @@
 #define SYS_arch_prctl                   158
 #define SYS_tkill                        200
 #define SYS_tgkill                       234
+#define SYS_pidfd_open                   434
+#define SYS_pidfd_send_signal            424
+#define SYS_pidfd_getfd                  438
 /* Files */
 #define SYS_open                         2
 #define SYS_openat                       257
@@ -414,6 +417,9 @@
 #define SYS_rseq                         293
 #define SYS_tkill                        130
 #define SYS_tgkill                       131
+#define SYS_pidfd_open                   434
+#define SYS_pidfd_send_signal            424
+#define SYS_pidfd_getfd                  438
 /* Files */
 #define SYS_openat                       56
 #define SYS_openat2                      437
@@ -720,6 +726,9 @@
 #define SYS_rseq                         293
 #define SYS_tkill                        130
 #define SYS_tgkill                       131
+#define SYS_pidfd_open                   434
+#define SYS_pidfd_send_signal            424
+#define SYS_pidfd_getfd                  438
 /* Files */
 #define SYS_openat                       56
 #define SYS_openat2                      437

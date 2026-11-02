@@ -47,6 +47,10 @@ pub struct ForkOptions {
     pub child_settid: Option<usize>,
     /// CLONE_CHILD_CLEARTID: cleared and futex-woken when the child exits.
     pub child_cleartid: Option<usize>,
+    /// CLONE_PIDFD: where to store a pidfd for the child in the parent
+    /// (installed after the child's file table is copied, so the child
+    /// does not have it).
+    pub pidfd: Option<usize>,
 }
 
 impl Default for ForkOptions {
@@ -61,6 +65,7 @@ impl Default for ForkOptions {
             parent_settid: None,
             child_settid: None,
             child_cleartid: None,
+            pidfd: None,
         }
     }
 }
