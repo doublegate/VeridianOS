@@ -5539,6 +5539,7 @@ static void test_statfs(void)
 }
 
 static void test_record_locks(void);
+static void test_fcntl_flags(void);
 
 /* Tests `--only NAME` can run alone (for debugging a single test). */
 static const struct {
@@ -5547,6 +5548,7 @@ static const struct {
 } only_tests[] = {
     {"review_fixes", test_review_fixes},
     {"record_locks", test_record_locks},
+    {"fcntl_flags", test_fcntl_flags},
     {"threads", test_threads},
     {"cow_race", test_cow_race},
     {"signals", test_signals},
@@ -7332,6 +7334,69 @@ static void test_record_locks(void)
     report("record_locks", f == 0, why);
 }
 
+#ifndef F_DUPFD_QUERY
+#define F_DUPFD_QUERY 1027
+#endif
+
+/* fcntl (N-199): every command on a closed descriptor is EBADF and an
+ * unknown one EINVAL; F_SETFL changes O_APPEND (which writes then honour)
+ * and the other status flags, never the access mode. */
+static void test_fcntl_flags(void)
+{
+    const char *path = "/tmp/musl_fcntl_fl";
+    struct flock fl = {.l_type = F_RDLCK, .l_whence = SEEK_SET};
+    char why[96], buf[8] = {0};
+    int f = 0;
+
+    int fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0644);
+    if (fd < 0 || write(fd, "abc", 3) != 3 || lseek(fd, 0, SEEK_SET) != 0) f |= 1;
+    int fl0 = fcntl(fd, F_GETFL);
+    if (fl0 < 0 || (fl0 & O_ACCMODE) != O_RDWR || (fl0 & O_APPEND)) f |= 1;
+    /* O_APPEND on: the write goes to the end. */
+    if (fcntl(fd, F_SETFL, fl0 | O_APPEND) != 0 || !(fcntl(fd, F_GETFL) & O_APPEND)) f |= 2;
+    if (write(fd, "d", 1) != 1 || lseek(fd, 0, SEEK_CUR) != 4) f |= 2;
+    /* Off again: the write goes to the position. */
+    if (fcntl(fd, F_SETFL, fl0) != 0 || lseek(fd, 0, SEEK_SET) != 0 || write(fd, "X", 1) != 1)
+        f |= 4;
+    if (pread(fd, buf, sizeof(buf), 0) != 4 || memcmp(buf, "Xbcd", 4) != 0) f |= 4;
+    /* The access mode is not F_SETFL's to change. */
+    if (fcntl(fd, F_SETFL, O_WRONLY | O_ASYNC) != 0 || (fcntl(fd, F_GETFL) & O_ACCMODE) != O_RDWR ||
+        !(fcntl(fd, F_GETFL) & O_ASYNC))
+        f |= 8;
+    fcntl(fd, F_SETFL, fl0);
+    /* F_DUPFD_QUERY: the same open file or not. */
+    int d = dup(fd), other = open(path, O_RDONLY);
+    if (fcntl(fd, F_DUPFD_QUERY, d) != 1 || fcntl(fd, F_DUPFD_QUERY, other) != 0) f |= 16;
+    errno = 0;
+    if (!fails_with(fcntl(fd, 0x7fff, 0), EINVAL)) f |= 32;
+    close(d);
+    close(other);
+
+    /* O_NOATIME is the owner's: another user is refused. */
+    pid_t pid = fork();
+    if (pid == 0)
+        _exit(setresuid(65534, 65534, 65534) == 0 && fcntl(fd, F_SETFL, O_NOATIME) == -1 &&
+                      errno == EPERM
+                  ? 0
+                  : 1);
+    int st = 0;
+    if (pid < 0 || waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 0) f |= 64;
+    if (fcntl(fd, F_SETFL, O_NOATIME) != 0 || !(fcntl(fd, F_GETFL) & O_NOATIME)) f |= 64;
+
+    /* A closed descriptor: EBADF whatever the command. */
+    close(fd);
+    unlink(path);
+    static const int cmds[] = {F_DUPFD, F_GETFD, F_SETFD,       F_GETFL, F_SETFL,
+                               F_GETLK, F_SETLK, F_DUPFD_QUERY, 0x7fff};
+    for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
+        errno = 0;
+        if (!fails_with(fcntl(fd, cmds[i], &fl), EBADF)) f |= 128;
+    }
+
+    snprintf(why, sizeof(why), "f=0x%x fl0=0x%x errno=%d", f, fl0, errno);
+    report("fcntl_flags", f == 0, why);
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
@@ -7440,6 +7505,7 @@ int main(int argc, char **argv)
     test_fhandle();
     test_ioctl();
     test_record_locks();
+    test_fcntl_flags();
 #if defined(__x86_64__)
     test_ustat_sysfs();
 #endif

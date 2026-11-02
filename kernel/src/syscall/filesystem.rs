@@ -2668,16 +2668,19 @@ fn flock_range(
 ) -> Result<(u16, u64, u64), SyscallError> {
     use crate::fs::flock::{F_RDLCK, F_UNLCK, F_WRLCK, OFFSET_MAX};
     let max = OFFSET_MAX as i64;
-    let base: i64 = match fl.l_whence {
+    let base: usize = match fl.l_whence {
         0 => 0,
-        1 => *file.position.read() as i64,
-        2 => file.node.metadata().map_err(super::map_kernel_error)?.size as i64,
+        1 => *file.position.read(),
+        2 => file.node.metadata().map_err(super::map_kernel_error)?.size,
         _ => return Err(SyscallError::InvalidArgument),
     };
-    if fl.l_start > max - base {
-        return Err(SyscallError::Overflow);
-    }
-    let mut start = base + fl.l_start;
+    // A base past OFFSET_MAX cannot name a range (lseek refuses one, but
+    // a file's size is the filesystem's to report).
+    let base = i64::try_from(base).map_err(|_| SyscallError::Overflow)?;
+    let mut start = base
+        .checked_add(fl.l_start)
+        .filter(|&start| start <= max)
+        .ok_or(SyscallError::Overflow)?;
     if start < 0 {
         return Err(SyscallError::InvalidArgument);
     }
@@ -2823,23 +2826,77 @@ fn ofd_owner(file: &alloc::sync::Arc<crate::fs::file::File>) -> u64 {
     alloc::sync::Arc::as_ptr(file) as u64
 }
 
-/// File descriptor control (syscall 158).
+/// fcntl's O_LARGEFILE, which every open has on a 64-bit Linux kernel
+/// (force_o_largefile), so F_GETFL reports it.
+#[cfg(target_arch = "aarch64")]
+const O_LARGEFILE: u32 = 0x2_0000;
+#[cfg(not(target_arch = "aarch64"))]
+const O_LARGEFILE: u32 = 0x8000;
+/// Linux's O_NONBLOCK (and O_NDELAY), the same on every architecture.
+const O_NONBLOCK_FL: u32 = 0x800;
+
+/// F_GETFL: the access mode and status flags of an open file.
+fn file_status_flags(file: &crate::fs::file::File) -> u32 {
+    let access = match (file.flags.read, file.flags.write) {
+        (true, true) => 2,
+        (false, true) => 1,
+        _ => 0,
+    };
+    let nonblock = if file.nonblock.load(core::sync::atomic::Ordering::Acquire) {
+        O_NONBLOCK_FL
+    } else {
+        0
+    };
+    access | O_LARGEFILE | nonblock | file.status.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// F_SETFL, as Linux's setfl: O_APPEND, O_ASYNC, O_DIRECT, O_NOATIME and
+/// O_NONBLOCK take `arg`'s value and every other bit of it is ignored.
+/// Turning O_NOATIME on needs the file's owner or CAP_FOWNER
+/// (`owner_ok`, asked with the file's uid; EPERM); O_DIRECT is EINVAL but
+/// on a regular file (a pipe's packet mode does not exist).
+fn set_file_status_flags(
+    file: &crate::fs::file::File,
+    arg: u32,
+    owner_ok: impl FnOnce(u32) -> bool,
+) -> Result<(), SyscallError> {
+    use core::sync::atomic::Ordering;
+
+    use crate::fs::file::status;
+    let old = file.status.load(Ordering::Acquire);
+    if arg & status::NOATIME != 0 && old & status::NOATIME == 0 {
+        let uid = file.node.metadata().map_err(super::map_kernel_error)?.uid;
+        if !owner_ok(uid) {
+            return Err(SyscallError::OperationNotPermitted);
+        }
+    }
+    if arg & status::DIRECT != 0 && file.node.node_type() != crate::fs::NodeType::File {
+        return Err(SyscallError::InvalidArgument);
+    }
+    file.nonblock
+        .store(arg & O_NONBLOCK_FL != 0, Ordering::Release);
+    let _ = file
+        .status
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |old| {
+            Some((arg & status::SETFL) | (old & !status::SETFL))
+        });
+    Ok(())
+}
+
+/// File descriptor control (fcntl).
 ///
-/// Implements POSIX fcntl operations using the FileTable's cloexec API.
-///
-/// # Arguments
-/// - `fd`: File descriptor.
-/// - `cmd`: Command (F_DUPFD=0, F_GETFD=1, F_SETFD=2, F_GETFL=3, F_SETFL=4).
-/// - `arg`: Command-specific argument.
-///
-/// # Returns
-/// Command-specific value on success.
+/// The descriptor is looked up first, so any command on one that is not
+/// open is EBADF, as Linux's do_fcntl; an unknown command on an open one
+/// is EINVAL. A standard descriptor that is still the implicit console
+/// answers the descriptor and status flag commands as a terminal open for
+/// reading and writing would.
 pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
     const F_DUPFD: usize = 0;
     const F_GETFD: usize = 1;
     const F_SETFD: usize = 2;
     const F_GETFL: usize = 3;
     const F_SETFL: usize = 4;
+    const F_DUPFD_QUERY: usize = 1027;
     const F_DUPFD_CLOEXEC: usize = 1030;
     const F_ADD_SEALS: usize = 1033;
     const F_GET_SEALS: usize = 1034;
@@ -2847,76 +2904,48 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
 
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
     let file_table = proc.file_table.lock();
+    let Some((file, cloexec)) = file_table.get_entry(fd) else {
+        if !file_table.is_implicit_console(fd) {
+            return Err(SyscallError::BadFileDescriptor);
+        }
+        return match cmd {
+            F_GETFD => Ok(0),
+            F_GETFL => Ok((2 | O_LARGEFILE) as usize),
+            F_SETFD | F_SETFL => Ok(0),
+            _ => Err(SyscallError::InvalidArgument),
+        };
+    };
 
     match cmd {
-        F_DUPFD => {
-            // Duplicate fd to lowest available >= arg
-            match file_table.dup_at_least(fd, arg, false) {
-                Ok(new_fd) => Ok(new_fd),
-                Err(e) => Err(super::map_kernel_error(e)),
-            }
-        }
-        F_DUPFD_CLOEXEC => {
-            // Duplicate fd to lowest available >= arg, with close-on-exec
-            match file_table.dup_at_least(fd, arg, true) {
-                Ok(new_fd) => Ok(new_fd),
-                Err(e) => Err(super::map_kernel_error(e)),
-            }
-        }
-        F_GETFD => {
-            // Get close-on-exec flag via FileTable API
-            match file_table.get_cloexec(fd) {
-                Ok(cloexec) => Ok(if cloexec { FD_CLOEXEC } else { 0 }),
-                Err(e) => Err(super::map_kernel_error(e)),
-            }
-        }
-        F_SETFD => {
-            // Set close-on-exec flag via FileTable API
-            let cloexec = arg & FD_CLOEXEC != 0;
-            file_table
-                .set_cloexec(fd, cloexec)
-                .map_err(|_| SyscallError::InvalidArgument)?;
-            Ok(0)
-        }
-        F_GETFL => {
-            // Get file status flags. Linux ABI: O_RDONLY=0, O_WRONLY=1, O_RDWR=2.
-            let file = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
-            let mut flags: usize = if file.flags.read && file.flags.write {
-                2 // O_RDWR
-            } else if file.flags.write {
-                1 // O_WRONLY
-            } else {
-                0 // O_RDONLY
-            };
-            if file.flags.append {
-                flags |= 0x0400; // O_APPEND
-            }
-            if file.nonblock.load(core::sync::atomic::Ordering::Relaxed) {
-                flags |= 0x0800; // O_NONBLOCK
-            }
-            Ok(flags)
-        }
+        F_DUPFD | F_DUPFD_CLOEXEC => file_table
+            .dup_at_least(fd, arg, cmd == F_DUPFD_CLOEXEC)
+            .map_err(super::map_kernel_error),
+        F_GETFD => Ok(if cloexec { FD_CLOEXEC } else { 0 }),
+        F_SETFD => file_table
+            .set_cloexec(fd, arg & FD_CLOEXEC != 0)
+            .map(|()| 0)
+            .map_err(super::map_kernel_error),
+        F_GETFL => Ok(file_status_flags(&file) as usize),
         F_SETFL => {
-            // Set file status flags. Only O_APPEND and O_NONBLOCK can be
-            // changed after open (per POSIX). O_NONBLOCK is stored as an
-            // AtomicBool on the File for lock-free toggling.
-            let file = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
-            let nonblock = (arg & 0x0800) != 0; // O_NONBLOCK
-            file.nonblock
-                .store(nonblock, core::sync::atomic::Ordering::Relaxed);
-            Ok(0)
+            drop(file_table);
+            set_file_status_flags(&file, arg as u32, |uid| {
+                Caller::current().owner_or_capable(uid)
+            })
+            .map(|()| 0)
+        }
+        // Whether `arg` is a descriptor of the same open file (Linux 6.10).
+        F_DUPFD_QUERY => {
+            let other = file_table.get(arg).ok_or(SyscallError::BadFileDescriptor)?;
+            Ok(usize::from(alloc::sync::Arc::ptr_eq(&other, &file)))
         }
         // Seals (N-229): only a memfd has them (EINVAL otherwise); adding
         // needs the fd open for writing (EPERM), as on Linux.
-        F_GET_SEALS => {
-            let file = file_table.get(fd).ok_or(SyscallError::BadFileDescriptor)?;
-            file.node
-                .seals()
-                .map(|s| s as usize)
-                .ok_or(SyscallError::InvalidArgument)
-        }
+        F_GET_SEALS => file
+            .node
+            .seals()
+            .map(|s| s as usize)
+            .ok_or(SyscallError::InvalidArgument),
         F_ADD_SEALS => {
-            let file = file_table.get(fd).ok_or(SyscallError::BadFileDescriptor)?;
             drop(file_table);
             if file.node.seals().is_none() {
                 return Err(SyscallError::InvalidArgument);
@@ -4066,7 +4095,7 @@ pub fn sys_pwrite(fd: usize, buf: usize, count: usize, offset: usize) -> Syscall
     if !file.flags.write {
         return Err(SyscallError::BadFileDescriptor);
     }
-    let offset = if file.flags.append {
+    let offset = if file.is_append() {
         file_size(&file)?
     } else {
         offset
@@ -4382,6 +4411,49 @@ mod tests {
         assert_eq!(file.bytes_readable(), None);
     }
 
+    /// F_SETFL changes O_APPEND, O_ASYNC, O_DIRECT, O_NOATIME and
+    /// O_NONBLOCK and nothing else, and F_GETFL reports them with the
+    /// access mode and O_LARGEFILE, as Linux's setfl.
+    #[test]
+    fn status_flags_are_set_and_reported_as_linux_setfl() {
+        use super::{
+            file_status_flags as get, set_file_status_flags as set, SyscallError, O_LARGEFILE,
+            O_NONBLOCK_FL,
+        };
+        use crate::fs::file::{status, File, OpenFlags};
+        let vfs = make_vfs_with_root();
+        let root = vfs.resolve_path("/").unwrap();
+        let node = root.create("f", Permissions::from_mode(0o644)).unwrap();
+        let file = File::new(node, OpenFlags::read_write());
+        assert_eq!(get(&file), 2 | O_LARGEFILE);
+        assert!(!file.is_append());
+        // Access mode, O_CREAT and O_TRUNC bits are ignored.
+        set(&file, status::APPEND | O_NONBLOCK_FL | 0x241, |_| true).unwrap();
+        assert!(file.is_append());
+        assert_eq!(get(&file), 2 | O_LARGEFILE | status::APPEND | O_NONBLOCK_FL);
+        set(&file, status::ASYNC | status::DIRECT, |_| true).unwrap();
+        assert!(!file.is_append());
+        assert_eq!(get(&file), 2 | O_LARGEFILE | status::ASYNC | status::DIRECT);
+        // O_NOATIME needs the owner; keeping it once set asks no one.
+        assert_eq!(
+            set(&file, status::NOATIME, |_| false),
+            Err(SyscallError::OperationNotPermitted)
+        );
+        set(&file, status::NOATIME, |uid| uid == 0).unwrap();
+        set(&file, status::NOATIME | status::APPEND, |_| false).unwrap();
+        // O_DIRECT only on a regular file.
+        let dir = File::new(root, OpenFlags::read_only());
+        assert_eq!(
+            set(&dir, status::DIRECT, |_| true),
+            Err(SyscallError::InvalidArgument)
+        );
+        // An O_APPEND open starts with it.
+        let mut flags = OpenFlags::read_write();
+        flags.append = true;
+        let node = vfs.resolve_path("/f").unwrap();
+        assert!(File::new(node, flags).is_append());
+    }
+
     /// A `struct flock` names an inclusive range from the start, the file
     /// position or the end, as Linux's flock64_to_posix_lock.
     #[test]
@@ -4419,6 +4491,10 @@ mod tests {
             range(fl(F_WRLCK, 0, i64::MAX, 1)),
             Ok((F_WRLCK, OFFSET_MAX, OFFSET_MAX))
         );
+        // A position past OFFSET_MAX is an overflow, never a wrap.
+        *file.position.write() = usize::MAX;
+        assert_eq!(range(fl(F_WRLCK, 1, 0, 1)), over);
+        assert_eq!(range(fl(F_WRLCK, 1, i64::MIN, 1)), over);
     }
 
     /// openat2's `how` checks, in build_open_flags' order.

@@ -239,7 +239,7 @@ pub fn sys_pwritev2(
         None
     } else if rwf.append {
         Some(file_size(&file)?)
-    } else if rwf.noappend && file.flags.append {
+    } else if rwf.noappend && file.is_append() {
         Some(file.tell())
     } else {
         None
@@ -274,7 +274,7 @@ fn pwritev_at(fd: usize, iov_ptr: usize, iovcnt: usize, pos: i64, flags: u32) ->
         return Ok(0);
     }
     let rwf = Rwf::parse(flags, true, false)?;
-    let at = if rwf.append || (file.flags.append && !rwf.noappend) {
+    let at = if rwf.append || (file.is_append() && !rwf.noappend) {
         file_size(&file)?
     } else {
         pos as usize

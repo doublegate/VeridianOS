@@ -324,7 +324,7 @@ fn write_out(out: &File, data: &[u8], first: bool) -> Result<usize, SyscallError
 /// sendfile to anything but a pipe): from `*pos` of `inp`, at the position
 /// of `out`, until `count`, end of file or a short write.
 fn file_to_file(inp: &File, pos: &mut i64, out: &File, count: usize) -> SyscallResult {
-    if out.flags.append {
+    if out.is_append() {
         return Err(SyscallError::InvalidArgument);
     }
     let _io = seekable(out).then(|| out.io_lock.lock());
@@ -491,7 +491,7 @@ fn copy_checks(
     if tin != NodeType::File || tout != NodeType::File || is_pipe(inp) || is_pipe(out) {
         return Err(SyscallError::InvalidArgument);
     }
-    if !inp.flags.read || !out.flags.write || out.flags.append {
+    if !inp.flags.read || !out.flags.write || out.is_append() {
         return Err(SyscallError::BadFileDescriptor);
     }
     if !same_filesystem(inp, out) {
@@ -658,7 +658,7 @@ pub fn sys_splice(
                 None if seekable(&out) => position(&out),
                 None => 0,
             };
-            if out.flags.append {
+            if out.is_append() {
                 return Err(SyscallError::InvalidArgument);
             }
             if seekable(&out) {

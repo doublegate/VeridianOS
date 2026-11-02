@@ -266,14 +266,17 @@ What remains:
 - **PTYs answer only the window-size ioctls.** TCGETS, TCSETS and the rest are ENOTTY on either
   end of a PTY, so tcgetattr fails there (isatty works: musl asks TIOCGWINSZ). The console is the
   only terminal with termios calls.
+- **No pipe packet mode.** O_DIRECT on a pipe (pipe2 or F_SETFL) is EINVAL, not Linux's
+  packet mode; on a regular file F_SETFL keeps it and reads and writes are unchanged.
 - **Record locks are advisory only.** fcntl's POSIX and OFD locks work, but leases (F_SETLEASE,
   F_GETLEASE) and F_NOTIFY are EINVAL and nothing enforces a lock on read or write (Linux dropped
   mandatory locking too). As on Linux, deadlock detection follows at most ten waiting owners and
   ignores OFD waiters.
 - **No I/O siginfo.** SIGIO (F_SETOWN, O_ASYNC) does not exist yet, so no signal arrives with
   POLL_* information, and FIOASYNC refuses to turn it on (ENOTTY, Linux's answer for a file
-  that cannot send it); kill, tkill, sigqueue, POSIX timers, SIGCHLD and fault signals carry
-  Linux's siginfo (N-259).
+  that cannot send it); F_SETFL keeps O_ASYNC, as Linux does for a file that cannot send it, so
+  F_GETFL shows it but no signal follows on a pipe, socket or terminal either; kill, tkill,
+  sigqueue, POSIX timers, SIGCHLD and fault signals carry Linux's siginfo (N-259).
 - **POSIX timers on another process's CPU clock.** timer_create on a clock from
   clock_getcpuclockid for another process is EOPNOTSUPP; Linux allows it. CPU-clock timers
   fire on the next return to user mode after their clock passes the expiry, not at the tick.

@@ -1,7 +1,7 @@
 //! File descriptors and file operations
 
 use alloc::{string::String, sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 use spin::RwLock;
 
@@ -115,6 +115,27 @@ impl OpenFlags {
     }
 }
 
+/// The file status flags fcntl(F_SETFL) changes besides O_NONBLOCK, in
+/// Linux's numbering (O_DIRECT differs on arm64), as [`File::status`]
+/// holds them.
+pub mod status {
+    /// Every write goes to the end of the file.
+    pub const APPEND: u32 = 0x400;
+    /// SIGIO on I/O readiness (recorded; nothing sends SIGIO yet).
+    pub const ASYNC: u32 = 0x2000;
+    /// Uncached I/O (recorded: reads and writes are the same either way).
+    #[cfg(target_arch = "aarch64")]
+    pub const DIRECT: u32 = 0x1_0000;
+    /// Uncached I/O (recorded: reads and writes are the same either way).
+    #[cfg(not(target_arch = "aarch64"))]
+    pub const DIRECT: u32 = 0x4000;
+    /// Do not update the access time.
+    pub const NOATIME: u32 = 0x4_0000;
+    /// What F_SETFL sets and clears here (Linux's SETFL_MASK less
+    /// O_NONBLOCK, which [`super::File::nonblock`] holds).
+    pub const SETFL: u32 = APPEND | ASYNC | DIRECT | NOATIME;
+}
+
 /// Seek position
 #[derive(Debug, Clone, Copy)]
 pub enum SeekFrom {
@@ -135,6 +156,10 @@ pub struct File {
     /// Stored as AtomicBool because File is behind Arc and F_SETFL needs to
     /// toggle this without mutable access.
     pub nonblock: AtomicBool,
+
+    /// The [`status`] flags: O_APPEND from open, changed by F_SETFL like
+    /// the rest, so writes ask [`File::is_append`] rather than `flags`.
+    pub status: AtomicU32,
 
     /// Current position in file
     pub position: RwLock<usize>,
@@ -195,6 +220,12 @@ impl File {
         }
     }
 
+    /// Whether writes go to the end of the file (O_APPEND, as open or
+    /// F_SETFL last left it).
+    pub fn is_append(&self) -> bool {
+        self.status.load(Ordering::Acquire) & status::APPEND != 0
+    }
+
     /// Create a new file structure
     pub fn new(node: Arc<dyn VfsNode>, flags: OpenFlags) -> Self {
         let nb = flags.nonblock;
@@ -202,6 +233,7 @@ impl File {
             node,
             flags,
             nonblock: AtomicBool::new(nb),
+            status: AtomicU32::new(if flags.append { status::APPEND } else { 0 }),
             position: RwLock::new(0),
             io_lock: crate::sync::sleep_mutex::SleepMutex::new(()),
             refcount: RwLock::new(1),
@@ -218,6 +250,7 @@ impl File {
             node,
             flags,
             nonblock: AtomicBool::new(nb),
+            status: AtomicU32::new(if flags.append { status::APPEND } else { 0 }),
             position: RwLock::new(0),
             io_lock: crate::sync::sleep_mutex::SleepMutex::new(()),
             refcount: RwLock::new(1),
@@ -277,7 +310,7 @@ impl File {
         }
         let mut pos = self.position.write();
 
-        if self.flags.append {
+        if self.is_append() {
             // For append mode, always write at end
             let metadata = self.node.metadata()?;
             *pos = metadata.size;
@@ -300,7 +333,7 @@ impl File {
         if self.is_stream() {
             return Ok(count);
         }
-        let pos = if self.flags.append {
+        let pos = if self.is_append() {
             self.node.metadata()?.size
         } else {
             *self.position.read()
@@ -348,6 +381,13 @@ impl File {
                 }
             }
         };
+        // Linux's vfs_setpos: no position past the largest file offset.
+        if new_pos > i64::MAX as usize {
+            return Err(KernelError::InvalidArgument {
+                name: "offset",
+                value: "seek past the largest file offset",
+            });
+        }
 
         *pos = new_pos;
         Ok(new_pos)
@@ -879,6 +919,19 @@ mod tests {
 
     fn some_file() -> Arc<File> {
         Arc::new(File::new(RamFs::new().root(), OpenFlags::read_only()))
+    }
+
+    /// A position past i64::MAX is EINVAL, as Linux's vfs_setpos, so no
+    /// later offset arithmetic sees one.
+    #[test]
+    fn seek_stops_at_the_largest_file_offset() {
+        let file = some_file();
+        let max = i64::MAX as usize;
+        assert_eq!(file.seek(SeekFrom::Start(max)).unwrap(), max);
+        assert!(file.seek(SeekFrom::Current(1)).is_err());
+        assert!(file.seek(SeekFrom::Start(max + 1)).is_err());
+        assert!(file.seek(SeekFrom::Current(isize::MAX)).is_err());
+        assert_eq!(file.tell(), max);
     }
 
     /// Closing any descriptor of a file drops the table's POSIX record

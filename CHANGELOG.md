@@ -130,6 +130,13 @@
   EDEADLK when a POSIX waiter would close a cycle of waiting owners. A range is measured from the
   start, the position or the end, with Linux's EINVAL and EOVERFLOW, and a lock needs a descriptor
   open for its kind (EBADF).
+- fcntl looks the descriptor up first, so any command on one that is not open is EBADF (F_GETFL
+  and F_SETFL were EINVAL, and an F_SETFD failure was EINVAL whatever it was); an unknown command
+  is EINVAL. F_SETFL changes O_APPEND, which writes honour from then on (it was ignored), and keeps
+  O_ASYNC, O_DIRECT and O_NOATIME for F_GETFL, which also reports O_LARGEFILE as on 64-bit Linux;
+  turning O_NOATIME on needs the file's owner or CAP_FOWNER (EPERM), and O_DIRECT a regular file
+  (EINVAL). New: F_DUPFD_QUERY (N-199). lseek refuses a position past the largest file offset
+  (EINVAL, as Linux's vfs_setpos), and a record-lock range measured from one is EOVERFLOW.
 - execve of a relative name runs it from the working directory, as on Linux; it searched PATH,
   which is libc's job (execvp). Exec errors keep their errno (EACCES, ENOTDIR, ELOOP) instead of
   all being ENOENT, a script's interpreter is opened the same way, and an empty argv gets "" as
