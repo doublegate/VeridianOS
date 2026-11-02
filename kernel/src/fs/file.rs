@@ -218,6 +218,12 @@ pub struct File {
     /// f_cred: linkat with AT_EMPTY_PATH links it for that caller. `None`
     /// for files made otherwise (pipes, sockets, memfds).
     pub opener: Option<alloc::boxed::Box<crate::process::creds::Caller>>,
+
+    /// The write access a file opened for writing holds until its last
+    /// close (Linux's get_write_access in do_dentry_open): a program that
+    /// is running cannot be opened for writing, nor this file executed
+    /// (ETXTBSY, `fs::write_access`). `None` for other files.
+    pub write_access: Option<crate::fs::write_access::WriteAccess>,
 }
 
 impl Drop for File {
@@ -244,11 +250,7 @@ impl File {
     /// is stable while this open file exists, and the lock is released when
     /// it closes.
     pub fn flock_key(&self) -> u64 {
-        match self.node.file_identity() {
-            // Two opens of one BlockFS file get different node objects.
-            Some((fs, ino)) => fs ^ ino.wrapping_mul(0x9E37_79B9_7F4A_7C15),
-            None => Arc::as_ptr(&self.node) as *const () as u64,
-        }
+        crate::fs::write_access::node_key(&self.node)
     }
 
     /// Whether this is an O_PATH descriptor ([`status::PATH`]).
@@ -277,6 +279,7 @@ impl File {
             flock_owner: AtomicU64::new(0),
             ofd_locked: AtomicBool::new(false),
             opener: None,
+            write_access: None,
         }
     }
 
@@ -295,6 +298,7 @@ impl File {
             flock_owner: AtomicU64::new(0),
             ofd_locked: AtomicBool::new(false),
             opener: None,
+            write_access: None,
         }
     }
 

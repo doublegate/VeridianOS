@@ -161,7 +161,9 @@ their check, for a few shared reasons:
 - **Missing calls.** The System V IPC calls, message queues, mlock, msync, sched_getparam and
   the other calls the coverage tables list as missing;
   most of `/proc/sys` (it has `kernel/pid_max`, `kernel/cap_last_cap`, `kernel/core_pattern`,
-  `kernel/ostype`, `kernel/osrelease` and `kernel/version`), `/proc/self/mounts` and parts of `/proc/<pid>/stat` and `status`.
+  `kernel/ostype`, `kernel/osrelease` and `kernel/version`), `/proc/self/mounts` and parts of `/proc/<pid>/stat` and `status`; `/proc/<pid>/exe` (only
+  `/proc/self/exe` exists), and `/proc/<pid>/cmdline` holds the process name rather than its
+  arguments.
 - **Memory exhaustion.** libc-test's `malloc-oom`, `malloc-brk-fail` and `pthread_create-oom`
   run until the time limit on all three architectures after the full LTP and Open POSIX runs in
   the same guest (on RISC-V they stopped the whole guest until the runs of 2026-10-30), but
@@ -420,11 +422,11 @@ filesystem.
   Only mount images you trust.
 - **mount (N-129)** is allowed to any process holding a memory capability, and type `blockfs`
   mounts an empty RAM filesystem.
-- **No ETXTBSY.** Linux refuses to open for writing a file that a process is running (and refuses
-  to exec a file open for writing). Here such a write succeeds, and processes running the program
-  from BlockFS see it through the shared page cache. An exec that grants privilege (file
-  capabilities, set-user-ID or set-group-ID) maps a private copy of the bytes it checked, so the
-  write cannot change what runs privileged (v0.28 queue item 3, file tier).
+- **ETXTBSY counts files opened by name.** A running program cannot be opened for writing or
+  truncated, and a file open for writing cannot be executed, as on Linux; but a memfd's own
+  descriptor does not count as a writer, so a memfd open for writing can be executed with
+  fexecve, which Linux refuses. An exec that grants privilege (file capabilities, set-user-ID or
+  set-group-ID) still maps a private copy of the bytes it checked.
 - **Timestamps have one-second resolution** (`st_*tim.tv_nsec` is 0), and reads move a
   file's access time on ramfs and tmpfs every time (Linux's relatime moves it at most daily).
 

@@ -69,6 +69,7 @@ pub(crate) fn to_linux_errno(err: super::SyscallError) -> isize {
     const LINUX_EDEADLK: isize = -35;
     const LINUX_EFTYPE: isize = -134;
     const LINUX_ESTALE: isize = -116;
+    const LINUX_ETXTBSY: isize = -26;
 
     match err {
         SyscallError::InvalidSyscall => LINUX_ENOSYS,
@@ -133,6 +134,7 @@ pub(crate) fn to_linux_errno(err: super::SyscallError) -> isize {
         SyscallError::NoData => LINUX_ENODATA,
         SyscallError::WrongFileType => LINUX_EFTYPE,
         SyscallError::Stale => LINUX_ESTALE,
+        SyscallError::TextBusy => LINUX_ETXTBSY,
         // Not an errno: the signal return path rewrites it (`restart`).
         SyscallError::RestartBlock => -516,
     }

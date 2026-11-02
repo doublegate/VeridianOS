@@ -357,6 +357,13 @@ pub(super) fn open_node(
         require_open_access(&node, &open_flags)?;
     }
     check_open_status(&*node, flags)?;
+    // A writable open of a running program is ETXTBSY, before O_TRUNC
+    // truncates it (Linux's do_dentry_open, then handle_truncate).
+    let write_access = if open_flags.write {
+        Some(crate::fs::write_access::WriteAccess::get(&node).map_err(super::map_kernel_error)?)
+    } else {
+        None
+    };
     if open_flags.truncate && open_flags.write && !created && node_type == NodeType::File {
         open_truncate(&*node)?;
     }
@@ -376,6 +383,7 @@ pub(super) fn open_node(
 
     let mut file = crate::fs::file::File::new_with_path(node, open_flags, canonical);
     file.opener = Some(alloc::boxed::Box::new(Caller::current()));
+    file.write_access = write_access;
     file.status
         .fetch_or(open_status(flags), core::sync::atomic::Ordering::AcqRel);
     let file_table = process.file_table.lock();
@@ -3669,6 +3677,10 @@ pub fn sys_truncate(path_ptr: usize, length: usize) -> SyscallResult {
     }
     // As opening it for writing would need (N-191).
     require_open_access(&node, &OpenFlags::write_only())?;
+    // Write access for the truncate: a running program is ETXTBSY (Linux's
+    // vfs_truncate).
+    let _writing =
+        crate::fs::write_access::WriteAccess::get(&node).map_err(super::map_kernel_error)?;
     crate::fs::check_fsize_truncate(&*node, length).map_err(super::map_kernel_error)?;
     crate::fs::truncate_removing_privs(&*node, length).map_err(super::map_kernel_error)?;
     Ok(0)
@@ -3847,6 +3859,21 @@ fn open_empty_path(dirfd: usize, flags: usize, mode: usize, regular: bool) -> Sy
         let canonical = file.path.clone().ok_or(SyscallError::NoDeviceOrAddress)?;
         (file.node.clone(), canonical)
     };
+    // The MAC check of an open by name (`Vfs::open_in`), for the access now
+    // asked: an O_PATH descriptor was checked for reading only, and must
+    // not reopen for writing past it. O_TMPFILE writes the directory.
+    let write = OpenFlags::from_bits(flags as u32)
+        .ok_or(SyscallError::InvalidArgument)?
+        .write
+        || flags as u64 & O_TMPFILE_BIT != 0;
+    let access = if write {
+        crate::security::AccessType::Write
+    } else {
+        crate::security::AccessType::Read
+    };
+    let pid = process::current_process().map_or(0, |p| p.pid.0);
+    crate::security::mac::check_file_access(&canonical, access, pid)
+        .map_err(super::map_kernel_error)?;
     if flags as u64 & O_TMPFILE_BIT != 0 {
         return open_tmpfile(node, &canonical, flags, mode);
     }

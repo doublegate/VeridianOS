@@ -507,6 +507,9 @@ pub enum SyscallError {
     /// A file handle names no file any more, or not on that filesystem
     /// (ESTALE, errno 116; open_by_handle_at).
     Stale = -137,
+    /// A running program opened for writing or truncated, or a file open
+    /// for writing executed (ETXTBSY, errno 26).
+    TextBusy = -138,
     /// The call was interrupted and left a restart block (`restart`):
     /// Linux -ERESTART_RESTARTBLOCK, turned into EINTR or restart_syscall
     /// on the way back to user mode and never seen there.
@@ -584,6 +587,7 @@ pub fn map_kernel_error(err: crate::error::KernelError) -> SyscallError {
             FsError::OperationNotPermitted => SyscallError::OperationNotPermitted,
             FsError::Busy => SyscallError::Busy,
             FsError::NoData => SyscallError::NoData,
+            FsError::TextBusy => SyscallError::TextBusy,
             FsError::Canceled => SyscallError::Canceled,
         },
         KernelError::OutOfMemory { .. } => SyscallError::OutOfMemory,

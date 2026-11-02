@@ -176,11 +176,17 @@
   (F_GETFL reports O_PATH). O_TMPFILE makes an unnamed file in a ramfs or tmpfs directory
   (EOPNOTSUPP on BlockFS), with write and search permission on it, which linkat with
   AT_EMPTY_PATH names unless O_EXCL was given; without O_DIRECTORY or a write mode it is EINVAL.
-  O_EMPTYPATH with an empty name opens the descriptor's file again. O_NOATIME needs the file's
-  owner or CAP_FOWNER (EPERM) and O_DIRECT a regular file (EINVAL), and F_GETFL now reports
+  O_EMPTYPATH with an empty name opens the descriptor's file again, with the MAC check an open by
+  name makes for the access asked. O_NOATIME needs the file's owner or CAP_FOWNER (EPERM) and
+  O_DIRECT a regular file (EINVAL), and F_GETFL now reports
   O_ASYNC, O_DIRECT, O_NOATIME, O_DSYNC and O_SYNC given at open. linkat with AT_EMPTY_PATH also
   links a file for the credentials it was opened with, as Linux 6.10 does, so an unprivileged
   program can name its O_TMPFILE file.
+- ETXTBSY, as Linux's write counts: a program that is running cannot be opened for writing or
+  truncated (open with a write mode, O_TRUNC, truncate), and a file open for writing cannot be
+  executed. Exec denies writes to the program, a `#!` script and the dynamic loader while it
+  runs, the process keeps the program's denial until it exits or execs again, and fork copies
+  it. Reading, O_PATH and writing again once no process runs the file are unaffected.
 - execve of a relative name runs it from the working directory, as on Linux; it searched PATH,
   which is libc's job (execvp). Exec errors keep their errno (EACCES, ENOTDIR, ELOOP) instead of
   all being ENOENT, a script's interpreter is opened the same way, and an empty argv gets "" as

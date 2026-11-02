@@ -318,8 +318,9 @@ pub fn bti_guards(
 /// grants privilege (file capabilities, set-user-ID or set-group-ID) maps
 /// privately, so the program that runs privileged is the one that held the
 /// privilege when it was read, not what a later write put in the file
-/// (PR #33 review; Linux refuses such writes with ETXTBSY, which VeridianOS
-/// does not have yet).
+/// (PR #33 review). Writes to a running program are refused (ETXTBSY,
+/// `fs::write_access`) as well, but a privileged image must not depend on
+/// that.
 pub fn load(
     vas: &crate::mm::VirtualAddressSpace,
     program: (&ElfBinary, &dyn crate::fs::VfsNode, &[u8], &ImagePlan),

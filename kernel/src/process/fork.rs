@@ -162,6 +162,9 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
                 child_env.insert(key.clone(), value.clone());
             }
             *new_process.exe_path.lock() = current_process.exe_path.lock().clone();
+            // The child runs the same program, so its writes stay denied
+            // until both are gone (Linux's dup_mm keeps mm->exe_file).
+            *new_process.exe_denial.lock() = current_process.exe_denial.lock().clone();
         }
 
         // Inherit uid, gid, pgid, sid from parent

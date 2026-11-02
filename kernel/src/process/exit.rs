@@ -733,6 +733,10 @@ pub fn cleanup_process(process: &Process) {
         // Clear all mappings
         memory_space.clear();
     }
+    // The program may be written again once no process runs it (Linux's
+    // mmput dropping mm->exe_file).
+    #[cfg(feature = "alloc")]
+    process.exe_denial.lock().take();
 
     // Free kernel stack frames for all threads.
     //

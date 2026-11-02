@@ -223,6 +223,9 @@ pub enum FsError {
     Busy,
     /// No such attribute (ENODATA): an extended attribute that is not set
     NoData,
+    /// Text file busy (ETXTBSY): writing a program that is running, or
+    /// executing one open for writing (`fs::write_access`)
+    TextBusy,
 }
 
 /// Result type alias for kernel operations

@@ -5544,6 +5544,7 @@ static void test_vectored_io(void);
 static void test_link_errors(void);
 static void test_stat_numbers(void);
 static void test_open_flags(void);
+static void test_text_busy(void);
 
 /* Tests `--only NAME` can run alone (for debugging a single test). */
 static const struct {
@@ -5557,6 +5558,7 @@ static const struct {
     {"link_errors", test_link_errors},
     {"stat_numbers", test_stat_numbers},
     {"open_flags", test_open_flags},
+    {"text_busy", test_text_busy},
     {"threads", test_threads},
     {"cow_race", test_cow_race},
     {"signals", test_signals},
@@ -7763,6 +7765,88 @@ static void test_open_flags(void)
     report("open_flags", f == 0, why);
 }
 
+/* ETXTBSY (Linux's i_writecount): a program that is
+ * running cannot be opened for writing or truncated, and a file open for
+ * writing cannot be executed; reading it, O_PATH and writing it once the
+ * process is gone are fine. The program is a copy of sleep, and the
+ * checks wait until it runs. */
+static int txtbsy_copy(const char *from, const char *to)
+{
+    char buf[4096];
+    int in = open(from, O_RDONLY), ok = in >= 0;
+    int out = open(to, O_CREAT | O_TRUNC | O_WRONLY, 0755);
+    ok = ok && out >= 0;
+    ssize_t n;
+    while (ok && (n = read(in, buf, sizeof(buf))) > 0)
+        ok = write(out, buf, (size_t)n) == n;
+    if (in >= 0) close(in);
+    if (out >= 0) close(out);
+    return ok;
+}
+
+static void test_text_busy(void)
+{
+    const char *prog = "/tmp/musl_txtbsy";
+    char why[128];
+    int f = 0;
+
+    unlink(prog);
+    if (!txtbsy_copy("/bin/sleep", prog)) f |= 1;
+
+    /* Open for writing: exec is ETXTBSY. */
+    int w = open(prog, O_WRONLY);
+    pid_t pid = fork();
+    if (pid == 0) {
+        char *argv[] = {"sleep", "0", NULL};
+        execv(prog, argv);
+        _exit(errno == ETXTBSY ? 0 : 1);
+    }
+    int status = 0;
+    if (w < 0 || pid < 0 || waitpid(pid, &status, 0) != pid || !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 0)
+        f |= 2;
+    close(w);
+
+    /* Running: writing and truncating are ETXTBSY. The child's
+     * close-on-exec pipe end closes when its exec succeeds, so the parent
+     * reads end of file then, or the exec's errno. */
+    int ready[2];
+    if (pipe2(ready, O_CLOEXEC) != 0) f |= 1;
+    pid = fork();
+    if (pid == 0) {
+        char *argv[] = {"sleep", "10", NULL};
+        close(ready[0]);
+        execv(prog, argv);
+        int e = errno;
+        if (write(ready[1], &e, sizeof(e)) < 0) _exit(126);
+        _exit(127);
+    }
+    close(ready[1]);
+    int exec_errno = 0;
+    int running = pid > 0 && read(ready[0], &exec_errno, sizeof(exec_errno)) == 0;
+    close(ready[0]);
+    if (!running || !(open(prog, O_WRONLY) == -1 && errno == ETXTBSY)) f |= 4;
+    if (!(truncate(prog, 0) == -1 && errno == ETXTBSY)) f |= 8;
+    if (!(open(prog, O_RDWR | O_TRUNC) == -1 && errno == ETXTBSY)) f |= 8;
+    int r = open(prog, O_RDONLY), p = open(prog, O_PATH);
+    if (r < 0 || p < 0) f |= 16;
+    close(r);
+    close(p);
+    int ran = 0;
+    if (pid > 0) {
+        kill(pid, SIGKILL);
+        waitpid(pid, &ran, 0);
+    }
+    /* The process is gone: the file can be written again. */
+    w = open(prog, O_WRONLY);
+    if (w < 0) f |= 32;
+    close(w);
+
+    unlink(prog);
+    snprintf(why, sizeof(why), "f=%#x errno=%d exec=%d status=%#x", f, errno, exec_errno, ran);
+    report("text_busy", f == 0, why);
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
@@ -7876,6 +7960,7 @@ int main(int argc, char **argv)
     test_link_errors();
     test_stat_numbers();
     test_open_flags();
+    test_text_busy();
 #if defined(__x86_64__)
     test_ustat_sysfs();
 #endif

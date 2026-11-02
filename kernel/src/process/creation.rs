@@ -404,11 +404,16 @@ fn basename(path: &str) -> &str {
 pub(crate) fn read_executable(
     path: &str,
     caller: &super::creds::Caller,
-) -> Result<(alloc::sync::Arc<dyn crate::fs::VfsNode>, Vec<u8>), KernelError> {
+) -> Result<(alloc::sync::Arc<dyn crate::fs::VfsNode>, ExecRead), KernelError> {
     let node = crate::fs::get_vfs().as_caller().resolve_path(path)?;
-    let data = read_exec_node(&*node, caller)?;
-    Ok((node, data))
+    let read = read_exec_node(&node, caller)?;
+    Ok((node, read))
 }
+
+/// What exec read of a file: its contents, and the denial of writes to it
+/// that lasts while it is being executed (ETXTBSY, `fs::write_access`).
+#[cfg(feature = "alloc")]
+pub(crate) type ExecRead = (Vec<u8>, crate::fs::write_access::WriteDenial);
 
 /// Whether `caller` may execute `node`: a regular file with permission to
 /// execute it (`fs::permission`: CAP_DAC_OVERRIDE needs at least one
@@ -426,16 +431,20 @@ pub fn check_executable(
 
 /// `node`'s contents, once `check_executable` passed on the same node, so
 /// the file cannot be swapped between the check and the read (N-101).
+/// Writes to it are denied first, after the permission check as in
+/// Linux's do_open_execat: a file open for writing is ETXTBSY, and none
+/// can change it under the read or while the denial is held.
 #[cfg(feature = "alloc")]
 fn read_exec_node(
-    node: &dyn crate::fs::VfsNode,
+    node: &alloc::sync::Arc<dyn crate::fs::VfsNode>,
     caller: &super::creds::Caller,
-) -> Result<Vec<u8>, KernelError> {
-    check_executable(node, caller)?;
+) -> Result<ExecRead, KernelError> {
+    check_executable(&**node, caller)?;
+    let denial = crate::fs::write_access::WriteDenial::deny(node)?;
     let mut data = alloc::vec![0u8; node.metadata()?.size];
     let n = node.read(0, &mut data)?;
     data.truncate(n);
-    Ok(data)
+    Ok((data, denial))
 }
 
 /// Whether `caller` may execute a node with metadata `meta`: a regular
@@ -493,8 +502,9 @@ fn exec_at_depth(
     let current_thread = super::current_thread().ok_or(KernelError::ThreadNotFound { tid: 0 })?;
 
     // Step 1: read the program, checking execute permission on the node
-    // that is read (N-101).
-    let file_data = read_exec_node(&*file.node, &super::creds::Caller::current())?;
+    // that is read (N-101). A script's denial lasts while its interpreter
+    // is set up, the program's is the process's once the exec commits.
+    let (file_data, denial) = read_exec_node(&file.node, &super::creds::Caller::current())?;
 
     // Step 1b: a script runs its interpreter with [interpreter, opt_arg?,
     // the script's name, argv[1..]] (argv[0], the script as the caller
@@ -537,7 +547,7 @@ fn exec_at_depth(
         process,
         current_thread,
         file,
-        file_data,
+        (file_data, denial),
         argv,
         envp,
         before_commit,
@@ -556,7 +566,7 @@ fn exec_image(
     process: alloc::sync::Arc<super::Process>,
     current_thread: alloc::sync::Arc<super::Thread>,
     file: ExecFile,
-    file_data: Vec<u8>,
+    (file_data, denial): ExecRead,
     argv: &[&str],
     envp: &[&str],
     before_commit: &dyn Fn() -> Result<(), KernelError>,
@@ -594,15 +604,19 @@ fn exec_image(
 
     // The interpreter (PT_INTERP) is opened, permission-checked and checked
     // before the point of no return as well, as Linux does: a missing or
-    // non-executable loader fails the exec with the old image intact.
+    // non-executable loader fails the exec with the old image intact. Its
+    // writes are denied for the exec only (`_interp_denial`), as Linux's.
     type Interp = (
         alloc::sync::Arc<dyn crate::fs::VfsNode>,
         Vec<u8>,
         crate::elf::ElfBinary,
     );
+    let mut _interp_denial = None;
     let interp: Option<Interp> = match &elf_binary.interpreter {
         Some(path) => {
-            let (node, data) = read_executable(path, &super::creds::Caller::current())?;
+            let (node, (data, interp_denial)) =
+                read_executable(path, &super::creds::Caller::current())?;
+            _interp_denial = Some(interp_denial);
             let bad = |_| KernelError::InvalidArgument {
                 name: "interpreter",
                 value: "not a loadable ELF image",
@@ -709,6 +723,9 @@ fn exec_image(
         // old image's size stays in the peak resident set, as on Linux.
         process.note_rss();
         *process.exe_path.lock() = exe_path.clone();
+        // The new program's writes stay denied while it runs (Linux's
+        // set_mm_exe_file); the old program's are allowed again.
+        *process.exe_denial.lock() = Some(denial);
         let loaded = {
             let mut memory_space = process.memory_space.lock();
 

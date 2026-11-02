@@ -248,6 +248,12 @@ pub struct Process {
     #[cfg(feature = "alloc")]
     pub exe_path: Mutex<String>,
 
+    /// The denial of writes to the running program (Linux's
+    /// mm->exe_file): set by the loader and by a successful exec, copied by
+    /// fork, dropped when the process exits (ETXTBSY, `fs::write_access`).
+    #[cfg(feature = "alloc")]
+    pub exe_denial: Mutex<Option<crate::fs::write_access::WriteDenial>>,
+
     /// Signal handlers (signal number -> handler action)
     /// 0 = default, 1 = ignore, other values = handler address
     pub signal_handlers: Mutex<[u64; super::signals::NSIG + 1]>,
@@ -530,6 +536,8 @@ impl Process {
             env_vars: Mutex::new(BTreeMap::new()),
             #[cfg(feature = "alloc")]
             exe_path: Mutex::new(String::new()),
+            #[cfg(feature = "alloc")]
+            exe_denial: Mutex::new(None),
             signal_handlers: Mutex::new([0u64; super::signals::NSIG + 1]),
             signal_action_extra: Mutex::new([(0, 0, 0); super::signals::NSIG + 1]),
             pending_signals: AtomicU64::new(0),

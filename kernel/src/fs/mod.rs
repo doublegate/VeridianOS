@@ -35,6 +35,7 @@ pub mod tar;
 pub mod timerfd;
 #[cfg(feature = "alloc")]
 pub mod tmpfs;
+pub mod write_access;
 pub mod xattr;
 
 // Phase 8 Wave 3: Enterprise Storage
