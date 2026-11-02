@@ -231,17 +231,24 @@ pub fn sys_pidfd_getfd(pidfd: usize, fd: usize, flags: usize) -> SyscallResult {
     let target = process::get_process(pid).ok_or(SyscallError::ProcessNotFound)?;
     let caller = process::creds::Caller::current();
     let permitted = super::debug::current_permitted();
-    if !super::debug::may_access(&caller, permitted, &super::debug::PtraceTarget::of(&target)) {
-        return Err(SyscallError::OperationNotPermitted);
-    }
-    if !target.is_alive() {
-        return Err(SyscallError::ProcessNotFound);
-    }
-    let file = target
-        .file_table
-        .lock()
-        .get(fd as u32 as usize)
-        .ok_or(SyscallError::BadFileDescriptor)?;
+    // Checked and taken under the target's credential guard, as Linux
+    // holds exec_update_lock: a set-ID exec cannot install its credentials
+    // between the check and the lookup, so no descriptor the privileged
+    // image opens is handed out on the old credentials' check.
+    let file = {
+        let _guard = target.cred_guard.lock();
+        if !super::debug::may_access(&caller, permitted, &super::debug::PtraceTarget::of(&target)) {
+            return Err(SyscallError::OperationNotPermitted);
+        }
+        if !target.is_alive() {
+            return Err(SyscallError::ProcessNotFound);
+        }
+        target
+            .file_table
+            .lock()
+            .get(fd as u32 as usize)
+            .ok_or(SyscallError::BadFileDescriptor)?
+    };
     let me = process::current_process().ok_or(SyscallError::InvalidState)?;
     let fd = me
         .file_table

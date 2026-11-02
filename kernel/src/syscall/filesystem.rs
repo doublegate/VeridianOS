@@ -2303,7 +2303,7 @@ pub(crate) fn send_info(
 
 /// Whether delivering `sig` to `process` would end it (default action
 /// terminate or core dump, or SIGKILL).
-fn terminates(process: &crate::process::Process, sig: i32) -> bool {
+pub(super) fn terminates(process: &crate::process::Process, sig: i32) -> bool {
     use crate::process::exit::{default_signal_action, signals, SignalAction};
     if sig == signals::SIGKILL {
         return true;

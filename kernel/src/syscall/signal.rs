@@ -345,6 +345,14 @@ pub(super) fn deliver(
         .dispatched
         .load(core::sync::atomic::Ordering::Acquire)
     {
+        // As kill_one: a signal that ends the caller itself leaves through
+        // the exit path, or the teardown would return into the address
+        // space it just freed.
+        if process::current_process().is_some_and(|me| me.pid == target.pid)
+            && super::filesystem::terminates(target, sig)
+        {
+            return super::process::exit_current(0, sig as u32);
+        }
         return super::filesystem::send_info(target.pid, sig, info);
     }
     match thread {
