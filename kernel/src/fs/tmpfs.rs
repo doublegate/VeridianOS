@@ -659,15 +659,16 @@ impl VfsNode for TmpNode {
             return Err(KernelError::FsError(FsError::NotADirectory));
         }
 
-        if target.node_type() == NodeType::Directory {
-            return Err(KernelError::FsError(FsError::IsADirectory));
-        }
-
         // Same node, same tmpfs instance only (N-45): a copy drifted apart
         // from the original and was charged twice against the size limit.
         let target = as_tmp_arc(target)
             .filter(|t| Arc::ptr_eq(&t.bytes_used, &self.bytes_used))
             .ok_or(KernelError::FsError(FsError::CrossDevice))?;
+
+        // A directory, after EXDEV as on Linux.
+        if target.node_type() == NodeType::Directory {
+            return Err(KernelError::FsError(FsError::IsADirectory));
+        }
 
         let mut children = self.children.write();
         if children.contains_key(name) {

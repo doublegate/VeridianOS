@@ -1135,6 +1135,10 @@ impl MountTable {
 
         let xdev = || KernelError::FsError(crate::error::FsError::CrossDevice);
         let symlink_loop = || KernelError::FsError(crate::error::FsError::SymlinkLoop);
+        // A trailing slash names a directory (N-203): the last component is
+        // followed even without `follow_last`, and must be one (ENOTDIR).
+        let trailing_slash = path.ends_with('/');
+        let follow_last = follow_last || trailing_slash;
         let root_canon: Vec<String> = split(root).into_iter().collect();
         let mut canon: Vec<String> = root_canon.clone();
         let mut pending = if path.starts_with('/') {
@@ -1237,6 +1241,9 @@ impl MountTable {
             }
         }
 
+        if trailing_slash && node.node_type() != NodeType::Directory {
+            return Err(KernelError::FsError(crate::error::FsError::NotADirectory));
+        }
         Ok((node, join_components(&canon)))
     }
 
@@ -3098,6 +3105,35 @@ pub(crate) mod tests {
     }
 
     // --- Path resolution (FS-SEC-01) ---
+
+    #[test]
+    fn a_trailing_slash_names_a_directory() {
+        // N-203: "name/" is a directory, a symlink to one followed even
+        // where the last component is not; anything else is ENOTDIR.
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        let d = root.mkdir("d", Permissions::default()).unwrap();
+        root.create("f", Permissions::default()).unwrap();
+        root.symlink("dl", "d").unwrap();
+        root.symlink("fl", "f").unwrap();
+        let enotdir = Err(KernelError::FsError(FsError::NotADirectory));
+        let ino_of =
+            |r: Result<Arc<dyn VfsNode>, KernelError>| r.map(|n| n.metadata().unwrap().inode);
+        assert_eq!(ino_of(vfs.resolve_path("/f/")), enotdir);
+        assert_eq!(ino_of(vfs.resolve_path_no_follow("/f//")), enotdir);
+        assert_eq!(ino_of(vfs.resolve_path_no_follow("/fl/")), enotdir);
+        let dir = Ok(d.metadata().unwrap().inode);
+        assert_eq!(ino_of(vfs.resolve_path_no_follow("/dl/")), dir);
+        assert_eq!(ino_of(vfs.resolve_from_no_follow("dl/", "/")), dir);
+        assert_eq!(ino_of(vfs.resolve_path("/d/")), dir);
+        // Without the slash nothing changes.
+        assert!(vfs.resolve_path_no_follow("/fl").is_ok());
+        assert_eq!(
+            vfs.resolve_path_no_follow("/dl").unwrap().node_type(),
+            NodeType::Symlink
+        );
+        assert!(vfs.resolve_path("/").is_ok());
+    }
 
     #[test]
     fn dotdot_applies_after_symlink_expansion() {

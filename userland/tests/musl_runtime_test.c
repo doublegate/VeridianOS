@@ -5541,6 +5541,7 @@ static void test_statfs(void)
 static void test_record_locks(void);
 static void test_fcntl_flags(void);
 static void test_vectored_io(void);
+static void test_link_errors(void);
 
 /* Tests `--only NAME` can run alone (for debugging a single test). */
 static const struct {
@@ -5551,6 +5552,7 @@ static const struct {
     {"record_locks", test_record_locks},
     {"fcntl_flags", test_fcntl_flags},
     {"vectored_io", test_vectored_io},
+    {"link_errors", test_link_errors},
     {"threads", test_threads},
     {"cow_race", test_cow_race},
     {"signals", test_signals},
@@ -7467,6 +7469,105 @@ static void test_vectored_io(void)
     report("vectored_io", f == 0, why);
 }
 
+/* Hard and symbolic links fail as on Linux (N-202, N-203, N-206): an
+ * existing new name is EEXIST (with or without a trailing slash), a
+ * missing one with a slash ENOENT, a directory EPERM, unknown linkat flags
+ * EINVAL; linkat follows a final symlink only with AT_SYMLINK_FOLLOW and
+ * links an open file with AT_EMPTY_PATH; a dirfd whose directory was
+ * removed is ENOENT. A trailing slash on a non-directory is ENOTDIR, and
+ * follows a symlink to a directory. fchown of a bad descriptor is EBADF
+ * and getdents64 of a file ENOTDIR. */
+static int errno_is(int ret, int want)
+{
+    return ret == -1 && errno == want;
+}
+
+static void test_link_errors(void)
+{
+    const char *d = "/tmp/musl_links";
+    char why[96];
+    struct stat a, b;
+    int f = 0;
+
+    mkdir(d, 0755);
+    if (chdir(d) != 0) f |= 1;
+    unlink("file");
+    unlink("other");
+    unlink("ln");
+    unlink("sl");
+    unlink("sl2");
+    unlink("viafollow");
+    unlink("vianofollow");
+    unlink("viafd");
+    unlink("dsl");
+    rmdir("sub");
+    rmdir("gone");
+    int fd = open("file", O_CREAT | O_RDWR, 0644);
+    int fd2 = open("other", O_CREAT | O_RDWR, 0644);
+    if (fd < 0 || fd2 < 0 || mkdir("sub", 0755) != 0 || symlink("file", "sl") != 0 ||
+        symlink("sub", "dsl") != 0)
+        f |= 1;
+
+    /* link */
+    if (!errno_is(link("file", "other"), EEXIST)) f |= 2;
+    if (!errno_is(link("file", "other/"), EEXIST)) f |= 2;
+    if (!errno_is(link("file", "ln/"), ENOENT)) f |= 4;
+    if (!errno_is(link("sub", "ln"), EPERM)) f |= 8;
+    if (!errno_is(link("missing", "ln"), ENOENT)) f |= 4;
+    if (link("file", "ln") != 0 || stat("file", &a) != 0 || stat("ln", &b) != 0 ||
+        a.st_ino != b.st_ino)
+        f |= 16;
+
+    /* linkat */
+    if (!errno_is(linkat(AT_FDCWD, "file", AT_FDCWD, "x", 0x1), EINVAL)) f |= 32;
+    if (linkat(AT_FDCWD, "sl", AT_FDCWD, "vianofollow", 0) != 0 ||
+        lstat("vianofollow", &b) != 0 || !S_ISLNK(b.st_mode))
+        f |= 64;
+    if (linkat(AT_FDCWD, "sl", AT_FDCWD, "viafollow", AT_SYMLINK_FOLLOW) != 0 ||
+        lstat("viafollow", &b) != 0 || !S_ISREG(b.st_mode) || b.st_ino != a.st_ino)
+        f |= 128;
+    if (linkat(fd, "", AT_FDCWD, "viafd", AT_EMPTY_PATH) != 0 || stat("viafd", &b) != 0 ||
+        b.st_ino != a.st_ino)
+        f |= 256;
+
+    /* A directory descriptor whose directory is gone. */
+    int gone = -1;
+    if (mkdir("gone", 0755) != 0 || (gone = open("gone", O_DIRECTORY)) < 0 || rmdir("gone") != 0)
+        f |= 1;
+    if (!errno_is(linkat(gone, "x", AT_FDCWD, "y", 0), ENOENT)) f |= 512;
+    if (!errno_is(linkat(AT_FDCWD, "file", gone, "y", 0), ENOENT)) f |= 512;
+    if (!errno_is(symlinkat("file", gone, "y"), ENOENT)) f |= 512;
+    if (!errno_is(linkat(gone, "sub/file", AT_FDCWD, "y", 0), ENOENT)) f |= 512;
+    if (!errno_is(symlinkat("../file", gone, "sub/y"), ENOENT)) f |= 512;
+    close(gone);
+
+    /* symlink */
+    if (!errno_is(symlink("file", "other"), EEXIST)) f |= 1024;
+    if (!errno_is(symlink("", "sl2"), ENOENT)) f |= 1024;
+
+    /* Trailing slashes. */
+    if (!errno_is(stat("file/", &b), ENOTDIR) || !errno_is(open("file/", O_RDONLY), ENOTDIR) ||
+        !errno_is(lstat("sl/", &b), ENOTDIR))
+        f |= 2048;
+    if (lstat("dsl/", &b) != 0 || !S_ISDIR(b.st_mode)) f |= 4096;
+
+    /* fchown and getdents64. */
+    char buf[256];
+    if (!errno_is(fchown(-1, 0, 0), EBADF)) f |= 8192;
+    if (!errno_is((int)syscall(SYS_getdents64, fd, buf, sizeof(buf)), ENOTDIR)) f |= 16384;
+
+    close(fd);
+    close(fd2);
+    const char *names[] = {"file", "other", "ln", "sl", "viafollow", "vianofollow", "viafd", "dsl"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+        unlink(names[i]);
+    rmdir("sub");
+    if (chdir("/") != 0) f |= 1;
+    rmdir(d);
+    snprintf(why, sizeof(why), "f=%#x errno=%d", f, errno);
+    report("link_errors", f == 0, why);
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
@@ -7577,6 +7678,7 @@ int main(int argc, char **argv)
     test_record_locks();
     test_fcntl_flags();
     test_vectored_io();
+    test_link_errors();
 #if defined(__x86_64__)
     test_ustat_sysfs();
 #endif

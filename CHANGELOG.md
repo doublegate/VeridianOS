@@ -144,6 +144,21 @@
   buffer's address range is checked before anything moves (EFAULT with the data left in place, as
   Linux's import_iovec), and the descriptor before the iovec array, so a bad one is EBADF even
   with no buffers (it returned 0).
+- link, linkat, symlink and symlinkat report the errno of what failed (N-202); every failure used
+  to be EINVAL. An existing new name is EEXIST, also with a trailing slash, and a missing one with
+  a trailing slash ENOENT; a hard link to a directory, or on a filesystem without hard links, is
+  EPERM, and one into another filesystem EXDEV (checked before the directory, as Linux). linkat
+  follows a final symlink only with AT_SYMLINK_FOLLOW (it always followed), refuses other flags
+  (EINVAL), and with AT_EMPTY_PATH links the file a descriptor names; that needs
+  CAP_DAC_READ_SEARCH, since a file does not record who opened it (Linux also lets the opener
+  through).
+- A trailing slash makes any path name a directory (N-203): a symlink to one is followed and
+  anything else is ENOTDIR, in every call that looks a path up; open, stat and the link calls
+  ignored the slash. getdents and getdents64 of a descriptor that is not a directory are ENOTDIR
+  (they were EIO), a bad one is EBADF before the buffer is looked at, and the end of a directory
+  is 0 with any buffer; fchown of a descriptor that is not open is EBADF (it was EINVAL). Path
+  lookups report a full filesystem as ENOSPC (it was ENOMEM) and other failures as themselves
+  instead of ENOENT (N-206).
 - execve of a relative name runs it from the working directory, as on Linux; it searched PATH,
   which is libc's job (execvp). Exec errors keep their errno (EACCES, ENOTDIR, ELOOP) instead of
   all being ENOENT, a script's interpreter is opened the same way, and an empty argv gets "" as

@@ -405,6 +405,10 @@ filesystem.
 - **Directory listing (N-124).** `getdents64` re-reads the directory and seeks by index, so
   removing entries while listing (`rm -r`) skips entries; listing is O(n^2).
 - **`O_APPEND` (N-126)** is not atomic across separate opens of a file.
+- **linkat with AT_EMPTY_PATH** needs CAP_DAC_READ_SEARCH. Linux also lets a caller whose
+  credentials opened the descriptor link it; an open file here does not record who opened it, so
+  such a caller gets ENOENT. Linking a file whose last name was removed is not refused (ENOENT on
+  Linux), because link counts are not tracked yet (N-205).
 - **Directories and paths (N-130).** No dentry cache (`..` and symlinks re-walk from the root),
   BlockFS directories are scanned linearly and limited to 12 blocks.
 - **On-disk structures are not validated (N-123).** BlockFS checks only the magic number; the ext4

@@ -1361,34 +1361,10 @@ fn open_truncate(node: &dyn crate::fs::VfsNode) -> Result<(), SyscallError> {
     crate::fs::truncate_removing_privs(node, 0).map_err(super::map_kernel_error)
 }
 
+/// The errno of a failed path lookup: the error's own (N-206). It used to
+/// map ENOSPC to ENOMEM and anything unlisted to ENOENT.
 pub(crate) fn map_resolve_err(e: crate::error::KernelError) -> SyscallError {
-    match e {
-        crate::error::KernelError::FsError(crate::error::FsError::SymlinkLoop) => {
-            SyscallError::SymlinkLoop
-        }
-        crate::error::KernelError::FsError(crate::error::FsError::NotFound) => {
-            SyscallError::ResourceNotFound
-        }
-        crate::error::KernelError::FsError(crate::error::FsError::NotADirectory) => {
-            SyscallError::NotADirectory
-        }
-        crate::error::KernelError::FsError(crate::error::FsError::IsADirectory) => {
-            SyscallError::IsADirectory
-        }
-        crate::error::KernelError::FsError(crate::error::FsError::AlreadyExists) => {
-            SyscallError::FileExists
-        }
-        crate::error::KernelError::FsError(crate::error::FsError::NoSpace) => {
-            SyscallError::OutOfMemory
-        }
-        crate::error::KernelError::FsError(crate::error::FsError::PermissionDenied) => {
-            SyscallError::PermissionDenied
-        }
-        crate::error::KernelError::FsError(crate::error::FsError::CrossDevice) => {
-            SyscallError::CrossDevice
-        }
-        _ => SyscallError::ResourceNotFound,
-    }
+    super::map_kernel_error(e)
 }
 
 // ============================================================================
@@ -3343,43 +3319,124 @@ pub(super) const AT_SYMLINK_NOFOLLOW: usize = 0x100;
 /// An empty path names the dirfd itself.
 pub(super) const AT_EMPTY_PATH: usize = 0x1000;
 
-/// Create a hard link (syscall 155).
-///
-/// Creates a new directory entry `new_path` pointing to the same file as
-/// `old_path`. Both paths must be on the same filesystem.
+/// linkat: follow a final symlink of the old name.
+pub(super) const AT_SYMLINK_FOLLOW: usize = 0x400;
+
+/// link (syscall 155): linkat from the working directory, with no flags.
 pub fn sys_link(old_ptr: usize, new_ptr: usize) -> SyscallResult {
-    let old_path = read_user_path(old_ptr)?;
-    let new_path = read_user_path(new_ptr)?;
-    let (parent, link_name) = parent_dir(&new_path)?;
-    check_dir_write(&*parent)?;
+    link_at(AT_FDCWD, old_ptr, AT_FDCWD, new_ptr, 0)
+}
 
+/// link and linkat (N-202), in the order of Linux's filename_linkat: flags
+/// other than AT_SYMLINK_FOLLOW and AT_EMPTY_PATH are EINVAL; the old name
+/// is looked up, its final symlink followed only with AT_SYMLINK_FOLLOW,
+/// and with AT_EMPTY_PATH an empty one names `olddirfd` itself (the
+/// working directory for AT_FDCWD), which needs CAP_DAC_READ_SEARCH
+/// (ENOENT): Linux also lets the descriptor's opener through, but a file
+/// does not record who opened it. Then the new name is made as
+/// [`new_entry`] does; then a link into another filesystem is EXDEV, and
+/// one to a directory, or on a filesystem without hard links, EPERM.
+pub(crate) fn link_at(
+    olddirfd: usize,
+    old_ptr: usize,
+    newdirfd: usize,
+    new_ptr: usize,
+    flags: usize,
+) -> SyscallResult {
+    if flags & !(AT_SYMLINK_FOLLOW | AT_EMPTY_PATH) != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let old = if flags & AT_EMPTY_PATH != 0 {
+        read_user_path_or_empty(old_ptr)?
+    } else {
+        read_user_path(old_ptr)?
+    };
+    let new = read_user_path(new_ptr)?;
     let vfs = vfs()?;
-
-    // Resolve the old path to get the target node
-    let target = vfs.resolve_path(&old_path).map_err(map_resolve_err)?;
-
-    parent
-        .link(&link_name, target)
-        .map_err(|_| SyscallError::InvalidArgument)?;
-
+    let target = if old.is_empty() {
+        if olddirfd as u32 as i32 == AT_FDCWD as u32 as i32 {
+            vfs.resolve_path(&vfs.get_cwd()).map_err(map_resolve_err)?
+        } else {
+            let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+            let file = proc
+                .file_table
+                .lock()
+                .get(olddirfd as u32 as usize)
+                .ok_or(SyscallError::BadFileDescriptor)?;
+            if !Caller::current().capable(crate::process::linux_caps::CAP_DAC_READ_SEARCH) {
+                return Err(SyscallError::ResourceNotFound);
+            }
+            file.node.clone()
+        }
+    } else {
+        let abs = resolve_at_path(olddirfd, &old)?;
+        if flags & AT_SYMLINK_FOLLOW != 0 {
+            vfs.resolve_path(&abs)
+        } else {
+            vfs.resolve_path_no_follow(&abs)
+        }
+        .map_err(map_resolve_err)?
+    };
+    let (parent, name) = new_entry(newdirfd, &new)?;
+    parent.link(&name, target).map_err(|e| match e {
+        crate::error::KernelError::FsError(crate::error::FsError::IsADirectory)
+        | crate::error::KernelError::NotImplemented { .. } => SyscallError::OperationNotPermitted,
+        e => super::map_kernel_error(e),
+    })?;
     Ok(0)
 }
 
-/// Create a symbolic link (syscall 156).
-///
-/// Creates a symlink at `link_path` pointing to `target`.
+/// symlink (syscall 156): symlinkat from the working directory.
 pub fn sys_symlink(target_ptr: usize, link_ptr: usize) -> SyscallResult {
+    symlink_at(target_ptr, AT_FDCWD, link_ptr)
+}
+
+/// symlink and symlinkat (N-202): an empty target is ENOENT, and the new
+/// name is made as [`new_entry`] does; the filesystem's errors are its own
+/// (they all used to be EINVAL).
+pub(crate) fn symlink_at(target_ptr: usize, newdirfd: usize, link_ptr: usize) -> SyscallResult {
     let target = read_user_path(target_ptr)?;
-    let link_path = read_user_path(link_ptr)?;
-    let (parent, link_name) = parent_dir(&link_path)?;
-    check_dir_write(&*parent)?;
-
+    let link = read_user_path(link_ptr)?;
+    let (parent, name) = new_entry(newdirfd, &link)?;
     let node = parent
-        .symlink(&link_name, &target)
-        .map_err(|_| SyscallError::InvalidArgument)?;
+        .symlink(&name, &target)
+        .map_err(super::map_kernel_error)?;
     own_new_node(&node);
-
     Ok(0)
+}
+
+/// The directory and name of the entry link or symlink makes at `rel` from
+/// `dirfd`, as Linux's filename_create: EEXIST if the name exists, even
+/// with a trailing slash; ENOENT for a missing one with a trailing slash,
+/// which only mkdir makes; then write and search permission on the
+/// directory (EACCES).
+fn new_entry(
+    dirfd: usize,
+    rel: &str,
+) -> Result<
+    (
+        alloc::sync::Arc<dyn crate::fs::VfsNode>,
+        alloc::string::String,
+    ),
+    SyscallError,
+> {
+    let abs = resolve_at_path(dirfd, rel)?;
+    let name = abs.trim_end_matches('/');
+    if name.is_empty() {
+        // "/": the root exists.
+        return Err(SyscallError::FileExists);
+    }
+    match vfs()?.resolve_path_no_follow(name) {
+        Ok(_) => return Err(SyscallError::FileExists),
+        Err(e) if is_not_found(&e) => {}
+        Err(e) => return Err(map_resolve_err(e)),
+    }
+    if name.len() != abs.len() {
+        return Err(SyscallError::ResourceNotFound);
+    }
+    let (parent, name) = parent_dir(name)?;
+    check_dir_write(&*parent)?;
+    Ok((parent, name))
 }
 
 /// Change file permissions by path (syscall 185).
@@ -4209,7 +4266,7 @@ pub fn sys_fchown(fd: usize, uid: usize, gid: usize) -> SyscallResult {
         .file_table
         .lock()
         .get(fd)
-        .ok_or(SyscallError::InvalidArgument)?;
+        .ok_or(SyscallError::BadFileDescriptor)?;
     chown_node(&file.node, uid, gid)
 }
 

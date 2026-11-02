@@ -1876,25 +1876,32 @@ fn sys_getdents64(fd: usize, buf_ptr: usize, buf_size: usize) -> SyscallResult {
 
 /// getdents and getdents64: as many records of `form` as fit in
 /// `buf_size` bytes at `buf_ptr`, from the directory position of `fd` on.
+/// In Linux's order (N-206): a bad descriptor is EBADF, one that is not a
+/// directory ENOTDIR (it was EIO), and the directory's own errors are
+/// reported as themselves; at the end of the directory the result is 0
+/// whatever the buffer; then a buffer too small for one record is EINVAL.
 fn getdents(fd: usize, buf_ptr: usize, buf_size: usize, form: DirentForm) -> SyscallResult {
-    if buf_size == 0 {
-        return Err(SyscallError::InvalidArgument);
-    }
-    validate_user_buffer(buf_ptr, buf_size)?;
-
     let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
-    let file_table = proc.file_table.lock();
-    let file_desc = file_table.get(fd).ok_or(SyscallError::BadFileDescriptor)?;
+    // The table lock is not held across the directory read (N-118).
+    let file_desc = proc
+        .file_table
+        .lock()
+        .get(fd)
+        .ok_or(SyscallError::BadFileDescriptor)?;
+    if file_desc.node.node_type() != crate::fs::NodeType::Directory {
+        return Err(SyscallError::NotADirectory);
+    }
 
-    let entries = file_desc
-        .node
-        .readdir()
-        .map_err(|_| SyscallError::IoError)?;
+    let entries = file_desc.node.readdir().map_err(map_kernel_error)?;
 
     let pos = file_desc.tell();
     if pos >= entries.len() {
         return Ok(0);
     }
+    if buf_size == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    validate_user_buffer(buf_ptr, buf_size)?;
 
     // Records are built in a kernel buffer and copied out once (N-43).
     let (out, idx) = build_dirents(&entries, pos, buf_size, form)?;
@@ -2053,57 +2060,22 @@ fn sys_fchownat(
     filesystem::chown_node(&node, uid, gid)
 }
 
-/// linkat syscall -- create hard link relative to directory fds.
-///
-/// # Arguments
-/// - `olddirfd`: Directory fd for oldpath.
-/// - `oldpath_ptr`: Source path.
-/// - `newdirfd`: Directory fd for newpath.
-/// - `newpath_ptr`: Link destination path.
-/// - `flags`: AT_SYMLINK_FOLLOW, etc.
+/// linkat syscall -- create a hard link relative to directory fds
+/// ([`filesystem::link_at`]).
 fn sys_linkat(
     olddirfd: usize,
     oldpath_ptr: usize,
     newdirfd: usize,
     newpath_ptr: usize,
-    _flags: usize,
+    flags: usize,
 ) -> SyscallResult {
-    let old_rel = filesystem::read_user_path(oldpath_ptr)?;
-    let new_rel = filesystem::read_user_path(newpath_ptr)?;
-    let old_abs = filesystem::resolve_at_path(olddirfd, &old_rel)?;
-    let new_abs = filesystem::resolve_at_path(newdirfd, &new_rel)?;
-    // Checked and linked in the same directory node (N-51).
-    let (parent, link_name) = filesystem::parent_dir(&new_abs)?;
-    filesystem::check_dir_write(&*parent)?;
-
-    // Resolve old path to get target node
-    let target = filesystem::vfs()?
-        .resolve_path(&old_abs)
-        .map_err(filesystem::map_resolve_err)?;
-    parent
-        .link(&link_name, target)
-        .map_err(|_| SyscallError::InvalidArgument)?;
-    Ok(0)
+    filesystem::link_at(olddirfd, oldpath_ptr, newdirfd, newpath_ptr, flags)
 }
 
-/// symlinkat syscall -- create symlink relative to a directory fd.
-///
-/// # Arguments
-/// - `target_ptr`: Symlink target (what it points to).
-/// - `newdirfd`: Directory fd for linkpath.
-/// - `linkpath_ptr`: Path where symlink is created.
+/// symlinkat syscall -- create a symlink relative to a directory fd
+/// ([`filesystem::symlink_at`]).
 fn sys_symlinkat(target_ptr: usize, newdirfd: usize, linkpath_ptr: usize) -> SyscallResult {
-    let target = filesystem::read_user_path(target_ptr)?;
-    let link_rel = filesystem::read_user_path(linkpath_ptr)?;
-    let link_abs = filesystem::resolve_at_path(newdirfd, &link_rel)?;
-    // Checked and created in the same directory node (N-51).
-    let (parent, link_name) = filesystem::parent_dir(&link_abs)?;
-    filesystem::check_dir_write(&*parent)?;
-    let node = parent
-        .symlink(&link_name, &target)
-        .map_err(|_| SyscallError::InvalidArgument)?;
-    filesystem::own_new_node(&node);
-    Ok(0)
+    filesystem::symlink_at(target_ptr, newdirfd, linkpath_ptr)
 }
 
 /// readlinkat syscall -- read symlink target relative to a directory fd.

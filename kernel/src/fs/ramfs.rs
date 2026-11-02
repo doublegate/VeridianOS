@@ -528,11 +528,6 @@ impl VfsNode for RamNode {
             return Err(KernelError::FsError(FsError::NotADirectory));
         }
 
-        // Hard links to directories are not allowed (POSIX)
-        if target.node_type() == NodeType::Directory {
-            return Err(KernelError::FsError(FsError::IsADirectory));
-        }
-
         // A hard link names the same node, and only within one RamFs
         // instance; anything else is EXDEV. The old code copied the data
         // into a new node, so the two names drifted apart on the next write
@@ -540,6 +535,12 @@ impl VfsNode for RamNode {
         let target = as_ram_arc(target)
             .filter(|t| t.fs_id == self.fs_id)
             .ok_or(KernelError::FsError(FsError::CrossDevice))?;
+
+        // Hard links to directories are not allowed (POSIX), checked after
+        // EXDEV as Linux does.
+        if target.node_type() == NodeType::Directory {
+            return Err(KernelError::FsError(FsError::IsADirectory));
+        }
 
         let mut children = self.children.write();
         if children.contains_key(name) {
