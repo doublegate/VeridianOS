@@ -368,7 +368,29 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
      without CONFIG_FANOTIFY); the `docs/PORTING-GUIDE.md` rewrite. Namespaces follow ADR 0022,
      one commit per step: H1 (the framework, nsfs, `/proc/<pid>/ns`, unshare, setns, clone; UTS,
      IPC and cgroup) and H2 (time) are done; H3 mount, H4 user, H5 PID and H6 network remain.
-  4. [ ] The Linux system calls still missing after group 3 (added 2026-11-03; 108 of the 111 in
+  4. [ ] Architecture: the Linux ABI as a personality on the microkernel (decided 2026-11-03:
+     option (b), over keeping Linux compatibility in the kernel for good), with one security
+     model. ADR 0024, written after group 3 and before item 5 (the maintainer's order,
+     2026-11-03), so the calls still missing are built for the move:
+     - [ ] The Linux system calls are served by a user-space Linux runtime on native IPC and
+       capabilities (the model of Fuchsia's Starnix; gVisor's Sentry is similar), and the kernel
+       keeps memory, scheduling, IPC, capabilities and the hardware abstraction. The in-kernel
+       compatibility code (`kernel/src/syscall`, the Linux parts of `fs` and `process`, the
+       namespaces) is the reference implementation and moves out in pieces, each move keeping the
+       LTP, Open POSIX and libc-test expected lists. The ADR decides how a Linux call reaches the
+       runtime, and orders the moves with the IPC redesign (N-79 to N-91, which it depends on) and
+       C6 (drivers, filesystems and network protocols out of ring 0).
+     - [ ] One security model: every Linux privilege check (the POSIX capabilities of ADR 0020,
+       uid and permission checks) also requires the object capability for the resource it acts
+       on, as `sys_mount` already requires a Memory capability with WRITE and CREATE, so the native
+       model governs Linux programs too rather than running beside them. The ADR lists each check
+       with the object type and right it needs, says how a Linux process gets its first
+       capabilities (inherited at fork and exec, granted at launch) and how namespaces relate to
+       them; the checks change one subsystem per commit, as in ADR 0020 step 6.
+     - [ ] Until the moves: new compatibility code keeps Linux semantics behind module interfaces
+       (no new reach-ins across subsystems), so it can move; README and the design documents
+       state the current state (everything in ring 0) and the target.
+  5. [ ] The Linux system calls still missing after group 3 (added 2026-11-03; 108 of the 111 in
      `docs/compat/LINUX-SYSCALL-COVERAGE.md`, group 3 adds mount, umount2 and pivot_root). One
      branch and pull request, a commit per family below, each with its LTP cases and its
      `abi/kconfig.map` options set (ADR 0023). A call is either implemented with Linux semantics
@@ -401,36 +423,15 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
      - [ ] Linux AIO (io_setup, io_destroy, io_submit, io_cancel, io_getevents, io_pgetevents) and
        io_uring (io_uring_setup, io_uring_enter, io_uring_register) move to v0.29: they need an
        asynchronous completion path in the kernel.
-  5. [ ] ABI-review items N-190 to N-193, N-207, N-209 to N-211, N-217, N-221, N-222, N-225, N-231,
+  6. [ ] ABI-review items N-190 to N-193, N-207, N-209 to N-211, N-217, N-221, N-222, N-225, N-231,
      N-235 to N-238.
-  6. [ ] D leftovers: N-115, N-260, N-52/N-261, N-282; the native thread call (private 1064),
+  7. [ ] D leftovers: N-115, N-260, N-52/N-261, N-282; the native thread call (private 1064),
      whose thread is never started and keeps its process from finishing its exit: start it as
      `clone` does, with a runtime test that the process exits, or retire it (found in PR #33).
-  7. [ ] adjtimex frequency steering, before the cut decision (set 2026-11-01): ADJ_FREQUENCY and
+  8. [ ] adjtimex frequency steering, before the cut decision (set 2026-11-01): ADJ_FREQUENCY and
      the adjtime() slew change how fast CLOCK_REALTIME and CLOCK_MONOTONIC advance (as Linux's
      `ntp_tick_length`), and STA_INS/STA_DEL insert or delete a leap second (LTP leapsec01); its own
      commit or PR after group 3. KNOWN-LIMITATIONS "adjtimex and clock_adjtime".
-  8. [ ] Architecture: the Linux ABI as a personality on the microkernel (decided 2026-11-03:
-     option (b), over keeping Linux compatibility in the kernel for good), with one security
-     model. ADR 0024, written before the cut decision:
-     - [ ] The Linux system calls are served by a user-space Linux runtime on native IPC and
-       capabilities (the model of Fuchsia's Starnix; gVisor's Sentry is similar), and the kernel
-       keeps memory, scheduling, IPC, capabilities and the hardware abstraction. The in-kernel
-       compatibility code (`kernel/src/syscall`, the Linux parts of `fs` and `process`, the
-       namespaces) is the reference implementation and moves out in pieces, each move keeping the
-       LTP, Open POSIX and libc-test expected lists. The ADR decides how a Linux call reaches the
-       runtime, and orders the moves with the IPC redesign (N-79 to N-91, which it depends on) and
-       C6 (drivers, filesystems and network protocols out of ring 0).
-     - [ ] One security model: every Linux privilege check (the POSIX capabilities of ADR 0020,
-       uid and permission checks) also requires the object capability for the resource it acts
-       on, as `sys_mount` already requires a Memory capability with WRITE and CREATE, so the native
-       model governs Linux programs too rather than running beside them. The ADR lists each check
-       with the object type and right it needs, says how a Linux process gets its first
-       capabilities (inherited at fork and exec, granted at launch) and how namespaces relate to
-       them; the checks change one subsystem per commit, as in ADR 0020 step 6.
-     - [ ] Until the moves: new compatibility code keeps Linux semantics behind module interfaces
-       (no new reach-ins across subsystems), so it can move; README and the design documents
-       state the current state (everything in ring 0) and the target.
   9. [ ] Decision point: cut v0.28.0 here (moving 10 to 16 to v0.29) or continue.
   10. [ ] Sprint F (networking, storage), with `knetd` (N-69) and INET socket readiness.
   11. [ ] Sprint G (hardening).
