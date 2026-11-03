@@ -182,6 +182,9 @@ compose_root() {
     # this image is for the suites.
     rm -f "${OUT}/usr/src/busybox_test.sh"
     mkdir -p "${OUT}/lib" "${OUT}/tmp" "${OUT}/dev/shm" "${OUT}/usr/lib/compat" "${OUT}/etc"
+    # The kernel configuration, current even when the base root predates it
+    # (ADR 0023): LTP reads it to decide which tests apply.
+    python3 "${ROOT}/tools/compat/gen_kconfig.py" "${arch}" "${OUT}"
     # The users and groups LTP requires (its IDcheck.sh), with Linux's
     # usual IDs, when the base root has no account files of its own.
     [[ -f "${OUT}/etc/passwd" ]] || cat > "${OUT}/etc/passwd" <<'EOF'

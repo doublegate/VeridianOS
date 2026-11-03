@@ -156,8 +156,11 @@ their check, for a few shared reasons:
   with ENOSPC when the compat disk has less room (until fallocate existed, LTP wrote the image
   instead, which outlasted the 180-second limit under emulation). Loop devices come after the
   system call groups.
-- **No kernel configuration.** Tests that check a `CONFIG_*` option (about 95) find neither
-  `/proc/config.gz` nor `/boot/config-<release>` and are TBROK.
+- **Kernel configuration.** `/boot/config-<release>` (ADR 0023) sets an option only where the
+  kernel does what Linux built with it does, so the tests that need an option it leaves unset
+  (user, mount, PID and network namespaces until their steps, AIO, io_uring, keys, System V
+  IPC, loop devices, NUMA, swap, seccomp and the rest in `abi/kconfig.map`) are TCONF, as on a
+  Linux kernel built without them.
 - **Missing calls.** The System V IPC calls, message queues, mlock, msync, sched_getparam and
   the other calls the coverage tables list as missing;
   most of `/proc/sys` (it has `kernel/pid_max`, `kernel/cap_last_cap`, `kernel/core_pattern`,

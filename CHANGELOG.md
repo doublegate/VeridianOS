@@ -63,6 +63,12 @@
 
 ### Added
 
+- `/boot/config-7.3.0-veridian` in every root filesystem (ADR 0023): the Linux kernel
+  configuration VeridianOS reports, generated per architecture by `tools/compat/gen_kconfig.py`
+  from `abi/kconfig.map`. An option is set only where the kernel does what Linux built with it
+  does; `gen_kconfig.py --check` (gate and CI) refuses an option that names a missing or stub
+  system call. LTP's tests that check the kernel configuration (about 95) were TBROK on
+  "Cannot parse kernel .config"; they now run, or are TCONF where an option is unset.
 - fallocate (`fs::falloc`, N-208; it was ENOSYS), with Linux's argument checks in their order
   (EINVAL, EOPNOTSUPP, EBADF, ESPIPE, EISDIR, ENODEV, EFBIG), RLIMIT_FSIZE, and the removal of
   set-ID bits and file capabilities a write makes. BlockFS allocates (with or without

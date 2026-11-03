@@ -59,6 +59,7 @@ step asm-flags python3 "$root/scripts/dev/check-asm-flags.py"
 # host tests, and vsh's formatting and build.
 step syscall-numbers python3 "$root/tools/compat/gen_syscalls.py" --check
 step syscall-coverage python3 "$root/tools/compat/syscall_coverage.py" --check
+step kernel-config python3 "$root/tools/compat/gen_kconfig.py" --check
 step libc-host-tests bash -c 'for t in "$0"/userland/libc/tests/test-*.sh; do bash "$t" || exit 1; done' "$root"
 step vsh-fmt bash -c 'cd "$0/userland/vsh" && cargo fmt -- --check' "$root"
 # The image tool (its own crate, outside the workspace) and the conformance
@@ -66,7 +67,7 @@ step vsh-fmt bash -c 'cd "$0/userland/vsh" && cargo fmt -- --check' "$root"
 step mkfs-blockfs bash -c 'cd "$0/tools/mkfs-blockfs" && cargo fmt --check && cargo clippy --release --all-targets -- -D warnings && cargo test --release' "$root"
 step compat-tools python3 -I "$root/tools/compat/test_compat.py"
 if command -v ruff >/dev/null; then
-    step compat-ruff ruff check "$root/tools/compat/compat.py" "$root/tools/compat/test_compat.py"
+    step compat-ruff ruff check "$root/tools/compat/compat.py" "$root/tools/compat/gen_kconfig.py" "$root/tools/compat/test_compat.py"
 fi
 step vsh-build bash -c 'cd "$0/userland/vsh" && cargo build --target x86_64-unknown-none -Zbuild-std=core,compiler_builtins,alloc' "$root"
 step clippy-x86_64 cargo clippy --target targets/x86_64-veridian.json -p veridian-kernel "${bs[@]}" -- -D warnings

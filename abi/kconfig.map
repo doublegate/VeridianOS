@@ -1,0 +1,105 @@
+# The Linux kernel configuration VeridianOS reports (ADR 0023).
+#
+# Programs that ask what the kernel was built with (LTP's tst_kconfig above
+# all) read /boot/config-<release>. tools/compat/gen_kconfig.py turns this
+# file into that config for each architecture; the root filesystem builds
+# install it, and `gen_kconfig.py --check` (scripts/dev/gate.sh, CI) fails
+# when an option set to y names a system call that is missing or a stub
+# (tools/compat/syscall_coverage.py's classification).
+#
+# The rule: an option is y only when VeridianOS does what Linux built with it
+# does. An option it does in part stays unset until it is whole, so a test
+# that needs it is skipped, as on a Linux kernel built without it, instead
+# of failing. Options nothing asks about are left out; an option left out
+# reads as unset, as in Linux's own config files.
+#
+# Format, one option per line:
+#   CONFIG_<NAME> <value> [needs=<syscall>,...] [arch=<arch>,...]  # why
+# <value> is y, n (written "# CONFIG_<NAME> is not set") or a literal.
+# needs= names the Linux system calls the option provides; arch= limits the
+# line to those architectures (x86_64, aarch64, riscv64).
+
+## Architecture
+CONFIG_64BIT y
+CONFIG_MMU y
+CONFIG_X86 y arch=x86_64
+CONFIG_X86_64 y arch=x86_64
+CONFIG_ARM64 y arch=aarch64
+CONFIG_RISCV y arch=riscv64
+
+## Process model and namespaces (ADR 0022)
+CONFIG_MULTIUSER y needs=setresuid,setresgid,setgroups
+CONFIG_FUTEX y needs=futex
+CONFIG_POSIX_TIMERS y needs=timer_create,timer_settime,timer_delete
+CONFIG_NAMESPACES y needs=unshare,setns
+CONFIG_UTS_NS y needs=unshare,setns,sethostname  # H1
+CONFIG_IPC_NS y needs=unshare,setns  # H1; Linux's Kconfig would need SYSVIPC or POSIX_MQUEUE, the namespace itself works
+CONFIG_TIME_NS y needs=unshare,setns,clock_gettime  # H2
+CONFIG_MNT_NS n  # H3
+CONFIG_USER_NS n  # H4
+CONFIG_PID_NS n  # H5
+CONFIG_NET_NS n  # H6
+CONFIG_CHECKPOINT_RESTORE n  # kcmp only; no PR_SET_MM, map_files or msg_next_id
+CONFIG_SECCOMP n  # no seccomp(2)
+CONFIG_SECCOMP_FILTER n
+CONFIG_BSD_PROCESS_ACCT n  # no acct(2)
+CONFIG_RT_GROUP_SCHED n  # no cgroup hierarchy
+CONFIG_PREEMPT_RT n
+
+## Files and events
+CONFIG_PROC_FS y
+CONFIG_TMPFS y
+CONFIG_TMPFS_XATTR y needs=setxattr,getxattr,listxattr,removexattr
+CONFIG_FILE_LOCKING y needs=flock,fcntl
+CONFIG_FHANDLE y needs=name_to_handle_at,open_by_handle_at
+CONFIG_ADVISE_SYSCALLS y needs=madvise,fadvise64
+CONFIG_EPOLL y needs=epoll_create1,epoll_ctl,epoll_pwait
+CONFIG_EVENTFD y needs=eventfd2
+CONFIG_SIGNALFD y needs=signalfd4
+CONFIG_TIMERFD y needs=timerfd_create,timerfd_settime,timerfd_gettime
+CONFIG_INOTIFY_USER y needs=inotify_init1,inotify_add_watch,inotify_rm_watch
+CONFIG_MEMFD_CREATE y needs=memfd_create
+CONFIG_DNOTIFY n  # no fcntl(F_NOTIFY)
+CONFIG_FANOTIFY n  # no fanotify_init(2)
+CONFIG_AIO n  # no io_setup(2)
+CONFIG_IO_URING n  # no io_uring_setup(2)
+CONFIG_USERFAULTFD n  # no userfaultfd(2)
+CONFIG_SYSVIPC n  # no shmget, semget or msgget
+CONFIG_POSIX_MQUEUE n  # no mq_open(2)
+CONFIG_BLK_DEV_LOOP n  # no loop devices
+CONFIG_BLK_DEV_RAM n
+CONFIG_ZRAM n
+CONFIG_EXT4_FS n  # read-only, and no mount(2) to reach it until H3
+CONFIG_QUOTA n  # no quotactl(2)
+CONFIG_QFMT_V2 n
+CONFIG_XFS_FS n
+CONFIG_SQUASHFS n
+CONFIG_FS_VERITY n
+
+## Memory
+CONFIG_SWAP n  # no swapon(2)
+CONFIG_NUMA n  # one node; no mbind or set_mempolicy
+CONFIG_HUGETLBFS n
+CONFIG_MEMORY_FAILURE n
+CONFIG_HWPOISON_INJECT n
+
+## Keys and crypto
+CONFIG_KEYS n  # no add_key or keyctl
+CONFIG_KEY_DH_OPERATIONS n
+CONFIG_ASYMMETRIC_KEY_TYPE n
+CONFIG_X509_CERTIFICATE_PARSER n
+CONFIG_PKCS8_PRIVATE_KEY_PARSER n
+CONFIG_CRYPTO_USER_API n  # no AF_ALG
+
+## Networking
+CONFIG_NET y needs=socket,bind,connect
+CONFIG_INET y needs=socket
+CONFIG_UNIX y needs=socket,socketpair
+CONFIG_TUN n
+CONFIG_TLS n
+CONFIG_IP_SCTP n
+
+## Debugging (LTP lengthens its timeouts when any is set)
+CONFIG_KASAN n
+CONFIG_LOCKDEP n
+CONFIG_PROVE_LOCKING n

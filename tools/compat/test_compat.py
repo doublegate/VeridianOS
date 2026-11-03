@@ -591,5 +591,61 @@ class SyscallCoverage(unittest.TestCase):
         )
 
 
+
+class KernelConfig(unittest.TestCase):
+    """tools/compat/gen_kconfig.py (ADR 0023)."""
+
+    MAP = """
+# comment
+CONFIG_EVENTFD y needs=eventfd2
+CONFIG_AIO n  # no io_setup
+CONFIG_X86_64 y arch=x86_64
+CONFIG_HZ 250
+"""
+
+    def test_render_follows_linux_config_format(self):
+        import gen_kconfig
+
+        options = gen_kconfig.parse(self.MAP)
+        text = gen_kconfig.render(options, "aarch64", "7.3.0-veridian")
+        body = [
+            line
+            for line in text.splitlines()
+            if not line.startswith("#") or line.endswith(" is not set")
+        ]
+        self.assertEqual(
+            body, ["CONFIG_EVENTFD=y", "# CONFIG_AIO is not set", "CONFIG_HZ=250"]
+        )
+        self.assertIn("CONFIG_X86_64=y", gen_kconfig.render(options, "x86_64", "r"))
+
+    def test_bad_lines_are_refused(self):
+        import gen_kconfig
+
+        for text in (
+            "CONFIG_A y\nCONFIG_A n",
+            "EVENTFD y",
+            "CONFIG_A",
+            "CONFIG_A y arch=sparc",
+            "CONFIG_A y wants=x",
+        ):
+            with self.assertRaises(ValueError, msg=text):
+                gen_kconfig.parse(text)
+
+    def test_check_refuses_unimplemented_calls(self):
+        import gen_kconfig
+
+        linux = {a: {"eventfd2", "io_setup"} for a in gen_kconfig.ARCHES}
+        ok = gen_kconfig.parse("CONFIG_EVENTFD y needs=eventfd2\nCONFIG_AIO n needs=io_setup")
+        self.assertEqual(gen_kconfig.problems(ok, {"eventfd2"}, linux), [])
+        bad = gen_kconfig.parse("CONFIG_AIO y needs=io_setup")
+        self.assertEqual(len(gen_kconfig.problems(bad, {"eventfd2"}, linux)), 1)
+        # A call Linux lacks on an architecture the line covers.
+        linux["aarch64"] = {"eventfd2"}
+        self.assertIn(
+            "Linux has no io_setup on aarch64",
+            gen_kconfig.problems(bad, {"io_setup"}, linux)[0],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

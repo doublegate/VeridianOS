@@ -363,6 +363,8 @@ phase_rootfs() {
     # Clean and create build directory
     rm -rf "$BUILD_DIR"
     mkdir -p "$BUILD_DIR"/{bin,sbin,usr/bin,usr/sbin,usr/src,tmp,var/tmp,dev,proc,etc}
+    # The kernel configuration Linux programs read (ADR 0023).
+    python3 "$PROJECT_ROOT/tools/compat/gen_kconfig.py" x86_64 "$BUILD_DIR"
 
     # Install BusyBox binary
     cp "$BB_BIN" "$BUILD_DIR/bin/busybox"
@@ -755,7 +757,7 @@ SPECEOF
     echo ""
     echo "  Creating rootfs-busybox.tar..."
     cd "$BUILD_DIR"
-    tar cf "$ROOTFS_TAR" --format=ustar bin/ sbin/ usr/ tmp/ var/ dev/ proc/ etc/
+    tar cf "$ROOTFS_TAR" --format=ustar bin/ sbin/ usr/ tmp/ var/ dev/ proc/ etc/ boot/
     cd "$PROJECT_ROOT"
 
     local total_files size

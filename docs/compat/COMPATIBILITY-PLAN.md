@@ -181,8 +181,9 @@ Each group lands with its LTP cases. The counts are "missing" entries in the cov
   uname's release `7.3.0-veridian` (ADR 0021: about 230 tests passed with LTP's "kernel older than
   4.4" warning, which now appears once). What still stops most LTP tests before their check is
   listed in `docs/KNOWN-LIMITATIONS.md`, "Conformance suites": no test block device (about 175
-  tests, which on AArch64 and RISC-V run into the time limit while they write the image), no
-  kernel configuration, no mount.
+  tests, which on AArch64 and RISC-V run into the time limit while they write the image) and
+  no mount. The kernel configuration LTP reads is `/boot/config-<release>`, generated from
+  `abi/kconfig.map` (ADR 0023).
 - **Coverage tables.** Regenerate the coverage table every release, add one for arm64, and track
   partial semantics per syscall.
 - **Application ladder.** The ladder above runs as CI smoke tests.
