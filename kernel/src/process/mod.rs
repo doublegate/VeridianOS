@@ -85,6 +85,59 @@ pub fn alloc_tid() -> ThreadId {
     ThreadId(NEXT_ID.fetch_add(1, Ordering::Relaxed))
 }
 
+/// IDs clone3's set_tid has claimed for a process or thread not yet in the
+/// process table.
+#[cfg(feature = "alloc")]
+static CLAIMED_IDS: spin::Mutex<alloc::vec::Vec<u64>> = spin::Mutex::new(alloc::vec::Vec::new());
+
+/// An ID clone3's set_tid chose, held until its process or thread is in
+/// the table, or the clone has failed.
+#[cfg(feature = "alloc")]
+pub struct IdClaim(u64);
+
+#[cfg(feature = "alloc")]
+impl IdClaim {
+    /// Claim `id` unless a process, a zombie awaiting its reap, a thread or
+    /// another clone has it (None: Linux's EEXIST). `NEXT_ID` moves past it
+    /// first, so no later allocation hands it out. An ID allocated before
+    /// that by a fork or clone still under way is not yet in the table and
+    /// is not seen: the table then refuses the second process (and nothing
+    /// refuses a second thread), a window only a caller holding
+    /// CAP_CHECKPOINT_RESTORE or CAP_SYS_ADMIN can reach.
+    pub fn new(id: u64) -> Option<Self> {
+        let mut claimed = CLAIMED_IDS.lock();
+        let before = NEXT_ID.fetch_max(id + 1, Ordering::AcqRel);
+        if claimed.contains(&id) || (id < before && id_in_use(id)) {
+            return None;
+        }
+        claimed.push(id);
+        Some(Self(id))
+    }
+
+    pub fn id(&self) -> u64 {
+        self.0
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl Drop for IdClaim {
+    fn drop(&mut self) {
+        CLAIMED_IDS.lock().retain(|&id| id != self.0);
+    }
+}
+
+/// Whether a process (in the table or awaiting its reap) or a thread has
+/// the ID `id`.
+#[cfg(feature = "alloc")]
+fn id_in_use(id: u64) -> bool {
+    if process_for_reap(id).is_some() {
+        return true;
+    }
+    let mut used = false;
+    table::PROCESS_TABLE.for_each(|p| used |= p.get_thread(ThreadId(id)).is_some());
+    used
+}
+
 /// Initialize process management subsystem without creating init process
 ///
 /// This is used during bootstrap to initialize process structures

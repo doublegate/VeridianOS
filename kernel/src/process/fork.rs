@@ -51,6 +51,20 @@ pub struct ForkOptions {
     /// (installed after the child's file table is copied, so the child
     /// does not have it).
     pub pidfd: Option<usize>,
+    /// CLONE_PIDFD_AUTOKILL: that pidfd SIGKILLs the child when it is last
+    /// closed.
+    pub pidfd_autokill: bool,
+    /// clone3's set_tid: the child's ID, claimed (`process::IdClaim`).
+    pub pid: Option<ProcessId>,
+    /// CLONE_CLEAR_SIGHAND: handlers other than SIG_IGN start as SIG_DFL,
+    /// and every action's flags and mask are cleared (Linux's
+    /// flush_signal_handlers).
+    pub clear_sighand: bool,
+    /// CLONE_NNP: the child starts with no_new_privs set.
+    pub no_new_privs: bool,
+    /// CLONE_AUTOREAP: the child is reaped as it exits
+    /// (`Process::autoreap`).
+    pub autoreap: bool,
 }
 
 impl Default for ForkOptions {
@@ -66,6 +80,11 @@ impl Default for ForkOptions {
             child_settid: None,
             child_cleartid: None,
             pidfd: None,
+            pidfd_autokill: false,
+            pid: None,
+            clear_sighand: false,
+            no_new_privs: false,
+            autoreap: false,
         }
     }
 }
@@ -115,6 +134,7 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
         .parent(current_process.pid)
         .priority(*current_process.priority.lock())
         .credentials(parent_creds)
+        .pid(opts.pid)
         .build();
 
     let new_pid = new_process.pid;
@@ -210,8 +230,16 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
             // rest), so no action is copied half old and half new.
             let handlers = current_process.signal_handlers.lock();
             let extra = current_process.signal_action_extra.lock();
-            *new_process.signal_handlers.lock() = *handlers;
-            *new_process.signal_action_extra.lock() = *extra;
+            let (mut child_handlers, mut child_extra) = (*handlers, *extra);
+            if opts.clear_sighand {
+                const SIG_IGN: u64 = 1;
+                for handler in child_handlers.iter_mut().filter(|h| **h != SIG_IGN) {
+                    *handler = 0;
+                }
+                child_extra = [(0, 0, 0); super::signals::NSIG + 1];
+            }
+            *new_process.signal_handlers.lock() = child_handlers;
+            *new_process.signal_action_extra.lock() = child_extra;
         }
         new_process.signal_mask.store(
             current_process
@@ -361,6 +389,9 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
         new_process
             .vfork_pending
             .store(opts.vfork, core::sync::atomic::Ordering::Release);
+        new_process
+            .autoreap
+            .store(opts.autoreap, core::sync::atomic::Ordering::Release);
 
         // The TID stores happen before the child can run. CLONE_CHILD_SETTID
         // writes the child's memory only: a copy-on-write page is copied first
@@ -394,9 +425,10 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
         *new_thread.altstack.lock() = *current_thread.altstack.lock();
         *new_thread.comm.lock() = *current_thread.comm.lock();
         new_thread.no_new_privs.store(
-            current_thread
-                .no_new_privs
-                .load(core::sync::atomic::Ordering::Acquire),
+            opts.no_new_privs
+                || current_thread
+                    .no_new_privs
+                    .load(core::sync::atomic::Ordering::Acquire),
             core::sync::atomic::Ordering::Release,
         );
         // The sets read with the credentials (above), not re-read here: a

@@ -5548,6 +5548,7 @@ static void test_open_flags(void);
 static void test_text_busy(void);
 static void test_inotify_events(void);
 static void test_pidfd(void);
+static void test_clone3(void);
 
 /* Tests `--only NAME` can run alone (for debugging a single test). */
 static const struct {
@@ -5564,6 +5565,7 @@ static const struct {
     {"text_busy", test_text_busy},
     {"inotify_events", test_inotify_events},
     {"pidfd", test_pidfd},
+    {"clone3", test_clone3},
     {"threads", test_threads},
     {"cow_race", test_cow_race},
     {"signals", test_signals},
@@ -8104,6 +8106,237 @@ static void test_pidfd(void)
     report("pidfd", f == 0, why);
 }
 
+/* clone3, as Linux 7.3: struct clone_args read as an extensible struct and
+ * checked in Linux's order, the pidfd stored through its own pointer, and
+ * CLONE_CLEAR_SIGHAND, CLONE_NNP, CLONE_AUTOREAP, CLONE_PIDFD_AUTOKILL,
+ * set_tid and CLONE_INTO_CGROUP as Linux takes them. */
+#ifndef SYS_clone3
+#define SYS_clone3 435
+#endif
+#ifndef SYS_pidfd_open
+#define SYS_pidfd_open 434
+#endif
+#ifndef CLONE_PIDFD
+#define CLONE_PIDFD 0x1000
+#endif
+#ifndef P_PIDFD
+#define P_PIDFD 3
+#endif
+#define T_CLONE_CLEAR_SIGHAND (1ULL << 32)
+#define T_CLONE_INTO_CGROUP (1ULL << 33)
+#define T_CLONE_AUTOREAP (1ULL << 34)
+#define T_CLONE_NNP (1ULL << 35)
+#define T_CLONE_PIDFD_AUTOKILL (1ULL << 36)
+struct t_clone_args {
+    uint64_t flags, pidfd, child_tid, parent_tid, exit_signal, stack, stack_size, tls,
+        set_tid, set_tid_size, cgroup;
+};
+
+static long t_clone3(struct t_clone_args *a, size_t size)
+{
+    return syscall(SYS_clone3, a, size);
+}
+
+/* Reap `pid` and give its exit status (-1 if it did not exit normally). */
+static int t_exit_status(pid_t pid)
+{
+    int st;
+    if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st))
+        return -1;
+    return WEXITSTATUS(st);
+}
+
+static void t_handler(int sig) { (void)sig; }
+
+static void test_clone3(void)
+{
+    char why[160];
+    int f = 0;
+    struct t_clone_args a;
+    unsigned char big[96];
+    long r;
+
+    /* The struct's size: below its first version EINVAL, above a page or
+     * with nonzero bytes past the known fields E2BIG. */
+    memset(&a, 0, sizeof(a));
+    a.exit_signal = SIGCHLD;
+    if (!(t_clone3(&a, 0) == -1 && errno == EINVAL) ||
+        !(t_clone3(&a, 63) == -1 && errno == EINVAL) ||
+        !(t_clone3(&a, 4097) == -1 && errno == E2BIG))
+        f |= 1;
+    memset(big, 0, sizeof(big));
+    memcpy(big, &a, sizeof(a));
+    big[90] = 1;
+    if (!(t_clone3((struct t_clone_args *)big, sizeof(big)) == -1 && errno == E2BIG))
+        f |= 1;
+    big[90] = 0;
+    r = t_clone3((struct t_clone_args *)big, sizeof(big));
+    if (r == 0)
+        _exit(5);
+    if (r < 0 || t_exit_status((pid_t)r) != 5)
+        f |= 1;
+
+    /* Flags and fields clone3 refuses. */
+    memset(&a, 0, sizeof(a));
+    a.flags = 1ULL << 40;
+    if (!(t_clone3(&a, sizeof(a)) == -1 && errno == EINVAL)) f |= 2;
+    a.flags = 0x00400000; /* CLONE_DETACHED */
+    if (!(t_clone3(&a, sizeof(a)) == -1 && errno == EINVAL)) f |= 2;
+    a.flags = 0;
+    a.exit_signal = 0x100;
+    if (!(t_clone3(&a, sizeof(a)) == -1 && errno == EINVAL)) f |= 2;
+    a.exit_signal = 65;
+    if (!(t_clone3(&a, sizeof(a)) == -1 && errno == EINVAL)) f |= 2;
+    a.exit_signal = SIGCHLD;
+    a.stack_size = 4096;
+    if (!(t_clone3(&a, sizeof(a)) == -1 && errno == EINVAL)) f |= 2;
+    a.stack_size = 0;
+    a.flags = CLONE_THREAD | CLONE_SIGHAND | CLONE_VM;
+    if (!(t_clone3(&a, sizeof(a)) == -1 && errno == EINVAL)) f |= 2;
+    a.flags = CLONE_SIGHAND;
+    a.exit_signal = 0;
+    if (!(t_clone3(&a, sizeof(a)) == -1 && errno == EINVAL)) f |= 2;
+
+    /* CLONE_PIDFD stores through `pidfd`, CLONE_PARENT_SETTID through
+     * `parent_tid`; one address for both is EINVAL. */
+    int pidfd = -1, ptid = 0;
+    memset(&a, 0, sizeof(a));
+    a.flags = CLONE_PIDFD | CLONE_PARENT_SETTID;
+    a.pidfd = (uintptr_t)&pidfd;
+    a.parent_tid = (uintptr_t)&pidfd;
+    a.exit_signal = SIGCHLD;
+    if (!(t_clone3(&a, sizeof(a)) == -1 && errno == EINVAL)) f |= 4;
+    a.parent_tid = (uintptr_t)&ptid;
+    r = t_clone3(&a, sizeof(a));
+    if (r == 0)
+        _exit(6);
+    if (r < 0 || ptid != r || pidfd < 0 || fcntl(pidfd, F_GETFD) != FD_CLOEXEC)
+        f |= 4;
+    siginfo_t si;
+    memset(&si, 0, sizeof(si));
+    if (pidfd >= 0 && (waitid(P_PIDFD, pidfd, &si, WEXITED) != 0 || si.si_pid != r ||
+                       si.si_status != 6))
+        f |= 4;
+    if (pidfd >= 0) close(pidfd);
+
+    /* CLONE_CLEAR_SIGHAND: a handler goes back to SIG_DFL, SIG_IGN stays;
+     * not with CLONE_SIGHAND. CLONE_NNP: the child alone has
+     * no_new_privs. */
+    struct sigaction sa, old1, old2;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = t_handler;
+    sigaction(SIGUSR1, &sa, &old1);
+    sa.sa_handler = SIG_IGN;
+    sigaction(SIGUSR2, &sa, &old2);
+    memset(&a, 0, sizeof(a));
+    a.flags = T_CLONE_CLEAR_SIGHAND | T_CLONE_NNP;
+    a.exit_signal = SIGCHLD;
+    r = t_clone3(&a, sizeof(a));
+    if (r == 0) {
+        struct sigaction c1, c2;
+        sigaction(SIGUSR1, NULL, &c1);
+        sigaction(SIGUSR2, NULL, &c2);
+        _exit((c1.sa_handler == SIG_DFL ? 0 : 1) | (c2.sa_handler == SIG_IGN ? 0 : 2) |
+              (prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) == 1 ? 0 : 4));
+    }
+    if (r < 0 || t_exit_status((pid_t)r) != 0 || prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 0)
+        f |= 8;
+    sigaction(SIGUSR1, &old1, NULL);
+    sigaction(SIGUSR2, &old2, NULL);
+
+    /* CLONE_AUTOREAP: no exit signal allowed, and the child is gone once
+     * it exits -- its pidfd hangs up and there is nothing to wait for. */
+    memset(&a, 0, sizeof(a));
+    a.flags = T_CLONE_AUTOREAP;
+    a.exit_signal = SIGCHLD;
+    if (!(t_clone3(&a, sizeof(a)) == -1 && errno == EINVAL)) f |= 16;
+    pidfd = -1;
+    a.flags = T_CLONE_AUTOREAP | CLONE_PIDFD;
+    a.pidfd = (uintptr_t)&pidfd;
+    a.exit_signal = 0;
+    r = t_clone3(&a, sizeof(a));
+    if (r == 0)
+        _exit(0);
+    struct pollfd p = {pidfd, POLLIN, 0};
+    if (r < 0 || pidfd < 0 || poll(&p, 1, 5000) != 1)
+        f |= 16;
+    /* Reaped: no zombie is left to wait for. */
+    for (int i = 0; i < 100 && !(p.revents & POLLHUP); i++) {
+        usleep(10000);
+        p.revents = 0;
+        poll(&p, 1, 0);
+    }
+    if (!(p.revents & POLLHUP) || !(waitpid((pid_t)r, NULL, WNOHANG) == -1 && errno == ECHILD))
+        f |= 16;
+    if (pidfd >= 0) close(pidfd);
+
+    /* CLONE_PIDFD_AUTOKILL: the last close of the clone pidfd SIGKILLs the
+     * child; it needs CLONE_PIDFD and CLONE_AUTOREAP, and CLONE_NNP or
+     * CAP_SYS_ADMIN. */
+    memset(&a, 0, sizeof(a));
+    a.flags = T_CLONE_AUTOREAP | T_CLONE_PIDFD_AUTOKILL;
+    if (!(t_clone3(&a, sizeof(a)) == -1 && errno == EINVAL)) f |= 32;
+    pidfd = -1;
+    a.flags = CLONE_PIDFD | T_CLONE_AUTOREAP | T_CLONE_PIDFD_AUTOKILL | T_CLONE_NNP;
+    a.pidfd = (uintptr_t)&pidfd;
+    r = t_clone3(&a, sizeof(a));
+    if (r == 0) {
+        pause();
+        _exit(1);
+    }
+    int watch = r > 0 ? (int)syscall(SYS_pidfd_open, (pid_t)r, 0) : -1;
+    if (r < 0 || pidfd < 0 || watch < 0)
+        f |= 32;
+    if (pidfd >= 0) close(pidfd);
+    p.fd = watch;
+    p.revents = 0;
+    if (watch >= 0 && poll(&p, 1, 5000) != 1)
+        f |= 32;
+    if (watch >= 0) close(watch);
+
+    /* set_tid: one entry (one PID namespace), from 1 below pid_max, and
+     * only with CAP_CHECKPOINT_RESTORE or CAP_SYS_ADMIN; a taken ID is
+     * EEXIST. */
+    pid_t ids[2] = {0, 0};
+    memset(&a, 0, sizeof(a));
+    a.exit_signal = SIGCHLD;
+    a.set_tid = (uintptr_t)ids;
+    a.set_tid_size = 1;
+    if (!(t_clone3(&a, sizeof(a)) == -1 && errno == EINVAL)) f |= 64;
+    ids[0] = getpid() + 7000;
+    a.set_tid_size = 2;
+    if (!(t_clone3(&a, sizeof(a)) == -1 && errno == EINVAL)) f |= 64;
+    a.set_tid_size = 1;
+    if (geteuid() != 0) {
+        if (!(t_clone3(&a, sizeof(a)) == -1 && errno == EPERM)) f |= 64;
+    } else {
+        ids[0] = getpid();
+        if (!(t_clone3(&a, sizeof(a)) == -1 && errno == EEXIST)) f |= 64;
+        ids[0] = getpid() + 7000;
+        r = t_clone3(&a, sizeof(a));
+        if (r == 0)
+            _exit(getpid() == ids[0] ? 0 : 1);
+        if (r != ids[0] || t_exit_status((pid_t)r) != 0)
+            f |= 64;
+    }
+
+    /* CLONE_INTO_CGROUP: a descriptor past INT_MAX or a struct too short
+     * to have one is EINVAL; a descriptor that is not a cgroup EBADF. */
+    memset(&a, 0, sizeof(a));
+    a.flags = T_CLONE_INTO_CGROUP;
+    a.exit_signal = SIGCHLD;
+    a.cgroup = 1ULL << 31;
+    if (!(t_clone3(&a, sizeof(a)) == -1 && errno == EINVAL)) f |= 128;
+    int devnull = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    a.cgroup = devnull;
+    if (!(t_clone3(&a, 80) == -1 && errno == EINVAL)) f |= 128;
+    if (!(t_clone3(&a, sizeof(a)) == -1 && errno == EBADF)) f |= 128;
+    if (devnull >= 0) close(devnull);
+
+    snprintf(why, sizeof(why), "f=%#x errno=%d", f, errno);
+    report("clone3", f == 0, why);
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
@@ -8220,6 +8453,7 @@ int main(int argc, char **argv)
     test_text_busy();
     test_inotify_events();
     test_pidfd();
+    test_clone3();
 #if defined(__x86_64__)
     test_ustat_sysfs();
 #endif

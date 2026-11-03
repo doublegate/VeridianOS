@@ -137,6 +137,11 @@ pub struct Process {
     /// clone's low byte (0: none) (N-210).
     pub exit_signal: AtomicU32,
 
+    /// clone3's CLONE_AUTOREAP: reaped as it exits, with no zombie and no
+    /// exit signal (Linux 7.0's signal->autoreap). Kept across exec; its own
+    /// children do not inherit it.
+    pub autoreap: core::sync::atomic::AtomicBool,
+
     /// A CLONE_VFORK child whose parent waits until it execs or exits;
     /// cleared (and PROCESS_EVENTS woken) by either (N-210).
     pub vfork_pending: core::sync::atomic::AtomicBool,
@@ -501,6 +506,7 @@ impl Process {
             kill_pending: AtomicU32::new(0),
             exec_tid: AtomicU64::new(0),
             exit_signal: AtomicU32::new(super::signals::SIGCHLD as u32),
+            autoreap: core::sync::atomic::AtomicBool::new(false),
             vfork_pending: core::sync::atomic::AtomicBool::new(false),
             did_exec: core::sync::atomic::AtomicBool::new(false),
             stop_signal: AtomicU32::new(0),
@@ -1533,6 +1539,7 @@ pub struct ProcessBuilder {
     parent: Option<ProcessId>,
     priority: ProcessPriority,
     creds: super::creds::Credentials,
+    pid: Option<ProcessId>,
 }
 
 #[cfg(feature = "alloc")]
@@ -1544,7 +1551,15 @@ impl ProcessBuilder {
             parent: None,
             priority: ProcessPriority::Normal,
             creds: super::creds::Credentials::new(0, 0),
+            pid: None,
         }
+    }
+
+    /// Give the process this ID (clone3's set_tid, claimed with
+    /// [`super::IdClaim`]) rather than a new one.
+    pub fn pid(mut self, pid: Option<ProcessId>) -> Self {
+        self.pid = pid;
+        self
     }
 
     /// Set parent process
@@ -1573,7 +1588,7 @@ impl ProcessBuilder {
     /// `create_process_with_options` does), or clone from an existing
     /// address space (as `fork_process` does).
     pub fn build(self) -> Process {
-        let pid = super::alloc_pid();
+        let pid = self.pid.unwrap_or_else(super::alloc_pid);
         let process = Process::new(pid, self.parent, self.name, self.priority);
         process.update_credentials(|c| *c = self.creds);
         process

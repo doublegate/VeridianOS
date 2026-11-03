@@ -320,6 +320,14 @@ What remains:
   pidfd_send_signal alike, where Linux accepts and discards them. An open `/proc/self` stands for
   whichever process uses it, not the one that opened it, so pidfd_send_signal on one passed to
   another process signals that process.
+- **clone3 has one PID namespace level and no cgroups.** set_tid takes one ID (more are EINVAL,
+  as on Linux without nested PID namespaces), and CLONE_INTO_CGROUP is EBADF, since no
+  descriptor can name a cgroup. The namespace flags, CLONE_PARENT, CLONE_PTRACE, and CLONE_FILES
+  or CLONE_SIGHAND across processes are EINVAL from clone and clone3 alike. An ID that a fork or
+  clone still under way has just been given can be chosen again through set_tid before that
+  child is in the process table; the table then refuses the second process, but a second thread
+  with the ID is not refused. Only a caller with CAP_CHECKPOINT_RESTORE or CAP_SYS_ADMIN can
+  choose an ID.
 - **chroot (N-250):** a working directory outside the new root is moved to the root, where Linux
   would leave it outside.
 - **uname says `VeridianOS`, not `Linux`, by default (ADR 0021).** Programs that test the

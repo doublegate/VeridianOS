@@ -13,6 +13,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use super::{DirEntry, Metadata, NodeType, Permissions, VfsNode};
 use crate::{
@@ -49,6 +50,9 @@ pub struct PidFdNode {
     /// PIDFD_THREAD: the thread this pidfd names.
     tid: Option<ThreadId>,
     process: Weak<Process>,
+    /// PIDFD_AUTOKILL (clone3's CLONE_PIDFD_AUTOKILL): SIGKILL the process
+    /// when this pidfd is last closed. Armed once the clone has stored it.
+    autokill: AtomicBool,
 }
 
 impl PidFdNode {
@@ -58,7 +62,14 @@ impl PidFdNode {
             pid: process.pid,
             tid,
             process: Arc::downgrade(process),
+            autokill: AtomicBool::new(false),
         }
+    }
+
+    /// From now on, closing the last descriptor for this pidfd SIGKILLs its
+    /// process.
+    pub fn arm_autokill(&self) {
+        self.autokill.store(true, Ordering::Release);
     }
 
     pub fn pid(&self) -> ProcessId {
@@ -91,6 +102,27 @@ impl PidFdNode {
                 Some(_) => Life::Running,
             },
         }
+    }
+}
+
+/// PIDFD_AUTOKILL, as Linux's pidfs_file_release: the last close of the
+/// pidfd SIGKILLs its process if it is still alive. A process outside the
+/// dispatcher is not ended here when it closes its own pidfd (the teardown
+/// would return into the address space it frees, as kill_one says).
+impl Drop for PidFdNode {
+    fn drop(&mut self) {
+        if !self.autokill.load(Ordering::Acquire) {
+            return;
+        }
+        let Some(process) = self.process().filter(|p| p.is_alive()) else {
+            return;
+        };
+        let own = crate::process::current_process().is_some_and(|me| me.pid == process.pid);
+        if own && !process.dispatched.load(Ordering::Acquire) {
+            return;
+        }
+        let _ =
+            crate::process::exit::kill_process(process.pid, crate::process::exit::signals::SIGKILL);
     }
 }
 

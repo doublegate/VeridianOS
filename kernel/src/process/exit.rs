@@ -178,7 +178,10 @@ pub fn wait_children(filter: WaitFilter, options: WaitOptions) -> Result<Waited,
                 let child_state = child.get_state();
 
                 // Check for zombie (exited)
-                if child_state == ProcessState::Zombie && !options.skip_exited {
+                if child_state == ProcessState::Zombie
+                    && !options.skip_exited
+                    && !child.autoreap.load(Ordering::Acquire)
+                {
                     if options.keep {
                         return Ok(Waited::of(&child, child.wait_status()));
                     }
@@ -591,6 +594,7 @@ pub fn exit_dispatched(exit_code: i32, group: bool) -> ! {
                 &process,
                 SigInfo::child_exited(exit_signal(&process), &process),
             );
+            autoreap(&process);
         }
         dispatch::PROCESS_EVENTS.wake_all();
         // A pidfd for the thread, or for the process now a zombie, polls
@@ -603,6 +607,23 @@ pub fn exit_dispatched(exit_code: i32, group: bool) -> ! {
 // ============================================================================
 // SIGCHLD notification helper
 // ============================================================================
+
+/// CLONE_AUTOREAP: a process that has exited leaves its parent's children
+/// and the process table at once, as Linux's exit_notify releases it;
+/// nothing waits for it (its exit signal is 0). Its last task's reap frees
+/// the page tables (`remove_waited`).
+#[cfg(feature = "alloc")]
+fn autoreap(process: &Process) {
+    if !process.autoreap.load(Ordering::Acquire) {
+        return;
+    }
+    if let Some(parent) = process.parent().and_then(table::get_process) {
+        parent.children.lock().retain(|&p| p != process.pid);
+    }
+    super::remove_waited(process.pid);
+    #[cfg(feature = "alloc")]
+    sched::dispatch::PROCESS_EVENTS.wake_all();
+}
 
 /// The signal a parent gets when `process` exits: SIGCHLD, or what clone
 /// asked for (its low byte; 0 for none, N-210).
@@ -676,6 +697,8 @@ fn force_terminate_process(process: &Process, signal: i32) -> Result<(), KernelE
     // Clean up and mark as zombie
     cleanup_process(process);
     process.set_state(ProcessState::Zombie);
+    #[cfg(feature = "alloc")]
+    autoreap(process);
     // Its pidfds poll readable.
     #[cfg(feature = "alloc")]
     sched::dispatch::io_event();

@@ -1,8 +1,7 @@
-//! Thread clone syscall implementation (CLONE_VM | CLONE_FILES | CLONE_SIGHAND
-//! | CLONE_FS | CLONE_THREAD).
-//!
-//! Creates a new thread in the current process sharing address space and
-//! resources.
+//! clone(2) and clone3(2), as Linux 7.3's `kernel/fork.c`: both build one
+//! [`CloneRequest`] (Linux's `kernel_clone_args`) and go through
+//! [`kernel_clone`], which checks it in copy_process's order and creates a
+//! thread of the caller's process (CLONE_THREAD) or a new process.
 
 #[cfg(feature = "alloc")]
 use crate::process::thread::ThreadFs;
@@ -12,28 +11,58 @@ use crate::{
     syscall::{userspace::validate_user_ptr, SyscallError},
 };
 
-// Allowed clone flags (subset of Linux, thread-oriented)
-const CLONE_VM: usize = 0x0000_0100;
-const CLONE_FS: usize = 0x0000_0200;
-const CLONE_FILES: usize = 0x0000_0400;
-const CLONE_SIGHAND: usize = 0x0000_0800;
-const CLONE_THREAD: usize = 0x0001_0000;
+// clone's flags (its low 32 bits).
+/// clone's low byte: the signal the parent gets when a new process exits.
+const CSIGNAL: u64 = 0xFF;
+/// clone3 only (a CSIGNAL bit clone3 reuses): a new time namespace.
+const CLONE_NEWTIME: u64 = 0x0000_0080;
+const CLONE_VM: u64 = 0x0000_0100;
+const CLONE_FS: u64 = 0x0000_0200;
+const CLONE_FILES: u64 = 0x0000_0400;
+const CLONE_SIGHAND: u64 = 0x0000_0800;
+/// Return a pidfd for the child (a PIDFD_THREAD one for a thread), as
+/// Linux 5.2+: through `parent_tid` for clone, `pidfd` for clone3.
+const CLONE_PIDFD: u64 = 0x0000_1000;
+const CLONE_VFORK: u64 = 0x0000_4000;
+const CLONE_PARENT: u64 = 0x0000_8000;
+const CLONE_THREAD: u64 = 0x0001_0000;
+const CLONE_NEWNS: u64 = 0x0002_0000;
 /// Share SysV semaphore undo lists (musl always sets this for pthreads).
 /// Accepted but ignored -- VeridianOS has no SysV semaphore undo tracking.
-const CLONE_SYSVSEM: usize = 0x0004_0000;
-const CLONE_SETTLS: usize = 0x0008_0000;
-const CLONE_PARENT_SETTID: usize = 0x0010_0000;
-const CLONE_CHILD_CLEARTID: usize = 0x0020_0000;
+const CLONE_SYSVSEM: u64 = 0x0004_0000;
+const CLONE_SETTLS: u64 = 0x0008_0000;
+const CLONE_PARENT_SETTID: u64 = 0x0010_0000;
+const CLONE_CHILD_CLEARTID: u64 = 0x0020_0000;
 /// Deprecated flag set by musl's pthread_create (ignored on Linux 2.6+).
-/// Accepted but ignored for compatibility.
-const CLONE_DETACHED: usize = 0x0040_0000;
-const CLONE_CHILD_SETTID: usize = 0x0100_0000;
-const CLONE_VFORK: usize = 0x0000_4000;
-/// Return a pidfd for the child through `parent_tid` (a PIDFD_THREAD one
-/// for a thread), as Linux 5.2+.
-const CLONE_PIDFD: usize = 0x0000_1000;
-/// clone's low byte: the signal the parent gets when a new process exits.
-const CSIGNAL: usize = 0xFF;
+/// Accepted but ignored by clone; clone3 refuses it.
+const CLONE_DETACHED: u64 = 0x0040_0000;
+const CLONE_CHILD_SETTID: u64 = 0x0100_0000;
+/// Every flag clone(2) can name (Linux's CLONE_LEGACY_FLAGS).
+const CLONE_LEGACY_FLAGS: u64 = 0xFFFF_FFFF;
+
+// clone3's flags past clone's 32 bits.
+/// Handlers not SIG_IGN start as SIG_DFL in the child.
+const CLONE_CLEAR_SIGHAND: u64 = 1 << 32;
+/// Start the child in the cgroup `cgroup` names.
+const CLONE_INTO_CGROUP: u64 = 1 << 33;
+/// The child is reaped when it exits: no zombie, no signal (Linux 7.0).
+const CLONE_AUTOREAP: u64 = 1 << 34;
+/// The child has no_new_privs set (Linux 7.0).
+const CLONE_NNP: u64 = 1 << 35;
+/// SIGKILL the child when its clone pidfd is last closed (Linux 7.0).
+const CLONE_PIDFD_AUTOKILL: u64 = 1 << 36;
+/// A new, empty mount namespace (Linux 7.0; implies CLONE_NEWNS).
+const CLONE_EMPTY_MNTNS: u64 = 1 << 37;
+
+/// `struct clone_args` sizes: its first version (to `tls`), the second
+/// (to `set_tid_size`) and the third (to `cgroup`), Linux's
+/// CLONE_ARGS_SIZE_VER0..2.
+const CLONE_ARGS_SIZE_VER0: usize = 64;
+const CLONE_ARGS_SIZE_VER2: usize = 88;
+/// Linux's MAX_PID_NS_LEVEL: the most set_tid entries clone3 takes.
+const MAX_PID_NS_LEVEL: u64 = 32;
+/// The largest size clone3 reads (PAGE_SIZE).
+const CLONE_ARGS_MAX: usize = 4096;
 
 /// Upper bound of the user-space address range.  Any stack pointer must be
 /// strictly below this address.  The value matches the canonical user-space
@@ -41,79 +70,373 @@ const CSIGNAL: usize = 0xFF;
 /// `validate_user_ptr`.
 use crate::mm::user_layout::user_space_end;
 
-/// clone without CLONE_THREAD: a new process, as fork or vfork (N-210).
-/// musl's and glibc's posix_spawn -- and so system and popen -- call
-/// clone(CLONE_VM | CLONE_VFORK | SIGCHLD) with a stack of their own; it
-/// was EINVAL. CLONE_VM shares the parent's memory page by page
-/// (`VirtualAddressSpace::share_from`). CLONE_FILES and CLONE_SIGHAND
-/// across processes (a shared fd or handler table) are not supported
-/// (EINVAL).
-fn process_clone(
+/// What one clone asks for (Linux's `kernel_clone_args`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct CloneRequest {
+    /// The flags, without clone's exit signal byte.
+    flags: u64,
+    /// The signal the parent gets when a new process exits (0: none).
+    exit_signal: u64,
+    /// The child's stack pointer; 0 runs it on the caller's.
+    stack: usize,
+    parent_tid: usize,
+    child_tid: usize,
+    tls: usize,
+    /// Where CLONE_PIDFD stores the pidfd.
+    pidfd: usize,
+    /// clone3's set_tid: the ID the child is to have in the one PID
+    /// namespace level there is here.
+    set_tid: Option<i32>,
+    /// set_tid named more levels than there are (EINVAL).
+    set_tid_levels: u64,
+    /// clone3's CLONE_INTO_CGROUP descriptor.
+    cgroup: u64,
+}
+
+impl CloneRequest {
+    fn on(&self, flag: u64) -> bool {
+        self.flags & flag != 0
+    }
+}
+
+/// clone(flags, newsp, parent_tid, child_tid, tls) (the dispatcher puts
+/// AArch64's and RISC-V's tls/child_tid order right): its low 32 bits are
+/// the flags, their low byte the exit signal, and CLONE_PIDFD's pidfd goes
+/// to `parent_tid`, as Linux's sys_clone.
+pub fn sys_thread_clone(
     flags: usize,
     newsp: usize,
     parent_tid_ptr: usize,
     child_tid_ptr: usize,
     tls: usize,
 ) -> Result<usize, SyscallError> {
-    let supported = CSIGNAL
-        | CLONE_VM
-        | CLONE_FS
-        | CLONE_VFORK
-        | CLONE_SYSVSEM
-        | CLONE_SETTLS
-        | CLONE_PARENT_SETTID
-        | CLONE_CHILD_SETTID
-        | CLONE_CHILD_CLEARTID
-        | CLONE_DETACHED
-        | CLONE_PIDFD;
-    if flags & !supported != 0 {
+    let flags = flags as u64 & CLONE_LEGACY_FLAGS;
+    kernel_clone(CloneRequest {
+        flags: flags & !CSIGNAL,
+        exit_signal: flags & CSIGNAL,
+        stack: newsp,
+        parent_tid: parent_tid_ptr,
+        child_tid: child_tid_ptr,
+        tls,
+        pidfd: parent_tid_ptr,
+        ..CloneRequest::default()
+    })
+}
+
+/// `struct clone_args` as read, before its checks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct CloneArgs {
+    flags: u64,
+    pidfd: u64,
+    child_tid: u64,
+    parent_tid: u64,
+    exit_signal: u64,
+    stack: u64,
+    stack_size: u64,
+    tls: u64,
+    set_tid: u64,
+    set_tid_size: u64,
+    cgroup: u64,
+}
+
+impl CloneArgs {
+    /// The fields of a `struct clone_args` whose first `raw.len()` bytes
+    /// are `raw` (the rest zero, as copy_struct_from_user fills them).
+    fn decode(raw: &[u8]) -> Self {
+        let mut full = [0u8; CLONE_ARGS_SIZE_VER2];
+        let n = raw.len().min(CLONE_ARGS_SIZE_VER2);
+        full[..n].copy_from_slice(&raw[..n]);
+        let word = |i: usize| {
+            let mut b = [0u8; 8];
+            b.copy_from_slice(&full[i * 8..i * 8 + 8]);
+            u64::from_ne_bytes(b)
+        };
+        Self {
+            flags: word(0),
+            pidfd: word(1),
+            child_tid: word(2),
+            parent_tid: word(3),
+            exit_signal: word(4),
+            stack: word(5),
+            stack_size: word(6),
+            tls: word(7),
+            set_tid: word(8),
+            set_tid_size: word(9),
+            cgroup: word(10),
+        }
+    }
+
+    /// copy_clone_args_from_user's checks of the copied struct (`size` is
+    /// what the caller passed): set_tid_size above MAX_PID_NS_LEVEL, a
+    /// set_tid array without a size or a size without one, an exit signal
+    /// past CSIGNAL, and CLONE_INTO_CGROUP with a descriptor past INT_MAX
+    /// or a struct too short to have one are EINVAL.
+    fn check(&self, size: usize) -> Result<(), SyscallError> {
+        let bad = self.set_tid_size > MAX_PID_NS_LEVEL
+            || (self.set_tid == 0 && self.set_tid_size > 0)
+            || (self.set_tid != 0 && self.set_tid_size == 0)
+            || self.exit_signal & !CSIGNAL != 0
+            || (self.flags & CLONE_INTO_CGROUP != 0
+                && (self.cgroup > i32::MAX as u64 || size < CLONE_ARGS_SIZE_VER2));
+        if bad {
+            Err(SyscallError::InvalidArgument)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// clone3_args_valid, which also turns clone3's stack (its lowest address
+/// and size) into the stack pointer the child starts with: unknown flags,
+/// CLONE_DETACHED and the CSIGNAL bits other than CLONE_NEWTIME (clone3
+/// keeps them for reuse), CLONE_SIGHAND with CLONE_CLEAR_SIGHAND, an exit
+/// signal for a thread or a CLONE_PARENT child, a stack without a size or
+/// a size without a stack, and a stack not wholly in user space are EINVAL.
+fn clone3_request(args: &CloneArgs, set_tid: Option<i32>) -> Result<CloneRequest, SyscallError> {
+    let known = CLONE_LEGACY_FLAGS
+        | CLONE_CLEAR_SIGHAND
+        | CLONE_INTO_CGROUP
+        | CLONE_AUTOREAP
+        | CLONE_NNP
+        | CLONE_PIDFD_AUTOKILL
+        | CLONE_EMPTY_MNTNS;
+    let flags = args.flags;
+    let stack = match (args.stack, args.stack_size) {
+        (0, 0) => Some(0),
+        (0, _) | (_, 0) => None,
+        (base, size) => base
+            .checked_add(size)
+            .filter(|&top| top <= user_space_end() as u64)
+            .map(|top| top as usize),
+    };
+    let valid = flags & !known == 0
+        && flags & (CLONE_DETACHED | (CSIGNAL & !CLONE_NEWTIME)) == 0
+        && flags & (CLONE_SIGHAND | CLONE_CLEAR_SIGHAND) != CLONE_SIGHAND | CLONE_CLEAR_SIGHAND
+        && !(flags & (CLONE_THREAD | CLONE_PARENT) != 0 && args.exit_signal != 0);
+    match stack {
+        Some(stack) if valid => Ok(CloneRequest {
+            flags,
+            exit_signal: args.exit_signal,
+            stack,
+            parent_tid: args.parent_tid as usize,
+            child_tid: args.child_tid as usize,
+            tls: args.tls as usize,
+            pidfd: args.pidfd as usize,
+            set_tid,
+            set_tid_levels: args.set_tid_size,
+            cgroup: args.cgroup,
+        }),
+        _ => Err(SyscallError::InvalidArgument),
+    }
+}
+
+/// clone3(uargs, size), as Linux 7.3's sys_clone3: `struct clone_args` is
+/// read as copy_struct_from_user reads an extensible struct (E2BIG above a
+/// page or for nonzero bytes past the fields known here, EINVAL below its
+/// first version, EFAULT), checked ([`CloneArgs::check`]), its set_tid
+/// array read (EFAULT), then checked as clone3_args_valid
+/// ([`clone3_request`]) and cloned as clone is.
+pub fn sys_clone3(uargs: usize, size: usize) -> Result<usize, SyscallError> {
+    if size > CLONE_ARGS_MAX {
+        return Err(SyscallError::ArgumentListTooLong);
+    }
+    if size < CLONE_ARGS_SIZE_VER0 {
         return Err(SyscallError::InvalidArgument);
     }
-    pidfd_flags_valid(flags)?;
-    let exit_signal = flags & CSIGNAL;
-    if exit_signal > crate::process::signals::NSIG {
+    // The bytes past the struct first, as check_zeroed_user.
+    if size > CLONE_ARGS_SIZE_VER2 {
+        let mut tail = alloc::vec![0u8; size - CLONE_ARGS_SIZE_VER2];
+        let past = uargs
+            .checked_add(CLONE_ARGS_SIZE_VER2)
+            .ok_or(SyscallError::InvalidPointer)?;
+        super::userspace::read_user_bytes(past, &mut tail)?;
+        if tail.iter().any(|&b| b != 0) {
+            return Err(SyscallError::ArgumentListTooLong);
+        }
+    }
+    let mut raw = [0u8; CLONE_ARGS_SIZE_VER2];
+    let len = size.min(CLONE_ARGS_SIZE_VER2);
+    super::userspace::read_user_bytes(uargs, &mut raw[..len])?;
+    let args = CloneArgs::decode(&raw[..len]);
+    args.check(size)?;
+    // The whole array is read (EFAULT); its first entry is for the
+    // innermost PID namespace, the only one here.
+    let set_tid = if args.set_tid_size != 0 {
+        let mut ids = alloc::vec![0u8; args.set_tid_size as usize * 4];
+        super::userspace::read_user_bytes(args.set_tid as usize, &mut ids)?;
+        Some(i32::from_ne_bytes([ids[0], ids[1], ids[2], ids[3]]))
+    } else {
+        None
+    };
+    kernel_clone(clone3_request(&args, set_tid)?)
+}
+
+/// copy_process's flag rules, in its order: CLONE_NEWNS with CLONE_FS, a
+/// thread without CLONE_SIGHAND, CLONE_SIGHAND without CLONE_VM,
+/// CLONE_PIDFD with CLONE_DETACHED, CLONE_AUTOREAP for a thread, with
+/// CLONE_PARENT or with an exit signal, CLONE_NNP for a thread, and
+/// CLONE_PIDFD_AUTOKILL without CLONE_PIDFD or CLONE_AUTOREAP or for a
+/// thread are EINVAL; CLONE_PIDFD_AUTOKILL without CLONE_NNP needs
+/// CAP_SYS_ADMIN (`admin`; EPERM), since the child could gain privilege
+/// after it starts.
+fn copy_process_checks(req: &CloneRequest, admin: bool) -> Result<(), SyscallError> {
+    let on = |flag| req.on(flag);
+    let invalid = (on(CLONE_NEWNS) && on(CLONE_FS))
+        || (on(CLONE_THREAD) && !on(CLONE_SIGHAND))
+        || (on(CLONE_SIGHAND) && !on(CLONE_VM))
+        || (on(CLONE_PIDFD) && on(CLONE_DETACHED))
+        || (on(CLONE_AUTOREAP) && (on(CLONE_THREAD) || on(CLONE_PARENT) || req.exit_signal != 0))
+        || (on(CLONE_NNP) && on(CLONE_THREAD))
+        || (on(CLONE_PIDFD_AUTOKILL)
+            && (!on(CLONE_PIDFD) || !on(CLONE_AUTOREAP) || on(CLONE_THREAD)));
+    if invalid {
         return Err(SyscallError::InvalidArgument);
     }
+    if on(CLONE_PIDFD_AUTOKILL) && !on(CLONE_NNP) && !admin {
+        return Err(SyscallError::OperationNotPermitted);
+    }
+    Ok(())
+}
+
+/// The flags each kind of clone supports here; anything else (the
+/// namespace flags, CLONE_PARENT, CLONE_PTRACE, and CLONE_FILES or
+/// CLONE_SIGHAND across processes) is EINVAL.
+const PROCESS_FLAGS: u64 = CLONE_VM
+    | CLONE_FS
+    | CLONE_VFORK
+    | CLONE_SYSVSEM
+    | CLONE_SETTLS
+    | CLONE_PARENT_SETTID
+    | CLONE_CHILD_SETTID
+    | CLONE_CHILD_CLEARTID
+    | CLONE_DETACHED
+    | CLONE_PIDFD
+    | CLONE_CLEAR_SIGHAND
+    | CLONE_INTO_CGROUP
+    | CLONE_AUTOREAP
+    | CLONE_NNP
+    | CLONE_PIDFD_AUTOKILL;
+const THREAD_FLAGS: u64 = CLONE_VM
+    | CLONE_FS
+    | CLONE_FILES
+    | CLONE_SIGHAND
+    | CLONE_THREAD
+    | CLONE_SYSVSEM
+    | CLONE_SETTLS
+    | CLONE_PARENT_SETTID
+    | CLONE_CHILD_CLEARTID
+    | CLONE_DETACHED
+    | CLONE_CHILD_SETTID
+    | CLONE_PIDFD
+    | CLONE_INTO_CGROUP;
+
+/// kernel_clone's own checks, then copy_process's: CLONE_EMPTY_MNTNS
+/// implies CLONE_NEWNS; CLONE_PIDFD and CLONE_PARENT_SETTID storing to one
+/// address, and an exit signal past the last signal, are EINVAL.
+fn request_checks(req: &mut CloneRequest, admin: bool) -> Result<(), SyscallError> {
+    if req.on(CLONE_EMPTY_MNTNS) {
+        req.flags |= CLONE_NEWNS;
+    }
+    if req.on(CLONE_PIDFD) && req.on(CLONE_PARENT_SETTID) && req.pidfd == req.parent_tid {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if req.exit_signal > crate::process::signals::NSIG as u64 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    copy_process_checks(req, admin)?;
+    let supported = if req.on(CLONE_THREAD) {
+        THREAD_FLAGS
+    } else {
+        PROCESS_FLAGS
+    };
+    if req.flags & !supported != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    Ok(())
+}
+
+/// set_tid's own rules (Linux's alloc_pid): more IDs than PID namespace
+/// levels (one here), or an ID below 1 or not below pid_max, are EINVAL;
+/// choosing one needs CAP_CHECKPOINT_RESTORE or CAP_SYS_ADMIN
+/// (`may_choose`; EPERM).
+fn set_tid_checks(tid: i32, levels: u64, may_choose: bool) -> Result<u64, SyscallError> {
+    if levels > 1 || tid < 1 || tid as u64 >= crate::process::PID_MAX {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if !may_choose {
+        return Err(SyscallError::OperationNotPermitted);
+    }
+    Ok(tid as u64)
+}
+
+/// Linux's kernel_clone: check `req` ([`request_checks`]), claim a set_tid
+/// ID (EEXIST when taken), refuse CLONE_INTO_CGROUP (EBADF: there is no
+/// cgroup filesystem, so no descriptor names a cgroup; Linux checks it
+/// after the ID and the pidfd), and make the thread or process.
+fn kernel_clone(mut req: CloneRequest) -> Result<usize, SyscallError> {
+    use crate::process::linux_caps::{CAP_CHECKPOINT_RESTORE, CAP_SYS_ADMIN};
+    let caller = process::creds::Caller::current();
+    request_checks(&mut req, caller.capable(CAP_SYS_ADMIN))?;
+    let claim = match req.set_tid {
+        Some(tid) => {
+            let may = caller.capable(CAP_CHECKPOINT_RESTORE) || caller.capable(CAP_SYS_ADMIN);
+            let id = set_tid_checks(tid, req.set_tid_levels, may)?;
+            Some(process::IdClaim::new(id).ok_or(SyscallError::FileExists)?)
+        }
+        None => None,
+    };
+    if req.on(CLONE_INTO_CGROUP) {
+        return Err(SyscallError::BadFileDescriptor);
+    }
+    let id = claim.as_ref().map(|c| c.id());
+    if req.on(CLONE_THREAD) {
+        thread_clone(&req, id)
+    } else {
+        process_clone(&req, id)
+    }
+}
+
+/// A clone without CLONE_THREAD: a new process, as fork or vfork (N-210).
+/// musl's and glibc's posix_spawn -- and so system and popen -- call
+/// clone(CLONE_VM | CLONE_VFORK | SIGCHLD) with a stack of their own; it
+/// was EINVAL. CLONE_VM shares the parent's memory page by page
+/// (`VirtualAddressSpace::share_from`). `id` is set_tid's, claimed.
+fn process_clone(req: &CloneRequest, id: Option<u64>) -> Result<usize, SyscallError> {
     #[cfg(target_arch = "x86_64")]
-    if flags & CLONE_SETTLS != 0 && !crate::arch::x86_64::trap::is_user_address(tls as u64) {
+    if req.on(CLONE_SETTLS) && !crate::arch::x86_64::trap::is_user_address(req.tls as u64) {
         return Err(SyscallError::InvalidArgument);
     }
     // 0 keeps the caller's stack (fork); otherwise it must be user memory.
-    if newsp > user_space_end() {
+    if req.stack > user_space_end() {
         return Err(SyscallError::InvalidPointer);
     }
     for (flag, ptr) in [
-        (CLONE_PARENT_SETTID, parent_tid_ptr),
-        (CLONE_CHILD_SETTID, child_tid_ptr),
-        (CLONE_CHILD_CLEARTID, child_tid_ptr),
+        (CLONE_PARENT_SETTID, req.parent_tid),
+        (CLONE_CHILD_SETTID, req.child_tid),
+        (CLONE_CHILD_CLEARTID, req.child_tid),
     ] {
-        if flags & flag != 0 {
+        if req.on(flag) {
             validate_user_ptr(ptr as *const u32, core::mem::size_of::<u32>())?;
         }
     }
-    let on = |flag: usize| flags & flag != 0;
+    let on = |flag: u64| req.on(flag);
     super::process::sys_fork_with(&process::fork::ForkOptions {
         share_vm: on(CLONE_VM),
         share_fs: on(CLONE_FS),
         vfork: on(CLONE_VFORK),
-        stack: (newsp != 0).then_some(newsp),
-        tls: on(CLONE_SETTLS).then_some(tls),
-        exit_signal: exit_signal as u32,
-        parent_settid: on(CLONE_PARENT_SETTID).then_some(parent_tid_ptr),
-        child_settid: on(CLONE_CHILD_SETTID).then_some(child_tid_ptr),
-        child_cleartid: on(CLONE_CHILD_CLEARTID).then_some(child_tid_ptr),
-        pidfd: on(CLONE_PIDFD).then_some(parent_tid_ptr),
+        stack: (req.stack != 0).then_some(req.stack),
+        tls: on(CLONE_SETTLS).then_some(req.tls),
+        exit_signal: req.exit_signal as u32,
+        parent_settid: on(CLONE_PARENT_SETTID).then_some(req.parent_tid),
+        child_settid: on(CLONE_CHILD_SETTID).then_some(req.child_tid),
+        child_cleartid: on(CLONE_CHILD_CLEARTID).then_some(req.child_tid),
+        pidfd: on(CLONE_PIDFD).then_some(req.pidfd),
+        pidfd_autokill: on(CLONE_PIDFD_AUTOKILL),
+        pid: id.map(process::ProcessId),
+        clear_sighand: on(CLONE_CLEAR_SIGHAND),
+        no_new_privs: on(CLONE_NNP),
+        autoreap: on(CLONE_AUTOREAP),
     })
-}
-
-/// CLONE_PIDFD's own rules (Linux's copy_process and kernel_clone): not
-/// with CLONE_DETACHED, nor with CLONE_PARENT_SETTID, whose `parent_tid`
-/// the pidfd takes in clone(2).
-fn pidfd_flags_valid(flags: usize) -> Result<(), SyscallError> {
-    if flags & CLONE_PIDFD != 0 && flags & (CLONE_DETACHED | CLONE_PARENT_SETTID) != 0 {
-        return Err(SyscallError::InvalidArgument);
-    }
-    Ok(())
 }
 
 /// Create a new thread sharing the current process's address space and
@@ -128,68 +451,31 @@ fn pidfd_flags_valid(flags: usize) -> Result<(), SyscallError> {
 ///   child gets an independent copy.
 /// - `CLONE_SETTLS` — set the TLS base register (FS on x86_64, TPIDR_EL0 on
 ///   AArch64, `tp` on RISC-V) to `tls`.
-/// - `CLONE_PARENT_SETTID` — write the child's TID to `*parent_tid_ptr` in the
+/// - `CLONE_PARENT_SETTID` — write the child's TID to `*parent_tid` in the
 ///   parent's address space before the child starts running.
-/// - `CLONE_CHILD_SETTID` — write the child's TID to `*child_tid_ptr` in the
+/// - `CLONE_CHILD_SETTID` — write the child's TID to `*child_tid` in the
 ///   child's address space.
-/// - `CLONE_CHILD_CLEARTID` — register `child_tid_ptr` so that when the child
-///   exits, the kernel zeroes `*child_tid_ptr` and performs a `FUTEX_WAKE` on
-///   that address (used by `pthread_join`).
+/// - `CLONE_CHILD_CLEARTID` — register `child_tid` so that when the child
+///   exits, the kernel zeroes `*child_tid` and performs a `FUTEX_WAKE` on that
+///   address (used by `pthread_join`).
+/// - `CLONE_PIDFD` — a PIDFD_THREAD pidfd for the thread, stored at `pidfd`.
 ///
-/// # Arguments
-///
-/// * `flags`          - Combination of `CLONE_*` flags.
-/// * `newsp`          - User-space stack pointer for the new thread (must be
-///   non-zero and within user space).
-/// * `parent_tid_ptr` - Address to write child TID if `CLONE_PARENT_SETTID`.
-/// * `child_tid_ptr`  - Address for `CLONE_CHILD_SETTID` /
-///   `CLONE_CHILD_CLEARTID`.
-/// * `tls`            - TLS base if `CLONE_SETTLS` is set.
-///
-/// # Returns
-///
-/// `Ok(tid)` with the new thread's TID on success, or a `SyscallError` on
-/// failure.
-pub fn sys_thread_clone(
-    flags: usize,
-    newsp: usize,
-    parent_tid_ptr: usize,
-    child_tid_ptr: usize,
-    tls: usize,
-) -> Result<usize, SyscallError> {
-    if flags & CLONE_THREAD == 0 {
-        return process_clone(flags, newsp, parent_tid_ptr, child_tid_ptr, tls);
-    }
-    // Validate flags
-    let required = CLONE_VM | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD;
-    if flags & required != required {
+/// `id` is set_tid's, claimed: the thread's ID. Returns the new thread's
+/// TID.
+fn thread_clone(req: &CloneRequest, id: Option<u64>) -> Result<usize, SyscallError> {
+    let (newsp, tls) = (req.stack, req.tls);
+    let (parent_tid_ptr, child_tid_ptr) = (req.parent_tid, req.child_tid);
+    // The thread shares the fd table too (one per process here).
+    if !req.on(CLONE_FILES) {
         return Err(SyscallError::InvalidArgument);
     }
-    // Reject unsupported flags
-    let unsupported = flags
-        & !(CLONE_VM
-            | CLONE_FS
-            | CLONE_FILES
-            | CLONE_SIGHAND
-            | CLONE_THREAD
-            | CLONE_SYSVSEM
-            | CLONE_SETTLS
-            | CLONE_PARENT_SETTID
-            | CLONE_CHILD_CLEARTID
-            | CLONE_DETACHED
-            | CLONE_CHILD_SETTID
-            | CLONE_PIDFD);
-    if unsupported != 0 {
-        return Err(SyscallError::InvalidArgument);
-    }
-    pidfd_flags_valid(flags)?;
     // Share FS? (CWD and umask). If not set, clone gets its own copy.
-    let share_fs = flags & CLONE_FS != 0;
+    let share_fs = req.on(CLONE_FS);
 
     // The TLS base is loaded into IA32_FS_BASE whenever the thread runs; a
     // non-canonical value would fault (#GP) in ring 0 at every switch.
     #[cfg(target_arch = "x86_64")]
-    if flags & CLONE_SETTLS != 0 && !crate::arch::x86_64::trap::is_user_address(tls as u64) {
+    if req.on(CLONE_SETTLS) && !crate::arch::x86_64::trap::is_user_address(tls as u64) {
         return Err(SyscallError::InvalidArgument);
     }
 
@@ -206,16 +492,15 @@ pub fn sys_thread_clone(
     }
 
     // Validate TID pointers if requested
-    if flags & CLONE_PARENT_SETTID != 0 {
+    if req.on(CLONE_PARENT_SETTID) {
         validate_user_ptr(parent_tid_ptr as *const u32, core::mem::size_of::<u32>())?;
     }
-    if flags & CLONE_CHILD_SETTID != 0 {
+    if req.on(CLONE_CHILD_SETTID) {
         validate_user_ptr(child_tid_ptr as *const u32, core::mem::size_of::<u32>())?;
     }
-    if flags & CLONE_CHILD_CLEARTID != 0 {
+    if req.on(CLONE_CHILD_CLEARTID) {
         validate_user_ptr(child_tid_ptr as *const u32, core::mem::size_of::<u32>())?;
     }
-
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
     // RLIMIT_NPROC counts threads too (EAGAIN).
     // Held until the thread is added.
@@ -239,6 +524,9 @@ pub fn sys_thread_clone(
     // kernel-chosen stack is mapped for it. One used to be, 256 KiB per
     // thread that nothing ran on (N-114).
     .user_stack_size(0);
+    if let Some(id) = id {
+        builder = builder.tid(process::ThreadId(id));
+    }
 
     #[cfg(feature = "alloc")]
     {
@@ -251,10 +539,10 @@ pub fn sys_thread_clone(
         builder = builder.fs(child_fs);
     }
 
-    if flags & CLONE_SETTLS != 0 {
+    if req.on(CLONE_SETTLS) {
         builder = builder.tls_base(tls);
     }
-    if flags & CLONE_CHILD_CLEARTID != 0 {
+    if req.on(CLONE_CHILD_CLEARTID) {
         builder = builder.clear_tid(child_tid_ptr);
     }
 
@@ -321,7 +609,7 @@ pub fn sys_thread_clone(
         child_ctx.set_stack_pointer(newsp);
         child_ctx.set_return_value(0); // child sees 0 return
                                        // Apply requested TLS base after cloning parent context
-        if flags & CLONE_SETTLS != 0 {
+        if req.on(CLONE_SETTLS) {
             child_ctx.set_tls_base(tls as u64);
         }
     }
@@ -335,7 +623,7 @@ pub fn sys_thread_clone(
     // CLONE_PARENT_SETTID: write the child's TID into the parent's address
     // space at `parent_tid_ptr`, so the parent can observe the TID
     // immediately after clone returns.
-    if flags & CLONE_PARENT_SETTID != 0 {
+    if req.on(CLONE_PARENT_SETTID) {
         // SAFETY: `parent_tid_ptr` was validated above via `validate_user_ptr`.
         // `copy_to_user` performs its own bounds check as a defence-in-depth
         // measure.  The write is a single u32 which is naturally aligned.
@@ -352,7 +640,7 @@ pub fn sys_thread_clone(
     // context is equivalent.  For full fork() support (separate address
     // spaces) this would need to be deferred to the child's first
     // scheduling quantum.
-    if flags & CLONE_CHILD_SETTID != 0 {
+    if req.on(CLONE_CHILD_SETTID) {
         // SAFETY: `child_tid_ptr` was validated above via `validate_user_ptr`.
         // The pointer targets shared user memory (CLONE_VM is set).
         unsafe {
@@ -364,8 +652,13 @@ pub fn sys_thread_clone(
     // CLONE_PIDFD: a PIDFD_THREAD pidfd for the new thread, stored before
     // it runs (EFAULT if the store faults; the thread never starts).
     #[cfg(feature = "alloc")]
-    let pidfd = if flags & CLONE_PIDFD != 0 {
-        Some(super::pidfd::install_at(&proc, Some(tid), parent_tid_ptr)?)
+    let pidfd = if req.on(CLONE_PIDFD) {
+        Some(super::pidfd::install_at(
+            &proc,
+            Some(tid),
+            req.pidfd,
+            false,
+        )?)
     } else {
         None
     };
@@ -415,17 +708,265 @@ pub fn sys_thread_clone(
 mod tests {
     use super::*;
 
+    const EINVAL: Result<(), SyscallError> = Err(SyscallError::InvalidArgument);
+
+    fn args(flags: u64) -> CloneArgs {
+        CloneArgs {
+            flags,
+            ..CloneArgs::default()
+        }
+    }
+
+    fn request(flags: u64) -> CloneRequest {
+        CloneRequest {
+            flags,
+            ..CloneRequest::default()
+        }
+    }
+
     #[test]
-    fn clone_pidfd_excludes_detached_and_parent_settid() {
-        assert!(pidfd_flags_valid(CLONE_PIDFD | 17).is_ok());
-        assert!(pidfd_flags_valid(CLONE_DETACHED).is_ok());
+    fn clone_args_decode_fills_a_short_struct_with_zeros() {
+        let mut raw = [0u8; CLONE_ARGS_SIZE_VER0];
+        raw[0..8].copy_from_slice(&0x1234u64.to_ne_bytes());
+        raw[32..40].copy_from_slice(&17u64.to_ne_bytes());
+        raw[56..64].copy_from_slice(&0xabcdu64.to_ne_bytes());
+        let a = CloneArgs::decode(&raw);
+        assert_eq!((a.flags, a.exit_signal, a.tls), (0x1234, 17, 0xabcd));
+        assert_eq!((a.set_tid, a.set_tid_size, a.cgroup), (0, 0, 0));
+    }
+
+    #[test]
+    fn clone_args_checks_are_copy_clone_args_from_users() {
+        assert_eq!(args(0).check(64), Ok(()));
+        let too_many = CloneArgs {
+            set_tid: 8,
+            set_tid_size: MAX_PID_NS_LEVEL + 1,
+            ..args(0)
+        };
+        assert_eq!(too_many.check(88), EINVAL);
+        let no_array = CloneArgs {
+            set_tid_size: 1,
+            ..args(0)
+        };
+        assert_eq!(no_array.check(88), EINVAL);
+        let no_size = CloneArgs {
+            set_tid: 8,
+            ..args(0)
+        };
+        assert_eq!(no_size.check(88), EINVAL);
+        let one = CloneArgs {
+            set_tid: 8,
+            set_tid_size: 1,
+            ..args(0)
+        };
+        assert_eq!(one.check(80), Ok(()));
+        let high_signal = CloneArgs {
+            exit_signal: 0x100,
+            ..args(0)
+        };
+        assert_eq!(high_signal.check(64), EINVAL);
+        let cgroup = CloneArgs {
+            cgroup: 3,
+            ..args(CLONE_INTO_CGROUP)
+        };
+        assert_eq!(cgroup.check(88), Ok(()));
+        // The struct must be long enough to have the field.
+        assert_eq!(cgroup.check(80), EINVAL);
+        let big = CloneArgs {
+            cgroup: i32::MAX as u64 + 1,
+            ..args(CLONE_INTO_CGROUP)
+        };
+        assert_eq!(big.check(88), EINVAL);
+    }
+
+    #[test]
+    fn clone3_refuses_unknown_and_reused_flags() {
+        assert!(clone3_request(&args(CLONE_VM), None).is_ok());
+        // Past the flags clone3 knows.
         assert_eq!(
-            pidfd_flags_valid(CLONE_PIDFD | CLONE_DETACHED),
+            clone3_request(&args(1 << 40), None),
+            Err(SyscallError::InvalidArgument)
+        );
+        // CLONE_DETACHED and the CSIGNAL bits are kept for reuse, except
+        // CLONE_NEWTIME.
+        assert!(clone3_request(&args(CLONE_DETACHED), None).is_err());
+        assert!(clone3_request(&args(17), None).is_err());
+        assert!(clone3_request(&args(CLONE_NEWTIME), None).is_ok());
+        assert!(clone3_request(&args(CLONE_SIGHAND | CLONE_CLEAR_SIGHAND), None).is_err());
+        assert!(clone3_request(&args(CLONE_CLEAR_SIGHAND), None).is_ok());
+        // An exit signal for a thread, or for a CLONE_PARENT child.
+        for flags in [CLONE_THREAD, CLONE_PARENT] {
+            let a = CloneArgs {
+                exit_signal: 17,
+                ..args(flags)
+            };
+            assert!(clone3_request(&a, None).is_err());
+        }
+    }
+
+    #[test]
+    fn clone3_stack_is_a_base_and_size_and_starts_at_its_top() {
+        let stack = |stack, stack_size| CloneArgs {
+            stack,
+            stack_size,
+            ..args(0)
+        };
+        assert_eq!(clone3_request(&stack(0, 0), None).map(|r| r.stack), Ok(0));
+        assert!(clone3_request(&stack(0, 4096), None).is_err());
+        assert!(clone3_request(&stack(0x10_0000, 0), None).is_err());
+        assert_eq!(
+            clone3_request(&stack(0x10_0000, 0x4000), None).map(|r| r.stack),
+            Ok(0x10_4000)
+        );
+        // Not wholly user memory, or wrapping.
+        let end = user_space_end() as u64;
+        assert!(clone3_request(&stack(end - 0x1000, 0x2000), None).is_err());
+        assert!(clone3_request(&stack(u64::MAX - 0xfff, 0x2000), None).is_err());
+        assert!(clone3_request(&stack(end - 0x2000, 0x2000), None).is_ok());
+    }
+
+    #[test]
+    fn clone3_takes_its_pidfd_pointer_and_set_tid() {
+        let a = CloneArgs {
+            pidfd: 0x5000,
+            parent_tid: 0x6000,
+            set_tid: 0x7000,
+            set_tid_size: 1,
+            ..args(CLONE_PIDFD | CLONE_PARENT_SETTID)
+        };
+        let r = clone3_request(&a, Some(400)).unwrap();
+        assert_eq!((r.pidfd, r.parent_tid), (0x5000, 0x6000));
+        assert_eq!((r.set_tid, r.set_tid_levels), (Some(400), 1));
+    }
+
+    #[test]
+    fn copy_process_flag_rules_in_order() {
+        let check = |flags| copy_process_checks(&request(flags), false);
+        assert_eq!(check(CLONE_NEWNS | CLONE_FS), EINVAL);
+        assert_eq!(check(CLONE_THREAD | CLONE_VM), EINVAL);
+        assert_eq!(check(CLONE_SIGHAND), EINVAL);
+        assert_eq!(
+            check(CLONE_THREAD | CLONE_SIGHAND | CLONE_VM | CLONE_FILES),
+            Ok(())
+        );
+        assert_eq!(check(CLONE_PIDFD | CLONE_DETACHED), EINVAL);
+        assert_eq!(check(CLONE_PIDFD), Ok(()));
+        assert_eq!(check(CLONE_DETACHED), Ok(()));
+        // CLONE_AUTOREAP: a process, not CLONE_PARENT, no exit signal.
+        assert_eq!(check(CLONE_AUTOREAP), Ok(()));
+        assert_eq!(check(CLONE_AUTOREAP | CLONE_PARENT), EINVAL);
+        assert_eq!(
+            check(CLONE_AUTOREAP | CLONE_THREAD | CLONE_SIGHAND | CLONE_VM),
+            EINVAL
+        );
+        let signalled = CloneRequest {
+            exit_signal: 17,
+            ..request(CLONE_AUTOREAP)
+        };
+        assert_eq!(copy_process_checks(&signalled, false), EINVAL);
+        assert_eq!(
+            check(CLONE_NNP | CLONE_THREAD | CLONE_SIGHAND | CLONE_VM),
+            EINVAL
+        );
+        assert_eq!(check(CLONE_NNP), Ok(()));
+    }
+
+    #[test]
+    fn pidfd_autokill_needs_a_reaped_pidfd_child_and_nnp_or_admin() {
+        let check = |flags, admin| copy_process_checks(&request(flags), admin);
+        let base = CLONE_PIDFD | CLONE_AUTOREAP | CLONE_PIDFD_AUTOKILL;
+        assert_eq!(check(CLONE_AUTOREAP | CLONE_PIDFD_AUTOKILL, true), EINVAL);
+        assert_eq!(check(CLONE_PIDFD | CLONE_PIDFD_AUTOKILL, true), EINVAL);
+        assert_eq!(check(base, false), Err(SyscallError::OperationNotPermitted));
+        assert_eq!(check(base, true), Ok(()));
+        assert_eq!(check(base | CLONE_NNP, false), Ok(()));
+    }
+
+    #[test]
+    fn kernel_clone_checks_before_copy_process() {
+        let mut same = CloneRequest {
+            pidfd: 0x5000,
+            parent_tid: 0x5000,
+            ..request(CLONE_PIDFD | CLONE_PARENT_SETTID)
+        };
+        assert_eq!(request_checks(&mut same, false), EINVAL);
+        let mut apart = CloneRequest {
+            pidfd: 0x5000,
+            parent_tid: 0x6000,
+            ..request(CLONE_PIDFD | CLONE_PARENT_SETTID)
+        };
+        assert_eq!(request_checks(&mut apart, false), Ok(()));
+        let mut past = CloneRequest {
+            exit_signal: crate::process::signals::NSIG as u64 + 1,
+            ..request(0)
+        };
+        assert_eq!(request_checks(&mut past, false), EINVAL);
+        // CLONE_EMPTY_MNTNS is CLONE_NEWNS too, so CLONE_FS goes with
+        // neither.
+        let mut empty = request(CLONE_EMPTY_MNTNS | CLONE_FS);
+        assert_eq!(request_checks(&mut empty, false), EINVAL);
+        assert!(empty.on(CLONE_NEWNS));
+    }
+
+    #[test]
+    fn kernel_clone_refuses_what_it_does_not_support() {
+        let check = |flags| request_checks(&mut request(flags), true);
+        // Namespaces, CLONE_PARENT, and sharing a table across processes.
+        assert_eq!(check(CLONE_NEWNS), EINVAL);
+        assert_eq!(check(CLONE_PARENT), EINVAL);
+        assert_eq!(check(CLONE_VM | CLONE_SIGHAND), EINVAL);
+        assert_eq!(check(CLONE_FILES), EINVAL);
+        assert_eq!(check(CLONE_VM | CLONE_VFORK | CLONE_CLEAR_SIGHAND), Ok(()));
+        assert_eq!(
+            check(CLONE_THREAD | CLONE_SIGHAND | CLONE_VM | CLONE_FILES | CLONE_SETTLS),
+            Ok(())
+        );
+        // CLONE_INTO_CGROUP passes the flag checks; kernel_clone refuses
+        // the descriptor (EBADF).
+        assert_eq!(check(CLONE_INTO_CGROUP), Ok(()));
+    }
+
+    #[test]
+    fn legacy_clone_keeps_pidfd_and_signal_in_its_registers() {
+        // clone's CLONE_PIDFD | CLONE_PARENT_SETTID store to one address.
+        let flags = CLONE_PIDFD | CLONE_PARENT_SETTID | 17;
+        let req = CloneRequest {
+            flags: flags & !CSIGNAL,
+            exit_signal: flags & CSIGNAL,
+            parent_tid: 0x5000,
+            pidfd: 0x5000,
+            ..CloneRequest::default()
+        };
+        let mut checked = req;
+        assert_eq!(request_checks(&mut checked, false), EINVAL);
+        assert_eq!(req.exit_signal, 17);
+        assert!(copy_process_checks(&request(CLONE_PIDFD | CLONE_DETACHED), false).is_err());
+    }
+
+    #[test]
+    fn set_tid_is_in_range_and_privileged() {
+        assert_eq!(
+            set_tid_checks(0, 1, true),
             Err(SyscallError::InvalidArgument)
         );
         assert_eq!(
-            pidfd_flags_valid(CLONE_PIDFD | CLONE_PARENT_SETTID),
+            set_tid_checks(-1, 1, true),
             Err(SyscallError::InvalidArgument)
+        );
+        let max = crate::process::PID_MAX as i32;
+        assert_eq!(
+            set_tid_checks(max, 1, true),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(set_tid_checks(max - 1, 1, true), Ok(max as u64 - 1));
+        // More levels than the one PID namespace.
+        assert_eq!(
+            set_tid_checks(400, 2, true),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(
+            set_tid_checks(400, 1, false),
+            Err(SyscallError::OperationNotPermitted)
         );
     }
 }

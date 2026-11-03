@@ -207,6 +207,15 @@
   reaped, and its reads are EINVAL. waitid takes P_PIDFD (an O_NONBLOCK pidfd waits as WNOHANG,
   and EAGAIN when nothing is ready) and now checks its options before its id, as Linux; clone
   takes CLONE_PIDFD for processes and threads, returning the pidfd through `parent_tid`.
+- clone3, as Linux 7.3's `kernel/fork.c`: `struct clone_args` read as an extensible struct and
+  checked in Linux's order (clone shares the same path), the pidfd stored through its own
+  pointer, the stack given as base and size, CLONE_CLEAR_SIGHAND, CLONE_NNP, CLONE_AUTOREAP (the
+  child is reaped as it exits), CLONE_PIDFD_AUTOKILL (closing the clone pidfd kills the child)
+  and set_tid for a caller with CAP_CHECKPOINT_RESTORE or CAP_SYS_ADMIN. CLONE_INTO_CGROUP is
+  EBADF: there is no cgroup filesystem.
+- A signal from rt_sigqueueinfo, rt_tgsigqueueinfo or pidfd_send_signal that ends a sender
+  outside the dispatcher leaves through the exit path, and pidfd_getfd checks access and takes
+  the descriptor under the target's credential guard, so a set-ID exec cannot come between.
 - execve of a relative name runs it from the working directory, as on Linux; it searched PATH,
   which is libc's job (execvp). Exec errors keep their errno (EACCES, ENOTDIR, ELOOP) instead of
   all being ENOENT, a script's interpreter is opened the same way, and an empty argv gets "" as

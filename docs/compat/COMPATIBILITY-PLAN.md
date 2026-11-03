@@ -85,8 +85,8 @@ Each group lands with its LTP cases. The counts are "missing" entries in the cov
   - the uid/gid family
   - capget/capset, times, personality, getcpu
   - priority and rlimit calls
-  - pidfd_*, kcmp, process_vm_*, ptrace (the pidfd calls are done; no pidfd ioctls,
-    KNOWN-LIMITATIONS)
+  - pidfd_*, clone3, kcmp, process_vm_*, ptrace (the pidfd calls and clone3 are done; no pidfd
+    ioctls, one PID namespace level, KNOWN-LIMITATIONS)
   - unshare/setns
   - real prctl, rseq
 - **signals (11)**

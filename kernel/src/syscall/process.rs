@@ -59,7 +59,12 @@ pub(crate) fn sys_fork_with(opts: &crate::process::fork::ForkOptions) -> Syscall
                 // the child never runs, as Linux's copy_process.
                 #[cfg(feature = "alloc")]
                 let pidfd = match opts.pidfd {
-                    Some(ptr) => match super::pidfd::install_at(&child_process, None, ptr) {
+                    Some(ptr) => match super::pidfd::install_at(
+                        &child_process,
+                        None,
+                        ptr,
+                        opts.pidfd_autokill,
+                    ) {
                         Ok(fd) => Some(fd),
                         Err(e) => {
                             crate::process::exit::discard_unstarted(&child_process);
@@ -79,11 +84,12 @@ pub(crate) fn sys_fork_with(opts: &crate::process::fork::ForkOptions) -> Syscall
                         crate::process::start_thread(&child_process, &t, true).is_ok()
                     });
                     if !started {
+                        // Freed whole, not just unlisted (N-46); then its
+                        // pidfd, which finds it gone and kills nothing.
+                        crate::process::exit::discard_unstarted(&child_process);
                         if let Some(fd) = pidfd {
                             super::pidfd::uninstall(fd);
                         }
-                        // Freed whole, not just unlisted (N-46).
-                        crate::process::exit::discard_unstarted(&child_process);
                         return Err(SyscallError::OutOfMemory);
                     }
                 }

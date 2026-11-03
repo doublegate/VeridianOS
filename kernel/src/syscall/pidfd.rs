@@ -31,9 +31,14 @@ pub(super) fn install(
     tid: Option<ThreadId>,
     nonblock: bool,
 ) -> SyscallResult {
+    install_node(Arc::new(PidFdNode::new(process, tid)), nonblock)
+}
+
+/// Put the pidfd `node` in the caller's file table, as [`install`] says.
+fn install_node(node: Arc<PidFdNode>, nonblock: bool) -> SyscallResult {
     let mut flags = OpenFlags::read_write();
     flags.nonblock = nonblock;
-    let file = File::new(Arc::new(PidFdNode::new(process, tid)), flags);
+    let file = File::new(node, flags);
     let caller = process::current_process().ok_or(SyscallError::InvalidState)?;
     let fd = caller
         .file_table
@@ -45,15 +50,22 @@ pub(super) fn install(
 
 /// clone(CLONE_PIDFD): [`install`] a pidfd and store its number at the
 /// caller's `ptr` (an int); a store that faults closes it again (EFAULT).
+/// With `autokill` (CLONE_PIDFD_AUTOKILL) its last close SIGKILLs the
+/// process, armed only once the store is made.
 pub(super) fn install_at(
     process: &Arc<Process>,
     tid: Option<ThreadId>,
     ptr: usize,
+    autokill: bool,
 ) -> SyscallResult {
-    let fd = install(process, tid, false)?;
+    let node = Arc::new(PidFdNode::new(process, tid));
+    let fd = install_node(node.clone(), false)?;
     if super::userspace::write_user::<i32>(ptr, fd as i32).is_err() {
         uninstall(fd);
         return Err(SyscallError::InvalidPointer);
+    }
+    if autokill {
+        node.arm_autokill();
     }
     Ok(fd)
 }
