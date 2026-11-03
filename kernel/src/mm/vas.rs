@@ -2732,6 +2732,66 @@ impl VirtualAddressSpace {
         }
     }
 
+    /// Read `buf.len()` bytes at `vaddr` from this address space, for a
+    /// copy the kernel makes on another process's behalf
+    /// (process_vm_readv): every page must be present and readable by user
+    /// code here (PROT_NONE pages are not); device memory is refused, as
+    /// Linux's pin_user_pages refuses VM_IO and VM_PFNMAP mappings.
+    #[cfg(feature = "alloc")]
+    pub fn read_user_bytes(&self, vaddr: u64, buf: &mut [u8]) -> Result<(), KernelError> {
+        let root = self.page_table_root.load(Ordering::Acquire);
+        let bad = || KernelError::InvalidAddress {
+            addr: vaddr as usize,
+        };
+        if root == 0 {
+            return Err(bad());
+        }
+        let mappings = self.mappings.lock();
+        // SAFETY: `root` is this address space's L4 table, reached through
+        // the physical map and only read here; the mappings lock held keeps
+        // the user pages below it from being unmapped meanwhile.
+        let mapper = unsafe { create_mapper_from_root(root) };
+        let mut done = 0usize;
+        while done < buf.len() {
+            let at = vaddr.checked_add(done as u64).ok_or_else(bad)?;
+            let page = at & !0xFFF;
+            if !is_user_page(page) {
+                return Err(bad());
+            }
+            let device = mappings
+                .range(..=VirtualAddress(page))
+                .next_back()
+                .map(|(_, m)| m)
+                .filter(|m| m.contains(VirtualAddress(page)))
+                .ok_or_else(bad)?
+                .mapping_type
+                == MappingType::Device;
+            if device {
+                return Err(bad());
+            }
+            let (frame, flags) = mapper
+                .translate_page(VirtualAddress(page))
+                .map_err(|_| bad())?;
+            if !access_allowed_for(flags, false, true, false) {
+                return Err(bad());
+            }
+            let offset = (at & 0xFFF) as usize;
+            let n = (4096 - offset).min(buf.len() - done);
+            // SAFETY: `frame` is RAM (device memory is refused) that a user
+            // mapping of this address space maps readable, reached through
+            // the physical map; `offset + n` stays within the 4 KiB page.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    (super::phys_to_virt_addr(frame.as_u64() << 12) as *const u8).add(offset),
+                    buf[done..].as_mut_ptr(),
+                    n,
+                );
+            }
+            done += n;
+        }
+        Ok(())
+    }
+
     /// Write `data` at `vaddr` into this address space only (see
     /// [`Self::private_frame`]; `force` as there). Every page must be
     /// mapped and writable this way, or nothing past the failing page is

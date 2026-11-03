@@ -87,6 +87,9 @@ tgkill
 pidfd_open
 pidfd_send_signal
 pidfd_getfd
+kcmp
+process_vm_readv
+process_vm_writev
 
 ## Files
 open

@@ -97,13 +97,13 @@ pub struct IdClaim(u64);
 
 #[cfg(feature = "alloc")]
 impl IdClaim {
-    /// Claim `id` unless a process, a zombie awaiting its reap, a thread or
-    /// another clone has it (None: Linux's EEXIST). `NEXT_ID` moves past it
-    /// first, so no later allocation hands it out. An ID allocated before
-    /// that by a fork or clone still under way is not yet in the table and
-    /// is not seen: the table then refuses the second process (and nothing
-    /// refuses a second thread), a window only a caller holding
-    /// CAP_CHECKPOINT_RESTORE or CAP_SYS_ADMIN can reach.
+    /// Claim `id` unless a process, a zombie awaiting its reap, a thread, an
+    /// open pidfd or another clone has it (None: Linux's EEXIST). `NEXT_ID`
+    /// moves past it first, so no later allocation hands it out. An ID
+    /// allocated before that by a fork or clone still under way is not yet
+    /// in the table and is not seen: the table then refuses the second
+    /// process (and nothing refuses a second thread), a window only a
+    /// caller holding CAP_CHECKPOINT_RESTORE or CAP_SYS_ADMIN can reach.
     pub fn new(id: u64) -> Option<Self> {
         let mut claimed = CLAIMED_IDS.lock();
         let before = NEXT_ID.fetch_max(id + 1, Ordering::AcqRel);
@@ -130,7 +130,7 @@ impl Drop for IdClaim {
 /// the ID `id`.
 #[cfg(feature = "alloc")]
 fn id_in_use(id: u64) -> bool {
-    if process_for_reap(id).is_some() {
+    if process_for_reap(id).is_some() || crate::fs::pidfd::holds(id) {
         return true;
     }
     let mut used = false;

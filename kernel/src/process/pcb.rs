@@ -142,6 +142,11 @@ pub struct Process {
     /// children do not inherit it.
     pub autoreap: core::sync::atomic::AtomicBool,
 
+    /// Which address space this process runs in, as kcmp(KCMP_VM) compares
+    /// them: its own from creation, its parent's for a CLONE_VM child (which
+    /// maps the same memory), and a new one at each exec (`new_vm_id`).
+    pub vm_id: AtomicU64,
+
     /// A CLONE_VFORK child whose parent waits until it execs or exits;
     /// cleared (and PROCESS_EVENTS woken) by either (N-210).
     pub vfork_pending: core::sync::atomic::AtomicBool,
@@ -507,6 +512,7 @@ impl Process {
             exec_tid: AtomicU64::new(0),
             exit_signal: AtomicU32::new(super::signals::SIGCHLD as u32),
             autoreap: core::sync::atomic::AtomicBool::new(false),
+            vm_id: AtomicU64::new(new_vm_id()),
             vfork_pending: core::sync::atomic::AtomicBool::new(false),
             did_exec: core::sync::atomic::AtomicBool::new(false),
             stop_signal: AtomicU32::new(0),
@@ -1530,6 +1536,12 @@ mod tests {
         assert!(ProcessPriority::Normal < ProcessPriority::Low);
         assert!(ProcessPriority::Low < ProcessPriority::Idle);
     }
+}
+
+/// A new address-space identity (`Process::vm_id`).
+pub fn new_vm_id() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Process builder for convenient process creation

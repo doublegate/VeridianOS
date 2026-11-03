@@ -213,6 +213,17 @@
   child is reaped as it exits), CLONE_PIDFD_AUTOKILL (closing the clone pidfd kills the child)
   and set_tid for a caller with CAP_CHECKPOINT_RESTORE or CAP_SYS_ADMIN. CLONE_INTO_CGROUP is
   EBADF: there is no cgroup filesystem.
+- kcmp, as Linux 7.3's `kernel/kcmp.c`: whether two tasks share an open file, address space,
+  file table, filesystem state or signal handlers, or a file an epoll instance watches
+  (KCMP_EPOLL_TFD), ordered by an obfuscated address; a CLONE_VM child shares its parent's
+  address space until either execs, and KCMP_IO and KCMP_SYSVSEM find every pair equal (no task
+  has an I/O context or a semaphore undo list). clone accepts CLONE_IO. process_vm_readv and process_vm_writev, as `mm/process_vm_access.c`: copies
+  between the caller and a process it may ptrace, page by page, faulting the target's pages in,
+  writing only where the target may write, and returning what was copied before a fault. Access
+  is checked again for every page, so a set-ID exec in the target ends the copy. A process may
+  always use these calls, and pidfd_getfd, on itself, as Linux's ptrace_may_access allows. An
+  open pidfd keeps its process's id from being chosen again by clone3's set_tid, as Linux's pidfd
+  keeps its struct pid, so CLONE_PIDFD_AUTOKILL's kill cannot reach another process.
 - A signal from rt_sigqueueinfo, rt_tgsigqueueinfo or pidfd_send_signal that ends a sender
   outside the dispatcher leaves through the exit path, and pidfd_getfd checks access and takes
   the descriptor under the target's credential guard, so a set-ID exec cannot come between.

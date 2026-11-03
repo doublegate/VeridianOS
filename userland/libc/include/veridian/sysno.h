@@ -75,6 +75,9 @@
 #define SYS_pidfd_open                   434
 #define SYS_pidfd_send_signal            424
 #define SYS_pidfd_getfd                  438
+#define SYS_kcmp                         312
+#define SYS_process_vm_readv             310
+#define SYS_process_vm_writev            311
 /* Files */
 #define SYS_open                         2
 #define SYS_openat                       257
@@ -420,6 +423,9 @@
 #define SYS_pidfd_open                   434
 #define SYS_pidfd_send_signal            424
 #define SYS_pidfd_getfd                  438
+#define SYS_kcmp                         272
+#define SYS_process_vm_readv             270
+#define SYS_process_vm_writev            271
 /* Files */
 #define SYS_openat                       56
 #define SYS_openat2                      437
@@ -729,6 +735,9 @@
 #define SYS_pidfd_open                   434
 #define SYS_pidfd_send_signal            424
 #define SYS_pidfd_getfd                  438
+#define SYS_kcmp                         272
+#define SYS_process_vm_readv             270
+#define SYS_process_vm_writev            271
 /* Files */
 #define SYS_openat                       56
 #define SYS_openat2                      437

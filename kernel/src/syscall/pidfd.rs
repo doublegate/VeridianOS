@@ -249,7 +249,7 @@ pub fn sys_pidfd_getfd(pidfd: usize, fd: usize, flags: usize) -> SyscallResult {
     // image opens is handed out on the old credentials' check.
     let file = {
         let _guard = target.cred_guard.lock();
-        if !super::debug::may_access(&caller, permitted, &super::debug::PtraceTarget::of(&target)) {
+        if !super::debug::may_access_process(&caller, permitted, &target) {
             return Err(SyscallError::OperationNotPermitted);
         }
         if !target.is_alive() {

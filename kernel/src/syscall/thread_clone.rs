@@ -37,6 +37,9 @@ const CLONE_CHILD_CLEARTID: u64 = 0x0020_0000;
 /// Accepted but ignored by clone; clone3 refuses it.
 const CLONE_DETACHED: u64 = 0x0040_0000;
 const CLONE_CHILD_SETTID: u64 = 0x0100_0000;
+/// Share the I/O context: accepted, as no task has one (kcmp's KCMP_IO
+/// finds every pair equal).
+const CLONE_IO: u64 = 0x8000_0000;
 /// Every flag clone(2) can name (Linux's CLONE_LEGACY_FLAGS).
 const CLONE_LEGACY_FLAGS: u64 = 0xFFFF_FFFF;
 
@@ -311,6 +314,7 @@ const PROCESS_FLAGS: u64 = CLONE_VM
     | CLONE_CHILD_CLEARTID
     | CLONE_DETACHED
     | CLONE_PIDFD
+    | CLONE_IO
     | CLONE_CLEAR_SIGHAND
     | CLONE_INTO_CGROUP
     | CLONE_AUTOREAP
@@ -328,6 +332,7 @@ const THREAD_FLAGS: u64 = CLONE_VM
     | CLONE_DETACHED
     | CLONE_CHILD_SETTID
     | CLONE_PIDFD
+    | CLONE_IO
     | CLONE_INTO_CGROUP;
 
 /// kernel_clone's own checks, then copy_process's: CLONE_EMPTY_MNTNS

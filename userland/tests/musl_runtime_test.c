@@ -5549,6 +5549,7 @@ static void test_text_busy(void);
 static void test_inotify_events(void);
 static void test_pidfd(void);
 static void test_clone3(void);
+static void test_kcmp_process_vm(void);
 
 /* Tests `--only NAME` can run alone (for debugging a single test). */
 static const struct {
@@ -5566,6 +5567,7 @@ static const struct {
     {"inotify_events", test_inotify_events},
     {"pidfd", test_pidfd},
     {"clone3", test_clone3},
+    {"kcmp_process_vm", test_kcmp_process_vm},
     {"threads", test_threads},
     {"cow_race", test_cow_race},
     {"signals", test_signals},
@@ -8337,6 +8339,114 @@ static void test_clone3(void)
     report("clone3", f == 0, why);
 }
 
+/* kcmp and process_vm_readv/writev, as Linux 7.3: kcmp says 0 for a shared
+ * object and 1 or 2 otherwise, by an order the two arguments reverse;
+ * process_vm_* copy between this process and one it may ptrace, page by
+ * page, returning what was copied before a fault. */
+#ifndef SYS_kcmp
+#define SYS_kcmp 312
+#endif
+static long t_kcmp(pid_t a, pid_t b, int type, unsigned long i1, unsigned long i2)
+{
+    return syscall(SYS_kcmp, a, b, type, i1, i2);
+}
+static char t_pvm_buf[8192];
+
+static void test_kcmp_process_vm(void)
+{
+    char why[160];
+    int f = 0;
+    pid_t me = getpid();
+    enum { FILE_ = 0, VM = 1, FILES = 2, FS = 3, SIGHAND = 4, IO = 5, EPOLL_TFD = 7 };
+
+    /* One process shares everything with itself; dup shares the file. */
+    int a = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    int b = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    int c = dup(a);
+    if (t_kcmp(me, me, VM, 0, 0) != 0 || t_kcmp(me, me, FILES, 0, 0) != 0 ||
+        t_kcmp(me, me, FS, 0, 0) != 0 || t_kcmp(me, me, SIGHAND, 0, 0) != 0 ||
+        t_kcmp(me, me, IO, 0, 0) != 0 || t_kcmp(me, me, FILE_, a, c) != 0)
+        f |= 1;
+    long ab = t_kcmp(me, me, FILE_, a, b), ba = t_kcmp(me, me, FILE_, b, a);
+    if (!((ab == 1 && ba == 2) || (ab == 2 && ba == 1)))
+        f |= 2;
+    if (!(t_kcmp(me, me, 99, 0, 0) == -1 && errno == EINVAL) ||
+        !(t_kcmp(me, 0x3ffffff0, VM, 0, 0) == -1 && errno == ESRCH) ||
+        !(t_kcmp(me, me, FILE_, a, 0x7ffe) == -1 && errno == EBADF))
+        f |= 4;
+    /* An epoll instance's registration of a pipe is the file its
+     * descriptor names. */
+    int ep = epoll_create1(EPOLL_CLOEXEC), pp[2] = {-1, -1};
+    struct epoll_event ev = {EPOLLIN, {0}};
+    if (pipe(pp) != 0 || epoll_ctl(ep, EPOLL_CTL_ADD, pp[0], &ev) != 0) f |= 8;
+    uint32_t slot[3] = {(uint32_t)ep, (uint32_t)pp[0], 0};
+    if (t_kcmp(me, me, EPOLL_TFD, pp[0], (unsigned long)slot) != 0 ||
+        t_kcmp(me, me, EPOLL_TFD, pp[1], (unsigned long)slot) == 0)
+        f |= 8;
+    slot[2] = 1;
+    if (!(t_kcmp(me, me, EPOLL_TFD, pp[0], (unsigned long)slot) == -1 && errno == ENOENT)) f |= 8;
+    slot[0] = (uint32_t)b;
+    slot[2] = 0;
+    if (!(t_kcmp(me, me, EPOLL_TFD, pp[0], (unsigned long)slot) == -1 && errno == EINVAL)) f |= 8;
+    close(ep);
+    close(pp[0]);
+    close(pp[1]);
+
+    /* A fork child: its own memory, files and handlers, the same open file
+     * behind an inherited descriptor; its memory read and written here. */
+    memset(t_pvm_buf, 'p', sizeof(t_pvm_buf));
+    memcpy(t_pvm_buf + 4090, "boundary", 8);
+    int go[2], back[2];
+    if (pipe(go) != 0 || pipe(back) != 0) f |= 16;
+    pid_t pid = fork();
+    if (pid == 0) {
+        char x;
+        memset(t_pvm_buf, 'c', 16);
+        if (write(back[1], "r", 1) != 1) _exit(2);
+        if (read(go[0], &x, 1) != 1) _exit(3);
+        _exit(memcmp(t_pvm_buf + 100, "written", 7) == 0 ? 0 : 1);
+    }
+    char x;
+    if (read(back[0], &x, 1) != 1) f |= 16;
+    if (t_kcmp(me, pid, VM, 0, 0) == 0 || t_kcmp(me, pid, FILES, 0, 0) == 0 ||
+        t_kcmp(me, pid, SIGHAND, 0, 0) == 0 || t_kcmp(me, pid, FILE_, a, a) != 0)
+        f |= 16;
+    char got[32];
+    struct iovec l = {got, 24}, r = {t_pvm_buf + 4086, 24};
+    memset(got, 0, sizeof(got));
+    /* Across a page boundary of the child's memory. */
+    if (process_vm_readv(pid, &l, 1, &r, 1, 0) != 24 || memcmp(got + 4, "boundary", 8) != 0)
+        f |= 32;
+    r.iov_base = t_pvm_buf;
+    r.iov_len = 16;
+    if (process_vm_readv(pid, &l, 1, &r, 1, 0) != 16 || got[0] != 'c') f |= 32;
+    /* What was copied before a fault, or EFAULT if nothing was. */
+    struct iovec rr[2] = {{t_pvm_buf, 8}, {(void *)16, 8}};
+    if (process_vm_readv(pid, &l, 1, rr, 2, 0) != 8) f |= 64;
+    if (!(process_vm_readv(pid, &l, 1, rr + 1, 1, 0) == -1 && errno == EFAULT)) f |= 64;
+    if (!(process_vm_readv(pid, &l, 1, &r, 1, 1) == -1 && errno == EINVAL) ||
+        !(process_vm_readv(0x3ffffff0, &l, 1, &r, 1, 0) == -1 && errno == ESRCH) ||
+        process_vm_readv(pid, &l, 0, &r, 1, 0) != 0)
+        f |= 64;
+    struct iovec wl = {(void *)"written", 7}, wr = {t_pvm_buf + 100, 7};
+    if (process_vm_writev(pid, &wl, 1, &wr, 1, 0) != 7) f |= 128;
+    if (write(go[1], "g", 1) != 1) f |= 128;
+    int st;
+    if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 0) f |= 128;
+    /* The parent's copy was not touched. */
+    if (t_pvm_buf[0] != 'p' || memcmp(t_pvm_buf + 100, "pppp", 4) != 0) f |= 128;
+    close(go[0]);
+    close(go[1]);
+    close(back[0]);
+    close(back[1]);
+    close(a);
+    close(b);
+    close(c);
+
+    snprintf(why, sizeof(why), "f=%#x errno=%d", f, errno);
+    report("kcmp_process_vm", f == 0, why);
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
@@ -8454,6 +8564,7 @@ int main(int argc, char **argv)
     test_inotify_events();
     test_pidfd();
     test_clone3();
+    test_kcmp_process_vm();
 #if defined(__x86_64__)
     test_ustat_sysfs();
 #endif

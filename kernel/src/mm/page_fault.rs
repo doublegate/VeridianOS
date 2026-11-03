@@ -140,6 +140,24 @@ pub fn resolve_user_copy_fault(info: &PageFaultInfo) -> bool {
         || (info.was_write && resolve_cow_in(&process, info, false).is_ok())
 }
 
+/// Bring the page at `addr` of `process` -- not necessarily the caller's --
+/// in as a user access of that kind would (demand paging; copy-on-write is
+/// the writer's to resolve), for process_vm_readv and process_vm_writev,
+/// as Linux's pin_user_pages_remote faults pages in. Returns whether it
+/// worked. The caller holds no lock of that address space.
+#[cfg(feature = "alloc")]
+pub fn fault_in_remote(process: &crate::process::Process, addr: u64, write: bool) -> bool {
+    let info = PageFaultInfo {
+        faulting_address: addr,
+        reason: PageFaultReason::NotPresent,
+        was_write: write,
+        was_user_mode: true,
+        was_fetch: false,
+        instruction_pointer: 0,
+    };
+    try_demand_page_in(process, &info, true).is_ok()
+}
+
 /// The SIGSEGV code for a user fault at `addr` that could not be resolved,
 /// as Linux chooses it: SEGV_ACCERR when a mapping covers the address (the
 /// access was not allowed), SEGV_MAPERR when none does. For RISC-V, whose

@@ -44,6 +44,37 @@ pub enum Life {
     Reaped,
 }
 
+/// The ids open pidfds name, with how many name each: set_tid may not give
+/// one to a new process or thread while a pidfd holds it
+/// ([`crate::process::IdClaim`]), as on Linux a pidfd keeps its struct pid
+/// and so its number.
+static HELD: spin::Mutex<alloc::collections::BTreeMap<u64, usize>> =
+    spin::Mutex::new(alloc::collections::BTreeMap::new());
+
+/// Whether an open pidfd names `id`.
+pub fn holds(id: u64) -> bool {
+    HELD.lock().contains_key(&id)
+}
+
+fn hold(ids: &[u64]) {
+    let mut held = HELD.lock();
+    for &id in ids {
+        *held.entry(id).or_insert(0) += 1;
+    }
+}
+
+fn release(ids: &[u64]) {
+    let mut held = HELD.lock();
+    for &id in ids {
+        if let Some(n) = held.get_mut(&id) {
+            *n -= 1;
+            if *n == 0 {
+                held.remove(&id);
+            }
+        }
+    }
+}
+
 /// The file a pidfd is.
 pub struct PidFdNode {
     pid: ProcessId,
@@ -58,6 +89,7 @@ pub struct PidFdNode {
 impl PidFdNode {
     /// A pidfd for `process`, or for its thread `tid`.
     pub fn new(process: &Arc<Process>, tid: Option<ThreadId>) -> Self {
+        hold(&[process.pid.0, tid.map_or(process.pid.0, |t| t.0)]);
         Self {
             pid: process.pid,
             tid,
@@ -111,6 +143,16 @@ impl PidFdNode {
 /// would return into the address space it frees, as kill_one says).
 impl Drop for PidFdNode {
     fn drop(&mut self) {
+        // The ids stay held until the kill below is sent, so the number it
+        // is sent to is still this process's (or no one's).
+        let ids = [self.pid.0, self.tid.map_or(self.pid.0, |t| t.0)];
+        self.autokill_if_armed();
+        release(&ids);
+    }
+}
+
+impl PidFdNode {
+    fn autokill_if_armed(&self) {
         if !self.autokill.load(Ordering::Acquire) {
             return;
         }

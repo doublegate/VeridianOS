@@ -328,6 +328,12 @@ What remains:
   child is in the process table; the table then refuses the second process, but a second thread
   with the ID is not refused. Only a caller with CAP_CHECKPOINT_RESTORE or CAP_SYS_ADMIN can
   choose an ID.
+- **kcmp sees no file or handler table shared between processes**, since CLONE_FILES and
+  CLONE_SIGHAND across processes are refused. A CLONE_VM child counts as sharing its parent's
+  address space until either execs, though each maps the memory through an address space of its
+  own (a mapping one makes later the other does not see). No task has an I/O context or a System V
+  semaphore undo list, so KCMP_IO and KCMP_SYSVSEM always answer 0, as Linux does for two tasks
+  with none.
 - **chroot (N-250):** a working directory outside the new root is moved to the root, where Linux
   would leave it outside.
 - **uname says `VeridianOS`, not `Linux`, by default (ADR 0021).** Programs that test the

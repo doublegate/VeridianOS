@@ -799,6 +799,11 @@ fn exec_image(
         // the loader's refusal of LD_PRELOAD and LD_LIBRARY_PATH) follows
         // from them.
         let secure = install_exec_credentials(&process, &current_thread, set_ids)?;
+        // A new address space as far as kcmp(KCMP_VM) can tell.
+        process.vm_id.store(
+            super::pcb::new_vm_id(),
+            core::sync::atomic::Ordering::Release,
+        );
 
         // Step 3: Setup new stack with arguments, environment, and aux vector
         let stack_top = setup_exec_stack(&process, argv, envp, &filename, &loaded.aux, secure)?;

@@ -376,6 +376,12 @@ mod fhandle;
 mod notify;
 #[cfg(feature = "alloc")]
 mod pidfd;
+// kcmp
+#[cfg(feature = "alloc")]
+mod kcmp;
+// process_vm_readv and process_vm_writev
+#[cfg(feature = "alloc")]
+mod process_vm;
 pub(crate) use filesystem::rename_paths;
 pub use futex::sys_futex_wake;
 
@@ -1505,6 +1511,16 @@ fn handle_syscall(
         Syscall::PidfdSendSignal => pidfd::sys_pidfd_send_signal(arg1, arg2, arg3, arg4),
         #[cfg(feature = "alloc")]
         Syscall::PidfdGetfd => pidfd::sys_pidfd_getfd(arg1, arg2, arg3),
+        #[cfg(feature = "alloc")]
+        Syscall::Kcmp => kcmp::sys_kcmp(arg1, arg2, arg3, arg4, arg5),
+        #[cfg(feature = "alloc")]
+        Syscall::ProcessVmReadv => {
+            process_vm::sys_process_vm_readv(arg1, arg2, arg3, arg4, arg5, syscall_arg6()?)
+        }
+        #[cfg(feature = "alloc")]
+        Syscall::ProcessVmWritev => {
+            process_vm::sys_process_vm_writev(arg1, arg2, arg3, arg4, arg5, syscall_arg6()?)
+        }
         #[cfg(feature = "alloc")]
         Syscall::Madvise => memory::sys_madvise(arg1, arg2, arg3),
 

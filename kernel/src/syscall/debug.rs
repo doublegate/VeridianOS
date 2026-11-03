@@ -259,6 +259,18 @@ fn may_attach(
 ///   that kept them and use them through it.
 ///
 /// Also guards get_robust_list.
+/// [`may_access`] for `target` as a process, with Linux's first rule of
+/// `__ptrace_may_access`: a process may always access itself (its own
+/// thread group), dumpable or not.
+pub(super) fn may_access_process(
+    caller: &process::creds::Caller,
+    caller_permitted: process::linux_caps::LinuxCaps,
+    target: &process::Process,
+) -> bool {
+    process::current_process().is_some_and(|me| me.pid == target.pid)
+        || may_access(caller, caller_permitted, &PtraceTarget::of(target))
+}
+
 pub(super) fn may_access(
     caller: &process::creds::Caller,
     caller_permitted: process::linux_caps::LinuxCaps,

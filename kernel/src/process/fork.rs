@@ -392,6 +392,14 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
         new_process
             .autoreap
             .store(opts.autoreap, core::sync::atomic::Ordering::Release);
+        if opts.share_vm {
+            new_process.vm_id.store(
+                current_process
+                    .vm_id
+                    .load(core::sync::atomic::Ordering::Acquire),
+                core::sync::atomic::Ordering::Release,
+            );
+        }
 
         // The TID stores happen before the child can run. CLONE_CHILD_SETTID
         // writes the child's memory only: a copy-on-write page is copied first
