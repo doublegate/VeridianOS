@@ -214,6 +214,11 @@ pub enum FsError {
     NoSpace,
     /// The operation was cancelled (ECANCELED): a timerfd's clock was set
     Canceled,
+    /// A value outside what the file takes (ERANGE): a time namespace
+    /// offset past the clock's range
+    OutOfRange,
+    /// The process a `/proc/<pid>` file is about has gone (ESRCH)
+    NoProcess,
     /// Operation would cross filesystems (EXDEV)
     CrossDevice,
     /// Refused by the object's own state, not by permission bits (EPERM):

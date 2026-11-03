@@ -191,13 +191,17 @@ fn read_cpu_clock(clock: Clock) -> Result<u64, SyscallError> {
     }
 }
 
-/// The time on `clock` in nanoseconds (wall time may be negative: before
-/// 1970).
-fn clock_now_ns(clock: Clock) -> Result<i64, SyscallError> {
+/// The time on `clock` (named by `id`) in nanoseconds (wall time may be
+/// negative: before 1970); the monotonic and boot-time clocks read the
+/// caller's time namespace's offsets ahead (ADR 0022 H2).
+fn clock_now_ns(clock: Clock, id: i32) -> Result<i64, SyscallError> {
     match clock {
         Clock::Realtime => Ok(crate::timer::realtime::now_ns()),
         Clock::Tai => Ok(crate::timer::realtime::now_ns().saturating_add(tai_offset_ns())),
-        Clock::Monotonic => Ok(crate::timer::monotonic_ns().min(i64::MAX as u64) as i64),
+        Clock::Monotonic => Ok(
+            crate::process::ns::clock_from_host(id, crate::timer::monotonic_ns())
+                .min(i64::MAX as u64) as i64,
+        ),
         #[cfg(feature = "alloc")]
         _ => Ok(read_cpu_clock(clock)?.min(i64::MAX as u64) as i64),
         #[cfg(not(feature = "alloc"))]
@@ -294,7 +298,7 @@ fn clock_was_set(delta_ns: i64) {
 /// from 1970 (N-219).
 pub fn sys_clock_gettime(clock_id: usize, tp_ptr: usize) -> SyscallResult {
     let clock = Clock::decode(clock_id as i32)?;
-    let ns = clock_now_ns(clock)?;
+    let ns = clock_now_ns(clock, clock_id as i32)?;
     super::userspace::write_user(tp_ptr, Timespec::from_ns(ns))?;
     Ok(0)
 }
@@ -305,7 +309,7 @@ pub fn sys_clock_gettime(clock_id: usize, tp_ptr: usize) -> SyscallResult {
 pub fn sys_clock_getres(clock_id: usize, res_ptr: usize) -> SyscallResult {
     let clock = Clock::decode(clock_id as i32)?;
     // A CPU clock of an unknown process or thread is EINVAL here too.
-    clock_now_ns(clock)?;
+    clock_now_ns(clock, clock_id as i32)?;
     if res_ptr != 0 {
         super::userspace::write_user(res_ptr, Timespec::from_ns(1))?;
     }
@@ -569,7 +573,9 @@ pub(crate) fn sleep_until(deadline: u64, rem_ptr: usize, restartable: bool) -> S
 /// `clock_nanosleep` (Linux 230): a relative sleep, or with TIMER_ABSTIME
 /// (flags bit 0) until an absolute time on the clock: on CLOCK_REALTIME
 /// the monotonic time the wall clock will then read (a later
-/// clock_settime does not move the sleep, which Linux would). A thread CPU
+/// clock_settime does not move the sleep, which Linux would); on the
+/// monotonic and boot-time clocks the time is the caller's time
+/// namespace's, taken back to the host's. A thread CPU
 /// clock is EINVAL as on Linux; sleeping on a process CPU clock is not
 /// supported (ENOTSUP). An absolute sleep never writes `rem`.
 pub fn sys_clock_nanosleep(
@@ -593,7 +599,7 @@ pub fn sys_clock_nanosleep(
     let deadline = match clock {
         Clock::Realtime => crate::timer::realtime::monotonic_at(at),
         Clock::Tai => crate::timer::realtime::monotonic_at(at.saturating_sub(tai_offset_ns())),
-        _ => at as u64,
+        _ => crate::process::ns::clock_to_host(clock_id as i32, at as u64),
     };
     #[cfg(feature = "alloc")]
     if crate::sched::dispatch::current_owner().is_some() {
@@ -726,6 +732,7 @@ fn timer_clock(
         // A timer on CLOCK_TAI runs as one on CLOCK_REALTIME: it does not
         // see the TAI offset (docs/KNOWN-LIMITATIONS.md).
         Clock::Realtime | Clock::Tai => TimerClock::Wall,
+        Clock::Monotonic if matches!(id, CLOCK_BOOTTIME | CLOCK_BOOTTIME_ALARM) => TimerClock::Boot,
         Clock::Monotonic => TimerClock::Mono,
         Clock::ProcessCpu(target, kind) => {
             if target.is_some_and(|target| target != pid) {
@@ -835,16 +842,32 @@ fn spec_itimerspec(s: crate::process::posix_timer::Spec) -> [Timespec; 2] {
 }
 
 /// timer_settime(timerid, flags, new, old): TIMER_ABSTIME sets an expiry
-/// on the clock; a NULL `new` is EINVAL.
+/// on the clock, which in a time namespace is first taken back to the
+/// host's (Linux's common_timer_set); a NULL `new` is EINVAL.
 #[cfg(feature = "alloc")]
 pub fn sys_timer_settime(id: usize, flags: usize, new_ptr: usize, old_ptr: usize) -> SyscallResult {
     if new_ptr == 0 {
         return Err(SyscallError::InvalidArgument);
     }
     let new = super::userspace::read_user::<[Timespec; 2]>(new_ptr)?;
-    let new = itimerspec_spec(new)?;
+    let mut new = itimerspec_spec(new)?;
     let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
     let absolute = flags as i32 & crate::process::posix_timer::TIMER_ABSTIME as i32 != 0;
+    if absolute && new.value != 0 {
+        use crate::process::{ns, posix_timer::TimerClock};
+        let clock =
+            crate::process::posix_timer::clock_of(&process, timer_id(id)?).map_err(timer_error)?;
+        let clock_id = match clock {
+            TimerClock::Mono => Some(ns::CLOCK_MONOTONIC),
+            TimerClock::Boot => Some(ns::CLOCK_BOOTTIME),
+            _ => None,
+        };
+        if let Some(clock_id) = clock_id {
+            // A time already past stays a setting (1 ns, long gone), not 0,
+            // which would disarm the timer.
+            new.value = (ns::clock_to_host(clock_id, new.value as u64) as i64).max(1);
+        }
+    }
     let old = crate::process::posix_timer::settime(&process, timer_id(id)?, absolute, new)
         .map_err(timer_error)?;
     if old_ptr != 0 {
@@ -892,7 +915,8 @@ mod tests {
         use crate::process::posix_timer::TimerClock;
         assert_eq!(timer_clock(CLOCK_REALTIME, 5, 6), Ok(TimerClock::Wall));
         assert_eq!(timer_clock(CLOCK_TAI, 5, 6), Ok(TimerClock::Wall));
-        assert_eq!(timer_clock(CLOCK_BOOTTIME, 5, 6), Ok(TimerClock::Mono));
+        assert_eq!(timer_clock(CLOCK_BOOTTIME, 5, 6), Ok(TimerClock::Boot));
+        assert_eq!(timer_clock(CLOCK_MONOTONIC, 5, 6), Ok(TimerClock::Mono));
         for id in [
             CLOCK_MONOTONIC_RAW,
             CLOCK_REALTIME_COARSE,

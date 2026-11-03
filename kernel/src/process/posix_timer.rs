@@ -38,8 +38,11 @@ pub const TIMER_ABSTIME: usize = 1;
 pub enum TimerClock {
     /// Wall time (`timer::realtime::now_ns`).
     Wall,
-    /// Time since boot (`timer::monotonic_ns`).
+    /// Time since boot (`timer::monotonic_ns`), as CLOCK_MONOTONIC.
     Mono,
+    /// The same count as CLOCK_BOOTTIME (there is no suspend to add); only
+    /// a time namespace's offsets tell the two apart.
+    Boot,
     /// The process's CPU time: user only (`user`) or user and system.
     ProcessCpu { user: bool },
     /// One of its threads' CPU time.
@@ -363,7 +366,7 @@ fn now_on(process: &Process, clock: TimerClock) -> Option<i64> {
     let clamp = |ns: u64| ns.min(i64::MAX as u64) as i64;
     match clock {
         TimerClock::Wall => Some(crate::timer::realtime::now_ns()),
-        TimerClock::Mono => Some(clamp(crate::timer::monotonic_ns())),
+        TimerClock::Mono | TimerClock::Boot => Some(clamp(crate::timer::monotonic_ns())),
         TimerClock::ProcessCpu { user } => {
             let (times, (user_ns, _)) = process.cpu_split();
             Some(clamp(if user { user_ns } else { times.runtime_ns }))
@@ -392,7 +395,9 @@ fn wait_for(process: &Process, id: i32, clock: TimerClock, expires: i64) {
             key(process, id),
             crate::timer::realtime::monotonic_at(expires),
         ),
-        TimerClock::Mono => crate::timer::ktimerd::arm(key(process, id), expires.max(0) as u64),
+        TimerClock::Mono | TimerClock::Boot => {
+            crate::timer::ktimerd::arm(key(process, id), expires.max(0) as u64)
+        }
         _ => {}
     }
 }
@@ -471,6 +476,16 @@ pub fn create(
         super::signals::uncharge_user(charge.uid, 1);
         TimerError::Again
     })
+}
+
+/// The clock timer `id` was created on.
+pub fn clock_of(process: &Process, id: i32) -> Result<TimerClock, TimerError> {
+    process
+        .posix_timers
+        .lock()
+        .get_mut(id)
+        .map(|timer| timer.clock)
+        .ok_or(TimerError::Invalid)
 }
 
 /// timer_settime: set timer `id` to `new` (`absolute`: TIMER_ABSTIME),

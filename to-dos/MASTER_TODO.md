@@ -367,7 +367,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
      are done, rseq stays ENOSYS; fanotify stays ENOSYS, as
      without CONFIG_FANOTIFY); the `docs/PORTING-GUIDE.md` rewrite. Namespaces follow ADR 0022,
      one commit per step: H1 (the framework, nsfs, `/proc/<pid>/ns`, unshare, setns, clone; UTS,
-     IPC and cgroup) is done; H2 time, H3 mount, H4 user, H5 PID and H6 network remain.
+     IPC and cgroup) and H2 (time) are done; H3 mount, H4 user, H5 PID and H6 network remain.
   4. [ ] ABI-review items N-190 to N-193, N-207, N-209 to N-211, N-217, N-221, N-222, N-225, N-231,
      N-235 to N-238.
   5. [ ] D leftovers: N-115, N-260, N-52/N-261, N-282; the native thread call (private 1064),

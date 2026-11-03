@@ -171,7 +171,10 @@ pub(crate) fn linux_timeout(ptr: usize, kind: FutexTimeout) -> Result<Option<u64
         .saturating_add(nsec as u64);
     Ok(Some(match kind {
         FutexTimeout::Relative => crate::timer::monotonic_ns().saturating_add(ns),
-        FutexTimeout::Monotonic => ns,
+        // In the caller's time namespace (Linux's futex_init_timeout).
+        FutexTimeout::Monotonic => {
+            crate::process::ns::clock_to_host(crate::process::ns::CLOCK_MONOTONIC, ns)
+        }
         FutexTimeout::Realtime => {
             crate::timer::realtime::monotonic_at(ns.min(i64::MAX as u64) as i64)
         }

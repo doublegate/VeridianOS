@@ -449,11 +449,15 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
                 .load(core::sync::atomic::Ordering::Acquire),
             core::sync::atomic::Ordering::Release,
         );
-        new_thread.set_namespaces(
-            opts.namespaces
-                .clone()
-                .unwrap_or_else(|| current_thread.namespaces()),
-        );
+        new_thread.set_namespaces(opts.namespaces.clone().unwrap_or_else(|| {
+            // fork and vfork: Linux's copy_namespaces with no namespace
+            // flag, so the child of an unshare(CLONE_NEWTIME) caller enters
+            // the new time namespace (a vfork child, sharing memory, does
+            // not). Without namespace flags it cannot fail.
+            let current = current_thread.namespaces();
+            let flags = if opts.share_vm { 0x100 } else { 0 };
+            super::ns::for_clone(&current, flags, false).unwrap_or(current)
+        }));
         // The sets read with the credentials (above), not re-read here: a
         // set*id call on another thread in between would pair root IDs
         // with dropped sets, which exec turns back into full privilege.

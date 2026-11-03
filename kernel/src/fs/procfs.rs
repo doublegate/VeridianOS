@@ -47,6 +47,128 @@ const NS_LINKS: [&str; 10] = [
 /// following one needs ptrace read access to the process (EACCES), as
 /// Linux's proc_ns_get_link.
 #[cfg(feature = "alloc")]
+/// The time namespace for children of process `pid`'s first thread, which
+/// `/proc/<pid>/timens_offsets` is about (Linux's timens_for_children_get).
+fn time_for_children(pid: u64) -> Option<alloc::sync::Arc<crate::process::ns::TimeNs>> {
+    let process = crate::process::get_process(crate::process::ProcessId(pid))?;
+    let thread = process
+        .get_thread(crate::process::ThreadId(pid))
+        .or_else(|| process.threads.lock().values().next().cloned())?;
+    Some(thread.namespaces().time_for_children.clone())
+}
+
+/// One offset line, as Linux's show_offset: "monotonic  <sec> <nsec>".
+fn offset_line(clock: &str, ns: i64) -> String {
+    format!(
+        "{:<10} {:>10} {:>9}\n",
+        clock,
+        ns.div_euclid(1_000_000_000),
+        ns.rem_euclid(1_000_000_000)
+    )
+}
+
+/// What `/proc/<pid>/timens_offsets` reads: the offsets of the time
+/// namespace its children get.
+fn timens_offsets_text(pid: u64) -> Option<String> {
+    let offsets = time_for_children(pid)?.offsets();
+    Some(format!(
+        "{}{}",
+        offset_line("monotonic", offsets.monotonic),
+        offset_line("boottime", offsets.boottime)
+    ))
+}
+
+/// The most seconds an offset or the clock it moves may reach: Linux's
+/// KTIME_SEC_MAX (KTIME_MAX in seconds).
+const KTIME_SEC_MAX: i64 = i64::MAX / 1_000_000_000;
+
+/// One "<clock> <sec> <nsec>" line of a timens_offsets write: the clock id
+/// (named or by number), and the offset in nanoseconds; None if malformed
+/// (sscanf's "%9s %lld %lu" failing, a nanosecond count of a second or
+/// more, or an unknown clock).
+fn parse_offset_line(line: &str) -> Option<(i32, i64, i64)> {
+    use crate::process::ns::{CLOCK_BOOTTIME, CLOCK_MONOTONIC};
+    let mut words = line.split_ascii_whitespace();
+    let clock = words.next()?;
+    let sec: i64 = words.next()?.parse().ok()?;
+    let nsec: u64 = words.next()?.parse().ok()?;
+    if nsec >= 1_000_000_000 {
+        return None;
+    }
+    let clock = match clock {
+        "monotonic" | "1" => CLOCK_MONOTONIC,
+        "boottime" | "7" => CLOCK_BOOTTIME,
+        _ => return None,
+    };
+    Some((clock, sec, nsec as i64))
+}
+
+/// A write to `/proc/<pid>/timens_offsets`, as Linux's
+/// timens_offsets_write and proc_timens_set_offset: at the start of the
+/// file and under a page (EINVAL), up to two well-formed lines (EINVAL),
+/// the process there (ESRCH), CAP_SYS_TIME (EPERM; the writer's, where
+/// Linux asks the opener's), each offset and the clock it moves within
+/// range (ERANGE), and a namespace no process has entered (EACCES).
+fn write_timens_offsets(pid: u64, offset: usize, data: &[u8]) -> Result<usize, KernelError> {
+    use crate::process::ns::CLOCK_MONOTONIC;
+    let invalid = || KernelError::InvalidArgument {
+        name: "timens_offsets",
+        value: "malformed offset",
+    };
+    if offset != 0 || data.len() >= 4096 {
+        return Err(invalid());
+    }
+    let text = core::str::from_utf8(data).map_err(|_| invalid())?;
+    if text.is_empty() {
+        return Err(invalid());
+    }
+    // Linux reads only the first two lines and reports what it consumed.
+    let mut offsets: Vec<(i32, i64, i64)> = Vec::new();
+    let mut consumed = data.len();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let (line, next) = match rest.find('\n') {
+            Some(i) => (&rest[..i], &rest[i + 1..]),
+            None => (rest, ""),
+        };
+        offsets.push(parse_offset_line(line).ok_or_else(invalid)?);
+        rest = next;
+        if offsets.len() == 2 {
+            if !rest.is_empty() {
+                consumed = text.len() - rest.len();
+            }
+            break;
+        }
+    }
+    let ns = time_for_children(pid).ok_or(KernelError::FsError(FsError::NoProcess))?;
+    if !crate::process::creds::Caller::current().capable(crate::process::linux_caps::CAP_SYS_TIME) {
+        return Err(KernelError::FsError(FsError::OperationNotPermitted));
+    }
+    // There is no suspend: the boot-time clock reads the monotonic one.
+    let now = crate::timer::monotonic_ns().min(i64::MAX as u64) as i64;
+    let mut monotonic = None;
+    let mut boottime = None;
+    for &(clock, sec, nsec) in &offsets {
+        if !(-KTIME_SEC_MAX..=KTIME_SEC_MAX).contains(&sec) {
+            return Err(KernelError::FsError(FsError::OutOfRange));
+        }
+        let moved = (now / 1_000_000_000).saturating_add(sec)
+            + (now % 1_000_000_000 + nsec) / 1_000_000_000;
+        if !(0..=KTIME_SEC_MAX / 2).contains(&moved) {
+            return Err(KernelError::FsError(FsError::OutOfRange));
+        }
+        let ns_value = sec * 1_000_000_000 + nsec;
+        if clock == CLOCK_MONOTONIC {
+            monotonic = Some(ns_value);
+        } else {
+            boottime = Some(ns_value);
+        }
+    }
+    ns.set_offsets(monotonic, boottime)
+        .map_err(|_| KernelError::FsError(FsError::PermissionDenied))?;
+    Ok(consumed)
+}
+
 fn ns_link_target(pid: Option<u64>, name: &str) -> Result<crate::process::ns::NsRef, KernelError> {
     use crate::process::ns::{self, NsKind, NsRef};
     let not_found = || KernelError::FsError(FsError::NotFound);
@@ -66,7 +188,7 @@ fn ns_link_target(pid: Option<u64>, name: &str) -> Result<crate::process::ns::Ns
         "pid" => ns::pid_of(&process),
         "user" => ns::user_of(&process),
         "pid_for_children" => set.get(NsKind::Pid),
-        "time" => NsRef::Plain(set.time.clone()),
+        "time" => NsRef::Time(set.time.clone()),
         "time_for_children" => set.get(NsKind::Time),
         "cgroup" => set.get(NsKind::Cgroup),
         "ipc" => set.get(NsKind::Ipc),
@@ -261,10 +383,17 @@ impl VfsNode for ProcNode {
                     "osrelease" => format!("{}\n", crate::utils::uname::RELEASE),
                     "sys/kernel/version" => format!("{}\n", crate::utils::uname::VERSION),
                     "uptime" => {
-                        let secs = crate::arch::timer::get_timestamp_secs();
-                        let frac_ms = crate::arch::timer::get_timestamp_ms() % 1000;
-                        // Linux format: uptime_secs idle_secs
-                        format!("{}.{:02} 0.00\n", secs, frac_ms / 10)
+                        // Boot time in the reader's time namespace (Linux's
+                        // uptime_proc_show), then the idle time.
+                        let up = crate::process::ns::clock_from_host(
+                            crate::process::ns::CLOCK_BOOTTIME,
+                            crate::timer::monotonic_ns(),
+                        );
+                        format!(
+                            "{}.{:02} 0.00\n",
+                            up / 1_000_000_000,
+                            up % 1_000_000_000 / 10_000_000
+                        )
                     }
                     "meminfo" => {
                         let stats = crate::mm::get_memory_stats();
@@ -377,6 +506,7 @@ impl VfsNode for ProcNode {
                             format!("Name:\tProcess\nPid:\t{}\nState:\tR (running)\n", pid)
                         }
                     }
+                    "timens_offsets" => timens_offsets_text(*pid).unwrap_or_default(),
                     "cmdline" => {
                         // Get actual command line
                         if let Some(process) =
@@ -407,7 +537,12 @@ impl VfsNode for ProcNode {
         Ok(bytes_to_read)
     }
 
-    fn write(&self, _offset: usize, data: &[u8]) -> Result<usize, KernelError> {
+    fn write(&self, offset: usize, data: &[u8]) -> Result<usize, KernelError> {
+        if let ProcNodeType::ProcessFile(pid, name) = &self.node_type {
+            if name == "timens_offsets" {
+                return write_timens_offsets(*pid, offset, data);
+            }
+        }
         // The inotify limits are sysctls root may set (the mode decides who
         // can open them for writing); the rest is EACCES, as Linux's
         // read-only /proc files give (EROFS would say the filesystem is
@@ -437,6 +572,10 @@ impl VfsNode for ProcNode {
             NodeType::Directory => 0o555,
             NodeType::Symlink => 0o777,
             _ if self.sysctl().is_some() => 0o644,
+            // rw-r--r--, as Linux's (its owner is root here).
+            _ if matches!(&self.node_type, ProcNodeType::ProcessFile(_, n) if n == "timens_offsets") => {
+                0o644
+            }
             _ => 0o444,
         });
         Ok(Metadata {
@@ -542,6 +681,12 @@ impl VfsNode for ProcNode {
                     node_type: NodeType::Directory,
                     inode: 0,
                 });
+
+                entries.push(DirEntry {
+                    name: String::from("timens_offsets"),
+                    node_type: NodeType::File,
+                    inode: 0,
+                });
             }
             ProcNodeType::NsDir(_) => {
                 for name in NS_LINKS {
@@ -639,10 +784,11 @@ impl VfsNode for ProcNode {
                 }
             }
             ProcNodeType::ProcessDir(pid) => match name {
-                "status" | "cmdline" => Ok(Arc::new(ProcNode::new_process_file(
+                "status" | "cmdline" | "timens_offsets" => Ok(Arc::new(ProcNode::new_process_file(
                     *pid,
                     String::from(name),
-                )) as Arc<dyn VfsNode>),
+                ))
+                    as Arc<dyn VfsNode>),
                 "ns" => Ok(Arc::new(ProcNode {
                     node_type: ProcNodeType::NsDir(Some(*pid)),
                 }) as Arc<dyn VfsNode>),
@@ -706,12 +852,16 @@ impl VfsNode for ProcNode {
                         }) as Arc<dyn VfsNode>),
                         // The caller's own files, as /proc/<its pid>/...
                         // (Linux's /proc/self is a link to that directory).
-                        "status" | "cmdline" => crate::process::current_process()
-                            .map(|p| {
-                                Arc::new(ProcNode::new_process_file(p.pid.0, String::from(name)))
-                                    as Arc<dyn VfsNode>
-                            })
-                            .ok_or(KernelError::FsError(FsError::NotFound)),
+                        "status" | "cmdline" | "timens_offsets" => {
+                            crate::process::current_process()
+                                .map(|p| {
+                                    Arc::new(ProcNode::new_process_file(
+                                        p.pid.0,
+                                        String::from(name),
+                                    )) as Arc<dyn VfsNode>
+                                })
+                                .ok_or(KernelError::FsError(FsError::NotFound))
+                        }
                         "maps" => Ok(
                             Arc::new(ProcNode::new_system_file(format!("self/{}", name)))
                                 as Arc<dyn VfsNode>,
@@ -757,8 +907,13 @@ impl VfsNode for ProcNode {
     /// A sysctl has no size to change: opening one with O_TRUNC (fopen
     /// "w") succeeds, as on Linux.
     fn truncate(&self, _size: usize) -> Result<(), KernelError> {
+        // The writable files ignore O_TRUNC, as Linux's: fopen("w") on
+        // them must succeed.
+        let timens =
+            matches!(&self.node_type, ProcNodeType::ProcessFile(_, n) if n == "timens_offsets");
         match self.sysctl() {
             Some(_) => Ok(()),
+            None if timens => Ok(()),
             None => Err(KernelError::FsError(FsError::PermissionDenied)),
         }
     }
@@ -1081,6 +1236,39 @@ impl Filesystem for ProcFs {
 
 #[cfg(test)]
 mod tests {
+    /// fopen("w") opens with O_TRUNC, as LTP's SAFE_FILE_PRINTF does: the
+    /// writable files take it (Linux ignores the size), the rest refuse it.
+    #[test]
+    fn writable_files_accept_o_trunc() {
+        use super::ProcNode;
+        use crate::fs::VfsNode;
+        let offsets = ProcNode::new_process_file(1, "timens_offsets".into());
+        assert!(offsets.truncate(0).is_ok());
+        let status = ProcNode::new_process_file(1, "status".into());
+        assert!(status.truncate(0).is_err());
+    }
+
+    #[test]
+    fn timens_offset_lines_parse_as_linux_reads_them() {
+        use crate::process::ns::{CLOCK_BOOTTIME, CLOCK_MONOTONIC};
+        assert_eq!(
+            super::parse_offset_line("monotonic 100 5"),
+            Some((CLOCK_MONOTONIC, 100, 5))
+        );
+        assert_eq!(
+            super::parse_offset_line("7 -3 0"),
+            Some((CLOCK_BOOTTIME, -3, 0))
+        );
+        assert_eq!(super::parse_offset_line("boottime 1"), None);
+        assert_eq!(super::parse_offset_line("boottime 1 1000000000"), None);
+        assert_eq!(super::parse_offset_line("realtime 1 0"), None);
+        assert_eq!(super::parse_offset_line("monotonic 1 -1"), None);
+        assert_eq!(
+            super::offset_line("monotonic", -1),
+            "monotonic          -1 999999999\n"
+        );
+    }
+
     use super::*;
 
     /// Everyone may walk /proc and read its files, as on Linux: directories

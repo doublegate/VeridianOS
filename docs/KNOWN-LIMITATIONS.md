@@ -335,13 +335,17 @@ What remains:
   with none.
 - **Namespaces are partial (ADR 0022).** UTS namespaces are complete. IPC and cgroup
   namespaces can be created and joined but isolate nothing, as there is no System V IPC, message
-  queue or cgroup hierarchy. User, mount, PID, network and time namespaces exist only as the
-  initial ones: unshare, clone and clone3 refuse new ones with EINVAL, as Linux does when built
-  without them, until their steps (H2 to H6). unshare(CLONE_FILES) in a multithreaded process is
+  queue or cgroup hierarchy. Time namespaces are complete but for the two points below. User,
+  mount, PID and network namespaces exist only as the initial ones: unshare, clone and clone3
+  refuse new ones with EINVAL, as Linux does when built without them, until their steps (H3 to
+  H6). unshare(CLONE_FILES) in a multithreaded process is
   EINVAL, since the descriptor table belongs to the process, not the thread. The nsfs file's
   st_dev is procfs's, not an nsfs device's, and `/proc/sys/kernel/hostname` cannot be written
   (sethostname can). NS_MNT_GET_*, listns, statns and `/proc/sys/user/max_*_namespaces` do not
-  exist.
+  exist. A write to `/proc/<pid>/timens_offsets` needs CAP_SYS_TIME in the writer's credentials,
+  where Linux checks the credentials the file was opened with (file_ns_capable), so a descriptor
+  opened by a privileged process and handed to an unprivileged one cannot set offsets. No vDSO
+  reads the offsets, as there is no vDSO at all (below).
 - **personality changes little.** Every value is stored and reported, but only PER_LINUX
   exists, and only STICKY_TIMEOUTS, UNAME26 and READ_IMPLIES_EXEC change anything.
   READ_IMPLIES_EXEC is honoured only for a program with the W^X opt-in (ADR 0017), since adding

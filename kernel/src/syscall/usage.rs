@@ -207,8 +207,14 @@ pub fn sys_sysinfo(info_ptr: usize) -> SyscallResult {
     let loads = crate::sched::loadavg::averages()
         .map(|l| l << (SI_LOAD_SHIFT - crate::sched::loadavg::FSHIFT));
     let procs = crate::process::get_process_list().map_or(0, |p| p.len());
+    // Boot time in the caller's time namespace, a started second counted
+    // whole, as Linux's do_sysinfo.
+    let up = crate::process::ns::clock_from_host(
+        crate::process::ns::CLOCK_BOOTTIME,
+        crate::timer::monotonic_ns(),
+    );
     let info = Sysinfo {
-        uptime: (crate::timer::monotonic_ns() / 1_000_000_000) as i64,
+        uptime: (up / 1_000_000_000 + u64::from(!up.is_multiple_of(1_000_000_000))) as i64,
         loads,
         totalram: stats.total_frames as u64 * page,
         freeram: stats.free_frames as u64 * page,

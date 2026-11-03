@@ -169,7 +169,8 @@ fn namespaces_of(target: &process::Process) -> Option<Arc<ns::Namespaces>> {
 /// Linux), checked before anything changes. UTS, IPC, cgroup, PID,
 /// network and time namespaces need CAP_SYS_ADMIN (there is one user
 /// namespace, so in both the namespace's owner and the caller's); a time
-/// namespace also a single-threaded caller (EUSERS); a mount namespace
+/// namespace first a single-threaded caller, sharing its address space
+/// with no other process (EUSERS, as timens_install); a mount namespace
 /// also CAP_SYS_CHROOT, and a filesystem state no other thread shares
 /// (EINVAL), since joining it moves the root and working directory to its
 /// root; the caller's own user namespace is EINVAL, as Linux refuses
@@ -194,11 +195,11 @@ fn install_check(ns: &NsRef) -> Result<(), SyscallError> {
             Ok(())
         }
         NsKind::Time => {
+            if other_threads() || vm_shared() {
+                return Err(SyscallError::TooManyUsers);
+            }
             if !caller.capable(CAP_SYS_ADMIN) {
                 return Err(SyscallError::OperationNotPermitted);
-            }
-            if other_threads() {
-                return Err(SyscallError::TooManyUsers);
             }
             Ok(())
         }
@@ -207,11 +208,13 @@ fn install_check(ns: &NsRef) -> Result<(), SyscallError> {
     }
 }
 
-/// Make `namespaces` the caller's (setns's commit): the set replaced, and
-/// for a mount namespace the root and working directory moved to its root
-/// (`mnt`), as Linux's mntns_install does.
+/// Make `namespaces` the caller's (setns's commit): the set replaced, for
+/// a mount namespace the root and working directory moved to its root
+/// (`mnt`), as Linux's mntns_install does, and the time namespace it runs
+/// in fixed (timens_commit).
 fn commit(namespaces: ns::Namespaces, mnt: bool) -> Result<(), SyscallError> {
     let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
+    namespaces.time.freeze();
     if mnt {
         let fs = thread.fs();
         *fs.root.lock() = alloc::string::String::from("/");
@@ -280,7 +283,7 @@ pub fn sys_setns(fd: usize, nstype: usize) -> SyscallResult {
             NsKind::User => ns::user_of(&proc),
             NsKind::Pid => ns::pid_of(&proc),
             // The time namespace it runs in, not the one for children.
-            NsKind::Time => NsRef::Plain(theirs.time.clone()),
+            NsKind::Time => NsRef::Time(theirs.time.clone()),
             _ => theirs.get(kind),
         };
         install_check(&ns)?;

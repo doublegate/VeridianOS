@@ -234,7 +234,10 @@ pub fn timerfd_settime(
         (true, true) if on_wall_clock => crate::timer::realtime::monotonic_at(
             new_spec.it_value.to_ns().min(i64::MAX as u64) as i64,
         ),
-        (true, true) => new_spec.it_value.to_ns(),
+        // A monotonic or boot-time one, in the caller's time namespace.
+        (true, true) => {
+            crate::process::ns::clock_to_host(instance.clock_id as i32, new_spec.it_value.to_ns())
+        }
         (true, false) => now.saturating_add(new_spec.it_value.to_ns()),
     };
     drop(registry);

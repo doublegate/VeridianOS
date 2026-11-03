@@ -240,8 +240,15 @@
   checks. UTS namespaces are complete: sethostname, setdomainname, uname and
   `/proc/sys/kernel/{hostname,domainname}` follow the caller's (the domain name reads "(none)",
   as on Linux). IPC and cgroup namespaces can be created and joined but hold nothing yet; user,
-  mount, PID, network and time namespaces exist as their initial ones, and a new one is EINVAL
-  until its step.
+  mount, PID and network namespaces exist as their initial ones, and a new one is EINVAL until
+  its step.
+- Time namespaces, step H2 of ADR 0022: unshare(CLONE_NEWTIME) and clone3 make a namespace for
+  the caller's children whose CLOCK_MONOTONIC and CLOCK_BOOTTIME offsets
+  `/proc/<pid>/timens_offsets` sets (Linux's format, checks and error order) until a process
+  enters it, on fork without CLONE_VM, on exec or through setns. Every read of those clocks
+  (clock_gettime and the raw, coarse and alarm variants, `/proc/uptime`, sysinfo) adds the
+  reader's offset, and every absolute deadline on them (clock_nanosleep, timerfd, POSIX timers,
+  FUTEX_WAIT_BITSET) is taken back to the host's clock, as Linux's timens_ktime_to_host.
 - rseq stays ENOSYS, as on Linux built without CONFIG_RSEQ: glibc runs without it and musl does
   not use it.
 - A signal from rt_sigqueueinfo, rt_tgsigqueueinfo or pidfd_send_signal that ends a sender

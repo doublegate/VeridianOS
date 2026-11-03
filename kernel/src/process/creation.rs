@@ -813,6 +813,11 @@ fn exec_image(
             super::pcb::new_vm_id(),
             core::sync::atomic::Ordering::Release,
         );
+        // After unshare(CLONE_NEWTIME) the new program runs in the time
+        // namespace for children (Linux's exec_task_namespaces).
+        if let Some(set) = current_thread.namespaces().after_exec() {
+            current_thread.set_namespaces(alloc::sync::Arc::new(set));
+        }
 
         // Step 3: Setup new stack with arguments, environment, and aux vector
         let stack_top = setup_exec_stack(&process, argv, envp, &filename, &loaded.aux, secure)?;

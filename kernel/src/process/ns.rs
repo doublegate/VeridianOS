@@ -3,10 +3,10 @@
 //!
 //! Each namespace has Linux's identity: an inode number on nsfs (the
 //! initial namespaces Linux's fixed values, new ones from 0xF0000000) and a
-//! 64-bit id (the initial ones 1 to 8, new ones from 9). UTS, IPC and
-//! cgroup namespaces can be created (ADR 0022 step H1); the other types
-//! exist only as their initial namespace until their steps, and asking for
-//! a new one is EINVAL, as on Linux built without that namespace type.
+//! 64-bit id (the initial ones 1 to 8, new ones from 9). UTS, IPC, cgroup
+//! (ADR 0022 step H1) and time (H2) namespaces can be created; the other
+//! types exist only as their initial namespace until their steps, and
+//! asking for a new one is EINVAL, as on Linux built without that type.
 
 use alloc::{string::String, sync::Arc};
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -31,8 +31,16 @@ pub const CLONE_NS_ALL: u64 = CLONE_NEWTIME
     | CLONE_NEWUSER
     | CLONE_NEWPID
     | CLONE_NEWNET;
-/// The types a new namespace can be made of so far (ADR 0022 step H1).
-pub const CREATABLE: u64 = CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWCGROUP;
+/// The types a new namespace can be made of so far (ADR 0022 steps H1 and
+/// H2).
+pub const CREATABLE: u64 = CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWCGROUP | CLONE_NEWTIME;
+
+/// The clock ids a time namespace offsets (`include/uapi/linux/time.h`).
+pub const CLOCK_MONOTONIC: i32 = 1;
+const CLOCK_MONOTONIC_RAW: i32 = 4;
+const CLOCK_MONOTONIC_COARSE: i32 = 6;
+pub const CLOCK_BOOTTIME: i32 = 7;
+const CLOCK_BOOTTIME_ALARM: i32 = 9;
 
 /// The longest host or domain name (Linux's __NEW_UTS_LEN).
 pub const UTS_LEN: usize = 64;
@@ -189,6 +197,120 @@ impl UtsNs {
     }
 }
 
+/// A time namespace's offsets from the host's clocks, in nanoseconds
+/// (Linux's `struct timens_offsets`), and whether they can still change.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TimeOffsets {
+    pub monotonic: i64,
+    pub boottime: i64,
+    /// A process has entered the namespace: the offsets are fixed (Linux's
+    /// frozen_offsets).
+    frozen: bool,
+}
+
+/// A time namespace (Linux's `kernel/time/namespace.c`): CLOCK_MONOTONIC
+/// and CLOCK_BOOTTIME read its offsets ahead of the host's, and absolute
+/// times on them are taken back by them. A new one starts with the offsets
+/// of the namespace it was made from, which `/proc/<pid>/timens_offsets`
+/// can change until a process enters it.
+pub struct TimeNs {
+    pub ident: NsIdent,
+    offsets: Mutex<TimeOffsets>,
+}
+
+/// Why `/proc/<pid>/timens_offsets` refused new offsets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OffsetError {
+    /// A process is in the namespace (EACCES).
+    Frozen,
+}
+
+impl TimeNs {
+    pub fn offsets(&self) -> TimeOffsets {
+        *self.offsets.lock()
+    }
+
+    /// Fix the offsets: a process enters the namespace (Linux's
+    /// timens_commit).
+    pub fn freeze(&self) {
+        self.offsets.lock().frozen = true;
+    }
+
+    /// Set the offsets given (proc_timens_set_offset, whose caller checked
+    /// privilege and range): EACCES once a process has entered.
+    pub fn set_offsets(
+        &self,
+        monotonic: Option<i64>,
+        boottime: Option<i64>,
+    ) -> Result<(), OffsetError> {
+        let mut offsets = self.offsets.lock();
+        if offsets.frozen {
+            return Err(OffsetError::Frozen);
+        }
+        if let Some(ns) = monotonic {
+            offsets.monotonic = ns;
+        }
+        if let Some(ns) = boottime {
+            offsets.boottime = ns;
+        }
+        Ok(())
+    }
+
+    /// What reading clock `clock_id` adds to the host's time: the
+    /// monotonic offset for MONOTONIC and its raw and coarse forms, the
+    /// boot-time one for BOOTTIME and its alarm form (Linux's
+    /// timens_add_monotonic and timens_add_boottime), 0 for the others.
+    pub fn read_offset(&self, clock_id: i32) -> i64 {
+        let offsets = self.offsets();
+        match clock_id {
+            CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW | CLOCK_MONOTONIC_COARSE => offsets.monotonic,
+            CLOCK_BOOTTIME | CLOCK_BOOTTIME_ALARM => offsets.boottime,
+            _ => 0,
+        }
+    }
+
+    /// An absolute time `t` on clock `clock_id` as the host's clock reads
+    /// it (Linux's do_timens_ktime_to_host): only MONOTONIC, BOOTTIME and
+    /// BOOTTIME_ALARM move; a time before the offset is already past (0).
+    pub fn to_host(&self, clock_id: i32, t: i64) -> i64 {
+        let offsets = self.offsets();
+        let offset = match clock_id {
+            CLOCK_MONOTONIC => offsets.monotonic,
+            CLOCK_BOOTTIME | CLOCK_BOOTTIME_ALARM => offsets.boottime,
+            _ => return t,
+        };
+        if t < offset {
+            0
+        } else {
+            t.saturating_sub(offset)
+        }
+    }
+}
+
+/// The time namespace the calling thread runs in (the initial one outside
+/// a thread).
+pub fn current_time() -> Arc<TimeNs> {
+    match crate::process::current_thread() {
+        Some(t) => t.namespaces().time.clone(),
+        None => initial_all().set.time.clone(),
+    }
+}
+
+/// The host's monotonic time `host_ns` as clock `clock_id` reads it in the
+/// caller's time namespace (never below 0).
+pub fn clock_from_host(clock_id: i32, host_ns: u64) -> u64 {
+    let offset = current_time().read_offset(clock_id);
+    (host_ns.min(i64::MAX as u64) as i64)
+        .saturating_add(offset)
+        .max(0) as u64
+}
+
+/// An absolute time `t` on clock `clock_id` in the caller's time namespace
+/// as the host's monotonic time (see [`TimeNs::to_host`]).
+pub fn clock_to_host(clock_id: i32, t: u64) -> u64 {
+    current_time().to_host(clock_id, t.min(i64::MAX as u64) as i64) as u64
+}
+
 /// A namespace that holds nothing yet besides its identity: IPC (no
 /// System V IPC or message queues exist), cgroup (no hierarchy), and the
 /// types whose own state comes with their later steps (ADR 0022).
@@ -200,6 +322,7 @@ pub struct PlainNs {
 #[derive(Clone)]
 pub enum NsRef {
     Uts(Arc<UtsNs>),
+    Time(Arc<TimeNs>),
     Plain(Arc<PlainNs>),
 }
 
@@ -207,6 +330,7 @@ impl NsRef {
     pub fn ident(&self) -> NsIdent {
         match self {
             NsRef::Uts(ns) => ns.ident,
+            NsRef::Time(ns) => ns.ident,
             NsRef::Plain(ns) => ns.ident,
         }
     }
@@ -232,8 +356,8 @@ pub struct Namespaces {
     pub pid_for_children: Arc<PlainNs>,
     pub net: Arc<PlainNs>,
     pub cgroup: Arc<PlainNs>,
-    pub time: Arc<PlainNs>,
-    pub time_for_children: Arc<PlainNs>,
+    pub time: Arc<TimeNs>,
+    pub time_for_children: Arc<TimeNs>,
 }
 
 impl core::fmt::Debug for Namespaces {
@@ -274,7 +398,14 @@ fn initial_all() -> &'static Initial {
             })
         };
         let pid = plain(NsKind::Pid);
-        let time = plain(NsKind::Time);
+        // The initial time namespace's offsets are 0 and fixed.
+        let time = Arc::new(TimeNs {
+            ident: NsIdent::initial(NsKind::Time),
+            offsets: Mutex::new(TimeOffsets {
+                frozen: true,
+                ..TimeOffsets::default()
+            }),
+        });
         Initial {
             set: Arc::new(Namespaces {
                 uts: Arc::new(UtsNs {
@@ -326,14 +457,16 @@ impl Namespaces {
             NsKind::Pid => NsRef::Plain(self.pid_for_children.clone()),
             NsKind::Net => NsRef::Plain(self.net.clone()),
             NsKind::Cgroup => NsRef::Plain(self.cgroup.clone()),
-            NsKind::Time => NsRef::Plain(self.time_for_children.clone()),
+            NsKind::Time => NsRef::Time(self.time_for_children.clone()),
             NsKind::User => NsRef::Plain(initial_all().user.clone()),
         }
     }
 
     /// Linux's create_new_namespaces: this set with a new namespace of
     /// each type in `flags` (a new UTS namespace starts with this one's
-    /// names, as copy_utsname copies them). A type not yet creatable is
+    /// names, as copy_utsname copies them; a new time namespace becomes the
+    /// one for children, with the offsets of the current one for children,
+    /// as copy_time_ns). A type not yet creatable is
     /// EINVAL; CLONE_NEWUSER is the credentials', not looked at here.
     pub fn copy_with(&self, flags: u64) -> Result<Namespaces, NsError> {
         let wanted = flags & CLONE_NS_ALL & !CLONE_NEWUSER;
@@ -359,6 +492,16 @@ impl Namespaces {
         if flags & CLONE_NEWCGROUP != 0 {
             new.cgroup = plain(NsKind::Cgroup);
         }
+        if flags & CLONE_NEWTIME != 0 {
+            let offsets = self.time_for_children.offsets();
+            new.time_for_children = Arc::new(TimeNs {
+                ident: NsIdent::fresh(NsKind::Time),
+                offsets: Mutex::new(TimeOffsets {
+                    frozen: false,
+                    ..offsets
+                }),
+            });
+        }
         Ok(new)
     }
 
@@ -373,9 +516,9 @@ impl Namespaces {
             (NsKind::Pid, NsRef::Plain(p)) => new.pid_for_children = p.clone(),
             (NsKind::Net, NsRef::Plain(p)) => new.net = p.clone(),
             (NsKind::Cgroup, NsRef::Plain(p)) => new.cgroup = p.clone(),
-            (NsKind::Time, NsRef::Plain(p)) => {
-                new.time = p.clone();
-                new.time_for_children = p.clone();
+            (NsKind::Time, NsRef::Time(t)) => {
+                new.time = t.clone();
+                new.time_for_children = t.clone();
             }
             _ => {}
         }
@@ -387,9 +530,35 @@ impl Namespaces {
     /// time namespace for children (Linux's timens_on_fork).
     pub fn for_child(mut self, share_vm: bool) -> Namespaces {
         if !share_vm {
-            self.time = self.time_for_children.clone();
+            self.enter_time_for_children();
         }
         self
+    }
+
+    /// Whether the time namespace for children is not the one this set
+    /// runs in (after unshare(CLONE_NEWTIME)).
+    pub fn time_pending(&self) -> bool {
+        self.time.ident != self.time_for_children.ident
+    }
+
+    /// Run in the time namespace for children, which then cannot change
+    /// its offsets (Linux's timens_on_fork and timens_commit).
+    fn enter_time_for_children(&mut self) {
+        if self.time_pending() {
+            self.time = self.time_for_children.clone();
+            self.time.freeze();
+        }
+    }
+
+    /// The set an exec leaves: the time namespace for children entered
+    /// (Linux's exec_task_namespaces), or None when nothing changes.
+    pub fn after_exec(&self) -> Option<Namespaces> {
+        if !self.time_pending() {
+            return None;
+        }
+        let mut new = self.clone();
+        new.enter_time_for_children();
+        Some(new)
     }
 }
 
@@ -466,10 +635,12 @@ mod tests {
     #[test]
     fn types_not_yet_creatable_are_einval() {
         let set = initial();
-        for flag in [CLONE_NEWNS, CLONE_NEWPID, CLONE_NEWNET, CLONE_NEWTIME] {
+        for flag in [CLONE_NEWNS, CLONE_NEWPID, CLONE_NEWNET] {
             assert_eq!(set.copy_with(flag).err(), Some(NsError::Unsupported));
         }
-        assert!(set.copy_with(CLONE_NEWIPC | CLONE_NEWCGROUP).is_ok());
+        assert!(set
+            .copy_with(CLONE_NEWIPC | CLONE_NEWCGROUP | CLONE_NEWTIME)
+            .is_ok());
     }
 
     #[test]
@@ -497,6 +668,63 @@ mod tests {
         );
         let new = for_clone(&set, CLONE_NEWUTS, true).unwrap();
         assert!(!new.get(NsKind::Uts).same(&set.get(NsKind::Uts)));
+    }
+
+    #[test]
+    fn a_new_time_namespace_is_for_children_until_entered() {
+        let set = initial();
+        assert_eq!(
+            set.time.set_offsets(Some(1), None),
+            Err(OffsetError::Frozen)
+        );
+        let new = set.copy_with(CLONE_NEWTIME).unwrap();
+        assert!(new.time_pending());
+        assert!(Arc::ptr_eq(&new.time, &set.time));
+        // Offsets can change until a process enters.
+        new.time_for_children
+            .set_offsets(Some(1_000_000_000_000), Some(-5))
+            .unwrap();
+        assert_eq!(
+            new.time_for_children.read_offset(CLOCK_MONOTONIC),
+            1_000_000_000_000
+        );
+        assert_eq!(new.time_for_children.read_offset(4), 1_000_000_000_000);
+        assert_eq!(new.time_for_children.read_offset(CLOCK_BOOTTIME), -5);
+        assert_eq!(new.time_for_children.read_offset(0), 0);
+        // A CLONE_VM child stays where it was; another enters.
+        assert!(new.clone().for_child(true).time_pending());
+        let child = new.clone().for_child(false);
+        assert!(!child.time_pending());
+        assert!(Arc::ptr_eq(&child.time, &new.time_for_children));
+        assert_eq!(
+            new.time_for_children.set_offsets(Some(0), None),
+            Err(OffsetError::Frozen)
+        );
+        // Exec enters it too; a set with nothing pending stays.
+        assert!(child.after_exec().is_none());
+        let execed = new.after_exec().unwrap();
+        assert!(Arc::ptr_eq(&execed.time, &new.time_for_children));
+        // A namespace made from it starts with its offsets, unfrozen.
+        let next = child.copy_with(CLONE_NEWTIME).unwrap();
+        assert_eq!(
+            next.time_for_children.offsets().monotonic,
+            1_000_000_000_000
+        );
+        assert!(next.time_for_children.set_offsets(None, Some(0)).is_ok());
+    }
+
+    #[test]
+    fn absolute_times_go_back_by_the_offset() {
+        let set = initial().copy_with(CLONE_NEWTIME).unwrap();
+        let t = &set.time_for_children;
+        t.set_offsets(Some(100), Some(1_000)).unwrap();
+        assert_eq!(t.to_host(CLOCK_MONOTONIC, 150), 50);
+        assert_eq!(t.to_host(CLOCK_MONOTONIC, 50), 0);
+        assert_eq!(t.to_host(CLOCK_BOOTTIME, 1_500), 500);
+        assert_eq!(t.to_host(9, 1_500), 500);
+        // The raw and coarse clocks have no timers; others do not move.
+        assert_eq!(t.to_host(4, 150), 150);
+        assert_eq!(t.to_host(0, 150), 150);
     }
 
     #[test]

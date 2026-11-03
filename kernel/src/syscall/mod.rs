@@ -608,6 +608,8 @@ pub fn map_kernel_error(err: crate::error::KernelError) -> SyscallError {
             FsError::NoData => SyscallError::NoData,
             FsError::TextBusy => SyscallError::TextBusy,
             FsError::Canceled => SyscallError::Canceled,
+            FsError::OutOfRange => SyscallError::RangeError,
+            FsError::NoProcess => SyscallError::ProcessNotFound,
         },
         KernelError::OutOfMemory { .. } => SyscallError::OutOfMemory,
         KernelError::InvalidArgument { .. } => SyscallError::InvalidArgument,

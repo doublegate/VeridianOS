@@ -5554,6 +5554,7 @@ static void test_clone3(void);
 static void test_kcmp_process_vm(void);
 static void test_personality(void);
 static void test_namespaces_uts(void);
+static void test_namespaces_time(void);
 
 /* Tests `--only NAME` can run alone (for debugging a single test). */
 static const struct {
@@ -5574,6 +5575,7 @@ static const struct {
     {"kcmp_process_vm", test_kcmp_process_vm},
     {"personality", test_personality},
     {"namespaces_uts", test_namespaces_uts},
+    {"namespaces_time", test_namespaces_time},
     {"threads", test_threads},
     {"cow_race", test_cow_race},
     {"signals", test_signals},
@@ -8645,6 +8647,193 @@ static void test_namespaces_uts(void)
     report("namespaces_uts", f == 0, why);
 }
 
+/* Time namespaces, as Linux 7.3 (ADR 0022 H2): unshare(CLONE_NEWTIME)
+ * makes a namespace for children whose offsets /proc/self/timens_offsets
+ * sets until a process enters it; a child (fork or exec) then reads
+ * CLOCK_MONOTONIC and CLOCK_BOOTTIME that far ahead, in clock_gettime,
+ * /proc/uptime and sysinfo, and its absolute deadlines (clock_nanosleep,
+ * timerfd, POSIX timers, futex) are taken back to the host's clock. All
+ * of it runs in a child, so the rest of the suite keeps its namespace. */
+#ifndef CLONE_NEWTIME
+#define CLONE_NEWTIME 0x80
+#endif
+
+static int64_t t_ns_now(clockid_t c)
+{
+    struct timespec ts;
+    clock_gettime(c, &ts);
+    return (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
+}
+
+static unsigned long t_time_ino(const char *link)
+{
+    char path[64];
+    struct stat st;
+    snprintf(path, sizeof(path), "/proc/self/ns/%s", link);
+    return stat(path, &st) == 0 ? (unsigned long)st.st_ino : 0;
+}
+
+static int t_write_offsets(const char *text)
+{
+    /* O_TRUNC, as fopen("w") and so LTP's SAFE_FILE_PRINTF. */
+    int fd = open("/proc/self/timens_offsets", O_WRONLY | O_TRUNC | O_CLOEXEC);
+    if (fd < 0) return -1;
+    ssize_t n = write(fd, text, strlen(text));
+    int saved = errno;
+    close(fd);
+    errno = saved;
+    return n == (ssize_t)strlen(text) ? 0 : -1;
+}
+
+static struct timespec t_ts(int64_t ns)
+{
+    struct timespec ts = {ns / 1000000000, ns % 1000000000};
+    return ts;
+}
+
+/* In the child that entered the namespace: what it sees (bits 1..7 of
+ * the exit status). */
+static int t_time_child(int64_t parent_mono, int64_t parent_boot)
+{
+    int f = 0;
+    int64_t sec = 1000000000;
+    int64_t mono = t_ns_now(CLOCK_MONOTONIC), boot = t_ns_now(CLOCK_BOOTTIME);
+    if (mono - parent_mono < 1000 * sec || mono - parent_mono > 1010 * sec) f |= 1;
+    if (boot - parent_boot < 2000 * sec || boot - parent_boot > 2010 * sec) f |= 1;
+    if (t_ns_now(CLOCK_MONOTONIC_COARSE) - parent_mono < 999 * sec) f |= 1;
+
+    char buf[64] = {0};
+    int fd = open("/proc/uptime", O_RDONLY);
+    if (fd < 0 || read(fd, buf, sizeof(buf) - 1) <= 0 || atol(buf) < 2000) f |= 2;
+    if (fd >= 0) close(fd);
+    struct sysinfo si;
+    if (sysinfo(&si) != 0 || si.uptime < 2000) f |= 2;
+
+    /* Absolute deadlines 20 ms ahead return about then, not 1000 s on. */
+    int64_t wall = t_ns_now(CLOCK_REALTIME);
+    struct timespec at = t_ts(t_ns_now(CLOCK_MONOTONIC) + 20000000);
+    if (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &at, NULL) != 0) f |= 4;
+    at = t_ts(t_ns_now(CLOCK_BOOTTIME) + 20000000);
+    if (clock_nanosleep(CLOCK_BOOTTIME, TIMER_ABSTIME, &at, NULL) != 0) f |= 4;
+    uint32_t word = 0;
+    at = t_ts(t_ns_now(CLOCK_MONOTONIC) + 20000000);
+    if (!(syscall(SYS_futex, &word, FUTEX_WAIT_BITSET, 0, &at, NULL, ~0u) == -1 &&
+          errno == ETIMEDOUT))
+        f |= 4;
+    if (t_ns_now(CLOCK_REALTIME) - wall > 5 * sec) f |= 4;
+
+    /* A timer set to an absolute time 1 s ahead has about 1 s left. */
+    struct itimerspec its = {{0, 0}, t_ts(t_ns_now(CLOCK_MONOTONIC) + sec)}, cur;
+    int tfd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC);
+    if (tfd < 0 || timerfd_settime(tfd, TFD_TIMER_ABSTIME, &its, NULL) != 0 ||
+        timerfd_gettime(tfd, &cur) != 0 || cur.it_value.tv_sec != 0 ||
+        cur.it_value.tv_nsec < 500000000)
+        f |= 8;
+    if (tfd >= 0) close(tfd);
+    timer_t timer;
+    struct sigevent sev = {0};
+    sev.sigev_notify = SIGEV_NONE;
+    its.it_value = t_ts(t_ns_now(CLOCK_BOOTTIME) + sec);
+    if (timer_create(CLOCK_BOOTTIME, &sev, &timer) != 0 ||
+        timer_settime(timer, TIMER_ABSTIME, &its, NULL) != 0 ||
+        timer_gettime(timer, &cur) != 0 || cur.it_value.tv_sec != 0 ||
+        cur.it_value.tv_nsec < 500000000)
+        f |= 8;
+
+    /* It runs in its parent's namespace for children. */
+    if (t_time_ino("time") != t_time_ino("time_for_children")) f |= 16;
+    return f;
+}
+
+static void test_namespaces_time(void)
+{
+    char why[160];
+    int f = 0;
+    pid_t top = fork();
+    if (top == 0) {
+        int g = 0;
+        unsigned long before = t_time_ino("time");
+        if (before == 0 || before != t_time_ino("time_for_children")) g |= 1;
+        int64_t mono0 = t_ns_now(CLOCK_MONOTONIC);
+        if (unshare(CLONE_NEWTIME) != 0) _exit(0x7f);
+        /* The caller stays where it was; its children will not. */
+        if (t_time_ino("time") != before || t_time_ino("time_for_children") == before) g |= 1;
+        if (t_ns_now(CLOCK_MONOTONIC) - mono0 > 5000000000LL) g |= 1;
+
+        char buf[128] = {0};
+        long s1 = -1, n1 = -1, s2 = -1, n2 = -1;
+        char c1[16], c2[16];
+        int fd = open("/proc/self/timens_offsets", O_RDONLY);
+        if (fd < 0 || read(fd, buf, sizeof(buf) - 1) <= 0 ||
+            sscanf(buf, "%15s %ld %ld %15s %ld %ld", c1, &s1, &n1, c2, &s2, &n2) != 6 ||
+            strcmp(c1, "monotonic") || strcmp(c2, "boottime") || s1 || n1 || s2 || n2)
+            g |= 2;
+        if (fd >= 0) close(fd);
+        if (!(t_write_offsets("realtime 1 0\n") == -1 && errno == EINVAL) ||
+            !(t_write_offsets("monotonic 1 1000000000\n") == -1 && errno == EINVAL) ||
+            !(t_write_offsets("monotonic 9223372037 0\n") == -1 && errno == ERANGE) ||
+            t_write_offsets("monotonic 1000 0\nboottime 2000 0\n") != 0)
+            g |= 2;
+
+        int64_t mono = t_ns_now(CLOCK_MONOTONIC), boot = t_ns_now(CLOCK_BOOTTIME);
+        if (mono - mono0 > 5000000000LL) g |= 4; /* not the caller's */
+        pid_t child = fork();
+        if (child == 0) _exit(t_time_child(mono, boot));
+        int st;
+        if (waitpid(child, &st, 0) != child || !WIFEXITED(st)) g |= 8;
+        else g |= WEXITSTATUS(st) << 8;
+        /* Entered: the offsets are fixed. */
+        if (!(t_write_offsets("monotonic 5 0\n") == -1 && errno == EACCES)) g |= 4;
+
+        /* setns into it from a nsfs file. */
+        child = fork();
+        if (child == 0) {
+            int ns = open("/proc/self/ns/time_for_children", O_RDONLY | O_CLOEXEC);
+            _exit(ns >= 0 && setns(ns, CLONE_NEWTIME) == 0 &&
+                          t_ns_now(CLOCK_MONOTONIC) - mono > 999000000000LL
+                      ? 0
+                      : 1);
+        }
+        if (waitpid(child, &st, 0) != child || !WIFEXITED(st) || WEXITSTATUS(st) != 0)
+            g |= 16;
+
+        /* Exec enters it too: a new program's /proc/uptime is ahead. */
+        int pfd[2];
+        if (pipe(pfd) != 0) g |= 32;
+        child = fork();
+        if (child == 0) {
+            if (unshare(CLONE_NEWTIME) != 0 || t_write_offsets("boottime 3000 0\n") != 0)
+                _exit(1);
+            dup2(pfd[1], 1);
+            execl("/bin/cat", "cat", "/proc/uptime", (char *)NULL);
+            _exit(1);
+        }
+        close(pfd[1]);
+        memset(buf, 0, sizeof(buf));
+        if (read(pfd[0], buf, sizeof(buf) - 1) <= 0 || atol(buf) < 3000) g |= 32;
+        close(pfd[0]);
+        waitpid(child, &st, 0);
+
+        /* Without CAP_SYS_ADMIN: EPERM. */
+        child = fork();
+        if (child == 0) {
+            if (setgid(65534) != 0 || setuid(65534) != 0) _exit(0);
+            _exit(unshare(CLONE_NEWTIME) == -1 && errno == EPERM ? 0 : 1);
+        }
+        if (waitpid(child, &st, 0) != child || !WIFEXITED(st) || WEXITSTATUS(st) != 0)
+            g |= 64;
+        printf("time-ns g=%#x\n", g);
+        fflush(stdout);
+        _exit(g == 0 ? 0 : 1);
+    }
+    int st;
+    if (waitpid(top, &st, 0) != top || !WIFEXITED(st)) f |= 1;
+    else if (WEXITSTATUS(st) == 0x7f) f |= 2; /* unshare refused */
+    else if (WEXITSTATUS(st) != 0) f |= 4;
+    snprintf(why, sizeof(why), "f=%#x", f);
+    report("namespaces_time", f == 0, why);
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
@@ -8765,6 +8954,7 @@ int main(int argc, char **argv)
     test_kcmp_process_vm();
     test_personality();
     test_namespaces_uts();
+    test_namespaces_time();
 #if defined(__x86_64__)
     test_ustat_sysfs();
 #endif
