@@ -429,6 +429,9 @@ pub struct Thread {
     /// privilege (no setuid or setgid). It cannot be cleared, and every
     /// thread and process the thread creates inherits it.
     pub no_new_privs: AtomicBool,
+    /// personality(2)'s value (`process::personality`): per thread, as on
+    /// Linux, and inherited by every thread and process the thread creates.
+    pub personality: core::sync::atomic::AtomicU32,
     /// The Linux capability sets and securebits (ADR 0020). Per thread, as
     /// on Linux: capset changes only the calling thread's. A new thread has
     /// the initial sets (full, as root has); fork and clone copy the
@@ -591,6 +594,7 @@ impl Thread {
             robust_list: AtomicUsize::new(0),
             sched: Mutex::new(SchedParams::default()),
             no_new_privs: AtomicBool::new(false),
+            personality: core::sync::atomic::AtomicU32::new(0),
             caps: Mutex::new(super::linux_caps::CapSets::ROOT),
             comm: Mutex::new(comm),
             fs_released: AtomicBool::new(false),

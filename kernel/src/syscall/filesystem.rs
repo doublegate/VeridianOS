@@ -2190,8 +2190,11 @@ pub fn sys_kill(pid: usize, signal: usize) -> SyscallResult {
         .ok_or(SyscallError::InvalidArgument)?;
     let caller = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
 
-    match pid as isize {
+    // A pid_t: its low 32 bits; -INT_MIN names no group (Linux's
+    // kill_something_info).
+    match pid as u32 as i32 {
         p if p > 0 => kill_one(&caller, crate::process::ProcessId(p as u64), sig),
+        i32::MIN => Err(SyscallError::ProcessNotFound),
         0 => kill_matching(&caller, sig, |p| {
             p.pgid.load(core::sync::atomic::Ordering::Relaxed)
                 == caller.pgid.load(core::sync::atomic::Ordering::Relaxed)
@@ -2253,13 +2256,13 @@ pub(crate) fn kill_one(
     sig: i32,
 ) -> SyscallResult {
     let target = crate::process::table::get_process(pid).ok_or(SyscallError::ProcessNotFound)?;
-    if !target.is_alive() {
-        return Err(SyscallError::ProcessNotFound);
-    }
     if !may_signal(caller, &target, sig) {
         return Err(SyscallError::OperationNotPermitted);
     }
-    if sig == 0 {
+    // A zombie (exited, not yet reaped) takes the signal and discards it,
+    // as on Linux, where it is still there to be signalled; only a reaped
+    // process is ESRCH.
+    if sig == 0 || !target.is_alive() {
         return Ok(0);
     }
     // A signal the caller sends itself whose action ends the process must
@@ -2335,8 +2338,10 @@ pub(crate) fn signal_matching(
     pred: impl Fn(&crate::process::Process) -> bool,
 ) -> SyscallResult {
     let mut targets = alloc::vec::Vec::new();
+    // Zombies too: they are still in their group (kill_one discards the
+    // signal for them).
     crate::process::table::PROCESS_TABLE.for_each(|p| {
-        if p.is_alive() && pred(p) {
+        if pred(p) {
             targets.push(p.pid);
         }
     });

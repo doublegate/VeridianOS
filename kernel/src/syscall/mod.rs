@@ -1511,6 +1511,7 @@ fn handle_syscall(
         Syscall::PidfdSendSignal => pidfd::sys_pidfd_send_signal(arg1, arg2, arg3, arg4),
         #[cfg(feature = "alloc")]
         Syscall::PidfdGetfd => pidfd::sys_pidfd_getfd(arg1, arg2, arg3),
+        Syscall::Personality => process::sys_personality(arg1),
         #[cfg(feature = "alloc")]
         Syscall::Kcmp => kcmp::sys_kcmp(arg1, arg2, arg3, arg4, arg5),
         #[cfg(feature = "alloc")]

@@ -439,6 +439,12 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
                     .load(core::sync::atomic::Ordering::Acquire),
             core::sync::atomic::Ordering::Release,
         );
+        new_thread.personality.store(
+            current_thread
+                .personality
+                .load(core::sync::atomic::Ordering::Acquire),
+            core::sync::atomic::Ordering::Release,
+        );
         // The sets read with the credentials (above), not re-read here: a
         // set*id call on another thread in between would pair root IDs
         // with dropped sets, which exec turns back into full privilege.

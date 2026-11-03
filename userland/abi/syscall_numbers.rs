@@ -34,6 +34,7 @@ pub mod sysno {
     pub const SYS_kill: usize = 62;
     pub const SYS_umask: usize = 95;
     pub const SYS_uname: usize = 63;
+    pub const SYS_personality: usize = 135;
     pub const SYS_PROCESS_GETENV: usize = 1229;
     pub const SYS_waitid: usize = 247;
     pub const SYS_prctl: usize = 157;
@@ -358,6 +359,7 @@ pub mod sysno {
     pub const SYS_kill: usize = 129;
     pub const SYS_umask: usize = 166;
     pub const SYS_uname: usize = 160;
+    pub const SYS_personality: usize = 92;
     pub const SYS_PROCESS_GETENV: usize = 1229;
     pub const SYS_waitid: usize = 95;
     pub const SYS_prctl: usize = 167;
@@ -645,6 +647,7 @@ pub mod sysno {
     pub const SYS_kill: usize = 129;
     pub const SYS_umask: usize = 166;
     pub const SYS_uname: usize = 160;
+    pub const SYS_personality: usize = 92;
     pub const SYS_PROCESS_GETENV: usize = 1229;
     pub const SYS_waitid: usize = 95;
     pub const SYS_prctl: usize = 167;

@@ -222,6 +222,9 @@ impl VfsNode for ProcNode {
                     // Qt/KDE compatibility files
                     "core_pattern" => String::from("core\n"),
                     "pid_max" => format!("{}\n", crate::process::PID_MAX),
+                    // No taint: no proprietary modules, no oops (LTP's
+                    // tst_taint reads it).
+                    "tainted" => String::from("0\n"),
                     "cap_last_cap" => {
                         format!("{}\n", crate::process::linux_caps::CAP_LAST_CAP)
                     }
@@ -454,6 +457,7 @@ impl VfsNode for ProcNode {
                         ("ostype", NodeType::File),
                         ("pid_max", NodeType::File),
                         ("random", NodeType::Directory),
+                        ("tainted", NodeType::File),
                         ("version", NodeType::File),
                     ],
                     "sys/kernel/random" => &[("boot_id", NodeType::File)],
@@ -555,7 +559,7 @@ impl VfsNode for ProcNode {
                         "core_pattern" => Ok(Arc::new(ProcNode::new_system_file(String::from(
                             "core_pattern",
                         ))) as Arc<dyn VfsNode>),
-                        "cap_last_cap" | "pid_max" | "ostype" | "osrelease" => {
+                        "cap_last_cap" | "pid_max" | "ostype" | "osrelease" | "tainted" => {
                             Ok(Arc::new(ProcNode::new_system_file(String::from(name)))
                                 as Arc<dyn VfsNode>)
                         }
@@ -1122,6 +1126,7 @@ mod tests {
                     "ostype",
                     "pid_max",
                     "random",
+                    "tainted",
                     "version",
                 ][..],
             ),

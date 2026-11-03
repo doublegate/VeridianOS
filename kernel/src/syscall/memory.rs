@@ -275,15 +275,16 @@ pub fn sys_mmap(
         return Err(SyscallError::InvalidArgument);
     }
 
-    // W^X: writable and executable memory is EACCES unless the program
-    // opted in, and always under PR_SET_MDWE (ADR 0017).
-    if process::current_process()
+    // personality's READ_IMPLIES_EXEC, then W^X: writable and executable
+    // memory is EACCES unless the program opted in, and always under
+    // PR_SET_MDWE (ADR 0017).
+    let policy = process::current_process()
         .ok_or(SyscallError::InvalidState)?
         .memory_space
         .lock()
-        .wx_policy()
-        .refuses_map(prot)
-    {
+        .wx_policy();
+    let prot = policy.read_implies_exec(prot, current_personality());
+    if policy.refuses_map(prot) {
         return Err(SyscallError::PermissionDenied);
     }
 
@@ -678,6 +679,13 @@ pub fn sys_munmap(addr: usize, length: usize) -> SyscallResult {
 ///
 /// # Returns
 /// 0 on success.
+/// The calling thread's personality (`process::personality`).
+fn current_personality() -> u32 {
+    process::current_thread().map_or(0, |t| {
+        t.personality.load(core::sync::atomic::Ordering::Acquire)
+    })
+}
+
 pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> SyscallResult {
     /// No effect on x86_64 (Linux accepts it).
     const PROT_SEM: usize = 0x8;
@@ -709,6 +717,10 @@ pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> SyscallResult {
     // (ENOMEM, as Linux), that borrowed mappings gain no rights (N-135),
     // and W^X with PR_SET_MDWE (EACCES, ADR 0017).
     let memory_space = proc.memory_space.lock();
+    // READ_IMPLIES_EXEC as mmap takes it.
+    let prot = memory_space
+        .wx_policy()
+        .read_implies_exec(prot, current_personality());
     // EACCES before the data limit's ENOMEM, as Linux checks each VMA.
     if memory_space.wx_policy().refuses_map(prot) {
         return Err(SyscallError::PermissionDenied);

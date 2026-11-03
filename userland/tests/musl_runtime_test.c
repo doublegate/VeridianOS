@@ -19,6 +19,7 @@
 #include <errno.h>
 #include <grp.h>
 #include <sys/stat.h>
+#include <limits.h>
 #include <poll.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
@@ -37,6 +38,7 @@
 #include <sys/fsuid.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
+#include <sys/personality.h>
 #include <sys/resource.h>
 #include <sys/sysinfo.h>
 #include <sys/statfs.h>
@@ -5550,6 +5552,7 @@ static void test_inotify_events(void);
 static void test_pidfd(void);
 static void test_clone3(void);
 static void test_kcmp_process_vm(void);
+static void test_personality(void);
 
 /* Tests `--only NAME` can run alone (for debugging a single test). */
 static const struct {
@@ -5568,6 +5571,7 @@ static const struct {
     {"pidfd", test_pidfd},
     {"clone3", test_clone3},
     {"kcmp_process_vm", test_kcmp_process_vm},
+    {"personality", test_personality},
     {"threads", test_threads},
     {"cow_race", test_cow_race},
     {"signals", test_signals},
@@ -8447,6 +8451,61 @@ static void test_kcmp_process_vm(void)
     report("kcmp_process_vm", f == 0, why);
 }
 
+/* personality, as Linux 7.3: any value is stored and the old one returned
+ * (0xffffffff only asks), STICKY_TIMEOUTS leaves select's timeout alone,
+ * UNAME26 makes the release 2.6.x, and the value is inherited by a fork
+ * child. Also kill of a zombie succeeds (only a reaped process is ESRCH)
+ * and waitpid(INT_MIN) is ESRCH. */
+static void test_personality(void)
+{
+    char why[160];
+    int f = 0;
+    int old = personality(0xffffffff);
+
+    if (old != 0) f |= 1;
+    if (personality(PER_LINUX | STICKY_TIMEOUTS) != 0 ||
+        personality(0xffffffff) != (PER_LINUX | STICKY_TIMEOUTS))
+        f |= 1;
+    /* pselect6 itself: musl's select and pselect pass the kernel a copy of
+     * the timeout, so only the system call shows what it writes back. */
+    struct timespec ts = {0, 10000};
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    if (syscall(SYS_pselect6, 0, &rfds, NULL, NULL, &ts, NULL) != 0 || ts.tv_nsec != 10000)
+        f |= 2;
+    personality(PER_LINUX);
+    ts.tv_nsec = 10000;
+    if (syscall(SYS_pselect6, 0, &rfds, NULL, NULL, &ts, NULL) != 0 || ts.tv_nsec != 0) f |= 2;
+
+    struct utsname u;
+    personality(PER_LINUX | UNAME26);
+    if (uname(&u) != 0 || strncmp(u.release, "2.6.", 4) != 0) f |= 4;
+    pid_t pid = fork();
+    if (pid == 0)
+        _exit(personality(0xffffffff) == (PER_LINUX | UNAME26) ? 0 : 1);
+    int st;
+    if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 0) f |= 8;
+    personality(PER_LINUX);
+    if (uname(&u) != 0 || strncmp(u.release, "2.6.", 4) == 0) f |= 4;
+
+    /* A zombie takes a signal; a reaped process does not exist. */
+    pid = fork();
+    if (pid == 0)
+        _exit(0);
+    siginfo_t si;
+    if (waitid(P_PID, pid, &si, WEXITED | WNOWAIT) != 0 || kill(pid, SIGTERM) != 0 ||
+        kill(pid, 0) != 0)
+        f |= 16;
+    if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st)) f |= 16;
+    if (!(kill(pid, 0) == -1 && errno == ESRCH)) f |= 16;
+    if (!(waitpid(INT_MIN, NULL, 0) == -1 && errno == ESRCH) ||
+        !(kill(INT_MIN, 0) == -1 && errno == ESRCH))
+        f |= 32;
+
+    snprintf(why, sizeof(why), "f=%#x errno=%d", f, errno);
+    report("personality", f == 0, why);
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
@@ -8565,6 +8624,7 @@ int main(int argc, char **argv)
     test_pidfd();
     test_clone3();
     test_kcmp_process_vm();
+    test_personality();
 #if defined(__x86_64__)
     test_ustat_sysfs();
 #endif

@@ -50,6 +50,7 @@ chroot
 kill
 umask
 uname
+personality
 ProcessGetenv           private 1229
 waitid
 prctl

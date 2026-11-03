@@ -41,6 +41,7 @@
 #define SYS_kill                         62
 #define SYS_umask                        95
 #define SYS_uname                        63
+#define SYS_personality                  135
 #define SYS_PROCESS_GETENV               1229
 #define SYS_waitid                       247
 #define SYS_prctl                        157
@@ -390,6 +391,7 @@
 #define SYS_kill                         129
 #define SYS_umask                        166
 #define SYS_uname                        160
+#define SYS_personality                  92
 #define SYS_PROCESS_GETENV               1229
 #define SYS_waitid                       95
 #define SYS_prctl                        167
@@ -702,6 +704,7 @@
 #define SYS_kill                         129
 #define SYS_umask                        166
 #define SYS_uname                        160
+#define SYS_personality                  92
 #define SYS_PROCESS_GETENV               1229
 #define SYS_waitid                       95
 #define SYS_prctl                        167

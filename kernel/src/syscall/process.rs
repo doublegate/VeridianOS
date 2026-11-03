@@ -123,6 +123,21 @@ pub(crate) fn sys_fork_with(opts: &crate::process::fork::ForkOptions) -> Syscall
     }
 }
 
+/// personality(persona): set the calling thread's personality to
+/// `persona` unless it is 0xffffffff (a query), and return the old one, as
+/// Linux; it never fails (`process::personality`).
+pub fn sys_personality(persona: usize) -> SyscallResult {
+    use core::sync::atomic::Ordering;
+    let thread = crate::process::current_thread().ok_or(SyscallError::InvalidState)?;
+    let persona = persona as u32;
+    let old = if persona == crate::process::personality::QUERY {
+        thread.personality.load(Ordering::Acquire)
+    } else {
+        thread.personality.swap(persona, Ordering::AcqRel)
+    };
+    Ok(old as usize)
+}
+
 /// execve(path, argv, envp): execveat from the working directory.
 pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallResult {
     sys_execveat(super::filesystem::AT_FDCWD, path_ptr, argv_ptr, envp_ptr, 0)
@@ -536,6 +551,10 @@ pub fn sys_wait4(
     const WTHREAD_FLAGS: usize = 0x2000_0000 | 0x4000_0000 | 0x8000_0000;
     if options & !(WNOHANG | WUNTRACED | WCONTINUED | WTHREAD_FLAGS) != 0 {
         return Err(SyscallError::InvalidArgument);
+    }
+    // -INT_MIN names no group (N-213).
+    if pid == i32::MIN {
+        return Err(SyscallError::ProcessNotFound);
     }
 
     let wait_options = WaitOptions {

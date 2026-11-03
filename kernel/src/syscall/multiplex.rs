@@ -140,8 +140,15 @@ fn remaining(timeout: u64, start: u64) -> u64 {
 /// Write the time left back into a user timespec (`usec` false) or timeval
 /// (`usec` true), as Linux does for a non-zero timeout. A timeout in
 /// read-only memory is not an error (Linux ignores the failed copy).
+/// Under personality's STICKY_TIMEOUTS the timeout is left as it was, as
+/// Linux's poll_select_finish.
 fn write_back_timeout(ptr: usize, timeout: u64, start: u64, usec: bool) {
-    if ptr == 0 || timeout == 0 {
+    let sticky = crate::process::current_thread().is_some_and(|t| {
+        t.personality.load(core::sync::atomic::Ordering::Acquire)
+            & crate::process::personality::STICKY_TIMEOUTS
+            != 0
+    });
+    if ptr == 0 || timeout == 0 || sticky {
         return;
     }
     let left = remaining(timeout, start);

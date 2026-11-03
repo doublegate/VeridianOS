@@ -217,13 +217,24 @@
   file table, filesystem state or signal handlers, or a file an epoll instance watches
   (KCMP_EPOLL_TFD), ordered by an obfuscated address; a CLONE_VM child shares its parent's
   address space until either execs, and KCMP_IO and KCMP_SYSVSEM find every pair equal (no task
-  has an I/O context or a semaphore undo list). clone accepts CLONE_IO. process_vm_readv and process_vm_writev, as `mm/process_vm_access.c`: copies
+  has an I/O context or a semaphore undo list). clone accepts CLONE_IO.
+- process_vm_readv and process_vm_writev, as `mm/process_vm_access.c`: copies
   between the caller and a process it may ptrace, page by page, faulting the target's pages in,
   writing only where the target may write, and returning what was copied before a fault. Access
   is checked again for every page, so a set-ID exec in the target ends the copy. A process may
   always use these calls, and pidfd_getfd, on itself, as Linux's ptrace_may_access allows. An
   open pidfd keeps its process's id from being chosen again by clone3's set_tid, as Linux's pidfd
   keeps its struct pid, so CLONE_PIDFD_AUTOKILL's kill cannot reach another process.
+- personality, as Linux 7.3: per thread, inherited, any value stored and the old one returned.
+  STICKY_TIMEOUTS leaves the timeout of select, pselect6 and ppoll unchanged, UNAME26 reports a
+  2.6 release (2.6.63-veridian), and READ_IMPLIES_EXEC makes readable memory executable for a
+  program with the W^X opt-in only (ADR 0017). Exec clears READ_IMPLIES_EXEC, as Linux does for
+  every 64-bit program, and a set-ID exec PER_CLEAR_ON_SETID.
+- kill and the other senders deliver to a zombie, which discards the signal, as Linux; only a
+  reaped process is ESRCH. kill and waitpid take a pid_t's low 32 bits and refuse INT_MIN with
+  ESRCH (N-213). `/proc/sys/kernel/tainted` reads 0.
+- rseq stays ENOSYS, as on Linux built without CONFIG_RSEQ: glibc runs without it and musl does
+  not use it.
 - A signal from rt_sigqueueinfo, rt_tgsigqueueinfo or pidfd_send_signal that ends a sender
   outside the dispatcher leaves through the exit path, and pidfd_getfd checks access and takes
   the descriptor under the target's credential guard, so a set-ID exec cannot come between.

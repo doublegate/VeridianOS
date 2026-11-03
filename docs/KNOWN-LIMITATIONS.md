@@ -316,8 +316,7 @@ What remains:
 - **pidfds have no ioctls and no fdinfo.** pidfd_open, pidfd_send_signal, pidfd_getfd,
   waitid(P_PIDFD) and clone(CLONE_PIDFD) work as on Linux, but PIDFD_GET_INFO and the namespace
   ioctls are not implemented and `/proc/<pid>/fdinfo` (where Linux shows a pidfd's pid) does not exist.
-  A process that has exited but is not yet reaped refuses signals with ESRCH, through kill and
-  pidfd_send_signal alike, where Linux accepts and discards them. An open `/proc/self` stands for
+  An open `/proc/self` stands for
   whichever process uses it, not the one that opened it, so pidfd_send_signal on one passed to
   another process signals that process.
 - **clone3 has one PID namespace level and no cgroups.** set_tid takes one ID (more are EINVAL,
@@ -334,6 +333,15 @@ What remains:
   own (a mapping one makes later the other does not see). No task has an I/O context or a System V
   semaphore undo list, so KCMP_IO and KCMP_SYSVSEM always answer 0, as Linux does for two tasks
   with none.
+- **personality changes little.** Every value is stored and reported, but only PER_LINUX
+  exists, and only STICKY_TIMEOUTS, UNAME26 and READ_IMPLIES_EXEC change anything.
+  READ_IMPLIES_EXEC is honoured only for a program with the W^X opt-in (ADR 0017), since adding
+  PROT_EXEC to writable memory would otherwise make every such mapping EACCES;
+  ADDR_NO_RANDOMIZE has nothing to turn off (no address-space randomization), and there is no
+  `/proc/<pid>/personality`.
+- **rseq is ENOSYS**, as on Linux built without CONFIG_RSEQ. glibc treats a failed rseq
+  registration as no rseq (sched_getcpu then uses getcpu) and musl does not use it; programs that
+  require restartable sequences do not run.
 - **chroot (N-250):** a working directory outside the new root is moved to the root, where Linux
   would leave it outside.
 - **uname says `VeridianOS`, not `Linux`, by default (ADR 0021).** Programs that test the

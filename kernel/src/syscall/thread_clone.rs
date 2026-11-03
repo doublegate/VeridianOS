@@ -564,6 +564,12 @@ fn thread_clone(req: &CloneRequest, id: Option<u64>) -> Result<usize, SyscallErr
         core::sync::atomic::Ordering::Release,
     );
     *thread.comm.lock() = *current_thread.comm.lock();
+    thread.personality.store(
+        current_thread
+            .personality
+            .load(core::sync::atomic::Ordering::Acquire),
+        core::sync::atomic::Ordering::Release,
+    );
     thread.no_new_privs.store(
         current_thread
             .no_new_privs

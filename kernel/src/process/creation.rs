@@ -799,6 +799,15 @@ fn exec_image(
         // the loader's refusal of LD_PRELOAD and LD_LIBRARY_PATH) follows
         // from them.
         let secure = install_exec_credentials(&process, &current_thread, set_ids)?;
+        // personality: READ_IMPLIES_EXEC goes, and with a secure exec
+        // PER_CLEAR_ON_SETID too (Linux's bprm->per_clear).
+        let persona = current_thread
+            .personality
+            .load(core::sync::atomic::Ordering::Acquire);
+        current_thread.personality.store(
+            super::personality::after_exec(persona, secure),
+            core::sync::atomic::Ordering::Release,
+        );
         // A new address space as far as kcmp(KCMP_VM) can tell.
         process.vm_id.store(
             super::pcb::new_vm_id(),

@@ -341,6 +341,10 @@ pub(super) fn deliver(
         crate::error::KernelError::WouldBlock => SyscallError::WouldBlock,
         _ => SyscallError::ProcessNotFound,
     };
+    // A zombie discards it (`filesystem::kill_one`).
+    if !target.is_alive() {
+        return Ok(0);
+    }
     if !target
         .dispatched
         .load(core::sync::atomic::Ordering::Acquire)

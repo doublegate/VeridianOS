@@ -62,6 +62,22 @@ impl WxPolicy {
         self.0 & WX_ALLOWED != 0 && self.0 & PR_MDWE_REFUSE_EXEC_GAIN == 0
     }
 
+    /// `prot` as personality's READ_IMPLIES_EXEC (in `personality`) makes
+    /// it: readable memory also executable, as Linux's do_mmap and
+    /// mprotect add PROT_EXEC -- only while this program may have W+X
+    /// memory (its opt-in, no MDWE), so the flag never weakens W^X.
+    pub fn read_implies_exec(self, prot: usize, personality: u32) -> usize {
+        const PROT_READ: usize = 0x1;
+        if personality & crate::process::personality::READ_IMPLIES_EXEC != 0
+            && prot & PROT_READ != 0
+            && self.wx_allowed()
+        {
+            prot | PROT_EXEC
+        } else {
+            prot
+        }
+    }
+
     /// Whether new memory with `prot` is refused (mmap; EACCES).
     pub fn refuses_map(self, prot: usize) -> bool {
         prot & PROT_WRITE != 0 && prot & PROT_EXEC != 0 && !self.wx_allowed()
@@ -128,6 +144,21 @@ mod tests {
     const R: usize = 1;
     const W: usize = PROT_WRITE;
     const X: usize = PROT_EXEC;
+
+    #[test]
+    fn read_implies_exec_only_for_a_program_that_opted_in() {
+        use crate::process::personality::READ_IMPLIES_EXEC as RIE;
+        let plain = WxPolicy::default();
+        assert_eq!(plain.read_implies_exec(R | W, RIE), R | W);
+        let opted = WxPolicy::default().exec(true);
+        assert_eq!(opted.read_implies_exec(R | W, RIE), R | W | X);
+        assert_eq!(opted.read_implies_exec(R, RIE), R | X);
+        assert_eq!(opted.read_implies_exec(W, RIE), W);
+        assert_eq!(opted.read_implies_exec(R, 0), R);
+        // MDWE takes the opt-in away.
+        let mdwe = opted.set_mdwe(1, 0, 0, 0).unwrap();
+        assert_eq!(mdwe.read_implies_exec(R, RIE), R);
+    }
 
     #[test]
     fn wx_is_refused_unless_the_program_opted_in() {

@@ -363,7 +363,8 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
   3. [ ] The remaining syscall groups: personality (READ_IMPLIES_EXEC with the W^X opt-in only),
      unshare/setns with every namespace type and `/proc/<pid>/ns`, then the process, signal, time
      and file tiers with ABI-review findings N-194 to N-247 (ETXTBSY, the ramfs and tmpfs
-     status-change time, inotify, the pidfd calls, clone3, kcmp and process_vm_* are done; fanotify stays ENOSYS, as
+     status-change time, inotify, the pidfd calls, clone3, kcmp, process_vm_* and personality
+     are done, rseq stays ENOSYS; fanotify stays ENOSYS, as
      without CONFIG_FANOTIFY); the `docs/PORTING-GUIDE.md` rewrite.
   4. [ ] ABI-review items N-190 to N-193, N-207, N-209 to N-211, N-217, N-221, N-222, N-225, N-231,
      N-235 to N-238.

@@ -33,6 +33,7 @@ pub mod lifecycle;
 pub mod linux_caps;
 pub mod memory;
 pub mod pcb;
+pub mod personality;
 pub mod posix_timer;
 pub mod rlimit;
 pub mod robust_list;

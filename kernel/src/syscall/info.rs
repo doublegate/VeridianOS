@@ -33,10 +33,10 @@ pub fn sys_get_kernel_info(buf: usize) -> SyscallResult {
 const UTSNAME_LENGTH: usize = 65;
 const UTSNAME_SIZE: usize = UTSNAME_LENGTH * 6;
 
-/// The utsname a process with system name `sysname` sees: sysname,
-/// nodename, release, version, machine and domainname, each NUL-padded to
-/// 65 bytes (ADR 0021).
-fn utsname_bytes(sysname: &str) -> [u8; UTSNAME_SIZE] {
+/// The utsname a process with system name `sysname` and `release` sees:
+/// sysname, nodename, release, version, machine and domainname, each
+/// NUL-padded to 65 bytes (ADR 0021).
+fn utsname_bytes(sysname: &str, release: &str) -> [u8; UTSNAME_SIZE] {
     use crate::utils::uname;
 
     let mut out = [0u8; UTSNAME_SIZE];
@@ -44,7 +44,7 @@ fn utsname_bytes(sysname: &str) -> [u8; UTSNAME_SIZE] {
     let fields = [
         sysname,
         uname::NODENAME,
-        uname::RELEASE,
+        release,
         uname::VERSION,
         uname::machine(),
         // domainname: no NIS domain
@@ -66,7 +66,18 @@ pub fn sys_uname(buf: usize) -> SyscallResult {
     validate_user_buffer(buf, UTSNAME_SIZE)?;
     // Built in a kernel buffer and copied out once (N-43).
     // The system name is the caller's: "Linux" in Linux uname mode.
-    let out = utsname_bytes(crate::utils::uname::current_sysname());
+    // personality's UNAME26: a 2.6 release, as Linux's override_release.
+    let uname26 = crate::process::current_thread().is_some_and(|t| {
+        t.personality.load(core::sync::atomic::Ordering::Acquire)
+            & crate::process::personality::UNAME26
+            != 0
+    });
+    let release = if uname26 {
+        crate::process::personality::uname26_release(crate::utils::uname::RELEASE)
+    } else {
+        alloc::string::String::from(crate::utils::uname::RELEASE)
+    };
+    let out = utsname_bytes(crate::utils::uname::current_sysname(), &release);
     super::userspace::write_user_bytes(buf, &out)?;
     Ok(0)
 }
@@ -84,7 +95,7 @@ mod tests {
 
     #[test]
     fn uname_reports_a_linux_release_and_the_veridian_version() {
-        let out = utsname_bytes("VeridianOS");
+        let out = utsname_bytes("VeridianOS", crate::utils::uname::RELEASE);
         assert_eq!(field(&out, 0), "VeridianOS");
         assert_eq!(field(&out, 1), "veridian");
         assert_eq!(field(&out, 2), "7.3.0-veridian");
