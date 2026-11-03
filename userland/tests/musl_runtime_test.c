@@ -5555,6 +5555,7 @@ static void test_kcmp_process_vm(void);
 static void test_personality(void);
 static void test_namespaces_uts(void);
 static void test_namespaces_time(void);
+static void test_namespaces_mnt(void);
 
 /* Tests `--only NAME` can run alone (for debugging a single test). */
 static const struct {
@@ -5576,6 +5577,7 @@ static const struct {
     {"personality", test_personality},
     {"namespaces_uts", test_namespaces_uts},
     {"namespaces_time", test_namespaces_time},
+    {"namespaces_mnt", test_namespaces_mnt},
     {"threads", test_threads},
     {"cow_race", test_cow_race},
     {"signals", test_signals},
@@ -8834,6 +8836,128 @@ static void test_namespaces_time(void)
     report("namespaces_time", f == 0, why);
 }
 
+/* Mount namespaces, as Linux 7.3 (ADR 0022 H3): /proc/<pid>/mounts and
+ * mountinfo list the process's namespace (/proc/mounts is a link to
+ * self/mounts), the namespace root being its own parent; unshare(CLONE_NEWNS)
+ * gives a copy of the tree with new mount ids and the same devices, and
+ * UNSHARE_EMPTY_MNTNS one with the root mount only, moving the root and
+ * working directory to it; setns returns to the first. All of it runs in
+ * a child, so the rest of the suite keeps its namespace. */
+#define T_UNSHARE_EMPTY_MNTNS 0x00100000
+
+/* Up to `len - 1` bytes of `path`, NUL-terminated; the length or -1. */
+static ssize_t t_slurp(const char *path, char *buf, size_t len)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    size_t n = 0;
+    ssize_t r;
+    while (n + 1 < len && (r = read(fd, buf + n, len - 1 - n)) > 0)
+        n += (size_t)r;
+    close(fd);
+    buf[n] = 0;
+    return (ssize_t)n;
+}
+
+/* The mount ids in a mountinfo text, in order; how many. */
+static int t_mount_ids(const char *info, int *ids, int max)
+{
+    int n = 0;
+    for (const char *line = info; *line && n < max;) {
+        ids[n++] = atoi(line);
+        const char *nl = strchr(line, '\n');
+        if (!nl) break;
+        line = nl + 1;
+    }
+    return n;
+}
+
+static void test_namespaces_mnt(void)
+{
+    char why[160];
+    int f = 0;
+    pid_t top = fork();
+    if (top == 0) {
+        static char before[4096], after[4096], info[4096], pinfo[4096], buf[64];
+        int g = 0;
+        struct stat root_before, root_after;
+        unsigned long first = t_ns_ino(getpid(), "mnt");
+
+        /* The initial namespace: /proc/mounts is self/mounts, the root
+         * comes first and is its own parent, /proc is there. */
+        ssize_t n = readlink("/proc/mounts", buf, sizeof(buf) - 1);
+        if (n != 11 || memcmp(buf, "self/mounts", 11) != 0) g |= 1;
+        if (t_slurp("/proc/self/mounts", before, sizeof(before)) <= 0 ||
+            t_slurp("/proc/mounts", after, sizeof(after)) <= 0 || strcmp(before, after) != 0 ||
+            !strstr(before, " /proc proc rw 0 0\n"))
+            g |= 1;
+        int id, parent;
+        if (t_slurp("/proc/self/mountinfo", pinfo, sizeof(pinfo)) <= 0 ||
+            sscanf(pinfo, "%d %d", &id, &parent) != 2 || id != parent ||
+            !strstr(pinfo, " / / "))
+            g |= 2;
+
+        /* A copy: another namespace, the same mount points, new ids, the
+         * same device for the root. */
+        if (stat("/", &root_before) != 0 || unshare(CLONE_NEWNS) != 0) {
+            printf("mnt-ns unshare errno=%d\n", errno);
+            fflush(stdout);
+            _exit(0x7f);
+        }
+        if (t_ns_ino(getpid(), "mnt") == first) g |= 4;
+        if (t_slurp("/proc/self/mounts", after, sizeof(after)) <= 0 || strcmp(before, after) != 0)
+            g |= 8;
+        int old_ids[64], new_ids[64];
+        int old_n = t_mount_ids(pinfo, old_ids, 64);
+        if (t_slurp("/proc/self/mountinfo", info, sizeof(info)) <= 0 ||
+            t_mount_ids(info, new_ids, 64) != old_n)
+            g |= 16;
+        for (int i = 0; i < old_n; i++)
+            for (int j = 0; j < old_n; j++)
+                if (old_ids[i] == new_ids[j]) g |= 16;
+        if (stat("/", &root_after) != 0 || root_after.st_dev != root_before.st_dev) g |= 32;
+
+        /* An empty one, from /proc: the root mount only, root and working
+         * directory at it. */
+        pid_t e = fork();
+        if (e == 0) {
+            char cwd[64];
+            if (chdir("/proc") != 0 || unshare(T_UNSHARE_EMPTY_MNTNS) != 0) _exit(1);
+            /* /proc is no longer a mount: its directory on the root is empty. */
+            int fd = open("/proc/self/mounts", O_RDONLY);
+            if (fd >= 0) _exit(2);
+            _exit(getcwd(cwd, sizeof(cwd)) && strcmp(cwd, "/") == 0 ? 0 : 3);
+        }
+        int st;
+        if (waitpid(e, &st, 0) != e || !WIFEXITED(st) || WEXITSTATUS(st) != 0) g |= 64;
+
+        /* setns back to the parent's namespace. */
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/%d/ns/mnt", (int)getppid());
+        int theirs = open(path, O_RDONLY | O_CLOEXEC);
+        if (theirs < 0 || setns(theirs, CLONE_NEWNS) != 0 || t_ns_ino(getpid(), "mnt") != first)
+            g |= 128;
+        if (theirs >= 0) close(theirs);
+
+        /* Without CAP_SYS_ADMIN: EPERM. */
+        pid_t un = fork();
+        if (un == 0) {
+            if (setgid(65534) != 0 || setuid(65534) != 0) _exit(0);
+            _exit(unshare(CLONE_NEWNS) == -1 && errno == EPERM ? 0 : 1);
+        }
+        if (waitpid(un, &st, 0) != un || !WIFEXITED(st) || WEXITSTATUS(st) != 0) g |= 256;
+        printf("mnt-ns g=%#x\n", g);
+        fflush(stdout);
+        _exit(g == 0 ? 0 : 1);
+    }
+    int st;
+    if (waitpid(top, &st, 0) != top || !WIFEXITED(st)) f |= 1;
+    else if (WEXITSTATUS(st) == 0x7f) f |= 2; /* unshare refused */
+    else if (WEXITSTATUS(st) != 0) f |= 4;
+    snprintf(why, sizeof(why), "f=%#x", f);
+    report("namespaces_mnt", f == 0, why);
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
@@ -8955,6 +9079,7 @@ int main(int argc, char **argv)
     test_personality();
     test_namespaces_uts();
     test_namespaces_time();
+    test_namespaces_mnt();
 #if defined(__x86_64__)
     test_ustat_sysfs();
 #endif

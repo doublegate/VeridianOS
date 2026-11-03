@@ -87,6 +87,14 @@ impl ThreadFs {
         src.clone()
     }
 
+    /// Move the root and working directory to the root of the tree (a
+    /// mount namespace joined, or an empty one made: Linux sets fs->root
+    /// and fs->pwd to the namespace's root mount).
+    pub fn move_to_root(&self) {
+        *self.root.lock() = alloc::string::String::from("/");
+        *self.cwd.lock() = alloc::string::String::from("/");
+    }
+
     /// Copy the filesystem state (non-CLONE_FS semantics).
     ///
     /// Creates a new independent `ThreadFs` with the same cwd and umask

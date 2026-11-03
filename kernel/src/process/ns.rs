@@ -4,9 +4,9 @@
 //! Each namespace has Linux's identity: an inode number on nsfs (the
 //! initial namespaces Linux's fixed values, new ones from 0xF0000000) and a
 //! 64-bit id (the initial ones 1 to 8, new ones from 9). UTS, IPC, cgroup
-//! (ADR 0022 step H1) and time (H2) namespaces can be created; the other
-//! types exist only as their initial namespace until their steps, and
-//! asking for a new one is EINVAL, as on Linux built without that type.
+//! (ADR 0022 step H1), time (H2) and mount (H3) namespaces can be created;
+//! the other types exist only as their initial namespace until their steps,
+//! and asking for a new one is EINVAL, as on Linux built without that type.
 
 use alloc::{string::String, sync::Arc};
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -31,9 +31,15 @@ pub const CLONE_NS_ALL: u64 = CLONE_NEWTIME
     | CLONE_NEWUSER
     | CLONE_NEWPID
     | CLONE_NEWNET;
-/// The types a new namespace can be made of so far (ADR 0022 steps H1 and
-/// H2).
-pub const CREATABLE: u64 = CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWCGROUP | CLONE_NEWTIME;
+/// clone3's flag for a new mount namespace holding only a copy of the root
+/// mount (Linux 7.0; it implies CLONE_NEWNS). unshare names it
+/// UNSHARE_EMPTY_MNTNS and passes it on as this, as Linux's
+/// unshare_nsproxy_namespaces does.
+pub const CLONE_EMPTY_MNTNS: u64 = 1 << 37;
+/// The types a new namespace can be made of so far (ADR 0022 steps H1 to
+/// H3).
+pub const CREATABLE: u64 =
+    CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWCGROUP | CLONE_NEWTIME | CLONE_NEWNS;
 
 /// The clock ids a time namespace offsets (`include/uapi/linux/time.h`).
 pub const CLOCK_MONOTONIC: i32 = 1;
@@ -311,6 +317,13 @@ pub fn clock_to_host(clock_id: i32, t: u64) -> u64 {
     current_time().to_host(clock_id, t.min(i64::MAX as u64) as i64) as u64
 }
 
+/// A mount namespace (Linux's `struct mnt_namespace`): its tree of
+/// mounts, which path lookups in it walk (`fs::Vfs::caller_context`).
+pub struct MntNs {
+    pub ident: NsIdent,
+    pub mounts: Arc<crate::fs::mount::Mounts>,
+}
+
 /// A namespace that holds nothing yet besides its identity: IPC (no
 /// System V IPC or message queues exist), cgroup (no hierarchy), and the
 /// types whose own state comes with their later steps (ADR 0022).
@@ -323,6 +336,7 @@ pub struct PlainNs {
 pub enum NsRef {
     Uts(Arc<UtsNs>),
     Time(Arc<TimeNs>),
+    Mnt(Arc<MntNs>),
     Plain(Arc<PlainNs>),
 }
 
@@ -331,6 +345,7 @@ impl NsRef {
         match self {
             NsRef::Uts(ns) => ns.ident,
             NsRef::Time(ns) => ns.ident,
+            NsRef::Mnt(ns) => ns.ident,
             NsRef::Plain(ns) => ns.ident,
         }
     }
@@ -352,7 +367,7 @@ impl NsRef {
 pub struct Namespaces {
     pub uts: Arc<UtsNs>,
     pub ipc: Arc<PlainNs>,
-    pub mnt: Arc<PlainNs>,
+    pub mnt: Arc<MntNs>,
     pub pid_for_children: Arc<PlainNs>,
     pub net: Arc<PlainNs>,
     pub cgroup: Arc<PlainNs>,
@@ -414,7 +429,10 @@ fn initial_all() -> &'static Initial {
                     domainname: Mutex::new(String::from("(none)")),
                 }),
                 ipc: plain(NsKind::Ipc),
-                mnt: plain(NsKind::Mnt),
+                mnt: Arc::new(MntNs {
+                    ident: NsIdent::initial(NsKind::Mnt),
+                    mounts: crate::fs::initial_mounts(),
+                }),
                 pid_for_children: pid.clone(),
                 net: plain(NsKind::Net),
                 cgroup: plain(NsKind::Cgroup),
@@ -453,7 +471,7 @@ impl Namespaces {
         match kind {
             NsKind::Uts => NsRef::Uts(self.uts.clone()),
             NsKind::Ipc => NsRef::Plain(self.ipc.clone()),
-            NsKind::Mnt => NsRef::Plain(self.mnt.clone()),
+            NsKind::Mnt => NsRef::Mnt(self.mnt.clone()),
             NsKind::Pid => NsRef::Plain(self.pid_for_children.clone()),
             NsKind::Net => NsRef::Plain(self.net.clone()),
             NsKind::Cgroup => NsRef::Plain(self.cgroup.clone()),
@@ -466,8 +484,10 @@ impl Namespaces {
     /// each type in `flags` (a new UTS namespace starts with this one's
     /// names, as copy_utsname copies them; a new time namespace becomes the
     /// one for children, with the offsets of the current one for children,
-    /// as copy_time_ns). A type not yet creatable is
-    /// EINVAL; CLONE_NEWUSER is the credentials', not looked at here.
+    /// as copy_time_ns; a new mount namespace a copy of this one's tree, or
+    /// with CLONE_EMPTY_MNTNS of its root mount only, as copy_mnt_ns). A type
+    /// not yet creatable is EINVAL; CLONE_NEWUSER is the credentials', not
+    /// looked at here.
     pub fn copy_with(&self, flags: u64) -> Result<Namespaces, NsError> {
         let wanted = flags & CLONE_NS_ALL & !CLONE_NEWUSER;
         if wanted & !CREATABLE != 0 {
@@ -492,6 +512,12 @@ impl Namespaces {
         if flags & CLONE_NEWCGROUP != 0 {
             new.cgroup = plain(NsKind::Cgroup);
         }
+        if flags & CLONE_NEWNS != 0 {
+            new.mnt = Arc::new(MntNs {
+                ident: NsIdent::fresh(NsKind::Mnt),
+                mounts: Arc::new(self.mnt.mounts.copy(flags & CLONE_EMPTY_MNTNS != 0)),
+            });
+        }
         if flags & CLONE_NEWTIME != 0 {
             let offsets = self.time_for_children.offsets();
             new.time_for_children = Arc::new(TimeNs {
@@ -512,7 +538,7 @@ impl Namespaces {
         match (ns.kind(), ns) {
             (NsKind::Uts, NsRef::Uts(uts)) => new.uts = uts.clone(),
             (NsKind::Ipc, NsRef::Plain(p)) => new.ipc = p.clone(),
-            (NsKind::Mnt, NsRef::Plain(p)) => new.mnt = p.clone(),
+            (NsKind::Mnt, NsRef::Mnt(m)) => new.mnt = m.clone(),
             (NsKind::Pid, NsRef::Plain(p)) => new.pid_for_children = p.clone(),
             (NsKind::Net, NsRef::Plain(p)) => new.net = p.clone(),
             (NsKind::Cgroup, NsRef::Plain(p)) => new.cgroup = p.clone(),
@@ -635,12 +661,43 @@ mod tests {
     #[test]
     fn types_not_yet_creatable_are_einval() {
         let set = initial();
-        for flag in [CLONE_NEWNS, CLONE_NEWPID, CLONE_NEWNET] {
+        for flag in [CLONE_NEWPID, CLONE_NEWNET] {
             assert_eq!(set.copy_with(flag).err(), Some(NsError::Unsupported));
         }
         assert!(set
             .copy_with(CLONE_NEWIPC | CLONE_NEWCGROUP | CLONE_NEWTIME)
             .is_ok());
+    }
+
+    #[test]
+    fn a_new_mount_namespace_copies_the_tree_or_only_its_root() {
+        let vfs = crate::fs::Vfs::new();
+        vfs.mount_root(Arc::new(crate::fs::ramfs::RamFs::new()))
+            .unwrap();
+        vfs.mount("/tmp".into(), Arc::new(crate::fs::ramfs::RamFs::new()))
+            .unwrap();
+        let mut set = (*initial()).clone();
+        set.mnt = Arc::new(MntNs {
+            ident: NsIdent::fresh(NsKind::Mnt),
+            mounts: vfs.mounts().clone(),
+        });
+        let full = set.copy_with(CLONE_NEWNS).unwrap();
+        assert!(!full.get(NsKind::Mnt).same(&set.get(NsKind::Mnt)));
+        assert!(full.get(NsKind::Uts).same(&set.get(NsKind::Uts)));
+        assert!(full.mnt.mounts.render_mounts("/").contains(" /tmp "));
+        assert!(!Arc::ptr_eq(&full.mnt.mounts, &set.mnt.mounts));
+        // The empty one: the root mount only. CLONE_PARENT_SETTID, which
+        // UNSHARE_EMPTY_MNTNS aliases, does not ask for it.
+        let empty = set.copy_with(CLONE_NEWNS | CLONE_EMPTY_MNTNS).unwrap();
+        assert_eq!(
+            empty.mnt.mounts.render_mounts("/"),
+            "ramfs / ramfs rw 0 0\n"
+        );
+        let settid = set.copy_with(CLONE_NEWNS | 0x0010_0000).unwrap();
+        assert!(settid.mnt.mounts.render_mounts("/").contains(" /tmp "));
+        // setns to it replaces the set's mount namespace.
+        let joined = set.with(&full.get(NsKind::Mnt));
+        assert!(joined.get(NsKind::Mnt).same(&full.get(NsKind::Mnt)));
     }
 
     #[test]

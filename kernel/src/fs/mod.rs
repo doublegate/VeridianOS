@@ -23,6 +23,7 @@ pub mod flock;
 pub mod inotify;
 #[cfg(feature = "alloc")]
 pub mod memfd;
+pub mod mount;
 #[cfg(feature = "alloc")]
 pub mod nsfs;
 #[cfg(feature = "alloc")]
@@ -879,12 +880,12 @@ pub(crate) fn note_change(meta: &mut Metadata, contents: bool) {
 }
 
 /// The device number stat reports for files on the mount with `ids`
-/// (`st_dev`): an anonymous device, major 0, numbered by the mount, as
-/// Linux numbers the superblocks of ramfs, tmpfs and procfs (each mount
-/// here is its own filesystem instance). The root is 0:1, and files
-/// outside the tree (pipes, sockets) are 0:0.
+/// (`st_dev`): an anonymous device, major 0, numbered by the filesystem
+/// instance, as Linux numbers the superblocks of ramfs, tmpfs and procfs,
+/// so a file has the same device in every mount namespace. The first root
+/// is 0:1, and files outside the tree (pipes, sockets) are 0:0.
 pub const fn mount_dev(ids: MountIds) -> u32 {
-    make_dev(0, ids.id)
+    make_dev(0, ids.dev)
 }
 
 /// The major number of a device number in Linux's 32-bit encoding (as
@@ -971,11 +972,14 @@ pub struct MountPoint {
 
 /// A mount's identifiers, as statx reports them (Linux's `mnt_id` and
 /// `mnt_id_unique`): `id` is the lowest one free when it was mounted and
-/// is reused after an unmount; `unique` never is.
+/// is reused after an unmount; `unique` never is. `dev` is the minor of
+/// its filesystem's anonymous device, the same for every mount of that
+/// filesystem ([`mount_dev`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MountIds {
     pub id: u32,
     pub unique: u64,
+    pub dev: u32,
 }
 
 /// Linux's MNT_UNIQUE_ID_OFFSET: unique ids start above it, so that one
@@ -988,6 +992,7 @@ const MNT_UNIQUE_ID_OFFSET: u64 = 1 << 31;
 pub const PSEUDO_MOUNT: MountIds = MountIds {
     id: 0,
     unique: MNT_UNIQUE_ID_OFFSET + 1,
+    dev: 0,
 };
 
 /// Make `path` absolute (relative to `cwd`) and remove `.`, `..` and empty
@@ -1042,34 +1047,13 @@ pub(crate) fn path_is_under(path: &str, mount: &str) -> bool {
 /// started with.
 #[derive(Clone, Default)]
 struct MountTable {
-    /// Root filesystem
-    root_fs: Option<Arc<dyn Filesystem>>,
-    /// Mount points, keyed by normalized path
-    mounts: BTreeMap<String, Arc<dyn Filesystem>>,
-    /// Each mount's ids, keyed as `mounts` ("/" for the root).
-    ids: BTreeMap<String, MountIds>,
-    /// The last unique id handed out (0 before the first).
-    last_unique: u64,
+    /// The root mount.
+    root: Option<Arc<mount::Mount>>,
+    /// The other mounts, keyed by normalized mount point.
+    mounts: BTreeMap<String, Arc<mount::Mount>>,
 }
 
 impl MountTable {
-    /// Give the new mount at `path` its ids (Linux's mnt_alloc_id): the
-    /// lowest free id and the next unique one.
-    fn assign_ids(&mut self, path: &str) {
-        let mut id = PSEUDO_MOUNT.id + 1;
-        while self.ids.values().any(|m| m.id == id) {
-            id += 1;
-        }
-        self.last_unique = self.last_unique.max(PSEUDO_MOUNT.unique) + 1;
-        self.ids.insert(
-            String::from(path),
-            MountIds {
-                id,
-                unique: self.last_unique,
-            },
-        );
-    }
-
     /// The mount point serving normalized `path`: the longest one it lies
     /// under, or the root.
     fn mount_of(&self, path: &str) -> &str {
@@ -1079,12 +1063,60 @@ impl MountTable {
             .max_by_key(|m| m.len())
             .map_or("/", |m| m.as_str())
     }
+
+    /// The mount at mount point `point` ("/" for the root).
+    fn mount_at(&self, point: &str) -> Option<&Arc<mount::Mount>> {
+        match point {
+            "/" => self.root.as_ref(),
+            m => self.mounts.get(m),
+        }
+    }
+
+    /// The filesystem mounted at mount point `point`.
+    fn fs_at(&self, point: &str) -> Option<Arc<dyn Filesystem>> {
+        self.mount_at(point).map(|m| m.fs().clone())
+    }
+
+    /// The ids of the mount serving canonical `path`, and whether `path` is
+    /// that mount's root (statx's STATX_ATTR_MOUNT_ROOT).
+    fn ids_of(&self, path: &str) -> (MountIds, bool) {
+        let path = normalize_path(path, "/");
+        let mount = self.mount_of(&path);
+        let ids = self.mount_at(mount).map_or(PSEUDO_MOUNT, |m| m.ids());
+        (ids, path == mount)
+    }
+
+    /// The filesystem whose files stat reports with device number `dev`.
+    fn fs_with_dev(&self, dev: u32) -> Option<Arc<dyn Filesystem>> {
+        self.root
+            .iter()
+            .chain(self.mounts.values())
+            .find(|m| mount_dev(m.ids()) == dev)
+            .map(|m| m.fs().clone())
+    }
+
+    /// The filesystem serving canonical `path`, with its mount point.
+    fn fs_of(&self, path: &str) -> Option<(String, Arc<dyn Filesystem>)> {
+        let path = normalize_path(path, "/");
+        let mount = self.mount_of(&path);
+        let fs = self.fs_at(mount)?;
+        Some((String::from(mount), fs))
+    }
+}
+
+/// The tree of the initial mount namespace: the global VFS's, which the
+/// initial namespace set (`process::ns`) names.
+pub fn initial_mounts() -> Arc<mount::Mounts> {
+    static INITIAL: spin::Once<Arc<mount::Mounts>> = spin::Once::new();
+    INITIAL.call_once(|| Arc::new(mount::Mounts::new())).clone()
 }
 
 /// Virtual Filesystem Manager
 pub struct Vfs {
-    /// Current mount table; replaced as a whole on every mount change.
-    table: RwLock<Arc<MountTable>>,
+    /// The tree its own methods (the kernel's view) work on: for the
+    /// global VFS the initial mount namespace's. A caller in another mount
+    /// namespace sees that one's ([`Vfs::caller_context`]).
+    mounts: Arc<mount::Mounts>,
 
     /// Legacy global working directory (fallback only).
     /// Per-process CWD is tracked in `process::cwd::ProcessCwd` and
@@ -1096,15 +1128,26 @@ pub struct Vfs {
 impl Vfs {
     /// Create a new VFS instance
     pub fn new() -> Self {
+        Self::with_mounts(Arc::new(mount::Mounts::new()))
+    }
+
+    /// A VFS working on the tree `mounts`.
+    fn with_mounts(mounts: Arc<mount::Mounts>) -> Self {
         Self {
-            table: RwLock::new(Arc::new(MountTable::default())),
+            mounts,
             cwd: RwLock::new(String::from("/")),
         }
     }
 
+    /// Its tree (for the global VFS the initial mount namespace's).
+    #[cfg(test)]
+    pub(crate) fn mounts(&self) -> &Arc<mount::Mounts> {
+        &self.mounts
+    }
+
     /// The root filesystem, if one is mounted.
     pub(crate) fn root_fs(&self) -> Option<Arc<dyn Filesystem>> {
-        self.snapshot().root_fs.clone()
+        self.snapshot().fs_at("/")
     }
 
     /// The filesystem mounted exactly at `path`, if any.
@@ -1112,21 +1155,17 @@ impl Vfs {
         self.snapshot()
             .mounts
             .get(&normalize_path(path, "/"))
-            .cloned()
+            .map(|m| m.fs().clone())
     }
 
     fn snapshot(&self) -> Arc<MountTable> {
-        self.table.read().clone()
+        self.mounts.snapshot()
     }
 
     /// Apply `f` to a copy of the mount table and publish the copy.
     /// Mount changes are serialized by the table's write lock.
     fn update_table<R>(&self, f: impl FnOnce(&mut MountTable) -> R) -> R {
-        let mut table = self.table.write();
-        let mut next = MountTable::clone(&table);
-        let result = f(&mut next);
-        *table = Arc::new(next);
-        result
+        self.mounts.update(f)
     }
 }
 
@@ -1258,7 +1297,7 @@ impl MountTable {
             let canon_path = join_components(&canon);
             node = match self.mounts.get(&canon_path) {
                 Some(_) if resolve & resolve_flags::NO_XDEV != 0 => return Err(xdev()),
-                Some(fs) => fs.root(),
+                Some(mount) => mount.fs().root(),
                 None => node.lookup(canon.last().map(String::as_str).unwrap_or(""))?,
             };
 
@@ -1330,17 +1369,17 @@ impl MountTable {
     /// The node at canonical components `canon` (no `.`, `..` or symlinks),
     /// entering mounts by whole-path match.
     fn walk_canonical(&self, canon: &[String]) -> Result<Arc<dyn VfsNode>, KernelError> {
-        let root_fs = self
-            .root_fs
+        let root = self
+            .root
             .as_ref()
             .ok_or(KernelError::FsError(crate::error::FsError::NoRootFs))?;
-        let mut node = root_fs.root();
+        let mut node = root.fs().root();
         let mut path = String::new();
         for c in canon {
             path.push('/');
             path.push_str(c);
             node = match self.mounts.get(&path) {
-                Some(fs) => fs.root(),
+                Some(mount) => mount.fs().root(),
                 None => node.lookup(c)?,
             };
         }
@@ -1388,6 +1427,8 @@ pub struct PathContext {
     /// openat2's RESOLVE_* flags ([`resolve_flags`]); 0 for every other
     /// lookup.
     pub resolve: u32,
+    /// The mount tree the walk uses: the caller's mount namespace's.
+    pub mounts: Arc<mount::Mounts>,
 }
 
 /// openat2's `how.resolve` flags, with Linux's values.
@@ -1518,7 +1559,37 @@ impl<'a> CallerView<'a> {
         } else {
             alloc::format!("{}/{}", canonical_parent, name)
         };
-        self.vfs.mount_point_of(&entry)
+        self.mount_point_of(&entry)
+    }
+
+    /// [`Vfs::mount_point_of`] in the caller's mount namespace.
+    pub fn mount_point_of(&self, path: &str) -> String {
+        String::from(
+            self.ctx
+                .mounts
+                .snapshot()
+                .mount_of(&normalize_path(path, "/")),
+        )
+    }
+
+    /// [`Vfs::mount_ids_of`] in the caller's mount namespace.
+    pub fn mount_ids_of(&self, path: &str) -> (MountIds, bool) {
+        self.ctx.mounts.snapshot().ids_of(path)
+    }
+
+    /// [`Vfs::filesystem_of`] in the caller's mount namespace.
+    pub fn filesystem_of(&self, path: &str) -> Option<(String, Arc<dyn Filesystem>)> {
+        self.ctx.mounts.snapshot().fs_of(path)
+    }
+
+    /// [`Vfs::filesystem_with_dev`] in the caller's mount namespace.
+    pub fn filesystem_with_dev(&self, dev: u32) -> Option<Arc<dyn Filesystem>> {
+        self.ctx.mounts.snapshot().fs_with_dev(dev)
+    }
+
+    /// [`Vfs::find_by_inode`] in the caller's mount namespace.
+    pub fn find_by_inode(&self, mount: &str, ino: u64) -> Option<(Arc<dyn VfsNode>, String)> {
+        self.ctx.mounts.snapshot().find_by_inode(mount, ino)
     }
 
     pub fn mkdir(
@@ -1578,16 +1649,16 @@ impl<'a> CallerView<'a> {
     }
 
     /// [`Vfs::mount_by_type`] at the directory `path` names for the caller.
-    pub fn mount_by_type(&self, path: &str, fs_type: &str, flags: u32) -> Result<(), KernelError> {
+    pub fn mount_by_type(&self, path: &str, fs_type: &str, _flags: u32) -> Result<(), KernelError> {
         let target = self.mount_target(path)?;
-        self.vfs.mount_by_type(&target, fs_type, flags)
+        mount_on(&self.ctx.mounts, &target, fs_by_type(fs_type)?)
     }
 
     /// [`Vfs::unmount`] of the mount at the directory `path` names for the
     /// caller.
     pub fn unmount(&self, path: &str) -> Result<(), KernelError> {
         let target = self.mount_target(path)?;
-        self.vfs.unmount(&target)
+        unmount_on(&self.ctx.mounts, &target)
     }
 
     /// Flush every filesystem; not path-dependent.
@@ -1635,43 +1706,25 @@ impl Default for Vfs {
 impl Vfs {
     /// Mount the root filesystem
     pub fn mount_root(&self, fs: Arc<dyn Filesystem>) -> Result<(), KernelError> {
+        let pool = self.mounts.pool().clone();
         self.update_table(|t| {
-            if t.root_fs.is_some() {
+            if t.root.is_some() {
                 return Err(KernelError::FsError(crate::error::FsError::AlreadyMounted));
             }
-            t.root_fs = Some(fs);
-            t.assign_ids("/");
+            let source = mount::default_source(fs.as_ref(), true);
+            t.root = Some(mount::Mount::new(fs, source, &pool));
             Ok(())
         })
     }
 
     /// Mount a filesystem at the specified path
     pub fn mount(&self, path: String, fs: Arc<dyn Filesystem>) -> Result<(), KernelError> {
-        let path = normalize_path(&path, "/");
-        self.update_table(|t| {
-            if t.root_fs.is_none() {
-                return Err(KernelError::FsError(crate::error::FsError::NoRootFs));
-            }
-            if t.mounts.contains_key(&path) {
-                return Err(KernelError::FsError(crate::error::FsError::AlreadyMounted));
-            }
-            t.assign_ids(&path);
-            t.mounts.insert(path, fs);
-            Ok(())
-        })
+        mount_on(&self.mounts, &path, fs)
     }
 
     /// Mount a filesystem by type at the specified path
     pub fn mount_by_type(&self, path: &str, fs_type: &str, _flags: u32) -> Result<(), KernelError> {
-        let fs: Arc<dyn Filesystem> = match fs_type {
-            "ramfs" => Arc::new(ramfs::RamFs::new()),
-            "devfs" => Arc::new(devfs::DevFs::new()),
-            "procfs" => Arc::new(procfs::ProcFs::new()),
-            "tmpfs" => Arc::new(tmpfs::TmpFs::half_of_ram()),
-            "blockfs" => Arc::new(blockfs::BlockFs::new(10000, 1000)),
-            _ => return Err(KernelError::FsError(crate::error::FsError::UnknownFsType)),
-        };
-
+        let fs = fs_by_type(fs_type)?;
         if path == "/" {
             self.mount_root(fs)
         } else {
@@ -1684,22 +1737,16 @@ impl Vfs {
     /// The previous root filesystem (if any) is dropped. Mount points under
     /// `/dev` and `/proc` should be re-mounted after calling this.
     pub fn swap_root(&self, fs: Arc<dyn Filesystem>) {
+        let pool = self.mounts.pool().clone();
         self.update_table(|t| {
-            t.root_fs = Some(fs);
-            t.assign_ids("/");
+            let source = mount::default_source(fs.as_ref(), true);
+            t.root = Some(mount::Mount::new(fs, source, &pool));
         });
     }
 
     /// Unmount a filesystem at the specified path
     pub fn unmount(&self, path: &str) -> Result<(), KernelError> {
-        let path = normalize_path(path, "/");
-        self.update_table(|t| {
-            if t.mounts.remove(&path).is_none() {
-                return Err(KernelError::FsError(crate::error::FsError::NotMounted));
-            }
-            t.ids.remove(&path);
-            Ok(())
-        })
+        unmount_on(&self.mounts, path)
     }
 
     /// The kernel's own view of the tree: the whole tree, the kernel
@@ -1712,6 +1759,7 @@ impl Vfs {
             creds: None,
             pid: 0,
             resolve: 0,
+            mounts: self.mounts.clone(),
         }
     }
 
@@ -1727,6 +1775,11 @@ impl Vfs {
             let fs = thread.fs();
             ctx.cwd = fs.cwd.lock().clone();
             ctx.root = fs.root.lock().clone();
+            // The caller's mount namespace, for the VFS whose tree is the
+            // initial namespace's (a VFS of its own, as in tests, keeps it).
+            if Arc::ptr_eq(&self.mounts, &initial_mounts()) {
+                ctx.mounts = thread.namespaces().mnt.mounts.clone();
+            }
         }
         if let Some(process) = crate::process::current_process() {
             ctx.pid = process.pid.0;
@@ -1763,8 +1816,15 @@ impl Vfs {
         cwd: &str,
         follow_last: bool,
     ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
-        self.snapshot()
-            .resolve_in(path, cwd, &ctx.root, follow_last, 0, ctx.creds, ctx.resolve)
+        ctx.mounts.snapshot().resolve_in(
+            path,
+            cwd,
+            &ctx.root,
+            follow_last,
+            0,
+            ctx.creds,
+            ctx.resolve,
+        )
     }
 
     /// Resolve a path to a VFS node, following symlinks (including the
@@ -1810,35 +1870,19 @@ impl Vfs {
     /// tree, and whether `path` is that mount's root (statx's
     /// STATX_ATTR_MOUNT_ROOT).
     pub fn mount_ids_of(&self, path: &str) -> (MountIds, bool) {
-        let path = normalize_path(path, "/");
-        let table = self.snapshot();
-        let mount = table.mount_of(&path);
-        let ids = table.ids.get(mount).copied().unwrap_or(PSEUDO_MOUNT);
-        (ids, path == mount)
+        self.snapshot().ids_of(path)
     }
 
     /// The filesystem whose files stat reports with device number `dev`
     /// ([`mount_dev`]), as ustat looks one up.
     pub fn filesystem_with_dev(&self, dev: u32) -> Option<Arc<dyn Filesystem>> {
-        let table = self.snapshot();
-        let (mount, _) = table.ids.iter().find(|(_, ids)| mount_dev(**ids) == dev)?;
-        match mount.as_str() {
-            "/" => table.root_fs.clone(),
-            m => table.mounts.get(m).cloned(),
-        }
+        self.snapshot().fs_with_dev(dev)
     }
 
     /// The filesystem serving `path`, a canonical path in the whole tree,
     /// with its mount point; `None` before a root is mounted.
     pub fn filesystem_of(&self, path: &str) -> Option<(String, Arc<dyn Filesystem>)> {
-        let path = normalize_path(path, "/");
-        let table = self.snapshot();
-        let mount = table.mount_of(&path);
-        let fs = match mount {
-            "/" => table.root_fs.clone(),
-            m => table.mounts.get(m).cloned(),
-        }?;
-        Some((String::from(mount), fs))
+        self.snapshot().fs_of(path)
     }
 
     /// The file with inode number `ino` in the filesystem mounted at
@@ -1850,11 +1894,15 @@ impl Vfs {
     /// inode is cached), and on a large filesystem the walk is slow; Linux
     /// filesystems find an inode by number directly.
     pub fn find_by_inode(&self, mount: &str, ino: u64) -> Option<(Arc<dyn VfsNode>, String)> {
-        let table = self.snapshot();
-        let fs = match mount {
-            "/" => table.root_fs.clone(),
-            m => table.mounts.get(m).cloned(),
-        }?;
+        self.snapshot().find_by_inode(mount, ino)
+    }
+}
+
+impl MountTable {
+    /// [`Vfs::find_by_inode`] in this tree.
+    fn find_by_inode(&self, mount: &str, ino: u64) -> Option<(Arc<dyn VfsNode>, String)> {
+        let table = self;
+        let fs = table.fs_at(mount)?;
         let root = fs.root();
         if root.metadata().ok()?.inode == ino {
             return Some((root, String::from(mount)));
@@ -1900,7 +1948,9 @@ impl Vfs {
         }
         None
     }
+}
 
+impl Vfs {
     /// The mount point holding the directory entry `name` in `parent`, with
     /// `parent` resolved canonically (symlinks, `.` and `..` followed; the
     /// entry itself is not). A rename must compare these rather than the
@@ -1923,7 +1973,7 @@ impl Vfs {
         } else {
             alloc::format!("{}/{}", canon, name)
         };
-        Ok(self.mount_point_of(&entry))
+        Ok(String::from(ctx.mounts.snapshot().mount_of(&entry)))
     }
 
     /// Resolve a path, returning the node together with its canonical
@@ -2141,16 +2191,14 @@ impl Vfs {
         let table = self.snapshot();
 
         // Root filesystem
-        if let Some(ref root) = table.root_fs {
-            result.push((
-                String::from("/"),
-                String::from(root.name()),
-                root.is_readonly(),
-            ));
+        if let Some(ref root) = table.root {
+            let fs = root.fs();
+            result.push((String::from("/"), String::from(fs.name()), fs.is_readonly()));
         }
 
         // Mounted filesystems
-        for (path, fs) in &table.mounts {
+        for (path, mount) in &table.mounts {
+            let fs = mount.fs();
             result.push((path.clone(), String::from(fs.name()), fs.is_readonly()));
         }
 
@@ -2162,17 +2210,62 @@ impl Vfs {
         let table = self.snapshot();
 
         // Sync root filesystem
-        if let Some(ref root) = table.root_fs {
-            root.sync()?;
+        if let Some(ref root) = table.root {
+            root.fs().sync()?;
         }
 
         // Sync all mounted filesystems
-        for fs in table.mounts.values() {
-            fs.sync()?;
+        for mount in table.mounts.values() {
+            mount.fs().sync()?;
         }
 
         Ok(())
     }
+}
+
+/// A new filesystem of the type `mount_by_type` names.
+fn fs_by_type(fs_type: &str) -> Result<Arc<dyn Filesystem>, KernelError> {
+    Ok(match fs_type {
+        "ramfs" => Arc::new(ramfs::RamFs::new()),
+        "devfs" => Arc::new(devfs::DevFs::new()),
+        "procfs" => Arc::new(procfs::ProcFs::new()),
+        "tmpfs" => Arc::new(tmpfs::TmpFs::half_of_ram()),
+        "blockfs" => Arc::new(blockfs::BlockFs::new(10000, 1000)),
+        _ => return Err(KernelError::FsError(FsError::UnknownFsType)),
+    })
+}
+
+/// Mount `fs` at `path` in the tree `mounts`: EBUSY-like AlreadyMounted
+/// when something is mounted there, NoRootFs before a root.
+fn mount_on(
+    mounts: &mount::Mounts,
+    path: &str,
+    fs: Arc<dyn Filesystem>,
+) -> Result<(), KernelError> {
+    let path = normalize_path(path, "/");
+    let pool = mounts.pool().clone();
+    mounts.update(|t| {
+        if t.root.is_none() {
+            return Err(KernelError::FsError(FsError::NoRootFs));
+        }
+        if path == "/" || t.mounts.contains_key(&path) {
+            return Err(KernelError::FsError(FsError::AlreadyMounted));
+        }
+        let source = mount::default_source(fs.as_ref(), false);
+        t.mounts.insert(path, mount::Mount::new(fs, source, &pool));
+        Ok(())
+    })
+}
+
+/// Remove the mount at `path` from the tree `mounts`.
+fn unmount_on(mounts: &mount::Mounts, path: &str) -> Result<(), KernelError> {
+    let path = normalize_path(path, "/");
+    mounts.update(|t| {
+        if t.mounts.remove(&path).is_none() {
+            return Err(KernelError::FsError(FsError::NotMounted));
+        }
+        Ok(())
+    })
 }
 
 /// EISDIR for unlink of a directory, ENOTDIR for rmdir of anything else.
@@ -2218,7 +2311,7 @@ pub fn init() {
     println!("[VFS] Initializing Virtual Filesystem...");
 
     println!("[VFS] Creating VFS structure...");
-    match VFS.set(Vfs::new()) {
+    match VFS.set(Vfs::with_mounts(initial_mounts())) {
         Ok(()) => println!("[VFS] VFS initialized successfully"),
         Err(_) => {
             println!("[VFS] WARNING: VFS already initialized! Skipping re-initialization.");
@@ -3482,6 +3575,7 @@ pub(crate) mod tests {
                 creds: None,
                 pid: 0,
                 resolve: 0,
+                mounts: vfs.mounts.clone(),
             },
         }
     }
@@ -3963,6 +4057,7 @@ pub(crate) mod tests {
                 creds: None,
                 pid: 0,
                 resolve: 0,
+                mounts: vfs.mounts.clone(),
             },
         }
         .resolving(resolve, start)
@@ -4237,6 +4332,7 @@ pub(crate) mod tests {
                 creds: None,
                 pid: 0,
                 resolve: 0,
+                mounts: vfs.mounts.clone(),
             },
         };
         caller.unmount("/dev/shm").unwrap();

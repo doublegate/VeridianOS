@@ -463,6 +463,7 @@ fn process_clone(
         no_new_privs: on(CLONE_NNP),
         autoreap: on(CLONE_AUTOREAP),
         namespaces: Some(namespaces),
+        fs_at_root: on(CLONE_EMPTY_MNTNS),
     })
 }
 
@@ -565,7 +566,11 @@ fn thread_clone(
         let child_fs = if share_fs {
             ThreadFs::clone_shared(&parent_fs)
         } else {
-            ThreadFs::clone_copy(&parent_fs)
+            let fs = ThreadFs::clone_copy(&parent_fs);
+            if req.on(CLONE_EMPTY_MNTNS) {
+                fs.move_to_root();
+            }
+            fs
         };
         builder = builder.fs(child_fs);
     }

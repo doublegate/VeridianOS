@@ -555,7 +555,7 @@ fn same_filesystem(a: &File, b: &File) -> bool {
         return true;
     };
     match filesystem::vfs() {
-        Ok(vfs) => vfs.global().mount_point_of(pa) == vfs.global().mount_point_of(pb),
+        Ok(vfs) => vfs.mount_point_of(pa) == vfs.mount_point_of(pb),
         Err(_) => true,
     }
 }

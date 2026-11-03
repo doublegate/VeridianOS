@@ -16,7 +16,7 @@ use super::{
     },
     userspace, SyscallError, SyscallResult,
 };
-use crate::fs::{NodeType, Vfs, VfsNode};
+use crate::fs::{CallerView, NodeType, VfsNode};
 
 const AT_SYMLINK_FOLLOW: usize = 0x400;
 const AT_HANDLE_FID: usize = 0x200;
@@ -71,7 +71,7 @@ fn encode(
 /// file is gone, a directory handle names something else, or a
 /// connectable one names a file outside the anchor.
 fn decode(
-    vfs: &Vfs,
+    vfs: &CallerView<'_>,
     anchor: Option<&str>,
     ty: i32,
     body: &[u8],
@@ -165,7 +165,6 @@ pub fn sys_name_to_handle_at(
     }
     let (node, canonical) = lookup(dirfd, path_ptr, flags)?;
     let vfs = vfs()?;
-    let vfs = vfs.global();
     let exportable = canonical
         .as_deref()
         .and_then(|path| vfs.filesystem_of(path))
@@ -247,8 +246,7 @@ pub fn sys_open_by_handle_at(mount_fd: usize, handle_ptr: usize, flags: usize) -
     let body = &mut body[..len as usize];
     userspace::read_user_bytes(handle_ptr + HEADER_LEN, body)?;
     let vfs = vfs()?;
-    let (node, canonical) =
-        decode(vfs.global(), anchor.as_deref(), ty, body).ok_or(SyscallError::Stale)?;
+    let (node, canonical) = decode(&vfs, anchor.as_deref(), ty, body).ok_or(SyscallError::Stale)?;
     // open_by_handle_at opens what it found; O_CREAT makes nothing, and
     // the flags are checked as open's (Linux's build_open_flags).
     let flags = flags as u32 as usize;
@@ -294,20 +292,20 @@ mod tests {
         let (_, ty, body) = encode(f.metadata().unwrap().inode, 128, false, false);
         let body = body.unwrap();
 
-        let (node, path) = decode(&vfs, Some("/d"), ty, &body).unwrap();
+        let (node, path) = decode(&vfs.as_caller(), Some("/d"), ty, &body).unwrap();
         assert!(Arc::ptr_eq(&node, &f));
         assert_eq!(path, "/d/f");
         // Not ours, a generation, a short body, no anchor path: stale.
-        assert!(decode(&vfs, Some("/"), 1, &body).is_none());
+        assert!(decode(&vfs.as_caller(), Some("/"), 1, &body).is_none());
         let mut gen = body;
         gen[8] = 1;
-        assert!(decode(&vfs, Some("/"), ty, &gen).is_none());
-        assert!(decode(&vfs, Some("/"), ty, &body[..8]).is_none());
-        assert!(decode(&vfs, None, ty, &body).is_none());
+        assert!(decode(&vfs.as_caller(), Some("/"), ty, &gen).is_none());
+        assert!(decode(&vfs.as_caller(), Some("/"), ty, &body[..8]).is_none());
+        assert!(decode(&vfs.as_caller(), None, ty, &body).is_none());
         // A directory handle must name a directory.
-        assert!(decode(&vfs, Some("/"), ty | FILEID_IS_DIR, &body).is_none());
+        assert!(decode(&vfs.as_caller(), Some("/"), ty | FILEID_IS_DIR, &body).is_none());
         d.unlink("f").unwrap();
-        assert!(decode(&vfs, Some("/"), ty, &body).is_none());
+        assert!(decode(&vfs.as_caller(), Some("/"), ty, &body).is_none());
     }
 
     #[test]
@@ -319,9 +317,9 @@ mod tests {
         let f = a.create("f", Permissions::default()).unwrap();
         let (_, ty, body) = encode(f.metadata().unwrap().inode, 128, true, false);
         let body = body.unwrap();
-        assert!(decode(&vfs, Some("/a"), ty, &body).is_some());
-        assert!(decode(&vfs, Some("/"), ty, &body).is_some());
-        assert!(decode(&vfs, Some("/b"), ty, &body).is_none());
+        assert!(decode(&vfs.as_caller(), Some("/a"), ty, &body).is_some());
+        assert!(decode(&vfs.as_caller(), Some("/"), ty, &body).is_some());
+        assert!(decode(&vfs.as_caller(), Some("/b"), ty, &body).is_none());
     }
 
     #[test]
@@ -347,6 +345,6 @@ mod tests {
         let f = fs.0.root().create("f", Permissions::default()).unwrap();
         vfs.mount("/o".into(), Arc::new(fs)).unwrap();
         let (_, ty, body) = encode(f.metadata().unwrap().inode, 128, false, false);
-        assert!(decode(&vfs, Some("/o"), ty, &body.unwrap()).is_none());
+        assert!(decode(&vfs.as_caller(), Some("/o"), ty, &body.unwrap()).is_none());
     }
 }

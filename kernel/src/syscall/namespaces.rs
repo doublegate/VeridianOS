@@ -130,8 +130,10 @@ pub fn sys_unshare(flags: usize) -> SyscallResult {
             return Err(SyscallError::OperationNotPermitted);
         }
         let current = thread.namespaces();
+        // The 32-bit UNSHARE_EMPTY_MNTNS (CLONE_PARENT_SETTID's bit) goes on
+        // as the 64-bit CLONE_EMPTY_MNTNS, as unshare_nsproxy_namespaces.
         let flags = if flags & UNSHARE_EMPTY_MNTNS != 0 {
-            flags | ns::CLONE_NEWNS
+            (flags & !UNSHARE_EMPTY_MNTNS) | ns::CLONE_NEWNS | ns::CLONE_EMPTY_MNTNS
         } else {
             flags
         };
@@ -152,6 +154,11 @@ pub fn sys_unshare(flags: usize) -> SyscallResult {
     }
     if let Some(set) = new_ns {
         thread.set_namespaces(set);
+    }
+    // An empty mount namespace has only its root mount: the root and
+    // working directory move to it (copy_mnt_ns).
+    if flags & UNSHARE_EMPTY_MNTNS != 0 {
+        thread.fs().move_to_root();
     }
     Ok(0)
 }
@@ -216,9 +223,7 @@ fn commit(namespaces: ns::Namespaces, mnt: bool) -> Result<(), SyscallError> {
     let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
     namespaces.time.freeze();
     if mnt {
-        let fs = thread.fs();
-        *fs.root.lock() = alloc::string::String::from("/");
-        *fs.cwd.lock() = alloc::string::String::from("/");
+        thread.fs().move_to_root();
     }
     thread.set_namespaces(Arc::new(namespaces));
     Ok(())

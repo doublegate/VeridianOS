@@ -25,6 +25,9 @@ enum ProcNodeType {
     NsDir(Option<u64>),
     /// One of its links, by name (`NS_LINKS`).
     NsLink(Option<u64>, &'static str),
+    /// A plain symlink in /proc, by name and target: `mounts`, which is
+    /// `self/mounts` as on Linux.
+    Link(&'static str, &'static str),
 }
 
 /// The links in `/proc/<pid>/ns`, as Linux lists them.
@@ -55,6 +58,25 @@ fn time_for_children(pid: u64) -> Option<alloc::sync::Arc<crate::process::ns::Ti
         .get_thread(crate::process::ThreadId(pid))
         .or_else(|| process.threads.lock().values().next().cloned())?;
     Some(thread.namespaces().time_for_children.clone())
+}
+
+/// What `/proc/<pid>/mounts` (or with `info` `mountinfo`) reads: the mounts
+/// of the mount namespace of process `pid`'s first thread under that
+/// thread's root, as Linux's mounts_open_common takes the task's
+/// namespace and root.
+#[cfg(feature = "alloc")]
+fn mounts_text(pid: u64, info: bool) -> Option<String> {
+    let process = crate::process::get_process(crate::process::ProcessId(pid))?;
+    let thread = process
+        .get_thread(crate::process::ThreadId(pid))
+        .or_else(|| process.threads.lock().values().next().cloned())?;
+    let root = thread.fs().root.lock().clone();
+    let mounts = thread.namespaces().mnt.mounts.clone();
+    Some(if info {
+        mounts.render_mountinfo(&root)
+    } else {
+        mounts.render_mounts(&root)
+    })
 }
 
 /// One offset line, as Linux's show_offset: "monotonic  <sec> <nsec>".
@@ -262,6 +284,7 @@ impl ProcNode {
             ProcNodeType::SelfExe => String::from("self/exe"),
             ProcNodeType::NsDir(pid) => format!("{}/ns", ns_owner_key(*pid)),
             ProcNodeType::NsLink(pid, name) => format!("{}/ns/{}", ns_owner_key(*pid), name),
+            ProcNodeType::Link(name, _) => String::from(*name),
         }
     }
 
@@ -328,7 +351,9 @@ impl VfsNode for ProcNode {
             | ProcNodeType::SubDir(_)
             | ProcNodeType::NsDir(_) => NodeType::Directory,
             ProcNodeType::ProcessFile(_, _) | ProcNodeType::SystemFile(_) => NodeType::File,
-            ProcNodeType::SelfExe | ProcNodeType::NsLink(..) => NodeType::Symlink,
+            ProcNodeType::SelfExe | ProcNodeType::NsLink(..) | ProcNodeType::Link(..) => {
+                NodeType::Symlink
+            }
         }
     }
 
@@ -345,6 +370,7 @@ impl VfsNode for ProcNode {
             ProcNodeType::NsLink(pid, name) => {
                 ns_link_target(*pid, name).map(|ns| ns.ident().link_text())
             }
+            ProcNodeType::Link(_, target) => Ok(String::from(*target)),
             _ => Err(KernelError::FsError(FsError::NotASymlink)),
         }
     }
@@ -507,6 +533,10 @@ impl VfsNode for ProcNode {
                         }
                     }
                     "timens_offsets" => timens_offsets_text(*pid).unwrap_or_default(),
+                    #[cfg(feature = "alloc")]
+                    "mounts" => mounts_text(*pid, false).unwrap_or_default(),
+                    #[cfg(feature = "alloc")]
+                    "mountinfo" => mounts_text(*pid, true).unwrap_or_default(),
                     "cmdline" => {
                         // Get actual command line
                         if let Some(process) =
@@ -560,7 +590,9 @@ impl VfsNode for ProcNode {
             | ProcNodeType::ProcessDir(_)
             | ProcNodeType::SubDir(_)
             | ProcNodeType::NsDir(_) => NodeType::Directory,
-            ProcNodeType::SelfExe | ProcNodeType::NsLink(..) => NodeType::Symlink,
+            ProcNodeType::SelfExe | ProcNodeType::NsLink(..) | ProcNodeType::Link(..) => {
+                NodeType::Symlink
+            }
             _ => NodeType::File,
         };
 
@@ -640,6 +672,12 @@ impl VfsNode for ProcNode {
                 });
 
                 entries.push(DirEntry {
+                    name: String::from("mounts"),
+                    node_type: NodeType::Symlink,
+                    inode: 0,
+                });
+
+                entries.push(DirEntry {
                     name: String::from("sys"),
                     node_type: NodeType::Directory,
                     inode: 0,
@@ -687,6 +725,14 @@ impl VfsNode for ProcNode {
                     node_type: NodeType::File,
                     inode: 0,
                 });
+
+                for name in ["mounts", "mountinfo"] {
+                    entries.push(DirEntry {
+                        name: String::from(name),
+                        node_type: NodeType::File,
+                        inode: 0,
+                    });
+                }
             }
             ProcNodeType::NsDir(_) => {
                 for name in NS_LINKS {
@@ -760,6 +806,9 @@ impl VfsNode for ProcNode {
                         Ok(Arc::new(ProcNode::new_system_file(String::from(name)))
                             as Arc<dyn VfsNode>)
                     }
+                    "mounts" => Ok(Arc::new(ProcNode {
+                        node_type: ProcNodeType::Link("mounts", "self/mounts"),
+                    }) as Arc<dyn VfsNode>),
                     // Virtual subdirectories for Qt/KDE compatibility
                     "sys" => Ok(Arc::new(ProcNode {
                         node_type: ProcNodeType::SubDir(String::from("sys")),
@@ -784,10 +833,9 @@ impl VfsNode for ProcNode {
                 }
             }
             ProcNodeType::ProcessDir(pid) => match name {
-                "status" | "cmdline" | "timens_offsets" => Ok(Arc::new(ProcNode::new_process_file(
-                    *pid,
-                    String::from(name),
-                ))
+                "status" | "cmdline" | "timens_offsets" | "mounts" | "mountinfo" => Ok(Arc::new(
+                    ProcNode::new_process_file(*pid, String::from(name)),
+                )
                     as Arc<dyn VfsNode>),
                 "ns" => Ok(Arc::new(ProcNode {
                     node_type: ProcNodeType::NsDir(Some(*pid)),
@@ -852,7 +900,7 @@ impl VfsNode for ProcNode {
                         }) as Arc<dyn VfsNode>),
                         // The caller's own files, as /proc/<its pid>/...
                         // (Linux's /proc/self is a link to that directory).
-                        "status" | "cmdline" | "timens_offsets" => {
+                        "status" | "cmdline" | "timens_offsets" | "mounts" | "mountinfo" => {
                             crate::process::current_process()
                                 .map(|p| {
                                     Arc::new(ProcNode::new_process_file(
@@ -1225,8 +1273,10 @@ impl Filesystem for ProcFs {
         "procfs"
     }
 
+    /// Mounted read-write, as Linux mounts proc: `/proc/sys` and
+    /// `timens_offsets` take writes; the files that do not refuse them.
     fn is_readonly(&self) -> bool {
-        true
+        false
     }
 
     fn sync(&self) -> Result<(), KernelError> {

@@ -63,7 +63,9 @@ them through an `nsproxy` (all but user, which lives in the credentials); `pid_f
    - **H3, mount.** Each mount namespace has its own `MountTable`; unshare copies the caller's,
      and mounts and unmounts then affect only that namespace. Every mount is private (no shared
      or slave propagation), recorded as a limitation. Linux mount(2), umount2 and pivot_root come
-     with it, and `/proc/<pid>/mounts` and `mountinfo`.
+     with it, and `/proc/<pid>/mounts` and `mountinfo`. As on Linux, the copy's mounts get new
+     ids from the pool the original's came from (one IDA), and a file's device number belongs to
+     its filesystem, so it is the same in every namespace.
    - **H4, user.** uid_map, gid_map and setgroups (Linux's write rules), ids translated at every
      boundary (stat, chown, credentials calls, SO_PEERCRED, siginfo si_uid, `/proc/<pid>/status`),
      and `capable()` asking about the user namespace that owns the object (Linux's ns_capable)

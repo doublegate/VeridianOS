@@ -68,6 +68,9 @@ pub struct ForkOptions {
     /// The child's namespaces (`process::ns::for_clone`); the caller's
     /// when None.
     pub namespaces: Option<alloc::sync::Arc<super::ns::Namespaces>>,
+    /// CLONE_EMPTY_MNTNS: the child's root and working directory are the
+    /// root of its new, empty mount namespace.
+    pub fs_at_root: bool,
 }
 
 impl Default for ForkOptions {
@@ -89,6 +92,7 @@ impl Default for ForkOptions {
             no_new_privs: false,
             autoreap: false,
             namespaces: None,
+            fs_at_root: false,
         }
     }
 }
@@ -286,7 +290,11 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
             .fs(if opts.share_fs {
                 super::thread::ThreadFs::clone_shared(&current_thread.fs())
             } else {
-                super::thread::ThreadFs::clone_copy(&current_thread.fs())
+                let fs = super::thread::ThreadFs::clone_copy(&current_thread.fs());
+                if opts.fs_at_root {
+                    fs.move_to_root();
+                }
+                fs
             });
             let thread = match opts.child_cleartid {
                 Some(ptr) => thread.clear_tid(ptr),

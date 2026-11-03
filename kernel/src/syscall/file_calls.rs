@@ -443,13 +443,12 @@ fn ustat_bytes(stats: &crate::fs::statfs::FsStats) -> [u8; USTAT_SIZE] {
 }
 
 /// ustat(dev, ubuf) (x86_64 only): free space on the filesystem whose
-/// files stat reports as on device `dev` (each mount's own, `fs::mount_dev`;
-/// the root's is 0:1); a device with no filesystem is EINVAL.
+/// files stat reports as on device `dev` (each filesystem's own,
+/// `fs::mount_dev`; the root's is 0:1); a device with no filesystem is EINVAL.
 pub fn sys_ustat(dev: usize, ubuf: usize) -> SyscallResult {
     // The filesystem whose files stat reports as on `dev` (N-205): EINVAL
     // for none, as Linux's user_get_super finding no superblock.
     let fs = filesystem::vfs()?
-        .global()
         .filesystem_with_dev(dev as u32)
         .ok_or(SyscallError::InvalidArgument)?;
     let stats = fs.root().statfs().map_err(super::map_kernel_error)?;

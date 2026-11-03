@@ -255,6 +255,16 @@
   (clock_gettime and the raw, coarse and alarm variants, `/proc/uptime`, sysinfo) adds the
   reader's offset, and every absolute deadline on them (clock_nanosleep, timerfd, POSIX timers,
   FUTEX_WAIT_BITSET) is taken back to the host's clock, as Linux's timens_ktime_to_host.
+- Mount namespaces, the first part of step H3 of ADR 0022: unshare(CLONE_NEWNS), clone, clone3
+  and setns make and join them. A new one holds a copy of the caller's mounts (Linux's
+  copy_tree: new mount ids, the same filesystems), or with UNSHARE_EMPTY_MNTNS or
+  CLONE_EMPTY_MNTNS only the root mount, with the root and working directory moved to it.
+  Path lookups, statx's mount ids and the private mount call work in the caller's namespace.
+  `/proc/<pid>/mounts` and `/proc/<pid>/mountinfo` list a process's mounts under its root in
+  Linux's formats, and `/proc/mounts` links to `self/mounts`. A file's device number (`st_dev`)
+  now belongs to its filesystem rather than to the mount, so it is the same in every namespace,
+  and procfs is listed read-write, as Linux mounts it. Linux's mount(2) and umount2 come next
+  (H3b).
 - rseq stays ENOSYS, as on Linux built without CONFIG_RSEQ: glibc runs without it and musl does
   not use it.
 - A signal from rt_sigqueueinfo, rt_tgsigqueueinfo or pidfd_send_signal that ends a sender

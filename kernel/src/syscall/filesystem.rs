@@ -1350,7 +1350,7 @@ fn fill_stat(
 /// (a pipe, a socket) is on the pseudo mount (N-205).
 fn mount_of(path: Option<&str>) -> Result<(crate::fs::MountIds, bool), SyscallError> {
     Ok(match path {
-        Some(path) => vfs()?.global().mount_ids_of(path),
+        Some(path) => vfs()?.mount_ids_of(path),
         None => (crate::fs::PSEUDO_MOUNT, false),
     })
 }
@@ -5230,6 +5230,7 @@ mod tests {
         let mount = crate::fs::MountIds {
             id: 3,
             unique: (1 << 31) + 9,
+            dev: 3,
         };
         let s = fill_statx(&m, (4, 64), mount, false, STATX_BASIC_STATS, 1);
         assert_eq!(s.stx_mask, STATX_BASIC_STATS | STATX_MNT_ID);

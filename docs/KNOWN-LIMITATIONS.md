@@ -70,8 +70,7 @@ exposed were fixed (N-182 to N-189); the rest are listed, with their targets, in
 - **statx reports what stat reports.** No birth time (STATX_BTIME is never set: no filesystem
   records one), the same device, link count and block numbers as stat, and no attributes but
   STATX_ATTR_MOUNT_ROOT. The sync types are accepted and change nothing (every filesystem is
-  local). Mount ids match no /proc/self/mountinfo, which does not exist yet, so LTP statx01's
-  mount-id check cannot pass.
+  local). Mount ids are the ones `/proc/self/mountinfo` lists.
 - **openat2's resolve flags have no cache to work with.** RESOLVE_CACHED refuses what it must
   (a creation or truncation is EAGAIN) but otherwise runs the whole walk, since there is no dentry
   cache whose miss it could report. /proc/self/exe is the only magic link (there is no
@@ -164,7 +163,7 @@ their check, for a few shared reasons:
 - **Missing calls.** The System V IPC calls, message queues, mlock, msync, sched_getparam and
   the other calls the coverage tables list as missing;
   most of `/proc/sys` (it has `kernel/pid_max`, `kernel/cap_last_cap`, `kernel/core_pattern`,
-  `kernel/ostype`, `kernel/osrelease` and `kernel/version`), `/proc/self/mounts` and parts of `/proc/<pid>/stat` and `status`; `/proc/<pid>/exe` (only
+  `kernel/ostype`, `kernel/osrelease` and `kernel/version`), parts of `/proc/<pid>/stat` and `status`; `/proc/<pid>/exe` (only
   `/proc/self/exe` exists), and `/proc/<pid>/cmdline` holds the process name rather than its
   arguments.
 - **Memory exhaustion.** libc-test's `malloc-oom`, `malloc-brk-fail` and `pthread_create-oom`
@@ -338,10 +337,18 @@ What remains:
   with none.
 - **Namespaces are partial (ADR 0022).** UTS namespaces are complete. IPC and cgroup
   namespaces can be created and joined but isolate nothing, as there is no System V IPC, message
-  queue or cgroup hierarchy. Time namespaces are complete but for the two points below. User,
-  mount, PID and network namespaces exist only as the initial ones: unshare, clone and clone3
-  refuse new ones with EINVAL, as Linux does when built without them, until their steps (H3 to
-  H6). unshare(CLONE_FILES) in a multithreaded process is
+  queue or cgroup hierarchy. Time namespaces are complete but for the two points below. Mount
+  namespaces can be created, emptied and joined, but there is no Linux mount(2), umount2 or
+  pivot_root yet (ADR 0022 H3b and H3d; `CONFIG_MNT_NS` stays unset until then), only the
+  private mount call, which works in the caller's namespace. `/proc/<pid>/mounts` and
+  `mountinfo` report `rw` or `ro` and no other mount or filesystem options, every mount is
+  private (no propagation fields) and covers its whole filesystem (no bind mounts). The VFS
+  finds open files by path, so a descriptor opened in another mount namespace is looked up by
+  its path in the caller's (for fstat's mount id, fchdir and the like) once the two trees
+  differ, and sync(2) flushes the filesystems of the initial namespace only. User, PID and
+  network namespaces exist only as the initial ones: unshare, clone and clone3 refuse new ones
+  with EINVAL, as Linux does when built without them, until their steps (H4 to H6).
+  unshare(CLONE_FILES) in a multithreaded process is
   EINVAL, since the descriptor table belongs to the process, not the thread. The nsfs file's
   st_dev is procfs's, not an nsfs device's, and `/proc/sys/kernel/hostname` cannot be written
   (sethostname can). NS_MNT_GET_*, listns, statns and `/proc/sys/user/max_*_namespaces` do not
