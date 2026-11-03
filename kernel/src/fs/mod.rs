@@ -24,6 +24,8 @@ pub mod inotify;
 #[cfg(feature = "alloc")]
 pub mod memfd;
 #[cfg(feature = "alloc")]
+pub mod nsfs;
+#[cfg(feature = "alloc")]
 pub mod pidfd;
 pub mod pipe;
 pub mod procfs;
@@ -610,6 +612,13 @@ pub trait VfsNode: Send + Sync {
     /// RESOLVE_NO_MAGICLINKS refuses to follow one.
     fn is_magic_link(&self) -> bool {
         false
+    }
+
+    /// For a magic link that names an object rather than a path
+    /// (`/proc/<pid>/ns/*`), that object: the walk continues from it, as
+    /// Linux's nd_jump_link. None for any other node.
+    fn magic_target(&self) -> Option<Result<Arc<dyn VfsNode>, KernelError>> {
+        None
     }
 
     /// Change permissions on this node
@@ -1258,6 +1267,19 @@ impl MountTable {
                 links += 1;
                 if links > SYMLINK_MAX_DEPTH || resolve & resolve_flags::NO_SYMLINKS != 0 {
                     return Err(symlink_loop());
+                }
+                // A link to an object: the walk goes on from the object
+                // (anything after it finds no directory, ENOTDIR). It is a
+                // magic link, and leaves the mount (Linux's nd_jump_link).
+                if let Some(target) = node.magic_target() {
+                    if resolve & resolve_flags::NO_MAGICLINKS != 0 {
+                        return Err(symlink_loop());
+                    }
+                    if resolve & (resolve_flags::SCOPED | resolve_flags::NO_XDEV) != 0 {
+                        return Err(xdev());
+                    }
+                    node = target?;
+                    continue;
                 }
                 let target = node.readlink()?;
                 // The target replaces the link: relative to the link's own

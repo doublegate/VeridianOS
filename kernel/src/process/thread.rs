@@ -447,9 +447,13 @@ pub struct Thread {
     fs_released: AtomicBool,
     /// Detached flag (pthread_detach)
     pub detached: AtomicBool,
-    /// Filesystem view (cwd, umask)
+    /// Filesystem view (cwd, umask); replaced by unshare(CLONE_FS) when
+    /// shared.
     #[cfg(feature = "alloc")]
-    pub fs: Arc<ThreadFs>,
+    fs: Mutex<Arc<ThreadFs>>,
+    /// The thread's namespaces (ADR 0022, Linux's nsproxy).
+    #[cfg(feature = "alloc")]
+    ns: Mutex<Arc<super::ns::Namespaces>>,
 }
 
 /// Stack information
@@ -599,7 +603,8 @@ impl Thread {
             comm: Mutex::new(comm),
             fs_released: AtomicBool::new(false),
             detached: AtomicBool::new(false),
-            fs,
+            fs: Mutex::new(fs),
+            ns: Mutex::new(super::ns::initial()),
         }
     }
 
@@ -745,7 +750,30 @@ impl Thread {
     /// Get filesystem view (cwd/umask)
     #[cfg(feature = "alloc")]
     pub fn fs(&self) -> Arc<ThreadFs> {
-        self.fs.clone()
+        self.fs.lock().clone()
+    }
+
+    /// Give the thread `new` in place of a filesystem state it shares
+    /// (unshare(CLONE_FS)), moving its count of users over.
+    #[cfg(feature = "alloc")]
+    pub fn replace_fs(&self, new: Arc<ThreadFs>) {
+        new.users.fetch_add(1, Ordering::AcqRel);
+        let old = core::mem::replace(&mut *self.fs.lock(), new);
+        if !self.fs_released.load(Ordering::Acquire) {
+            old.users.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    /// The thread's namespaces.
+    #[cfg(feature = "alloc")]
+    pub fn namespaces(&self) -> Arc<super::ns::Namespaces> {
+        self.ns.lock().clone()
+    }
+
+    /// Give the thread the namespace set `set` (clone, unshare, setns).
+    #[cfg(feature = "alloc")]
+    pub fn set_namespaces(&self, set: Arc<super::ns::Namespaces>) {
+        *self.ns.lock() = set;
     }
 
     /// Stop counting as a user of the filesystem state ([`ThreadFs::users`]),
@@ -754,7 +782,7 @@ impl Thread {
     #[cfg(feature = "alloc")]
     pub fn release_fs(&self) {
         if !self.fs_released.swap(true, Ordering::AcqRel) {
-            self.fs.users.fetch_sub(1, Ordering::AcqRel);
+            self.fs.lock().users.fetch_sub(1, Ordering::AcqRel);
         }
     }
 }

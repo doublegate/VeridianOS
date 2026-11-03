@@ -382,6 +382,11 @@ mod kcmp;
 // process_vm_readv and process_vm_writev
 #[cfg(feature = "alloc")]
 mod process_vm;
+// unshare, setns, sethostname, setdomainname and the nsfs ioctls (ADR 0022)
+#[cfg(feature = "alloc")]
+mod namespaces;
+#[cfg(feature = "alloc")]
+pub(crate) use debug::may_read_process;
 pub(crate) use filesystem::rename_paths;
 pub use futex::sys_futex_wake;
 
@@ -521,6 +526,9 @@ pub enum SyscallError {
     /// A running program opened for writing or truncated, or a file open
     /// for writing executed (ETXTBSY, errno 26).
     TextBusy = -138,
+    /// Too many users: joining a time namespace from a multi-threaded
+    /// process (EUSERS, errno 87).
+    TooManyUsers = -139,
     /// The call was interrupted and left a restart block (`restart`):
     /// Linux -ERESTART_RESTARTBLOCK, turned into EINTR or restart_syscall
     /// on the way back to user mode and never seen there.
@@ -1514,6 +1522,14 @@ fn handle_syscall(
         Syscall::Personality => process::sys_personality(arg1),
         #[cfg(feature = "alloc")]
         Syscall::Kcmp => kcmp::sys_kcmp(arg1, arg2, arg3, arg4, arg5),
+        #[cfg(feature = "alloc")]
+        Syscall::Unshare => namespaces::sys_unshare(arg1),
+        #[cfg(feature = "alloc")]
+        Syscall::Setns => namespaces::sys_setns(arg1, arg2),
+        #[cfg(feature = "alloc")]
+        Syscall::Sethostname => namespaces::sys_sethostname(arg1, arg2),
+        #[cfg(feature = "alloc")]
+        Syscall::Setdomainname => namespaces::sys_setdomainname(arg1, arg2),
         #[cfg(feature = "alloc")]
         Syscall::ProcessVmReadv => {
             process_vm::sys_process_vm_readv(arg1, arg2, arg3, arg4, arg5, syscall_arg6()?)

@@ -25,7 +25,7 @@ use crate::{arch::context::ThreadContext, error::KernelError, println};
 
 /// How a clone that makes a new process (not a thread) differs from a
 /// plain fork (N-210). `Default` is fork.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ForkOptions {
     /// CLONE_VM: the child maps the parent's memory itself
     /// (`VirtualAddressSpace::share_from`), not a copy-on-write copy.
@@ -65,6 +65,9 @@ pub struct ForkOptions {
     /// CLONE_AUTOREAP: the child is reaped as it exits
     /// (`Process::autoreap`).
     pub autoreap: bool,
+    /// The child's namespaces (`process::ns::for_clone`); the caller's
+    /// when None.
+    pub namespaces: Option<alloc::sync::Arc<super::ns::Namespaces>>,
 }
 
 impl Default for ForkOptions {
@@ -85,6 +88,7 @@ impl Default for ForkOptions {
             clear_sighand: false,
             no_new_privs: false,
             autoreap: false,
+            namespaces: None,
         }
     }
 }
@@ -280,9 +284,9 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
             // (N-93); a copy, because the child's later chdir is its own --
             // unless CLONE_FS shares them.
             .fs(if opts.share_fs {
-                super::thread::ThreadFs::clone_shared(&current_thread.fs)
+                super::thread::ThreadFs::clone_shared(&current_thread.fs())
             } else {
-                super::thread::ThreadFs::clone_copy(&current_thread.fs)
+                super::thread::ThreadFs::clone_copy(&current_thread.fs())
             });
             let thread = match opts.child_cleartid {
                 Some(ptr) => thread.clear_tid(ptr),
@@ -444,6 +448,11 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
                 .personality
                 .load(core::sync::atomic::Ordering::Acquire),
             core::sync::atomic::Ordering::Release,
+        );
+        new_thread.set_namespaces(
+            opts.namespaces
+                .clone()
+                .unwrap_or_else(|| current_thread.namespaces()),
         );
         // The sets read with the credentials (above), not re-read here: a
         // set*id call on another thread in between would pair root IDs

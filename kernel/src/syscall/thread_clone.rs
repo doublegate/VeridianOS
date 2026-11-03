@@ -7,7 +7,7 @@
 use crate::process::thread::ThreadFs;
 use crate::{
     arch::context::ThreadContext,
-    process::{self, thread::ThreadBuilder},
+    process::{self, ns, thread::ThreadBuilder},
     syscall::{userspace::validate_user_ptr, SyscallError},
 };
 
@@ -287,6 +287,7 @@ fn copy_process_checks(req: &CloneRequest, admin: bool) -> Result<(), SyscallErr
     let invalid = (on(CLONE_NEWNS) && on(CLONE_FS))
         || (on(CLONE_THREAD) && !on(CLONE_SIGHAND))
         || (on(CLONE_SIGHAND) && !on(CLONE_VM))
+        || (on(CLONE_THREAD) && on(ns::CLONE_NEWUSER | ns::CLONE_NEWPID))
         || (on(CLONE_PIDFD) && on(CLONE_DETACHED))
         || (on(CLONE_AUTOREAP) && (on(CLONE_THREAD) || on(CLONE_PARENT) || req.exit_signal != 0))
         || (on(CLONE_NNP) && on(CLONE_THREAD))
@@ -319,7 +320,8 @@ const PROCESS_FLAGS: u64 = CLONE_VM
     | CLONE_INTO_CGROUP
     | CLONE_AUTOREAP
     | CLONE_NNP
-    | CLONE_PIDFD_AUTOKILL;
+    | CLONE_PIDFD_AUTOKILL
+    | ns::CLONE_NS_ALL;
 const THREAD_FLAGS: u64 = CLONE_VM
     | CLONE_FS
     | CLONE_FILES
@@ -333,7 +335,8 @@ const THREAD_FLAGS: u64 = CLONE_VM
     | CLONE_CHILD_SETTID
     | CLONE_PIDFD
     | CLONE_IO
-    | CLONE_INTO_CGROUP;
+    | CLONE_INTO_CGROUP
+    | ns::CLONE_NS_ALL;
 
 /// kernel_clone's own checks, then copy_process's: CLONE_EMPTY_MNTNS
 /// implies CLONE_NEWNS; CLONE_PIDFD and CLONE_PARENT_SETTID storing to one
@@ -382,6 +385,20 @@ fn kernel_clone(mut req: CloneRequest) -> Result<usize, SyscallError> {
     use crate::process::linux_caps::{CAP_CHECKPOINT_RESTORE, CAP_SYS_ADMIN};
     let caller = process::creds::Caller::current();
     request_checks(&mut req, caller.capable(CAP_SYS_ADMIN))?;
+    // copy_creds: user namespaces do not exist yet (ADR 0022 H4), as on
+    // Linux without CONFIG_USER_NS; then copy_namespaces.
+    if req.on(ns::CLONE_NEWUSER) {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let current_ns = process::current_thread()
+        .ok_or(SyscallError::InvalidState)?
+        .namespaces();
+    let namespaces = ns::for_clone(&current_ns, req.flags, caller.capable(CAP_SYS_ADMIN)).map_err(
+        |e| match e {
+            ns::CloneNsError::Permission => SyscallError::OperationNotPermitted,
+            ns::CloneNsError::Invalid => SyscallError::InvalidArgument,
+        },
+    )?;
     let claim = match req.set_tid {
         Some(tid) => {
             let may = caller.capable(CAP_CHECKPOINT_RESTORE) || caller.capable(CAP_SYS_ADMIN);
@@ -395,9 +412,9 @@ fn kernel_clone(mut req: CloneRequest) -> Result<usize, SyscallError> {
     }
     let id = claim.as_ref().map(|c| c.id());
     if req.on(CLONE_THREAD) {
-        thread_clone(&req, id)
+        thread_clone(&req, id, namespaces)
     } else {
-        process_clone(&req, id)
+        process_clone(&req, id, namespaces)
     }
 }
 
@@ -406,7 +423,11 @@ fn kernel_clone(mut req: CloneRequest) -> Result<usize, SyscallError> {
 /// clone(CLONE_VM | CLONE_VFORK | SIGCHLD) with a stack of their own; it
 /// was EINVAL. CLONE_VM shares the parent's memory page by page
 /// (`VirtualAddressSpace::share_from`). `id` is set_tid's, claimed.
-fn process_clone(req: &CloneRequest, id: Option<u64>) -> Result<usize, SyscallError> {
+fn process_clone(
+    req: &CloneRequest,
+    id: Option<u64>,
+    namespaces: alloc::sync::Arc<ns::Namespaces>,
+) -> Result<usize, SyscallError> {
     #[cfg(target_arch = "x86_64")]
     if req.on(CLONE_SETTLS) && !crate::arch::x86_64::trap::is_user_address(req.tls as u64) {
         return Err(SyscallError::InvalidArgument);
@@ -441,6 +462,7 @@ fn process_clone(req: &CloneRequest, id: Option<u64>) -> Result<usize, SyscallEr
         clear_sighand: on(CLONE_CLEAR_SIGHAND),
         no_new_privs: on(CLONE_NNP),
         autoreap: on(CLONE_AUTOREAP),
+        namespaces: Some(namespaces),
     })
 }
 
@@ -467,7 +489,11 @@ fn process_clone(req: &CloneRequest, id: Option<u64>) -> Result<usize, SyscallEr
 ///
 /// `id` is set_tid's, claimed: the thread's ID. Returns the new thread's
 /// TID.
-fn thread_clone(req: &CloneRequest, id: Option<u64>) -> Result<usize, SyscallError> {
+fn thread_clone(
+    req: &CloneRequest,
+    id: Option<u64>,
+    namespaces: alloc::sync::Arc<ns::Namespaces>,
+) -> Result<usize, SyscallError> {
     let (newsp, tls) = (req.stack, req.tls);
     let (parent_tid_ptr, child_tid_ptr) = (req.parent_tid, req.child_tid);
     // The thread shares the fd table too (one per process here).
@@ -578,6 +604,8 @@ fn thread_clone(req: &CloneRequest, id: Option<u64>) -> Result<usize, SyscallErr
     );
     let sets = *current_thread.caps.lock();
     *thread.caps.lock() = sets;
+    #[cfg(feature = "alloc")]
+    thread.set_namespaces(namespaces);
 
     // Override context with cloned registers so the child returns 0 from clone.
     //
@@ -922,8 +950,13 @@ mod tests {
     #[test]
     fn kernel_clone_refuses_what_it_does_not_support() {
         let check = |flags| request_checks(&mut request(flags), true);
-        // Namespaces, CLONE_PARENT, and sharing a table across processes.
-        assert_eq!(check(CLONE_NEWNS), EINVAL);
+        // CLONE_PARENT and sharing a table across processes; namespace
+        // flags pass here and meet copy_namespaces' rules later.
+        assert_eq!(check(CLONE_NEWNS), Ok(()));
+        assert_eq!(
+            check(CLONE_THREAD | CLONE_SIGHAND | CLONE_VM | CLONE_FILES | ns::CLONE_NEWPID),
+            EINVAL
+        );
         assert_eq!(check(CLONE_PARENT), EINVAL);
         assert_eq!(check(CLONE_VM | CLONE_SIGHAND), EINVAL);
         assert_eq!(check(CLONE_FILES), EINVAL);

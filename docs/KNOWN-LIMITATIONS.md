@@ -333,6 +333,15 @@ What remains:
   own (a mapping one makes later the other does not see). No task has an I/O context or a System V
   semaphore undo list, so KCMP_IO and KCMP_SYSVSEM always answer 0, as Linux does for two tasks
   with none.
+- **Namespaces are partial (ADR 0022).** UTS namespaces are complete. IPC and cgroup
+  namespaces can be created and joined but isolate nothing, as there is no System V IPC, message
+  queue or cgroup hierarchy. User, mount, PID, network and time namespaces exist only as the
+  initial ones: unshare, clone and clone3 refuse new ones with EINVAL, as Linux does when built
+  without them, until their steps (H2 to H6). unshare(CLONE_FILES) in a multithreaded process is
+  EINVAL, since the descriptor table belongs to the process, not the thread. The nsfs file's
+  st_dev is procfs's, not an nsfs device's, and `/proc/sys/kernel/hostname` cannot be written
+  (sethostname can). NS_MNT_GET_*, listns, statns and `/proc/sys/user/max_*_namespaces` do not
+  exist.
 - **personality changes little.** Every value is stored and reported, but only PER_LINUX
   exists, and only STICKY_TIMEOUTS, UNAME26 and READ_IMPLIES_EXEC change anything.
   READ_IMPLIES_EXEC is honoured only for a program with the W^X opt-in (ADR 0017), since adding

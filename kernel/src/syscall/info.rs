@@ -36,19 +36,23 @@ const UTSNAME_SIZE: usize = UTSNAME_LENGTH * 6;
 /// The utsname a process with system name `sysname` and `release` sees:
 /// sysname, nodename, release, version, machine and domainname, each
 /// NUL-padded to 65 bytes (ADR 0021).
-fn utsname_bytes(sysname: &str, release: &str) -> [u8; UTSNAME_SIZE] {
+fn utsname_bytes(
+    sysname: &str,
+    nodename: &str,
+    release: &str,
+    domainname: &str,
+) -> [u8; UTSNAME_SIZE] {
     use crate::utils::uname;
 
     let mut out = [0u8; UTSNAME_SIZE];
     // The fields hold their value and at least one NUL.
     let fields = [
         sysname,
-        uname::NODENAME,
+        nodename,
         release,
         uname::VERSION,
         uname::machine(),
-        // domainname: no NIS domain
-        "",
+        domainname,
     ];
     for (i, value) in fields.iter().enumerate() {
         let len = core::cmp::min(value.len(), UTSNAME_LENGTH - 1);
@@ -77,7 +81,16 @@ pub fn sys_uname(buf: usize) -> SyscallResult {
     } else {
         alloc::string::String::from(crate::utils::uname::RELEASE)
     };
-    let out = utsname_bytes(crate::utils::uname::current_sysname(), &release);
+    // The caller's UTS namespace's host and domain names (ADR 0022).
+    let uts = crate::process::current_thread()
+        .map(|t| t.namespaces().uts.clone())
+        .unwrap_or_else(|| crate::process::ns::initial().uts.clone());
+    let out = utsname_bytes(
+        crate::utils::uname::current_sysname(),
+        &uts.hostname(),
+        &release,
+        &uts.domainname(),
+    );
     super::userspace::write_user_bytes(buf, &out)?;
     Ok(0)
 }
@@ -95,7 +108,12 @@ mod tests {
 
     #[test]
     fn uname_reports_a_linux_release_and_the_veridian_version() {
-        let out = utsname_bytes("VeridianOS", crate::utils::uname::RELEASE);
+        let out = utsname_bytes(
+            "VeridianOS",
+            crate::utils::uname::NODENAME,
+            crate::utils::uname::RELEASE,
+            "(none)",
+        );
         assert_eq!(field(&out, 0), "VeridianOS");
         assert_eq!(field(&out, 1), "veridian");
         assert_eq!(field(&out, 2), "7.3.0-veridian");
@@ -104,6 +122,6 @@ mod tests {
             concat!("#1 SMP VeridianOS ", env!("CARGO_PKG_VERSION"))
         );
         assert_eq!(field(&out, 4), crate::utils::uname::machine());
-        assert_eq!(field(&out, 5), "");
+        assert_eq!(field(&out, 5), "(none)");
     }
 }

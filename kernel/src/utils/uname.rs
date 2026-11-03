@@ -90,7 +90,7 @@ impl Default for UnameMode {
 pub fn current_sysname() -> &'static str {
     sysname(crate::process::current_process().is_some_and(|p| p.uname_linux.is_linux()))
 }
-/// The host name (until sethostname and UTS namespaces exist).
+/// The initial UTS namespace's host name (ADR 0022).
 pub const NODENAME: &str = "veridian";
 /// The release: the Linux version whose sources are the kernel's
 /// specification, so programs that compare kernel versions (LTP among them)

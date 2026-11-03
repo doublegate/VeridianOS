@@ -69,6 +69,10 @@ pub mod sysno {
     pub const SYS_kcmp: usize = 312;
     pub const SYS_process_vm_readv: usize = 310;
     pub const SYS_process_vm_writev: usize = 311;
+    pub const SYS_unshare: usize = 272;
+    pub const SYS_setns: usize = 308;
+    pub const SYS_sethostname: usize = 170;
+    pub const SYS_setdomainname: usize = 171;
     pub const SYS_open: usize = 2;
     pub const SYS_openat: usize = 257;
     pub const SYS_openat2: usize = 437;
@@ -393,6 +397,10 @@ pub mod sysno {
     pub const SYS_kcmp: usize = 272;
     pub const SYS_process_vm_readv: usize = 270;
     pub const SYS_process_vm_writev: usize = 271;
+    pub const SYS_unshare: usize = 97;
+    pub const SYS_setns: usize = 268;
+    pub const SYS_sethostname: usize = 161;
+    pub const SYS_setdomainname: usize = 162;
     pub const SYS_openat: usize = 56;
     pub const SYS_openat2: usize = 437;
     pub const SYS_name_to_handle_at: usize = 264;
@@ -681,6 +689,10 @@ pub mod sysno {
     pub const SYS_kcmp: usize = 272;
     pub const SYS_process_vm_readv: usize = 270;
     pub const SYS_process_vm_writev: usize = 271;
+    pub const SYS_unshare: usize = 97;
+    pub const SYS_setns: usize = 268;
+    pub const SYS_sethostname: usize = 161;
+    pub const SYS_setdomainname: usize = 162;
     pub const SYS_openat: usize = 56;
     pub const SYS_openat2: usize = 437;
     pub const SYS_name_to_handle_at: usize = 264;

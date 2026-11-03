@@ -87,7 +87,7 @@ Each group lands with its LTP cases. The counts are "missing" entries in the cov
   - priority and rlimit calls
   - pidfd_*, clone3, kcmp, process_vm_*, ptrace (the pidfd calls, clone3, kcmp and process_vm_*
     are done; no pidfd ioctls, one PID namespace level, KNOWN-LIMITATIONS)
-  - unshare/setns
+  - unshare/setns (H1 of ADR 0022: the framework, UTS, IPC and cgroup; H2-H6 the others)
   - real prctl, rseq (personality is done; rseq stays ENOSYS, as without CONFIG_RSEQ)
 - **signals (11)**
   - The pending/timedwait/suspend/queueinfo family, tkill/tgkill, pause, alarm, itimers,

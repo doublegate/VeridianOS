@@ -79,6 +79,10 @@
 #define SYS_kcmp                         312
 #define SYS_process_vm_readv             310
 #define SYS_process_vm_writev            311
+#define SYS_unshare                      272
+#define SYS_setns                        308
+#define SYS_sethostname                  170
+#define SYS_setdomainname                171
 /* Files */
 #define SYS_open                         2
 #define SYS_openat                       257
@@ -428,6 +432,10 @@
 #define SYS_kcmp                         272
 #define SYS_process_vm_readv             270
 #define SYS_process_vm_writev            271
+#define SYS_unshare                      97
+#define SYS_setns                        268
+#define SYS_sethostname                  161
+#define SYS_setdomainname                162
 /* Files */
 #define SYS_openat                       56
 #define SYS_openat2                      437
@@ -741,6 +749,10 @@
 #define SYS_kcmp                         272
 #define SYS_process_vm_readv             270
 #define SYS_process_vm_writev            271
+#define SYS_unshare                      97
+#define SYS_setns                        268
+#define SYS_sethostname                  161
+#define SYS_setdomainname                162
 /* Files */
 #define SYS_openat                       56
 #define SYS_openat2                      437

@@ -5553,6 +5553,7 @@ static void test_pidfd(void);
 static void test_clone3(void);
 static void test_kcmp_process_vm(void);
 static void test_personality(void);
+static void test_namespaces_uts(void);
 
 /* Tests `--only NAME` can run alone (for debugging a single test). */
 static const struct {
@@ -5572,6 +5573,7 @@ static const struct {
     {"clone3", test_clone3},
     {"kcmp_process_vm", test_kcmp_process_vm},
     {"personality", test_personality},
+    {"namespaces_uts", test_namespaces_uts},
     {"threads", test_threads},
     {"cow_race", test_cow_race},
     {"signals", test_signals},
@@ -8506,6 +8508,143 @@ static void test_personality(void)
     report("personality", f == 0, why);
 }
 
+/* Namespaces, as Linux 7.3 (ADR 0022 H1): /proc/<pid>/ns links read
+ * "type:[inode]" and open an nsfs file with that inode, its ioctls
+ * describe it, unshare(CLONE_NEWUTS) gives a host name of its own, and
+ * setns joins another process's UTS namespace, from an nsfs file or a
+ * pidfd. */
+#ifndef SYS_pidfd_open
+#define SYS_pidfd_open 434
+#endif
+#define T_NS_GET_PARENT 0xb702
+#define T_NS_GET_NSTYPE 0xb703
+#define T_NS_GET_OWNER_UID 0xb704
+#define T_NS_GET_ID 0x8008b70d
+#define T_NSFS_MAGIC 0x6e736673
+
+static unsigned long t_ns_ino(pid_t pid, const char *name)
+{
+    char path[64];
+    struct stat st;
+    snprintf(path, sizeof(path), "/proc/%d/ns/%s", (int)pid, name);
+    return stat(path, &st) == 0 ? (unsigned long)st.st_ino : 0;
+}
+
+static void test_namespaces_uts(void)
+{
+    char why[160], buf[64], path[64];
+    int f = 0;
+    static const char *names[] = {"cgroup", "ipc", "mnt", "net", "pid", "pid_for_children",
+                                  "time", "time_for_children", "user", "uts"};
+
+    /* Every link reads type:[inode], the inode stat finds behind it. */
+    for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        char want[64];
+        snprintf(path, sizeof(path), "/proc/self/ns/%s", names[i]);
+        ssize_t n = readlink(path, buf, sizeof(buf) - 1);
+        if (n <= 0) {
+            f |= 1;
+            continue;
+        }
+        buf[n] = 0;
+        const char *type = names[i];
+        if (strncmp(type, "pid_for", 7) == 0) type = "pid";
+        if (strncmp(type, "time_for", 8) == 0) type = "time";
+        snprintf(want, sizeof(want), "%s:[%lu]", type, t_ns_ino(getpid(), names[i]));
+        if (strcmp(buf, want) != 0) f |= 1;
+    }
+
+    /* The nsfs file: its type, a 64-bit id, EINVAL for other types' ioctls
+     * and for reads, ENOTTY for an unknown ioctl, NSFS_MAGIC. */
+    int uts = open("/proc/self/ns/uts", O_RDONLY | O_CLOEXEC);
+    struct stat st;
+    struct statfs sfs;
+    uint64_t id = 0;
+    char c;
+    if (uts < 0 || fstat(uts, &st) != 0 || st.st_ino != t_ns_ino(getpid(), "uts") ||
+        ioctl(uts, T_NS_GET_NSTYPE) != CLONE_NEWUTS || ioctl(uts, T_NS_GET_ID, &id) != 0 ||
+        id == 0)
+        f |= 2;
+    unsigned uid;
+    if (!(ioctl(uts, T_NS_GET_PARENT) == -1 && errno == EINVAL) ||
+        !(ioctl(uts, T_NS_GET_OWNER_UID, &uid) == -1 && errno == EINVAL) ||
+        !(ioctl(uts, 0xb7ff) == -1 && errno == ENOTTY) ||
+        !(read(uts, &c, 1) == -1 && errno == EINVAL) ||
+        fstatfs(uts, &sfs) != 0 || sfs.f_type != T_NSFS_MAGIC)
+        f |= 4;
+    /* setns checks the type it is given against the file's. */
+    if (!(setns(uts, CLONE_NEWIPC) == -1 && errno == EINVAL)) f |= 8;
+    if (!(unshare(0x8000) == -1 && errno == EINVAL)) f |= 8;
+    static char longname[80];
+    memset(longname, 'a', sizeof(longname));
+    if (!(sethostname(longname, 65) == -1 && errno == EINVAL)) f |= 8;
+
+    /* A child with a UTS namespace and host name of its own. */
+    struct utsname before, u;
+    uname(&before);
+    int go[2], ready[2];
+    if (pipe(go) != 0 || pipe(ready) != 0) f |= 16;
+    pid_t child = fork();
+    if (child == 0) {
+        if (unshare(CLONE_NEWUTS) != 0 || sethostname("ns-h1-test", 10) != 0) _exit(2);
+        if (write(ready[1], "r", 1) != 1) _exit(3);
+        if (read(go[0], &c, 1) != 1) _exit(4);
+        struct utsname cu;
+        uname(&cu);
+        _exit(strcmp(cu.nodename, "ns-h1-test") == 0 ? 0 : 1);
+    }
+    close(ready[1]);
+    close(go[0]);
+    if (read(ready[0], &c, 1) != 1) f |= 16;
+    uname(&u);
+    if (strcmp(u.nodename, before.nodename) != 0 ||
+        t_ns_ino(child, "uts") == t_ns_ino(getpid(), "uts") ||
+        t_ns_ino(child, "ipc") != t_ns_ino(getpid(), "ipc"))
+        f |= 16;
+
+    /* Two more children join it: one through its nsfs file, one through a
+     * pidfd for it. */
+    snprintf(path, sizeof(path), "/proc/%d/ns/uts", (int)child);
+    int theirs = open(path, O_RDONLY | O_CLOEXEC);
+    int pidfd = (int)syscall(SYS_pidfd_open, child, 0);
+    for (int way = 0; way < 2; way++) {
+        pid_t j = fork();
+        if (j == 0) {
+            int r = way == 0 ? setns(theirs, 0) : setns(pidfd, CLONE_NEWUTS | CLONE_NEWIPC);
+            struct utsname ju;
+            uname(&ju);
+            _exit(r == 0 && strcmp(ju.nodename, "ns-h1-test") == 0 ? 0 : 1);
+        }
+        int st2;
+        if (waitpid(j, &st2, 0) != j || !WIFEXITED(st2) || WEXITSTATUS(st2) != 0) f |= 32;
+    }
+    if (write(go[1], "g", 1) != 1) f |= 64;
+    int st3;
+    if (waitpid(child, &st3, 0) != child || !WIFEXITED(st3) || WEXITSTATUS(st3) != 0) f |= 64;
+    uname(&u);
+    if (strcmp(u.nodename, before.nodename) != 0) f |= 64;
+
+    /* Without CAP_SYS_ADMIN: EPERM. */
+    pid_t un = fork();
+    if (un == 0) {
+        if (setgid(65534) != 0 || setuid(65534) != 0) _exit(0); /* not root: nothing to test */
+        _exit(unshare(CLONE_NEWUTS) == -1 && errno == EPERM &&
+                      sethostname("x", 1) == -1 && errno == EPERM
+                  ? 0
+                  : 1);
+    }
+    int st4;
+    if (waitpid(un, &st4, 0) != un || !WIFEXITED(st4) || WEXITSTATUS(st4) != 0) f |= 128;
+
+    close(uts);
+    close(theirs);
+    close(pidfd);
+    close(go[1]);
+    close(ready[0]);
+    snprintf(why, sizeof(why), "f=%#x errno=%d", f, errno);
+    report("namespaces_uts", f == 0, why);
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
@@ -8625,6 +8764,7 @@ int main(int argc, char **argv)
     test_clone3();
     test_kcmp_process_vm();
     test_personality();
+    test_namespaces_uts();
 #if defined(__x86_64__)
     test_ustat_sysfs();
 #endif

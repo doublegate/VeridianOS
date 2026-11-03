@@ -2030,6 +2030,15 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
         }
     }
 
+    // A namespace file (ADR 0022).
+    #[cfg(feature = "alloc")]
+    if let Some(result) = file
+        .as_ref()
+        .and_then(|f| super::namespaces::nsfs_ioctl(f, cmd, arg))
+    {
+        return result;
+    }
+
     // Device ioctls (DRM, evdev). The device is identified by the node's
     // (major, minor), never by the path it was opened with (W-7). Both run
     // against a kernel copy of the argument (W-4, W-19): the handlers never

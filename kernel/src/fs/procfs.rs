@@ -21,6 +21,65 @@ enum ProcNodeType {
     SubDir(String),
     /// /proc/self/exe: symlink to the calling process's executable
     SelfExe,
+    /// /proc/<pid>/ns (None: /proc/self/ns, the caller's).
+    NsDir(Option<u64>),
+    /// One of its links, by name (`NS_LINKS`).
+    NsLink(Option<u64>, &'static str),
+}
+
+/// The links in `/proc/<pid>/ns`, as Linux lists them.
+const NS_LINKS: [&str; 10] = [
+    "cgroup",
+    "ipc",
+    "mnt",
+    "net",
+    "pid",
+    "pid_for_children",
+    "time",
+    "time_for_children",
+    "user",
+    "uts",
+];
+
+/// The namespace the `/proc/<pid>/ns/<name>` link names (None: the
+/// caller's): the process's first thread's set, its PID and user
+/// namespaces, and the time namespace it runs in for "time". Reading or
+/// following one needs ptrace read access to the process (EACCES), as
+/// Linux's proc_ns_get_link.
+#[cfg(feature = "alloc")]
+fn ns_link_target(pid: Option<u64>, name: &str) -> Result<crate::process::ns::NsRef, KernelError> {
+    use crate::process::ns::{self, NsKind, NsRef};
+    let not_found = || KernelError::FsError(FsError::NotFound);
+    let process = match pid {
+        Some(pid) => crate::process::get_process(crate::process::ProcessId(pid)),
+        None => crate::process::current_process(),
+    }
+    .ok_or_else(not_found)?;
+    if !crate::syscall::may_read_process(&process) {
+        return Err(KernelError::FsError(FsError::PermissionDenied));
+    }
+    let set = process
+        .get_thread(crate::process::ThreadId(process.pid.0))
+        .ok_or_else(not_found)?
+        .namespaces();
+    Ok(match name {
+        "pid" => ns::pid_of(&process),
+        "user" => ns::user_of(&process),
+        "pid_for_children" => set.get(NsKind::Pid),
+        "time" => NsRef::Plain(set.time.clone()),
+        "time_for_children" => set.get(NsKind::Time),
+        "cgroup" => set.get(NsKind::Cgroup),
+        "ipc" => set.get(NsKind::Ipc),
+        "mnt" => set.get(NsKind::Mnt),
+        "net" => set.get(NsKind::Net),
+        "uts" => set.get(NsKind::Uts),
+        _ => return Err(not_found()),
+    })
+}
+
+/// The pid part of an ns node's key.
+fn ns_owner_key(pid: Option<u64>) -> String {
+    pid.map_or(String::from("self"), |p| format!("{}", p))
 }
 
 /// ProcFS node
@@ -79,6 +138,8 @@ impl ProcNode {
             ProcNodeType::SystemFile(name) => format!("file:{}", name),
             ProcNodeType::SubDir(dir) => dir.clone(),
             ProcNodeType::SelfExe => String::from("self/exe"),
+            ProcNodeType::NsDir(pid) => format!("{}/ns", ns_owner_key(*pid)),
+            ProcNodeType::NsLink(pid, name) => format!("{}/ns/{}", ns_owner_key(*pid), name),
         }
     }
 
@@ -140,11 +201,12 @@ impl VfsNode for ProcNode {
 
     fn node_type(&self) -> NodeType {
         match &self.node_type {
-            ProcNodeType::Root | ProcNodeType::ProcessDir(_) | ProcNodeType::SubDir(_) => {
-                NodeType::Directory
-            }
+            ProcNodeType::Root
+            | ProcNodeType::ProcessDir(_)
+            | ProcNodeType::SubDir(_)
+            | ProcNodeType::NsDir(_) => NodeType::Directory,
             ProcNodeType::ProcessFile(_, _) | ProcNodeType::SystemFile(_) => NodeType::File,
-            ProcNodeType::SelfExe => NodeType::Symlink,
+            ProcNodeType::SelfExe | ProcNodeType::NsLink(..) => NodeType::Symlink,
         }
     }
 
@@ -156,13 +218,34 @@ impl VfsNode for ProcNode {
                 .map(|p| p.exe_path.lock().clone())
                 .filter(|path| !path.is_empty())
                 .ok_or(KernelError::FsError(FsError::NotFound)),
+            // "uts:[4026531838]"
+            #[cfg(feature = "alloc")]
+            ProcNodeType::NsLink(pid, name) => {
+                ns_link_target(*pid, name).map(|ns| ns.ident().link_text())
+            }
             _ => Err(KernelError::FsError(FsError::NotASymlink)),
         }
     }
 
-    /// /proc/self/exe names the executable, not a path.
+    /// /proc/self/exe names the executable, not a path; an ns link a
+    /// namespace.
     fn is_magic_link(&self) -> bool {
-        matches!(self.node_type, ProcNodeType::SelfExe)
+        matches!(
+            self.node_type,
+            ProcNodeType::SelfExe | ProcNodeType::NsLink(..)
+        )
+    }
+
+    /// An ns link opens the namespace's nsfs file.
+    #[cfg(feature = "alloc")]
+    fn magic_target(&self) -> Option<Result<Arc<dyn VfsNode>, KernelError>> {
+        match &self.node_type {
+            ProcNodeType::NsLink(pid, name) => Some(
+                ns_link_target(*pid, name)
+                    .map(|ns| Arc::new(crate::fs::nsfs::NsFileNode::new(ns)) as Arc<dyn VfsNode>),
+            ),
+            _ => None,
+        }
     }
 
     fn read(&self, offset: usize, buffer: &mut [u8]) -> Result<usize, KernelError> {
@@ -225,6 +308,17 @@ impl VfsNode for ProcNode {
                     // No taint: no proprietary modules, no oops (LTP's
                     // tst_taint reads it).
                     "tainted" => String::from("0\n"),
+                    "hostname" | "domainname" => {
+                        let uts = crate::process::current_thread()
+                            .map(|t| t.namespaces().uts.clone())
+                            .unwrap_or_else(|| crate::process::ns::initial().uts.clone());
+                        let name = if name == "hostname" {
+                            uts.hostname()
+                        } else {
+                            uts.domainname()
+                        };
+                        format!("{}\n", name)
+                    }
                     "cap_last_cap" => {
                         format!("{}\n", crate::process::linux_caps::CAP_LAST_CAP)
                     }
@@ -327,16 +421,19 @@ impl VfsNode for ProcNode {
 
     fn metadata(&self) -> Result<Metadata, KernelError> {
         let node_type = match &self.node_type {
-            ProcNodeType::Root | ProcNodeType::ProcessDir(_) | ProcNodeType::SubDir(_) => {
-                NodeType::Directory
-            }
-            ProcNodeType::SelfExe => NodeType::Symlink,
+            ProcNodeType::Root
+            | ProcNodeType::ProcessDir(_)
+            | ProcNodeType::SubDir(_)
+            | ProcNodeType::NsDir(_) => NodeType::Directory,
+            ProcNodeType::SelfExe | ProcNodeType::NsLink(..) => NodeType::Symlink,
             _ => NodeType::File,
         };
 
         // As on Linux: everyone may walk the directories and read the
         // files; links (self/exe) are rwxrwxrwx.
         let permissions = Permissions::from_mode(match node_type {
+            // dr-x--x--x, as Linux's ns directory.
+            NodeType::Directory if matches!(self.node_type, ProcNodeType::NsDir(_)) => 0o511,
             NodeType::Directory => 0o555,
             NodeType::Symlink => 0o777,
             _ if self.sysctl().is_some() => 0o644,
@@ -439,6 +536,21 @@ impl VfsNode for ProcNode {
                     node_type: NodeType::File,
                     inode: 0,
                 });
+
+                entries.push(DirEntry {
+                    name: String::from("ns"),
+                    node_type: NodeType::Directory,
+                    inode: 0,
+                });
+            }
+            ProcNodeType::NsDir(_) => {
+                for name in NS_LINKS {
+                    entries.push(DirEntry {
+                        name: String::from(name),
+                        node_type: NodeType::Symlink,
+                        inode: 0,
+                    });
+                }
             }
             // What lookup finds in /proc/sys and below.
             ProcNodeType::SubDir(dir) if dir.starts_with("sys") => {
@@ -453,6 +565,8 @@ impl VfsNode for ProcNode {
                     "sys/kernel" => &[
                         ("cap_last_cap", NodeType::File),
                         ("core_pattern", NodeType::File),
+                        ("domainname", NodeType::File),
+                        ("hostname", NodeType::File),
                         ("osrelease", NodeType::File),
                         ("ostype", NodeType::File),
                         ("pid_max", NodeType::File),
@@ -529,6 +643,9 @@ impl VfsNode for ProcNode {
                     *pid,
                     String::from(name),
                 )) as Arc<dyn VfsNode>),
+                "ns" => Ok(Arc::new(ProcNode {
+                    node_type: ProcNodeType::NsDir(Some(*pid)),
+                }) as Arc<dyn VfsNode>),
                 _ => Err(KernelError::FsError(FsError::NotFound)),
             },
             ProcNodeType::SubDir(dir_name) => {
@@ -559,7 +676,8 @@ impl VfsNode for ProcNode {
                         "core_pattern" => Ok(Arc::new(ProcNode::new_system_file(String::from(
                             "core_pattern",
                         ))) as Arc<dyn VfsNode>),
-                        "cap_last_cap" | "pid_max" | "ostype" | "osrelease" | "tainted" => {
+                        "cap_last_cap" | "pid_max" | "ostype" | "osrelease" | "tainted"
+                        | "hostname" | "domainname" => {
                             Ok(Arc::new(ProcNode::new_system_file(String::from(name)))
                                 as Arc<dyn VfsNode>)
                         }
@@ -583,6 +701,9 @@ impl VfsNode for ProcNode {
                         "exe" => Ok(Arc::new(ProcNode {
                             node_type: ProcNodeType::SelfExe,
                         }) as Arc<dyn VfsNode>),
+                        "ns" => Ok(Arc::new(ProcNode {
+                            node_type: ProcNodeType::NsDir(None),
+                        }) as Arc<dyn VfsNode>),
                         // The caller's own files, as /proc/<its pid>/...
                         // (Linux's /proc/self is a link to that directory).
                         "status" | "cmdline" => crate::process::current_process()
@@ -600,6 +721,15 @@ impl VfsNode for ProcNode {
                     _ => Err(KernelError::FsError(FsError::NotFound)),
                 }
             }
+            ProcNodeType::NsDir(pid) => NS_LINKS
+                .iter()
+                .find(|&&link| link == name)
+                .map(|&link| {
+                    Arc::new(ProcNode {
+                        node_type: ProcNodeType::NsLink(*pid, link),
+                    }) as Arc<dyn VfsNode>
+                })
+                .ok_or(KernelError::FsError(FsError::NotFound)),
             _ => Err(KernelError::FsError(FsError::NotADirectory)),
         }
     }
@@ -1122,6 +1252,8 @@ mod tests {
                 &[
                     "cap_last_cap",
                     "core_pattern",
+                    "domainname",
+                    "hostname",
                     "osrelease",
                     "ostype",
                     "pid_max",

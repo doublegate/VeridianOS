@@ -32,6 +32,8 @@ pub mod itimer;
 pub mod lifecycle;
 pub mod linux_caps;
 pub mod memory;
+#[cfg(feature = "alloc")]
+pub mod ns;
 pub mod pcb;
 pub mod personality;
 pub mod posix_timer;

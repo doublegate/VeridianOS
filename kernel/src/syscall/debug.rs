@@ -271,6 +271,17 @@ pub(super) fn may_access_process(
         || may_access(caller, caller_permitted, &PtraceTarget::of(target))
 }
 
+/// Whether the calling process may read `target` as ptrace's read mode
+/// allows ([`may_access_process`]): `/proc/<pid>/ns` links need it.
+#[cfg(feature = "alloc")]
+pub(crate) fn may_read_process(target: &process::Process) -> bool {
+    may_access_process(
+        &process::creds::Caller::current(),
+        current_permitted(),
+        target,
+    )
+}
+
 pub(super) fn may_access(
     caller: &process::creds::Caller,
     caller_permitted: process::linux_caps::LinuxCaps,

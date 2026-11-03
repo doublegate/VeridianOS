@@ -233,6 +233,15 @@
 - kill and the other senders deliver to a zombie, which discards the signal, as Linux; only a
   reaped process is ESRCH. kill and waitpid take a pid_t's low 32 bits and refuse INT_MIN with
   ESRCH (N-213). `/proc/sys/kernel/tainted` reads 0.
+- Namespaces, step H1 of ADR 0022: every thread has a namespace set, `/proc/<pid>/ns/*` links
+  read `type:[inode]` with Linux's inode numbers and open nsfs files (NS_GET_NSTYPE, NS_GET_ID,
+  NS_GET_USERNS, NS_GET_PARENT, NS_GET_OWNER_UID and the NS_GET_*_PIDNS calls), and unshare,
+  setns (from an nsfs file or a pidfd) and clone/clone3 take the CLONE_NEW* flags with Linux's
+  checks. UTS namespaces are complete: sethostname, setdomainname, uname and
+  `/proc/sys/kernel/{hostname,domainname}` follow the caller's (the domain name reads "(none)",
+  as on Linux). IPC and cgroup namespaces can be created and joined but hold nothing yet; user,
+  mount, PID, network and time namespaces exist as their initial ones, and a new one is EINVAL
+  until its step.
 - rseq stays ENOSYS, as on Linux built without CONFIG_RSEQ: glibc runs without it and musl does
   not use it.
 - A signal from rt_sigqueueinfo, rt_tgsigqueueinfo or pidfd_send_signal that ends a sender
