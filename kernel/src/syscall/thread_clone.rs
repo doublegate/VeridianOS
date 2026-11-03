@@ -321,6 +321,7 @@ const PROCESS_FLAGS: u64 = CLONE_VM
     | CLONE_AUTOREAP
     | CLONE_NNP
     | CLONE_PIDFD_AUTOKILL
+    | CLONE_EMPTY_MNTNS
     | ns::CLONE_NS_ALL;
 const THREAD_FLAGS: u64 = CLONE_VM
     | CLONE_FS
@@ -336,6 +337,7 @@ const THREAD_FLAGS: u64 = CLONE_VM
     | CLONE_PIDFD
     | CLONE_IO
     | CLONE_INTO_CGROUP
+    | CLONE_EMPTY_MNTNS
     | ns::CLONE_NS_ALL;
 
 /// kernel_clone's own checks, then copy_process's: CLONE_EMPTY_MNTNS
@@ -950,6 +952,13 @@ mod tests {
         let mut empty = request(CLONE_EMPTY_MNTNS | CLONE_FS);
         assert_eq!(request_checks(&mut empty, false), EINVAL);
         assert!(empty.on(CLONE_NEWNS));
+        // And so needs CAP_SYS_ADMIN before the child's root moves.
+        let mut alone = request(CLONE_EMPTY_MNTNS);
+        assert_eq!(request_checks(&mut alone, false), Ok(()));
+        assert!(matches!(
+            ns::for_clone(&ns::initial(), alone.flags, false),
+            Err(ns::CloneNsError::Permission)
+        ));
     }
 
     #[test]

@@ -154,11 +154,11 @@ pub fn sys_unshare(flags: usize) -> SyscallResult {
     }
     if let Some(set) = new_ns {
         thread.set_namespaces(set);
-    }
-    // An empty mount namespace has only its root mount: the root and
-    // working directory move to it (copy_mnt_ns).
-    if flags & UNSHARE_EMPTY_MNTNS != 0 {
-        thread.fs().move_to_root();
+        // An empty mount namespace has only its root mount: the root and
+        // working directory move to it (copy_mnt_ns).
+        if flags & UNSHARE_EMPTY_MNTNS != 0 {
+            thread.fs().move_to_root();
+        }
     }
     Ok(0)
 }

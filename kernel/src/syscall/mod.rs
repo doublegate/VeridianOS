@@ -385,6 +385,9 @@ mod process_vm;
 // unshare, setns, sethostname, setdomainname and the nsfs ioctls (ADR 0022)
 #[cfg(feature = "alloc")]
 mod namespaces;
+// mount(2) and umount2 (ADR 0022 H3b)
+#[cfg(feature = "alloc")]
+mod mount;
 #[cfg(feature = "alloc")]
 pub(crate) use debug::may_read_process;
 pub(crate) use filesystem::rename_paths;
@@ -1528,6 +1531,10 @@ fn handle_syscall(
         Syscall::Unshare => namespaces::sys_unshare(arg1),
         #[cfg(feature = "alloc")]
         Syscall::Setns => namespaces::sys_setns(arg1, arg2),
+        #[cfg(feature = "alloc")]
+        Syscall::Mount => mount::sys_mount(arg1, arg2, arg3, arg4, arg5),
+        #[cfg(feature = "alloc")]
+        Syscall::Umount2 => mount::sys_umount2(arg1, arg2),
         #[cfg(feature = "alloc")]
         Syscall::Sethostname => namespaces::sys_sethostname(arg1, arg2),
         #[cfg(feature = "alloc")]

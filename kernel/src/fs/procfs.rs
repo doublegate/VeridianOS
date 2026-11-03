@@ -457,6 +457,12 @@ impl VfsNode for ProcNode {
                     }
                     "cpuinfo" => generate_cpuinfo(),
                     "loadavg" => generate_loadavg(),
+                    // The types mount(2) makes, none on a block device
+                    // (Linux's filesystems_proc_show).
+                    "filesystems" => crate::fs::mount::MOUNTABLE
+                        .iter()
+                        .map(|ty| format!("nodev\t{ty}\n"))
+                        .collect(),
                     // Qt/KDE compatibility files
                     "core_pattern" => String::from("core\n"),
                     "pid_max" => format!("{}\n", crate::process::PID_MAX),
@@ -672,6 +678,12 @@ impl VfsNode for ProcNode {
                 });
 
                 entries.push(DirEntry {
+                    name: String::from("filesystems"),
+                    node_type: NodeType::File,
+                    inode: 0,
+                });
+
+                entries.push(DirEntry {
                     name: String::from("mounts"),
                     node_type: NodeType::Symlink,
                     inode: 0,
@@ -802,7 +814,7 @@ impl VfsNode for ProcNode {
             ProcNodeType::Root => {
                 // Check for system files
                 match name {
-                    "version" | "uptime" | "meminfo" | "cpuinfo" | "loadavg" => {
+                    "version" | "uptime" | "meminfo" | "cpuinfo" | "loadavg" | "filesystems" => {
                         Ok(Arc::new(ProcNode::new_system_file(String::from(name)))
                             as Arc<dyn VfsNode>)
                     }

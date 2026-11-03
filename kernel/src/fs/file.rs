@@ -930,6 +930,17 @@ impl FileTable {
             .collect()
     }
 
+    /// The canonical paths the open descriptors were opened at (O_PATH
+    /// ones too), for umount's busy check; pipes and sockets have none.
+    pub fn open_paths(&self) -> Vec<String> {
+        let files = self.files.read();
+        files
+            .iter()
+            .flatten()
+            .filter_map(|entry| entry.file.path.clone())
+            .collect()
+    }
+
     /// Get the number of open file descriptors
     pub fn count_open(&self) -> usize {
         let files = self.files.read();

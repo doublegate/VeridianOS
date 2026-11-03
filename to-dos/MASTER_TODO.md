@@ -368,8 +368,8 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
      without CONFIG_FANOTIFY); the `docs/PORTING-GUIDE.md` rewrite. Namespaces follow ADR 0022,
      one commit per step: H1 (the framework, nsfs, `/proc/<pid>/ns`, unshare, setns, clone; UTS,
      IPC and cgroup) and H2 (time) are done; of H3 (mount), H3a (the namespaces and
-     `/proc/<pid>/{mounts,mountinfo}`) is done, H3b (mount(2) and umount2), H3c (per-mount flags)
-     and H3d (pivot_root) remain; then H4 user, H5 PID and H6 network.
+     `/proc/<pid>/{mounts,mountinfo}`) and H3b (mount(2) and umount2) are done, H3c (per-mount
+     flags) and H3d (pivot_root) remain; then H4 user, H5 PID and H6 network.
   4. [ ] Architecture: the Linux ABI as a personality on the microkernel (decided 2026-11-03:
      option (b), over keeping Linux compatibility in the kernel for good), with one security
      model. ADR 0024, written after group 3 and before item 5 (the maintainer's order,
@@ -388,7 +388,10 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
        model governs Linux programs too rather than running beside them. The ADR lists each check
        with the object type and right it needs, says how a Linux process gets its first
        capabilities (inherited at fork and exec, granted at launch) and how namespaces relate to
-       them; the checks change one subsystem per commit, as in ADR 0020 step 6.
+       them; the checks change one subsystem per commit, as in ADR 0020 step 6. First:
+       mount(2), umount2 and pivot_root (group 3 H3), which check only CAP_SYS_ADMIN, while the
+       private FsMount/FsUnmount also want a Memory capability that no user process is given;
+       the right object there is the mount namespace, so both get the same rule.
      - [ ] Until the moves: new compatibility code keeps Linux semantics behind module interfaces
        (no new reach-ins across subsystems), so it can move; README and the design documents
        state the current state (everything in ring 0) and the target.

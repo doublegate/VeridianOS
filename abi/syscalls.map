@@ -205,6 +205,8 @@ DirClosedir             private 1088
 ## Filesystems
 FsMount                 private 1094
 FsUnmount               private 1095
+mount
+umount2
 sync
 fsync
 fdatasync

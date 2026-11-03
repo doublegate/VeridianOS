@@ -338,11 +338,20 @@ What remains:
 - **Namespaces are partial (ADR 0022).** UTS namespaces are complete. IPC and cgroup
   namespaces can be created and joined but isolate nothing, as there is no System V IPC, message
   queue or cgroup hierarchy. Time namespaces are complete but for the two points below. Mount
-  namespaces can be created, emptied and joined, but there is no Linux mount(2), umount2 or
-  pivot_root yet (ADR 0022 H3b and H3d; `CONFIG_MNT_NS` stays unset until then), only the
-  private mount call, which works in the caller's namespace. `/proc/<pid>/mounts` and
-  `mountinfo` report `rw` or `ro` and no other mount or filesystem options, every mount is
-  private (no propagation fields) and covers its whole filesystem (no bind mounts). The VFS
+  namespaces can be created, emptied and joined, and Linux mount(2) and umount2 work in them
+  (ADR 0022 H3b: new tmpfs, ramfs, proc and devtmpfs mounts, bind mounts with or without
+  MS_REC, MS_MOVE, remounts, MS_UNBINDABLE), with these gaps: no pivot_root yet (H3d); the
+  mount flags (ro, nosuid, nodev, noexec, the atime ones) and a read-only superblock are
+  recorded and shown in `/proc` but not enforced yet (H3c); mounts never propagate, so
+  MS_SHARED is EINVAL and MS_SLAVE is the same as MS_PRIVATE; there are no filesystems on block
+  devices to mount; tmpfs takes only `size`, `mode`, `uid` and `gid`, proc and devtmpfs no
+  options, a remount applies none of the options in its data (a new tmpfs `size` is ignored),
+  and `/proc` lists no filesystem-specific options; a mount on a mount point covers it, but
+  does not hide the mounts below that place, and moving or detaching it takes them along;
+  umount2's EBUSY counts the namespace's working directories, roots and open files but not
+  memory mappings, and nothing clears the MNT_EXPIRE mark; each devtmpfs mount is a new
+  instance. mount(2) and umount2 check CAP_SYS_ADMIN only, not an object capability (ADR 0024
+  will give them one); the private mount call keeps its own rules. The VFS
   finds open files by path, so a descriptor opened in another mount namespace is looked up by
   its path in the caller's (for fstat's mount id, fchdir and the like) once the two trees
   differ, and sync(2) flushes the filesystems of the initial namespace only. User, PID and

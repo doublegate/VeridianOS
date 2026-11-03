@@ -35,7 +35,7 @@ CONFIG_NAMESPACES y needs=unshare,setns
 CONFIG_UTS_NS y needs=unshare,setns,sethostname  # H1
 CONFIG_IPC_NS y needs=unshare,setns  # H1; Linux's Kconfig would need SYSVIPC or POSIX_MQUEUE, the namespace itself works
 CONFIG_TIME_NS y needs=unshare,setns,clock_gettime  # H2
-CONFIG_MNT_NS n  # H3: the namespaces exist (H3a); y with mount(2) and umount2 (H3b)
+CONFIG_MNT_NS y needs=unshare,setns,mount,umount2  # H3a namespaces, H3b mount(2) and umount2
 CONFIG_USER_NS n  # H4
 CONFIG_PID_NS n  # H5
 CONFIG_NET_NS n  # H6
@@ -69,7 +69,7 @@ CONFIG_POSIX_MQUEUE n  # no mq_open(2)
 CONFIG_BLK_DEV_LOOP n  # no loop devices
 CONFIG_BLK_DEV_RAM n
 CONFIG_ZRAM n
-CONFIG_EXT4_FS n  # read-only, and no mount(2) to reach it until H3
+CONFIG_EXT4_FS n  # read-only, and mount(2) takes no block devices
 CONFIG_QUOTA n  # no quotactl(2)
 CONFIG_QFMT_V2 n
 CONFIG_XFS_FS n

@@ -691,7 +691,7 @@ mod tests {
         let empty = set.copy_with(CLONE_NEWNS | CLONE_EMPTY_MNTNS).unwrap();
         assert_eq!(
             empty.mnt.mounts.render_mounts("/"),
-            "ramfs / ramfs rw 0 0\n"
+            "ramfs / ramfs rw,relatime 0 0\n"
         );
         let settid = set.copy_with(CLONE_NEWNS | 0x0010_0000).unwrap();
         assert!(settid.mnt.mounts.render_mounts("/").contains(" /tmp "));

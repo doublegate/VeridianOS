@@ -263,8 +263,18 @@
   `/proc/<pid>/mounts` and `/proc/<pid>/mountinfo` list a process's mounts under its root in
   Linux's formats, and `/proc/mounts` links to `self/mounts`. A file's device number (`st_dev`)
   now belongs to its filesystem rather than to the mount, so it is the same in every namespace,
-  and procfs is listed read-write, as Linux mounts it. Linux's mount(2) and umount2 come next
-  (H3b).
+  and procfs is listed read-write, as Linux mounts it.
+- Linux mount(2) and umount2 (ADR 0022 H3b), in the caller's mount namespace, with Linux's
+  checks and errors: new tmpfs (`size`, `mode`, `uid`, `gid`), ramfs, proc and devtmpfs mounts
+  (ENODEV for other types), bind mounts of a directory or file (MS_REC copying what is mounted
+  under it), MS_MOVE, MS_REMOUNT with and without MS_BIND, and MS_PRIVATE, MS_SLAVE and
+  MS_UNBINDABLE (MS_SHARED is EINVAL: mounts do not propagate). A mount on a mount point
+  covers it until unmounted. umount2 takes MNT_DETACH, MNT_EXPIRE, MNT_FORCE and
+  UMOUNT_NOFOLLOW, and is EBUSY while a mount has mounts under it or a process of the namespace
+  works, is rooted or has a file open in it. `/proc/<pid>/mounts` and `mountinfo` show the
+  mount flags (`relatime` by default, as Linux), the root of a bind mount, `unbindable` and a
+  read-only superblock; `/proc/filesystems` lists the types mount(2) makes. The flags are not
+  enforced yet (H3c). clone3 now accepts CLONE_EMPTY_MNTNS, which it refused with EINVAL.
 - rseq stays ENOSYS, as on Linux built without CONFIG_RSEQ: glibc runs without it and musl does
   not use it.
 - A signal from rt_sigqueueinfo, rt_tgsigqueueinfo or pidfd_send_signal that ends a sender
@@ -455,7 +465,7 @@
   own (`fs::shmem`, shared with memfds), so a `MAP_SHARED` mapping of a file there is the file:
   every mapping, `read` and `write` see one copy (N-230). LTP keeps its results this way, and
   musl's `shm_open` uses `/dev/shm`. The kernel's mount path (`Vfs::mount_by_type`, used by
-  VeridianOS's own mount call) accepts `"tmpfs"`; Linux `mount(2)` is not wired yet. A tmpfs
+  VeridianOS's own mount call) accepts `"tmpfs"`, and so does Linux `mount(2)`. A tmpfs
   root is mode 1777, its default size limit is half of RAM, and it charges whole pages against
   the limit (rounded up to whole pages), as Linux does.
 - Conformance suites on all three architectures (`tests/compat/README.md`): LTP 20260930's

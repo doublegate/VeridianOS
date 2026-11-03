@@ -1049,8 +1049,12 @@ pub(crate) fn path_is_under(path: &str, mount: &str) -> bool {
 struct MountTable {
     /// The root mount.
     root: Option<Arc<mount::Mount>>,
-    /// The other mounts, keyed by normalized mount point.
+    /// The other mounts, keyed by normalized mount point: the top one at
+    /// each place.
     mounts: BTreeMap<String, Arc<mount::Mount>>,
+    /// The mounts a mount at the same place covers ("/" too), bottom
+    /// first: mounting on a mount point stacks, as in Linux.
+    covered: BTreeMap<String, Vec<Arc<mount::Mount>>>,
 }
 
 impl MountTable {
@@ -1297,7 +1301,7 @@ impl MountTable {
             let canon_path = join_components(&canon);
             node = match self.mounts.get(&canon_path) {
                 Some(_) if resolve & resolve_flags::NO_XDEV != 0 => return Err(xdev()),
-                Some(mount) => mount.fs().root(),
+                Some(mount) => mount.root(),
                 None => node.lookup(canon.last().map(String::as_str).unwrap_or(""))?,
             };
 
@@ -1373,13 +1377,13 @@ impl MountTable {
             .root
             .as_ref()
             .ok_or(KernelError::FsError(crate::error::FsError::NoRootFs))?;
-        let mut node = root.fs().root();
+        let mut node = root.root();
         let mut path = String::new();
         for c in canon {
             path.push('/');
             path.push_str(c);
             node = match self.mounts.get(&path) {
-                Some(mount) => mount.fs().root(),
+                Some(mount) => mount.root(),
                 None => node.lookup(c)?,
             };
         }
@@ -1659,6 +1663,27 @@ impl<'a> CallerView<'a> {
     pub fn unmount(&self, path: &str) -> Result<(), KernelError> {
         let target = self.mount_target(path)?;
         unmount_on(&self.ctx.mounts, &target)
+    }
+
+    /// The node `path` names for the caller (relative paths from its
+    /// working directory; a last symlink followed if `follow`) and its
+    /// canonical path in the whole tree.
+    pub fn locate(
+        &self,
+        path: &str,
+        follow: bool,
+    ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
+        self.vfs.lookup(&self.ctx, path, &self.ctx.cwd, follow)
+    }
+
+    /// The caller's mount namespace's tree (mount(2), umount2).
+    pub fn mount_tree(&self) -> &Arc<mount::Mounts> {
+        &self.ctx.mounts
+    }
+
+    /// The caller's root, a canonical path in the whole tree.
+    pub fn root_path(&self) -> &str {
+        &self.ctx.root
     }
 
     /// Flush every filesystem; not path-dependent.

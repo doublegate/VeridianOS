@@ -37,6 +37,7 @@
 #include <sys/ioctl.h>
 #include <sys/fsuid.h>
 #include <sys/mman.h>
+#include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sys/personality.h>
 #include <sys/resource.h>
@@ -5556,6 +5557,7 @@ static void test_personality(void);
 static void test_namespaces_uts(void);
 static void test_namespaces_time(void);
 static void test_namespaces_mnt(void);
+static void test_mount_calls(void);
 
 /* Tests `--only NAME` can run alone (for debugging a single test). */
 static const struct {
@@ -5578,6 +5580,7 @@ static const struct {
     {"namespaces_uts", test_namespaces_uts},
     {"namespaces_time", test_namespaces_time},
     {"namespaces_mnt", test_namespaces_mnt},
+    {"mount_calls", test_mount_calls},
     {"threads", test_threads},
     {"cow_race", test_cow_race},
     {"signals", test_signals},
@@ -8889,7 +8892,7 @@ static void test_namespaces_mnt(void)
         if (n != 11 || memcmp(buf, "self/mounts", 11) != 0) g |= 1;
         if (t_slurp("/proc/self/mounts", before, sizeof(before)) <= 0 ||
             t_slurp("/proc/mounts", after, sizeof(after)) <= 0 || strcmp(before, after) != 0 ||
-            !strstr(before, " /proc proc rw 0 0\n"))
+            !strstr(before, " /proc proc rw,relatime 0 0\n"))
             g |= 1;
         int id, parent;
         if (t_slurp("/proc/self/mountinfo", pinfo, sizeof(pinfo)) <= 0 ||
@@ -8930,6 +8933,22 @@ static void test_namespaces_mnt(void)
         }
         int st;
         if (waitpid(e, &st, 0) != e || !WIFEXITED(st) || WEXITSTATUS(st) != 0) g |= 64;
+        /* The same from clone3's CLONE_EMPTY_MNTNS, which implies
+         * CLONE_NEWNS: the child starts at the root, without /proc. */
+        struct t_clone_args ca;
+        memset(&ca, 0, sizeof(ca));
+        ca.flags = 1ULL << 37;
+        ca.exit_signal = SIGCHLD;
+        if (chdir("/proc") != 0) g |= 64;
+        long c = t_clone3(&ca, sizeof(ca));
+        if (c == 0) {
+            char cwd[64];
+            int fd = open("/proc/self/mounts", O_RDONLY);
+            if (fd >= 0) _exit(2);
+            _exit(getcwd(cwd, sizeof(cwd)) && strcmp(cwd, "/") == 0 ? 0 : 3);
+        }
+        if (c < 0 || t_exit_status((pid_t)c) != 0) g |= 64;
+        if (chdir("/") != 0) g |= 64;
 
         /* setns back to the parent's namespace. */
         char path[64];
@@ -8956,6 +8975,118 @@ static void test_namespaces_mnt(void)
     else if (WEXITSTATUS(st) != 0) f |= 4;
     snprintf(why, sizeof(why), "f=%#x", f);
     report("namespaces_mnt", f == 0, why);
+}
+
+/* mount(2) and umount2, as Linux 7.3 (ADR 0022 H3b), in a mount namespace
+ * of a child's own: a new tmpfs with options and per-mount flags, which
+ * the parent's namespace does not show; a bind mount of a directory in it
+ * and a read-only remount of that; MS_MOVE; propagation changes (private
+ * and slave accepted, shared refused); umount2 EBUSY while the working
+ * directory is in the mount, MNT_DETACH, bad flags, not a mount point;
+ * ENODEV for an unknown type, EPERM without CAP_SYS_ADMIN; and
+ * /proc/filesystems. */
+static int t_info_has(const char *needle)
+{
+    static char info[8192];
+    return t_slurp("/proc/self/mountinfo", info, sizeof(info)) > 0 && strstr(info, needle);
+}
+
+static void test_mount_calls(void)
+{
+    char why[160];
+    int f = 0, go[2], done[2];
+    mkdir("/tmp", 01777);
+    rmdir("/tmp/mc-a");
+    rmdir("/tmp/mc-b");
+    rmdir("/tmp/mc-c");
+    if (mkdir("/tmp/mc-a", 0755) != 0 || mkdir("/tmp/mc-b", 0755) != 0 ||
+        mkdir("/tmp/mc-c", 0755) != 0 || pipe(go) != 0 || pipe(done) != 0) {
+        report("mount_calls", 0, "setup");
+        return;
+    }
+    pid_t child = fork();
+    if (child == 0) {
+        int g = 0;
+        char c = 0;
+        struct stat st;
+        if (unshare(CLONE_NEWNS) != 0) _exit(0x7f);
+        if (mount("none", "/tmp/mc-a", "tmpfs", MS_NOSUID | MS_NODEV, "size=1m,mode=700") != 0)
+            g |= 1;
+        if (stat("/tmp/mc-a", &st) != 0 || (st.st_mode & 07777) != 0700) g |= 1;
+        if (!t_info_has(" /tmp/mc-a rw,nosuid,nodev,relatime - tmpfs none rw")) g |= 2;
+        /* A bind mount of a directory in it, then read-only. */
+        int fd;
+        if (mkdir("/tmp/mc-a/d", 0755) != 0 ||
+            (fd = open("/tmp/mc-a/d/x", O_CREAT | O_WRONLY, 0644)) < 0)
+            g |= 4;
+        else
+            close(fd);
+        if (mount("/tmp/mc-a/d", "/tmp/mc-b", NULL, MS_BIND, NULL) != 0 ||
+            access("/tmp/mc-b/x", F_OK) != 0 || !t_info_has(" /d /tmp/mc-b rw,nosuid,nodev"))
+            g |= 4;
+        if (mount(NULL, "/tmp/mc-b", NULL, MS_REMOUNT | MS_BIND | MS_RDONLY, NULL) != 0 ||
+            !t_info_has(" /d /tmp/mc-b ro,relatime - tmpfs none rw"))
+            g |= 8;
+        /* Propagation: private and slave are fine, shared is refused,
+         * two at once is EINVAL. */
+        if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0 ||
+            mount(NULL, "/tmp/mc-a", NULL, MS_SLAVE, NULL) != 0 ||
+            !(mount(NULL, "/tmp/mc-a", NULL, MS_SHARED, NULL) == -1 && errno == EINVAL) ||
+            !(mount(NULL, "/tmp/mc-a", NULL, MS_PRIVATE | MS_SLAVE, NULL) == -1 &&
+              errno == EINVAL))
+            g |= 16;
+        /* umount2: busy while the working directory is in it. */
+        if (chdir("/tmp/mc-b") != 0 || !(umount2("/tmp/mc-b", 0) == -1 && errno == EBUSY) ||
+            chdir("/") != 0 || umount2("/tmp/mc-b", 0) != 0 || access("/tmp/mc-b/x", F_OK) == 0)
+            g |= 32;
+        /* MS_MOVE: the tmpfs moves to mc-c. */
+        if (mount("/tmp/mc-a", "/tmp/mc-c", NULL, MS_MOVE, NULL) != 0 ||
+            access("/tmp/mc-c/d/x", F_OK) != 0 || access("/tmp/mc-a/d", F_OK) == 0)
+            g |= 64;
+        /* Errors. */
+        if (!(mount("none", "/tmp/mc-a", "nosuchfs", 0, NULL) == -1 && errno == ENODEV) ||
+            !(mount("none", "/tmp/mc-a", "tmpfs", 0, "bogus") == -1 && errno == EINVAL) ||
+            !(mount("none", "/tmp/nonexistent", "tmpfs", 0, NULL) == -1 && errno == ENOENT) ||
+            !(umount2("/tmp/mc-c", 0x100) == -1 && errno == EINVAL) ||
+            !(umount2("/tmp/mc-a", 0) == -1 && errno == EINVAL))
+            g |= 128;
+        /* The parent's namespace does not have these mounts. */
+        if (write(go[1], "m", 1) != 1 || read(done[0], &c, 1) != 1 || c != 'y') g |= 256;
+        if (umount2("/tmp/mc-c", MNT_DETACH) != 0 || t_info_has("/tmp/mc-c")) g |= 512;
+        /* Without CAP_SYS_ADMIN: EPERM. */
+        pid_t un = fork();
+        if (un == 0) {
+            if (setgid(65534) != 0 || setuid(65534) != 0) _exit(0);
+            _exit(mount("none", "/tmp/mc-a", "tmpfs", 0, NULL) == -1 && errno == EPERM &&
+                          umount2("/", 0) == -1 && errno == EPERM
+                      ? 0
+                      : 1);
+        }
+        if (t_exit_status(un) != 0) g |= 1024;
+        printf("mount-calls g=%#x\n", g);
+        fflush(stdout);
+        _exit(g == 0 ? 0 : 1);
+    }
+    char c = 0;
+    if (child < 0 || read(go[0], &c, 1) != 1) f |= 1;
+    /* Here the directories are empty and nothing is mounted on them. */
+    if (t_info_has("/tmp/mc-") || access("/tmp/mc-c/d", F_OK) == 0) f |= 2;
+    static char fsl[512];
+    if (t_slurp("/proc/filesystems", fsl, sizeof(fsl)) <= 0 || !strstr(fsl, "nodev\ttmpfs\n"))
+        f |= 4;
+    if (write(done[1], "y", 1) != 1) f |= 1;
+    int code = t_exit_status(child);
+    if (code == 0x7f) f |= 8;
+    else if (code != 0) f |= 16;
+    close(go[0]);
+    close(go[1]);
+    close(done[0]);
+    close(done[1]);
+    rmdir("/tmp/mc-a");
+    rmdir("/tmp/mc-b");
+    rmdir("/tmp/mc-c");
+    snprintf(why, sizeof(why), "f=%#x", f);
+    report("mount_calls", f == 0, why);
 }
 
 int main(int argc, char **argv)
@@ -9080,6 +9211,7 @@ int main(int argc, char **argv)
     test_namespaces_uts();
     test_namespaces_time();
     test_namespaces_mnt();
+    test_mount_calls();
 #if defined(__x86_64__)
     test_ustat_sysfs();
 #endif
