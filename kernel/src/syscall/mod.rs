@@ -2302,10 +2302,13 @@ fn sys_get_robust_list(tid: usize, head_out: usize, len_out: usize) -> SyscallRe
             return Err(SyscallError::ProcessNotFound);
         }
         crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+        // A thread ID in the caller's PID namespace (find_task_by_vpid).
+        let kid =
+            crate::process::pidns::from_vnr(tid as i64).ok_or(SyscallError::ProcessNotFound)?;
         let mut found = None;
         crate::process::table::PROCESS_TABLE.for_each(|p| {
             if found.is_none() {
-                if let Some(t) = p.get_thread(crate::process::ThreadId(tid as u64)) {
+                if let Some(t) = p.get_thread(crate::process::ThreadId(kid)) {
                     found = Some((
                         p.credentials(),
                         p.dumpable.load(core::sync::atomic::Ordering::Acquire),

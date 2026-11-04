@@ -234,12 +234,19 @@ impl UnixSocket {
 
 /// The credentials of the peer of socket `socket_id` (SO_PEERCRED) with
 /// its IDs as a reader in user namespace `reader` sees them
-/// (cred_to_ucred's from_kuid_munged), or [`PeerCred::NONE`] if it has
+/// (cred_to_ucred's from_kuid_munged) and its process ID as the caller's
+/// PID namespace numbers it, or [`PeerCred::NONE`] if it has
 /// none.
 pub fn peer_cred(socket_id: u64, reader: &crate::process::userns::UserNs) -> Option<PeerCred> {
     UNIX_SOCKETS.lock().get(&socket_id).map(|s| {
         s.peer_cred.map_or(PeerCred::NONE, |c| PeerCred {
-            pid: c.pid,
+            // In the reader's PID namespace (pid_vnr): 0 for a peer it
+            // does not number.
+            pid: if c.pid > 0 {
+                crate::process::pidns::vnr(c.pid as u64) as i32
+            } else {
+                0
+            },
             uid: reader.uid_munged(c.uid),
             gid: reader.gid_munged(c.gid),
         })

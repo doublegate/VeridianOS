@@ -49,18 +49,16 @@ fn compare(a: usize, b: usize, cookie: [u64; 2]) -> usize {
     usize::from(x < y) | (usize::from(x > y) << 1)
 }
 
-/// The task `id` names (a process's or thread's ID, a pid_t), with its
-/// process: ESRCH for none.
+/// The task `id` names (a process's or thread's ID, a pid_t in the
+/// caller's PID namespace), with its process: ESRCH for none.
 fn task(id: usize) -> Result<(Arc<Process>, Arc<Thread>), SyscallError> {
-    let id = id as u32 as i32;
-    if id <= 0 {
-        return Err(SyscallError::ProcessNotFound);
-    }
-    let process = process::get_process(process::ProcessId(id as u64))
+    let id =
+        process::pidns::from_vnr(id as u32 as i32 as i64).ok_or(SyscallError::ProcessNotFound)?;
+    let process = process::get_process(process::ProcessId(id))
         .or_else(|| super::process::process_of_thread(id as usize).and_then(process::get_process))
         .ok_or(SyscallError::ProcessNotFound)?;
     let thread = process
-        .get_thread(ThreadId(id as u64))
+        .get_thread(ThreadId(id))
         .ok_or(SyscallError::ProcessNotFound)?;
     Ok((process, thread))
 }

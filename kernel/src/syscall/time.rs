@@ -114,7 +114,9 @@ pub(crate) enum Clock {
 impl Clock {
     /// Decode a clock ID: the fixed ones, or a CPU clock made by
     /// clock_getcpuclockid / pthread_getcpuclockid (`~id << 3 | thread << 2
-    /// | kind`, Linux's encoding; id 0 is the caller). EINVAL otherwise.
+    /// | kind`, Linux's encoding; id 0 is the caller, any other a number in
+    /// the caller's PID namespace, kept as the kernel id it names: one it
+    /// does not name finds no process). EINVAL otherwise.
     pub(crate) fn decode(id: i32) -> Result<Self, SyscallError> {
         if id < 0 {
             let kind = match id & 3 {
@@ -124,7 +126,8 @@ impl Clock {
                 _ => return Err(SyscallError::InvalidArgument),
             };
             let target = (!(id >> 3)) as u32 as u64;
-            let target = (target != 0).then_some(target);
+            let target = (target != 0)
+                .then(|| crate::process::pidns::from_vnr(target as i64).unwrap_or(u64::MAX));
             return Ok(if id & 4 != 0 {
                 Clock::ThreadCpu(target, kind)
             } else {
@@ -749,7 +752,9 @@ fn timer_clock(
 
 /// A `struct sigevent` as a timer's notification (Linux's good_sigevent):
 /// EINVAL for an unknown kind, a signal outside 1..=64, or (with
-/// SIGEV_THREAD_ID) a thread `is_thread` does not know.
+/// SIGEV_THREAD_ID) a thread `is_thread` does not know; that thread is
+/// named by its number in the caller's PID namespace and kept as its
+/// kernel id.
 fn timer_notify(
     event: Sigevent,
     is_thread: impl Fn(u64) -> bool,
@@ -760,7 +765,10 @@ fn timer_notify(
     let thread = match event.notify {
         SIGEV_NONE => return Ok(Notify::None),
         SIGEV_SIGNAL | SIGEV_THREAD => None,
-        SIGEV_THREAD_ID if event.tid > 0 && is_thread(event.tid as u64) => Some(event.tid as u64),
+        SIGEV_THREAD_ID => match crate::process::pidns::from_vnr(event.tid as i64) {
+            Some(tid) if is_thread(tid) => Some(tid),
+            _ => return Err(SyscallError::InvalidArgument),
+        },
         _ => return Err(SyscallError::InvalidArgument),
     };
     if !(1..=crate::process::signals::NSIG as i32).contains(&event.signo) {

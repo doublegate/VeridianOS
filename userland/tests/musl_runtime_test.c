@@ -9656,9 +9656,105 @@ static int t_status_has(const char *path, const char *want)
     return strstr(text, want) != NULL;
 }
 
+#define T_KCMP_VM 1
+
+/* Process `pid`'s CPU-time clock (Linux's MAKE_PROCESS_CPUCLOCK with
+ * CPUCLOCK_SCHED). */
+static clockid_t t_cpuclock(pid_t pid)
+{
+    return (clockid_t)((~(unsigned)pid << 3) | 2u);
+}
+
+/* The pid crossings from inside (ADR 0022 H5b), in the init while its
+ * child 2 lives: every pid it passes is a number of its own namespace, so
+ * `outside` (the maker's pid) names nothing, and what it is told about the
+ * maker (a socket peer, a lock holder) is 0. Bits printed as pid-ns h5b. */
+static int t_pidns_crossings(pid_t outside, int peer, int lockfd)
+{
+    int f = 0;
+    struct rlimit rl;
+    cpu_set_t set;
+    /* Scheduling, priority, prlimit, ptrace, robust lists (musl's
+     * sched_getscheduler is ENOSYS by design: the raw call). */
+    if (syscall(SYS_sched_getscheduler, 1) < 0 || syscall(SYS_sched_getscheduler, 2) < 0)
+        f |= 1;
+    if (!(syscall(SYS_sched_getscheduler, outside) == -1 && errno == ESRCH)) f |= 1;
+    if (!(sched_getaffinity(outside, sizeof(set), &set) == -1 && errno == ESRCH)) f |= 1;
+    errno = 0;
+    if (getpriority(PRIO_PROCESS, 2) == -1 && errno != 0) f |= 2;
+    if (!(getpriority(PRIO_PROCESS, outside) == -1 && errno == ESRCH)) f |= 2;
+    if (prlimit(1, RLIMIT_NOFILE, NULL, &rl) != 0) f |= 4;
+    if (!(prlimit(outside, RLIMIT_NOFILE, NULL, &rl) == -1 && errno == ESRCH)) f |= 4;
+    if (!(syscall(SYS_ptrace, 16 /* PTRACE_ATTACH */, outside, 0, 0) == -1 && errno == ESRCH))
+        f |= 4;
+    void *head;
+    size_t hlen;
+    if (syscall(SYS_get_robust_list, 1, &head, &hlen) != 0) f |= 4;
+    if (!(syscall(SYS_get_robust_list, outside, &head, &hlen) == -1 && errno == ESRCH))
+        f |= 4;
+    /* PRIO_USER reaches only processes this namespace numbers: 1 and 2
+     * here, never the maker (which checks its own nice). */
+    if (setpriority(PRIO_USER, 0, 7) != 0 || getpriority(PRIO_PROCESS, 2) != 7) f |= 8;
+    /* pidfds, kcmp, process_vm, capget. */
+    int pfd = (int)syscall(SYS_pidfd_open, 2, 0);
+    if (pfd < 0) f |= 16;
+    else close(pfd);
+    if (!(syscall(SYS_pidfd_open, outside, 0) == -1 && errno == ESRCH)) f |= 16;
+    if (t_kcmp(1, 1, T_KCMP_VM, 0, 0) != 0 || t_kcmp(1, 2, T_KCMP_VM, 0, 0) <= 0 ||
+        !(t_kcmp(1, outside, T_KCMP_VM, 0, 0) == -1 && errno == ESRCH))
+        f |= 32;
+    char byte;
+    struct iovec l = {&byte, 1}, r = {&byte, 1};
+    if (!(process_vm_readv(outside, &l, 1, &r, 1, 0) == -1 && errno == ESRCH)) f |= 32;
+    struct {
+        uint32_t version;
+        int pid;
+    } hdr = {0x20080522, 1};
+    uint32_t data[6];
+    if (syscall(SYS_capget, &hdr, data) != 0) f |= 64;
+    hdr.pid = outside;
+    if (!(syscall(SYS_capget, &hdr, data) == -1 && errno == ESRCH)) f |= 64;
+    /* CPU clocks and SIGEV_THREAD_ID name numbers here too. */
+    struct timespec ts;
+    if (syscall(SYS_clock_gettime, t_cpuclock(2), &ts) != 0) f |= 128;
+    if (!(syscall(SYS_clock_gettime, t_cpuclock(outside), &ts) == -1 && errno == EINVAL))
+        f |= 128;
+    struct {
+        uint64_t value;
+        int signo, notify, tid, pad[11];
+    } ev = {0, SIGUSR1, 4 /* SIGEV_THREAD_ID */, 1, {0}};
+    int timer;
+    if (syscall(SYS_timer_create, CLOCK_MONOTONIC, &ev, &timer) != 0) f |= 256;
+    else syscall(SYS_timer_delete, timer);
+    ev.tid = outside;
+    if (!(syscall(SYS_timer_create, CLOCK_MONOTONIC, &ev, &timer) == -1 && errno == EINVAL))
+        f |= 256;
+    /* A PI futex word holds this namespace's numbers: 1 for the init. */
+    static uint32_t word;
+    word = 0;
+    if (syscall(SYS_futex, &word, FUTEX_LOCK_PI_PRIVATE, 0, NULL, NULL, 0) != 0 ||
+        (word & FUTEX_TID_MASK) != 1 ||
+        syscall(SYS_futex, &word, FUTEX_UNLOCK_PI_PRIVATE, 0, NULL, NULL, 0) != 0 || word != 0)
+        f |= 512;
+    /* The maker, as a socket peer and as a lock holder, is process 0. */
+    struct ucred c;
+    socklen_t len = sizeof(c);
+    if (getsockopt(peer, SOL_SOCKET, SO_PEERCRED, &c, &len) != 0 || c.pid != 0) f |= 1024;
+    struct flock fl = {.l_type = F_WRLCK, .l_whence = SEEK_SET, .l_start = 0, .l_len = 0};
+    if (fcntl(lockfd, F_GETLK, &fl) != 0 || fl.l_type != F_WRLCK || fl.l_pid != 0) f |= 2048;
+    /* So is the terminal's group, led from outside. */
+    pid_t pg = -1;
+    if (ioctl(0, TIOCGPGRP, &pg) == 0 && pg != 0) f |= 4096;
+    if (f != 0) {
+        printf("pid-ns h5b=%#x\n", f);
+        fflush(stdout);
+    }
+    return f;
+}
+
 /* The namespace's init: its own child, a procfs of its own, then it
  * waits for the go-ahead and exits, taking the child with it. */
-static int t_pidns_init(int ready, int go)
+static int t_pidns_init(int ready, int go, pid_t outside, int peer, int lockfd)
 {
     int f = 0;
     char c;
@@ -9677,6 +9773,7 @@ static int t_pidns_init(int ready, int go)
     }
     if (g != 2) f |= 4;
     if (read(sync[0], &c, 1) != 1 || c != 'o') f |= 8;
+    if (t_pidns_crossings(outside, peer, lockfd) != 0) f |= 128;
     /* A procfs mounted here shows this namespace (in a mount namespace of
      * its own, so nothing is left behind). */
     if (unshare(CLONE_NEWNS) != 0 ||
@@ -9702,11 +9799,33 @@ static int t_pidns_maker(void)
     if (!(readlink("/proc/self/ns/pid_for_children", buf, sizeof(buf)) == -1 &&
           errno == ENOENT))
         f |= 1 << 16;
-    int ready[2], go[2];
+    int ready[2], go[2], sv[2];
     if (pipe(ready) != 0 || pipe(go) != 0) return 4;
+    /* For the init to look at: a socket pair this process made (its peer)
+     * and a lock it holds; its own nice, which the init's PRIO_USER must
+     * not reach. */
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) return 4;
+    int lockfd = open("/tmp/pidns-lock", O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    struct flock fl = {.l_type = F_WRLCK, .l_whence = SEEK_SET, .l_start = 0, .l_len = 0};
+    if (lockfd < 0 || fcntl(lockfd, F_SETLK, &fl) != 0) return 4;
+    errno = 0;
+    int nice0 = getpriority(PRIO_PROCESS, 0);
+    pid_t me = getpid();
     pid_t init = fork();
-    if (init == 0) _exit(t_pidns_init(ready[1], go[0]));
+    if (init == 0) {
+        int lfd = open("/tmp/pidns-lock", O_RDWR | O_CLOEXEC);
+        _exit(t_pidns_init(ready[1], go[0], me, sv[1], lfd));
+    }
     if (init < 0 || read(ready[0], &c, 1) != 1) return 8;
+    if (getpriority(PRIO_PROCESS, 0) != nice0) f |= 1 << 17;
+    struct ucred cred;
+    socklen_t clen = sizeof(cred);
+    if (getsockopt(sv[0], SOL_SOCKET, SO_PEERCRED, &cred, &clen) != 0 || cred.pid != me)
+        f |= 1 << 17;
+    close(sv[0]);
+    close(sv[1]);
+    close(lockfd);
+    unlink("/tmp/pidns-lock");
     /* Our own namespace is unchanged; its init is ours to see. */
     if (getpid() == 1 || init == 1) f |= 16;
     char path[64], want[64];

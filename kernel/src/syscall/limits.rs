@@ -28,10 +28,11 @@ pub(crate) fn may_prlimit(
 }
 
 /// prlimit64(pid, resource, new, old): the limit of process `pid` (0: the
-/// caller) goes to `old` and, if `new` is given, is replaced by it. ESRCH
-/// for no such process, EPERM without permission (`may_prlimit`), the
-/// `Limits::set` errors otherwise (raising a hard limit needs
-/// CAP_SYS_RESOURCE); `new` is read before anything changes.
+/// caller; otherwise a number in the caller's PID namespace) goes to `old` and,
+/// if `new` is given, is replaced by it. ESRCH for no such process, EPERM
+/// without permission (`may_prlimit`), the `Limits::set` errors otherwise
+/// (raising a hard limit needs CAP_SYS_RESOURCE); `new` is read before anything
+/// changes.
 #[cfg(feature = "alloc")]
 pub fn sys_prlimit64(pid: usize, resource: usize, new_ptr: usize, old_ptr: usize) -> SyscallResult {
     let caller = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
@@ -40,7 +41,9 @@ pub fn sys_prlimit64(pid: usize, resource: usize, new_ptr: usize, old_ptr: usize
     let target = match pid {
         0 => caller.clone(),
         p if p > 0 => {
-            let target = crate::process::find_process(crate::process::ProcessId(p as u64))
+            let kid =
+                crate::process::pidns::from_vnr(p as i64).ok_or(SyscallError::ProcessNotFound)?;
+            let target = crate::process::find_process(crate::process::ProcessId(kid))
                 .ok_or(SyscallError::ProcessNotFound)?;
             if target.pid != caller.pid
                 && !may_prlimit(&me, &target.credentials(), &target.user_ns())

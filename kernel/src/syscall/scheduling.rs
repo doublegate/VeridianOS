@@ -201,9 +201,10 @@ pub(crate) fn thread_exit(thread: &Thread) {
     }
 }
 
-/// The thread a scheduling call names (pid 0: the caller) with its process
-/// ID and owner credentials. `negative` is the error for pid < 0 (EINVAL
-/// for most calls, ESRCH for the affinity ones).
+/// The thread a scheduling call names (pid 0: the caller; otherwise a
+/// thread ID in the caller's PID namespace, as find_task_by_vpid) with its
+/// process ID and owner credentials. `negative` is the error for pid < 0
+/// (EINVAL for most calls, ESRCH for the affinity ones).
 fn target(
     pid: usize,
     negative: SyscallError,
@@ -217,10 +218,11 @@ fn target(
         let thread = crate::process::current_thread().ok_or(SyscallError::InvalidState)?;
         return Ok((process.pid.0, process.credentials(), thread));
     }
+    let kid = crate::process::pidns::from_vnr(tid as i64).ok_or(SyscallError::ProcessNotFound)?;
     let mut found = None;
     crate::process::table::PROCESS_TABLE.for_each(|p| {
         if found.is_none() {
-            if let Some(t) = p.get_thread(crate::process::ThreadId(tid as u64)) {
+            if let Some(t) = p.get_thread(crate::process::ThreadId(kid)) {
                 found = Some((p.pid.0, p.credentials(), t));
             }
         }
@@ -603,7 +605,9 @@ pub fn sys_getcpu(cpu: usize, node: usize, _cache: usize) -> SyscallResult {
 
 /// The threads getpriority/setpriority name, with their process IDs and
 /// owners: one thread (PRIO_PROCESS), every thread of a process group
-/// (PRIO_PGRP) or of a user (PRIO_USER); `who` 0 is the caller's.
+/// (PRIO_PGRP) or of a user (PRIO_USER); `who` 0 is the caller's. A pid
+/// or group is a number in the caller's PID namespace, and PRIO_USER skips
+/// processes that namespace does not number, as Linux.
 fn priority_targets(
     which: usize,
     who: usize,
@@ -622,15 +626,16 @@ fn priority_targets(
                 // A uid of the caller's user namespace (make_kuid); one it
                 // does not map has no processes.
                 (PRIO_USER, w) => me.user_ns().uid_down(w).map_or(u64::MAX, u64::from),
-                (_, w) => w as u64,
+                (_, w) => crate::process::pidns::from_vnr(w as i32 as i64).unwrap_or(u64::MAX),
             };
+            let ns = me.pid_ns();
             let mut out = Vec::new();
             crate::process::table::PROCESS_TABLE.for_each(|p| {
                 let creds = p.credentials();
                 let hit = if which == PRIO_PGRP {
                     p.pgid.load(core::sync::atomic::Ordering::Acquire) == key
                 } else {
-                    creds.ruid as u64 == key
+                    creds.ruid as u64 == key && crate::process::pidns::nr_in(p.pid.0, &ns) != 0
                 };
                 if hit {
                     for t in p.threads.lock().values() {

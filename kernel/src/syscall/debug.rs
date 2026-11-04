@@ -343,6 +343,14 @@ fn still_traced(target: &process::Process, caller_pid: u64) -> Result<(), Syscal
     Ok(())
 }
 
+/// The process that `pid`, a number in the caller's PID namespace, names
+/// (find_task_by_vpid); ESRCH for none.
+fn by_vpid(pid: usize) -> Result<alloc::sync::Arc<process::Process>, SyscallError> {
+    let kid =
+        process::pidns::from_vnr(pid as u32 as i32 as i64).ok_or(SyscallError::ProcessNotFound)?;
+    process::find_process(process::ProcessId(kid)).ok_or(SyscallError::ProcessNotFound)
+}
+
 /// The process `pid` if the caller is its tracer; ESRCH otherwise, as
 /// Linux answers requests about a process the caller does not trace.
 /// Reading or writing another process's memory needs this relationship;
@@ -351,8 +359,7 @@ fn traced_by_caller(
     pid: usize,
     caller_pid: u64,
 ) -> Result<alloc::sync::Arc<process::Process>, SyscallError> {
-    let target = process::find_process(process::ProcessId(pid as u64))
-        .ok_or(SyscallError::ProcessNotFound)?;
+    let target = by_vpid(pid)?;
     if target.tracer.load(core::sync::atomic::Ordering::Acquire) != caller_pid {
         return Err(SyscallError::ProcessNotFound);
     }
@@ -410,8 +417,7 @@ pub fn sys_ptrace(request: usize, pid: usize, addr: usize, data: usize) -> Sysca
         }
 
         PtraceRequest::Attach => {
-            let target = process::find_process(process::ProcessId(pid as u64))
-                .ok_or(SyscallError::ProcessNotFound)?;
+            let target = by_vpid(pid)?;
             // Checked and attached under the target's credential guard, as
             // a set-ID exec decides under it: the target's credentials
             // cannot change between the check and the attach.

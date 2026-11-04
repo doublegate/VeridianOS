@@ -187,14 +187,12 @@ fn process_vm_rw(
     }
 }
 
-/// The process `pid` (a process's or thread's ID, a pid_t) names: ESRCH
-/// for none.
+/// The process `pid` (a process's or thread's ID, a pid_t in the caller's
+/// PID namespace) names: ESRCH for none.
 fn target(pid: usize) -> Result<Arc<Process>, SyscallError> {
-    let id = pid as u32 as i32;
-    if id <= 0 {
-        return Err(SyscallError::ProcessNotFound);
-    }
-    process::get_process(process::ProcessId(id as u64))
+    let id =
+        process::pidns::from_vnr(pid as u32 as i32 as i64).ok_or(SyscallError::ProcessNotFound)?;
+    process::get_process(process::ProcessId(id))
         .or_else(|| super::process::process_of_thread(id as usize).and_then(process::get_process))
         .ok_or(SyscallError::ProcessNotFound)
 }

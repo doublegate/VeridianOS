@@ -306,6 +306,12 @@ fn signal_number(sig: usize) -> Result<usize, SyscallError> {
     }
 }
 
+/// A positive pid or tid the caller passed, as the kernel id its PID
+/// namespace numbers that way: ESRCH for none.
+fn vpid(id: usize) -> Result<u64, SyscallError> {
+    process::pidns::from_vnr(id as i64).ok_or(SyscallError::ProcessNotFound)
+}
+
 /// rt_sigqueueinfo(tgid, sig, info): send `sig` to process `tgid` with the
 /// caller's siginfo (sigqueue passes SI_QUEUE, its pid and uid, and the
 /// value). Permission as kill; EAGAIN when the real-time queue is full.
@@ -314,7 +320,7 @@ pub fn sys_rt_sigqueueinfo(tgid: usize, sig: usize, uinfo: usize) -> SyscallResu
     let tgid = super::process::positive_id(tgid).map_err(|_| SyscallError::ProcessNotFound)?;
     let sig = signal_number(sig)?;
     let caller = process::current_process().ok_or(SyscallError::InvalidState)?;
-    let pid = process::ProcessId(tgid as u64);
+    let pid = process::ProcessId(vpid(tgid)?);
     let info = queued_siginfo(uinfo, sig, caller.pid == pid)?;
     // Existence and permission first (sig 0 stops there).
     super::filesystem::kill_one(&caller, pid, 0)?;
@@ -379,9 +385,10 @@ pub fn sys_rt_tgsigqueueinfo(tgid: usize, tid: usize, sig: usize, uinfo: usize) 
     let tid = super::process::positive_id(tid)?;
     let sig = signal_number(sig)?;
     let caller = process::current_process().ok_or(SyscallError::InvalidState)?;
-    let pid = process::ProcessId(tgid as u64);
+    let pid = process::ProcessId(vpid(tgid)?);
+    let tid = vpid(tid)?;
     let info = queued_siginfo(uinfo, sig, caller.pid == pid)?;
-    if super::process::process_of_thread(tid) != Some(pid) {
+    if super::process::process_of_thread(tid as usize) != Some(pid) {
         return Err(SyscallError::ProcessNotFound);
     }
     super::filesystem::kill_one(&caller, pid, 0)?;
@@ -390,7 +397,7 @@ pub fn sys_rt_tgsigqueueinfo(tgid: usize, tid: usize, sig: usize, uinfo: usize) 
     }
     let target = process::get_process(pid).ok_or(SyscallError::ProcessNotFound)?;
     let thread = target
-        .get_thread(process::ThreadId(tid as u64))
+        .get_thread(process::ThreadId(tid))
         .ok_or(SyscallError::ProcessNotFound)?;
     deliver(&target, Some(&thread), info)
 }

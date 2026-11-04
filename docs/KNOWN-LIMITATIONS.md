@@ -373,11 +373,13 @@ What remains:
   joined, and the main interfaces translate pids through the caller's (ADR 0022 H5a): getpid
   and its family, fork, clone and clone3 (with set_tid at each level), wait4, waitid, kill,
   tkill, tgkill, siginfo, the process group and session calls, set_tid_address, the nsfs
-  translations, and procfs, which shows the namespace it was mounted in. Until H5b the
-  scheduling and priority calls, prlimit, ptrace, the pidfd calls and their fdinfo,
-  process_vm_*, kcmp, capget and capset, CPU clock ids, SIGEV_THREAD_ID, the robust-list and PI
-  futex owner words, SO_PEERCRED, F_GETLK, F_SETOWN and F_GETOWN and a terminal's process group
-  still take and return the initial namespace's numbers. In each namespace numbers count up
+  translations, and procfs, which shows the namespace it was mounted in; so do (H5b) the
+  scheduling and priority calls (PRIO_USER reaching only processes the caller's namespace
+  numbers), prlimit, ptrace, the pidfd calls (pidfd_send_signal is EINVAL for a process outside
+  the caller's namespace), process_vm_*, kcmp, capget and capset, CPU clock ids,
+  SIGEV_THREAD_ID, get_robust_list and the robust-list and PI futex owner words, SO_PEERCRED,
+  F_GETLK and a terminal's process group. Of Linux's other crossings, pidfd fdinfo, ptrace's
+  event messages, SCM_CREDENTIALS and F_SETOWN are not implemented at all (above). In each namespace numbers count up
   from 1 and are not handed out again, as in the initial one (above); a group's or session's
   number is kept while a member lives. An init whose exit takes its namespace down waits, as
   Linux's, for those of its processes whose parents are outside the namespace to be reaped.

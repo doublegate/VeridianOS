@@ -330,6 +330,13 @@
   `/proc/sys/user/max_pid_namespaces` limits how many each user may make. readlink of a
   `/proc/<pid>/ns` link with no namespace behind it is now ENOENT (it was EINVAL), and one the
   caller may not read EACCES. kconfig's CONFIG_PID_NS is now set.
+- The remaining pid crossings use the caller's PID namespace too (ADR 0022 H5b): the
+  scheduling and priority calls, prlimit64, ptrace, pidfd_open, process_vm_readv and writev,
+  kcmp, capget and capset, rt_sigqueueinfo and rt_tgsigqueueinfo, get_robust_list, CPU clock
+  ids and SIGEV_THREAD_ID. PRIO_USER reaches only processes the caller's namespace numbers,
+  and pidfd_send_signal is EINVAL for a process outside it. The PI futex owner word and the
+  robust-list owner check hold the namespace's thread ids, and SO_PEERCRED, F_GETLK's l_pid,
+  TIOCGPGRP and tcgetpgrp report 0 for a process the caller's namespace does not number.
 - rseq stays ENOSYS, as on Linux built without CONFIG_RSEQ: glibc runs without it and musl does
   not use it.
 - A signal from rt_sigqueueinfo, rt_tgsigqueueinfo or pidfd_send_signal that ends a sender

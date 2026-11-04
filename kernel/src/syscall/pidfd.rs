@@ -93,9 +93,10 @@ pub(super) fn target(fd: usize) -> Result<(Arc<File>, ProcessId, Option<ThreadId
 
 /// pidfd_open(pid, flags): a pidfd for process `pid`, or with PIDFD_THREAD
 /// for thread `pid`. Other flags than PIDFD_NONBLOCK and PIDFD_THREAD, or
-/// a pid not above 0, are EINVAL; no such process (or one already reaped)
-/// ESRCH; a thread that does not lead its process, without PIDFD_THREAD,
-/// ENOENT. An exited process not yet reaped can be opened.
+/// a pid not above 0, are EINVAL; no such process in the caller's PID
+/// namespace (or one already reaped) ESRCH; a thread that does not lead its
+/// process, without PIDFD_THREAD, ENOENT. An exited process not yet reaped can
+/// be opened.
 pub fn sys_pidfd_open(pid: usize, flags: usize) -> SyscallResult {
     let flags = flags as u32;
     if flags & !(PIDFD_NONBLOCK | PIDFD_THREAD) != 0 {
@@ -105,7 +106,8 @@ pub fn sys_pidfd_open(pid: usize, flags: usize) -> SyscallResult {
     if id <= 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    let id = id as u64;
+    // A number in the caller's PID namespace (find_get_pid).
+    let id = process::pidns::from_vnr(id as i64).ok_or(SyscallError::ProcessNotFound)?;
     let nonblock = flags & PIDFD_NONBLOCK != 0;
     if let Some(process) = process::get_process(ProcessId(id)) {
         let tid = (flags & PIDFD_THREAD != 0).then_some(ThreadId(id));
@@ -134,12 +136,12 @@ enum Scope {
 /// flag given asks, to the thread, the process or its process group; the
 /// calling thread or process for PIDFD_SELF_THREAD and
 /// PIDFD_SELF_THREAD_GROUP; an open `/proc/<pid>` directory names its
-/// process as a pidfd does. Unknown flags or more than one are EINVAL, any
-/// other file EBADF. With `info`, its si_signo must be `sig`
-/// (EINVAL) and a si_code the kernel keeps (SI_USER, SI_KERNEL, SI_TKILL)
-/// is EPERM except to the caller itself; otherwise the target sees
-/// SI_USER (SI_TKILL for a thread) from the caller. Permission is kill's
-/// (EPERM); an exited process is ESRCH.
+/// process as a pidfd does. Unknown flags or more than one, or a process
+/// outside the caller's PID namespace, are EINVAL, any other file EBADF. With
+/// `info`, its si_signo must be `sig` (EINVAL) and a si_code the kernel keeps
+/// (SI_USER, SI_KERNEL, SI_TKILL) is EPERM except to the caller itself;
+/// otherwise the target sees SI_USER (SI_TKILL for a thread) from the caller.
+/// Permission is kill's (EPERM); an exited process is ESRCH.
 pub fn sys_pidfd_send_signal(pidfd: usize, sig: usize, info: usize, flags: usize) -> SyscallResult {
     use crate::process::signals::{SigInfo, NSIG, SI_TKILL, SI_USER};
     let flags = flags as u32;
@@ -173,6 +175,11 @@ pub fn sys_pidfd_send_signal(pidfd: usize, sig: usize, info: usize, flags: usize
             Err(e) => return Err(e),
         },
     };
+    // A process outside the caller's PID namespace (from a pidfd passed
+    // in): EINVAL, as access_pidfd_pidns.
+    if process::pidns::nr_in(pid.0, &caller.pid_ns()) == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
     scope = match flags {
         PIDFD_SIGNAL_THREAD => Scope::Thread,
         PIDFD_SIGNAL_THREAD_GROUP => Scope::Process,

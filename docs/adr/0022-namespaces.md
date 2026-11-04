@@ -160,11 +160,15 @@ them through an `nsproxy` (all but user, which lives in the credentials); `pid_f
      for them). getpid and its family, fork and clone, wait4 and waitid, kill, tkill and tgkill,
      si_pid (zero for a sender above the receiver), the process group and session calls,
      set_tid_address, the nsfs ioctls and procfs (which records the mounter's namespace) are
-     translated. H5b translates the remaining crossings: the scheduling and priority calls,
-     prlimit, ptrace and its event messages, the pidfd calls and fdinfo, process_vm_*, kcmp,
-     capget and capset, CPU clock ids, SIGEV_THREAD_ID, the robust-list and PI futex owner words,
-     SO_PEERCRED and SCM_CREDENTIALS, F_GETLK, F_SETOWN and F_GETOWN, and a terminal's process
-     group.
+     translated. H5b translates the remaining crossings, each as Linux: the scheduling and
+     priority calls (find_task_by_vpid; PRIO_USER skips tasks with no number in the caller's
+     namespace), prlimit, ptrace, the pidfd calls (pidfd_send_signal is EINVAL past
+     access_pidfd_pidns), process_vm_*, kcmp, capget and capset, CPU clock ids,
+     SIGEV_THREAD_ID, get_robust_list, the robust-list owner (the dying thread's own number) and
+     the PI futex owner words (wake_futex_pi's task_pid_vnr, attach_to_pi_owner's lookup),
+     SO_PEERCRED (pid_vnr in the reader's), F_GETLK (locks_translate_pid) and a terminal's
+     process group. pidfd fdinfo, ptrace event messages, SCM_CREDENTIALS and F_SETOWN do not
+     exist yet; each translates when it lands.
    - **H6, network.** The network stack's global tables move into a `NetNs`; the existing stack
      becomes the initial namespace, and a new namespace starts with only its own loopback, as on
      Linux. Sockets belong to the namespace they were created in; moving devices between

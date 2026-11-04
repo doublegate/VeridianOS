@@ -2186,8 +2186,10 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
                 return Err(SyscallError::InvalidPointer);
             }
             validate_user_ptr_typed::<i32>(arg)?;
+            // In the caller's PID namespace (pid_vnr).
             let pgid = if let Some(proc) = process::current_process() {
-                proc.pgid.load(core::sync::atomic::Ordering::Acquire) as i32
+                crate::process::pidns::vnr(proc.pgid.load(core::sync::atomic::Ordering::Acquire))
+                    as i32
             } else {
                 1
             };
@@ -3094,7 +3096,13 @@ fn fcntl_record_lock(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
                 } else {
                     (held.end - held.start + 1) as i64
                 };
-                fl.l_pid = held.pid;
+                // As the caller's PID namespace numbers the holder, 0 if
+                // it does not (locks_translate_pid); an OFD lock's -1 stays.
+                fl.l_pid = if held.pid > 0 {
+                    crate::process::pidns::vnr(held.pid as u64) as i32
+                } else {
+                    held.pid
+                };
             }
             None => fl.l_type = F_UNLCK as i16,
         }

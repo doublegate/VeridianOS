@@ -1374,7 +1374,9 @@ pub fn sys_getsid(pid: usize) -> SyscallResult {
 pub fn sys_tcsetpgrp(fd: usize, pgid: usize) -> SyscallResult {
     let proc = current_process().ok_or(SyscallError::InvalidState)?;
     let caller_sid = proc.sid.load(core::sync::atomic::Ordering::Acquire);
-    let new_pgid = pgid as u64;
+    // A group in the caller's PID namespace (find_vpid): ESRCH for none.
+    let new_pgid = crate::process::pidns::from_vnr(pgid as u32 as i32 as i64)
+        .ok_or(SyscallError::ProcessNotFound)?;
 
     // Validate that the target pgid belongs to a process in the same session
     // as the caller (POSIX requirement).
@@ -1432,19 +1434,21 @@ pub fn sys_tcgetpgrp(fd: usize) -> SyscallResult {
     })
     .unwrap_or(0);
 
+    // Each as the caller's PID namespace numbers it (pid_vnr: 0 for a group
+    // it does not).
     if pty_pgid != 0 {
-        return Ok(pty_pgid as usize);
+        return Ok(vnr(pty_pgid) as usize);
     }
 
     // Check the kernel-wide console foreground pgid
     let console_pgid = CONSOLE_FOREGROUND_PGID.load(core::sync::atomic::Ordering::Acquire);
     if console_pgid != 0 {
-        return Ok(console_pgid as usize);
+        return Ok(vnr(console_pgid) as usize);
     }
 
     // Default: return the calling process's pgid
     let proc = current_process().ok_or(SyscallError::InvalidState)?;
-    Ok(proc.pgid.load(core::sync::atomic::Ordering::Acquire) as usize)
+    Ok(vnr(proc.pgid.load(core::sync::atomic::Ordering::Acquire)) as usize)
 }
 
 /// Kernel-wide foreground process group for the system console.
