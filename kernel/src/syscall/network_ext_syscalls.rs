@@ -75,14 +75,16 @@ pub(super) fn sys_net_sendto(
     let data = super::userspace::read_user_vec(buf_ptr, len, super::userspace::MAX_USER_MESSAGE)?;
     let data = &data[..];
 
-    let dest = if addr_ptr != 0 {
-        Some(parse_sockaddr(addr_ptr, addr_len)?)
-    } else {
-        None
-    };
-
     match socket_handle(fd)? {
         SocketHandle::Inet(id) => {
+            let dest = if addr_ptr != 0 {
+                Some(parse_sockaddr(addr_ptr, addr_len)?)
+            } else {
+                None
+            };
+            if !crate::net::socket::reachable(id) {
+                return Err(SyscallError::NetworkUnreachable);
+            }
             crate::net::socket::sendto(id, data, dest.as_ref()).map_err(|_| SyscallError::IoError)
         }
         // send() is sendto() with no address; addressed Unix datagrams are
@@ -330,16 +332,21 @@ fn sockaddr_len_for_family(family: u16) -> usize {
     }
 }
 
-/// Parse a sockaddr_in from user space.
+/// Parse a sockaddr_in from user space, as bind, connect and sendto take
+/// it: shorter than a `struct sockaddr_in` is EINVAL, another family
+/// EAFNOSUPPORT (Linux's inet_bind and udp_sendmsg; N-64).
 ///
 /// The bytes are copied out with the fault-handled user-copy routine and
 /// decoded from a local buffer: the user pointer need not be aligned, and
 /// dereferencing it as `*const u16`/`*const u32` was undefined behaviour on
 /// an unaligned address (review of the v0.26.0 stack, PR #7).
-fn parse_sockaddr(
+pub(super) fn parse_sockaddr(
     addr_ptr: usize,
-    _addr_len: usize,
+    addr_len: usize,
 ) -> Result<crate::net::SocketAddr, SyscallError> {
+    if addr_len < 16 {
+        return Err(SyscallError::InvalidArgument);
+    }
     // struct sockaddr_in { u16 family, u16 port_be, u32 addr_be, u8 zero[8] }
     let mut raw = [0u8; 8];
     super::userspace::read_user_bytes(addr_ptr, &mut raw)?;
@@ -347,12 +354,12 @@ fn parse_sockaddr(
 }
 
 /// Decode the first 8 bytes of a `struct sockaddr_in` (family, port,
-/// address); a family other than AF_INET is EINVAL.
+/// address); a family other than AF_INET is EAFNOSUPPORT.
 fn sockaddr_in_from_bytes(raw: &[u8; 8]) -> Result<crate::net::SocketAddr, SyscallError> {
     let family = u16::from_ne_bytes([raw[0], raw[1]]);
     if family != 2 {
         // AF_INET = 2
-        return Err(SyscallError::InvalidArgument);
+        return Err(SyscallError::AddressFamilyNotSupported);
     }
     let port = u16::from_be_bytes([raw[2], raw[3]]);
     let addr_bytes = [raw[4], raw[5], raw[6], raw[7]];
@@ -518,6 +525,11 @@ mod tests {
         head[..2].copy_from_slice(&1u16.to_ne_bytes());
         assert_eq!(
             sockaddr_in_from_bytes(&head),
+            Err(SyscallError::AddressFamilyNotSupported)
+        );
+        // Shorter than a sockaddr_in.
+        assert_eq!(
+            parse_sockaddr(buf.as_ptr() as usize + 1, 15),
             Err(SyscallError::InvalidArgument)
         );
         assert!(parse_sockaddr(0xFFFF_8000_0000_1000, 16).is_err());

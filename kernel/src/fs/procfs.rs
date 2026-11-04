@@ -259,6 +259,8 @@ enum Sysctl {
     MaxUserNamespaces,
     /// `user/max_pid_namespaces` (ADR 0022 H5), likewise.
     MaxPidNamespaces,
+    /// `user/max_net_namespaces` (ADR 0022 H6), likewise.
+    MaxNetNamespaces,
 }
 
 impl Sysctl {
@@ -274,6 +276,7 @@ impl Sysctl {
             "sys/kernel/unprivileged_userns_clone" => Some(Self::UnprivilegedUsernsClone),
             "sys/user/max_user_namespaces" => Some(Self::MaxUserNamespaces),
             "sys/user/max_pid_namespaces" => Some(Self::MaxPidNamespaces),
+            "sys/user/max_net_namespaces" => Some(Self::MaxNetNamespaces),
             _ => None,
         }
     }
@@ -289,6 +292,9 @@ impl Sysctl {
             }
             Self::MaxUserNamespaces => userns::USER_NAMESPACES.max.load(Ordering::Acquire) as usize,
             Self::MaxPidNamespaces => crate::process::pidns::PID_NAMESPACES
+                .max
+                .load(Ordering::Acquire) as usize,
+            Self::MaxNetNamespaces => crate::process::ns::NET_NAMESPACES
                 .max
                 .load(Ordering::Acquire) as usize,
         }
@@ -307,6 +313,7 @@ impl Sysctl {
             Self::UnprivilegedUsernsClone => (&userns::UNPRIVILEGED_CLONE, 1),
             Self::MaxUserNamespaces => (&userns::USER_NAMESPACES.max, i32::MAX as u32),
             Self::MaxPidNamespaces => (&crate::process::pidns::PID_NAMESPACES.max, i32::MAX as u32),
+            Self::MaxNetNamespaces => (&crate::process::ns::NET_NAMESPACES.max, i32::MAX as u32),
         };
         let value = core::str::from_utf8(text)
             .ok()
@@ -688,6 +695,10 @@ impl VfsNode for ProcNode {
                         format!("{}\n", crate::process::linux_caps::CAP_LAST_CAP)
                     }
                     "boot_id" => String::from("00000000-0000-0000-0000-000000000001\n"),
+                    // The reader's network namespace's interfaces.
+                    "net/dev" => crate::net::device::proc_net_dev(
+                        crate::process::ns::current_net() == crate::process::ns::INITIAL_NET,
+                    ),
                     name if Sysctl::from_name(name).is_some() => {
                         format!("{}\n", Sysctl::from_name(name).map_or(0, |l| l.get()))
                     }
@@ -926,6 +937,12 @@ impl VfsNode for ProcNode {
                 });
 
                 entries.push(DirEntry {
+                    name: String::from("net"),
+                    node_type: NodeType::Directory,
+                    inode: 0,
+                });
+
+                entries.push(DirEntry {
                     name: String::from("sys"),
                     node_type: NodeType::Directory,
                     inode: 0,
@@ -996,9 +1013,10 @@ impl VfsNode for ProcNode {
                     });
                 }
             }
-            // What lookup finds in /proc/sys and below.
-            ProcNodeType::SubDir(dir) if dir.starts_with("sys") => {
+            // What lookup finds in /proc/sys and below, and /proc/net.
+            ProcNodeType::SubDir(dir) if dir.starts_with("sys") || dir == "net" => {
                 let listed: &[(&str, NodeType)] = match dir.as_str() {
+                    "net" => &[("dev", NodeType::File)],
                     "sys" => &[
                         ("fs", NodeType::Directory),
                         ("kernel", NodeType::Directory),
@@ -1025,6 +1043,7 @@ impl VfsNode for ProcNode {
                     ],
                     "sys/kernel/random" => &[("boot_id", NodeType::File)],
                     "sys/user" => &[
+                        ("max_net_namespaces", NodeType::File),
                         ("max_pid_namespaces", NodeType::File),
                         ("max_user_namespaces", NodeType::File),
                     ],
@@ -1073,6 +1092,12 @@ impl VfsNode for ProcNode {
                         Arc::new(self.child(ProcNodeType::Link("mounts", "self/mounts")))
                             as Arc<dyn VfsNode>,
                     ),
+                    // The reader's network namespace's files (Linux's
+                    // /proc/net, a link to self/net, here a directory).
+                    "net" => Ok(
+                        Arc::new(self.child(ProcNodeType::SubDir(String::from("net"))))
+                            as Arc<dyn VfsNode>,
+                    ),
                     // Virtual subdirectories for Qt/KDE compatibility
                     "sys" => Ok(
                         Arc::new(self.child(ProcNodeType::SubDir(String::from("sys"))))
@@ -1113,6 +1138,13 @@ impl VfsNode for ProcNode {
             ProcNodeType::SubDir(dir_name) => {
                 // Handle /proc/sys/*, /proc/self/*
                 match dir_name.as_str() {
+                    "net" => {
+                        match name {
+                            "dev" => Ok(Arc::new(self.system_file(String::from("net/dev")))
+                                as Arc<dyn VfsNode>),
+                            _ => Err(KernelError::FsError(FsError::NotFound)),
+                        }
+                    }
                     "sys" => match name {
                         "fs" | "kernel" | "user" => Ok(Arc::new(
                             self.child(ProcNodeType::SubDir(format!("sys/{}", name))),
@@ -1156,7 +1188,7 @@ impl VfsNode for ProcNode {
                         _ => Err(KernelError::FsError(FsError::NotFound)),
                     },
                     "sys/user" => match name {
-                        "max_user_namespaces" | "max_pid_namespaces" => {
+                        "max_user_namespaces" | "max_pid_namespaces" | "max_net_namespaces" => {
                             Ok(Arc::new(self.system_file(format!("sys/user/{}", name)))
                                 as Arc<dyn VfsNode>)
                         }
@@ -1857,6 +1889,12 @@ mod tests {
             pid_max.get(),
             crate::process::userns::DEFAULT_MAX_USER_NAMESPACES as usize
         );
+        let net_max = Sysctl::from_name("sys/user/max_net_namespaces").unwrap();
+        assert!(net_max.write(b"2147483648").is_err());
+        assert_eq!(
+            net_max.get(),
+            crate::process::userns::DEFAULT_MAX_USER_NAMESPACES as usize
+        );
     }
 
     #[test]
@@ -1900,8 +1938,13 @@ mod tests {
             ("sys/kernel/random", &["boot_id"][..]),
             (
                 "sys/user",
-                &["max_pid_namespaces", "max_user_namespaces"][..],
+                &[
+                    "max_net_namespaces",
+                    "max_pid_namespaces",
+                    "max_user_namespaces",
+                ][..],
             ),
+            ("net", &["dev"][..]),
         ] {
             let node = ProcNode::of(ProcNodeType::SubDir(String::from(dir)));
             let mut got = names(&node);

@@ -91,7 +91,8 @@ Each group lands with its LTP cases. The counts are "missing" entries in the cov
     namespaces of H3, mount(2), umount2, the per-mount flags and pivot_root are done; of H4 the
     user namespace object, creation, maps and setns (H4a), ids at the boundaries (H4b) and the
     privilege checks per namespace (H4c); of H5 the PID namespaces with init and the main
-    interfaces (H5a) and the remaining pid crossings (H5b); H6 network)
+    interfaces (H5a) and the remaining pid crossings (H5b); H6 the network namespaces, each
+    with its own ports and a loopback that is down)
   - real prctl, rseq (personality is done; rseq stays ENOSYS, as without CONFIG_RSEQ)
 - **signals (11)**
   - The pending/timedwait/suspend/queueinfo family, tkill/tgkill, pause, alarm, itimers,

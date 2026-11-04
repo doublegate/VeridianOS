@@ -372,7 +372,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
      H3d (pivot_root) are done; of H4 (user), H4a (the namespace, its creation, maps and setns)
      H4b (ids at the boundaries) and H4c (privilege checks per namespace) are done; of H5 (PID),
      H5a (the namespaces, init and the main interfaces) and H5b (the remaining pid crossings)
-     are done; then H6 network.
+     are done; H6 (network: the namespaces, per-namespace ports, `/proc/net/dev`) is done.
   4. [ ] Architecture: the Linux ABI as a personality on the microkernel (decided 2026-11-03:
      option (b), over keeping Linux compatibility in the kernel for good), with one security
      model. ADR 0024, written after group 3 and before item 5 (the maintainer's order,

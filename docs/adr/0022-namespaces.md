@@ -169,10 +169,17 @@ them through an `nsproxy` (all but user, which lives in the credentials); `pid_f
      SO_PEERCRED (pid_vnr in the reader's), F_GETLK (locks_translate_pid) and a terminal's
      process group. pidfd fdinfo, ptrace event messages, SCM_CREDENTIALS and F_SETOWN do not
      exist yet; each translates when it lands.
-   - **H6, network.** The network stack's global tables move into a `NetNs`; the existing stack
-     becomes the initial namespace, and a new namespace starts with only its own loopback, as on
-     Linux. Sockets belong to the namespace they were created in; moving devices between
-     namespaces comes with veth, later.
+   - **H6, network.** A `NetNs` (Linux's `struct net`) per namespace, charged to its creator
+     against `max_net_namespaces`. The existing stack's tables and every device stay the
+     initial namespace's rather than moving into it: nothing can be configured in a new one
+     (no netlink, no SIOCSIF* ioctls, no veth), so it would hold only an empty copy. A new
+     namespace has a loopback interface that is down, as copy_net_ns leaves it, so nothing is
+     reachable from it (ENETUNREACH on send and connect). Sockets belong to the namespace they
+     were created in, ports are kept per namespace (bind's EADDRINUSE), and arriving
+     connections reach only the initial namespace's listeners, as the devices are its.
+     `/proc/net/dev` lists the reader's namespace's interfaces. Per-namespace routing tables,
+     ARP caches and a working loopback come when an interface can be configured; moving
+     devices between namespaces comes with veth.
 
 6. **`kernel/src/virt/namespace.rs` stays an unwired model** for the kernel shell's container
    commands, which move onto the real namespaces with C6 (and the dead container hook in fork

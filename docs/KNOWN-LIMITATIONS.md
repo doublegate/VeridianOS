@@ -157,7 +157,7 @@ their check, for a few shared reasons:
   system call groups.
 - **Kernel configuration.** `/boot/config-<release>` (ADR 0023) sets an option only where the
   kernel does what Linux built with it does, so the tests that need an option it leaves unset
-  (user, mount, PID and network namespaces until their steps, AIO, io_uring, keys, System V
+  (network namespaces until an interface can be configured, AIO, io_uring, keys, System V
   IPC, loop devices, NUMA, swap, seccomp and the rest in `abi/kconfig.map`) are TCONF, as on a
   Linux kernel built without them.
 - **Missing calls.** The System V IPC calls, message queues, mlock, msync, sched_getparam and
@@ -368,8 +368,13 @@ What remains:
   finds open files by path, so a descriptor opened in another mount namespace is looked up by
   its path in the caller's (for fstat's mount id, fchdir and the like) once the two trees
   differ, and sync(2) flushes the filesystems of the initial namespace only. Network namespaces
-  exist only as the initial one: unshare, clone and clone3 refuse new ones with EINVAL, as
-  Linux does when built without them, until their step (H6). PID namespaces can be made and
+  can be made and joined (ADR 0022 H6), but only the initial one has devices, routes and a
+  working stack: a new one has a loopback interface that is down, and nothing (netlink, the
+  SIOCSIF* ioctls) can bring it up or add an interface, so every send and connect from it is
+  ENETUNREACH; there are no veth pairs or device moves. Each has its own ports. Unix sockets
+  are found by path, which crosses network namespaces as on Linux; abstract names do not exist
+  (below). `/proc/net` is a directory with `dev` only, for the reader's namespace, not a link to
+  `self/net`. PID namespaces can be made and
   joined, and the main interfaces translate pids through the caller's (ADR 0022 H5a): getpid
   and its family, fork, clone and clone3 (with set_tid at each level), wait4, waitid, kill,
   tkill, tgkill, siginfo, the process group and session calls, set_tid_address, the nsfs
@@ -633,7 +638,7 @@ Present as code but not in effect, despite older documentation:
 
 ### Network sockets do not work from user programs (N-64 to N-69; planned v0.28, sprint F)
 
-`bind` and `connect` misread `struct sockaddr_in`, UDP datagrams are neither sent nor received
+UDP datagrams are neither sent nor received
 through the socket layer, TCP `connect` reports success without a handshake, and received packets
 are processed only while the kernel shell waits for input. Loopback and Unix sockets are not
 affected. Below the socket layer:

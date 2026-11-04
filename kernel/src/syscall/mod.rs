@@ -529,6 +529,9 @@ pub enum SyscallError {
     /// A running program opened for writing or truncated, or a file open
     /// for writing executed (ETXTBSY, errno 26).
     TextBusy = -138,
+    /// No route to the destination's network, e.g. from a network
+    /// namespace whose interfaces are down (ENETUNREACH, errno 101).
+    NetworkUnreachable = -140,
     /// Too many users: joining a time namespace from a multi-threaded
     /// process (EUSERS, errno 87).
     TooManyUsers = -139,
@@ -3358,21 +3361,6 @@ pub(super) fn socket_err(e: crate::error::KernelError) -> SyscallError {
     }
 }
 
-/// Read an INET address passed as (4 address bytes, big-endian port).
-fn read_inet_addr(addr_ptr: usize) -> Result<crate::net::SocketAddr, SyscallError> {
-    let mut raw = [0u8; 6];
-    userspace::read_user_bytes(addr_ptr, &mut raw)?;
-    Ok(inet_addr_from_bytes(&raw))
-}
-
-/// Decode an INET address passed as (4 address bytes, big-endian port).
-fn inet_addr_from_bytes(raw: &[u8; 6]) -> crate::net::SocketAddr {
-    crate::net::SocketAddr::v4(
-        crate::net::Ipv4Address([raw[0], raw[1], raw[2], raw[3]]),
-        u16::from_be_bytes([raw[4], raw[5]]),
-    )
-}
-
 /// The Unix socket type for a base socket type (flags already removed by
 /// `socket_type_flags`).
 fn to_unix_socket_type(
@@ -3467,10 +3455,16 @@ fn sys_socket_create(domain: usize, sock_type: usize, protocol: usize) -> Syscal
 fn sys_socket_bind(fd: usize, addr_ptr: usize, addr_len: usize) -> SyscallResult {
     match with_socket_fd(fd, SocketNode::handle)? {
         SocketHandle::Inet(id) => {
-            let addr = read_inet_addr(addr_ptr)?;
+            let addr = network_ext_syscalls::parse_sockaddr(addr_ptr, addr_len)?;
             crate::net::socket::with_socket_mut(id, |s| s.bind(addr))
                 .map_err(|_| SyscallError::InvalidState)?
-                .map_err(|_| SyscallError::InvalidState)?;
+                .map_err(|e| match e {
+                    // A port taken in the socket's network namespace.
+                    crate::error::KernelError::ResourceExhausted {
+                        resource: "socket_address",
+                    } => SyscallError::AddressInUse,
+                    _ => SyscallError::InvalidArgument,
+                })?;
             Ok(0)
         }
         SocketHandle::Unix(id) => {
@@ -3524,7 +3518,10 @@ fn sys_socket_listen(fd: usize, backlog: usize) -> SyscallResult {
 fn sys_socket_connect(fd: usize, addr_ptr: usize, addr_len: usize) -> SyscallResult {
     match with_socket_fd(fd, SocketNode::handle)? {
         SocketHandle::Inet(id) => {
-            let addr = read_inet_addr(addr_ptr)?;
+            let addr = network_ext_syscalls::parse_sockaddr(addr_ptr, addr_len)?;
+            if !crate::net::socket::reachable(id) {
+                return Err(SyscallError::NetworkUnreachable);
+            }
             crate::net::socket::with_socket_mut(id, |s| s.connect(addr))
                 .map_err(|_| SyscallError::InvalidState)?
                 .map_err(|_| SyscallError::InvalidState)?;
@@ -4639,21 +4636,6 @@ mod tests {
             epoll_events_buffer_len(usize::MAX),
             Err(SyscallError::InvalidArgument)
         );
-    }
-
-    #[test]
-    fn inet_addr_is_address_then_big_endian_port() {
-        let a = inet_addr_from_bytes(&[10, 0, 2, 15, 0x1F, 0x90]);
-        assert_eq!(
-            a,
-            crate::net::SocketAddr::v4(crate::net::Ipv4Address([10, 0, 2, 15]), 8080)
-        );
-        let raw = [192u8, 168, 1, 1, 0, 53];
-        assert_eq!(
-            read_inet_addr(raw.as_ptr() as usize),
-            Ok(inet_addr_from_bytes(&raw))
-        );
-        assert!(read_inet_addr(0).is_err());
     }
 
     // --- getdents64 records ---

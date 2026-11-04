@@ -51,6 +51,7 @@
 #include <spawn.h>
 #include <sys/wait.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
 #include <sys/un.h>
 #include <sys/auxv.h>
 #include <sys/signalfd.h>
@@ -5562,6 +5563,7 @@ static void test_mount_flags(void);
 static void test_pivot_root(void);
 static void test_user_ns(void);
 static void test_pid_ns(void);
+static void test_net_ns(void);
 
 /* Tests `--only NAME` can run alone (for debugging a single test). */
 static const struct {
@@ -5589,6 +5591,7 @@ static const struct {
     {"pivot_root", test_pivot_root},
     {"user_ns", test_user_ns},
     {"pid_ns", test_pid_ns},
+    {"net_ns", test_net_ns},
     {"threads", test_threads},
     {"cow_race", test_cow_race},
     {"signals", test_signals},
@@ -9881,6 +9884,134 @@ static void test_pid_ns(void)
     report("pid_ns", code == 0, why);
 }
 
+/* ADR 0022 H6: network namespaces. */
+#define T_NETNS_PORT 47123
+
+/* A TCP socket bound to the wildcard address on `port` (a new socket, or
+ * `s` when not negative) and listening: its fd, or -errno. */
+static int t_netns_listen(int s, int port)
+{
+    if (s < 0) s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) return -errno;
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_port = htons(port);
+    a.sin_addr.s_addr = htonl(INADDR_ANY);
+    if (bind(s, (struct sockaddr *)&a, sizeof(a)) != 0 || listen(s, 4) != 0) {
+        int e = errno;
+        close(s);
+        return -e;
+    }
+    return s;
+}
+
+/* The interface lines of /proc/net/dev (after its two header lines), up to
+ * `max` names into `names`: how many, or -1. */
+static int t_netns_devices(char names[][16], int max)
+{
+    FILE *fp = fopen("/proc/net/dev", "r");
+    if (!fp) return -1;
+    char line[256];
+    int n = 0, row = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        if (row++ < 2) continue;
+        char *colon = strchr(line, ':');
+        if (!colon) continue;
+        *colon = 0;
+        char *name = line;
+        while (*name == ' ') name++;
+        if (n < max) snprintf(names[n], 16, "%.15s", name);
+        n++;
+    }
+    fclose(fp);
+    return n;
+}
+
+/* In a child: a new network namespace has its own identity and ports, only
+ * a loopback interface, and reaches nothing (its loopback is down); a
+ * socket made before keeps the old one's ports; setns goes back. */
+static int t_netns_child(int initial_fd, unsigned long initial_ino)
+{
+    int f = 0;
+    char names[4][16];
+    int before = socket(AF_INET, SOCK_STREAM, 0);
+    if (unshare(CLONE_NEWNET) != 0) return 1;
+    if (t_ns_ino(getpid(), "net") == initial_ino) f |= 2;
+    if (!(t_netns_devices(names, 4) == 1 && strcmp(names[0], "lo") == 0)) f |= 4;
+    /* The port the parent listens on is free here, once. */
+    int l = t_netns_listen(-1, T_NETNS_PORT);
+    if (l < 0) f |= 8;
+    if (t_netns_listen(-1, T_NETNS_PORT) != -EADDRINUSE) f |= 16;
+    /* The socket made before the unshare is in the parent's namespace. */
+    if (before < 0 || t_netns_listen(before, T_NETNS_PORT) != -EADDRINUSE) f |= 32;
+    /* Nothing is reachable: not the host, not even 127.0.0.1. */
+    struct sockaddr_in to;
+    memset(&to, 0, sizeof(to));
+    to.sin_family = AF_INET;
+    to.sin_port = htons(9);
+    to.sin_addr.s_addr = htonl(0x0A000202); /* 10.0.2.2 */
+    int u = socket(AF_INET, SOCK_DGRAM, 0);
+    if (u < 0 || !(sendto(u, "x", 1, 0, (struct sockaddr *)&to, sizeof(to)) == -1 &&
+                   errno == ENETUNREACH))
+        f |= 64;
+    int c = socket(AF_INET, SOCK_STREAM, 0);
+    to.sin_port = htons(T_NETNS_PORT);
+    to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (c < 0 ||
+        !(connect(c, (struct sockaddr *)&to, sizeof(to)) == -1 && errno == ENETUNREACH))
+        f |= 128;
+    /* A sockaddr shorter than sockaddr_in is EINVAL, another family
+     * EAFNOSUPPORT (N-64). */
+    to.sin_family = AF_INET6;
+    if (!(bind(c, (struct sockaddr *)&to, sizeof(to)) == -1 && errno == EAFNOSUPPORT) ||
+        !(bind(c, (struct sockaddr *)&to, 8) == -1 && errno == EINVAL))
+        f |= 256;
+    /* setns back to the initial one, with its devices. */
+    if (setns(initial_fd, CLONE_NEWNET) != 0 || t_ns_ino(getpid(), "net") != initial_ino ||
+        t_netns_devices(names, 4) < 1 || strcmp(names[0], "lo") == 0)
+        f |= 512;
+    if (u >= 0) close(u);
+    if (c >= 0) close(c);
+    if (l >= 0) close(l);
+    return f;
+}
+
+static void test_net_ns(void)
+{
+    char why[96], names[4][16], buf[32];
+    int f = 0;
+    unsigned long ino = t_ns_ino(getpid(), "net");
+    int nsfd = open("/proc/self/ns/net", O_RDONLY | O_CLOEXEC);
+    if (nsfd < 0 || ioctl(nsfd, T_NS_GET_NSTYPE) != CLONE_NEWNET) f |= 1;
+    /* The initial namespace has the devices, and the limit its default. */
+    if (t_netns_devices(names, 4) < 1) f |= 2;
+    int lim = open("/proc/sys/user/max_net_namespaces", O_RDONLY);
+    ssize_t n = lim < 0 ? -1 : read(lim, buf, sizeof(buf) - 1);
+    if (n <= 0 || (buf[n] = 0, strcmp(buf, "15000\n") != 0)) f |= 4;
+    if (lim >= 0) close(lim);
+    int l = t_netns_listen(-1, T_NETNS_PORT);
+    if (l < 0) f |= 8;
+    int code = -1;
+    pid_t child = fork();
+    if (child == 0) {
+        int r = t_netns_child(nsfd, ino);
+        printf("net-ns child f=%#x\n", r);
+        fflush(stdout);
+        _exit(r == 0 ? 0 : 1);
+    }
+    int st;
+    if (child > 0 && waitpid(child, &st, 0) == child && WIFEXITED(st)) code = WEXITSTATUS(st);
+    if (code != 0) f |= 16;
+    /* The parent's namespace and listener are unchanged. */
+    if (t_ns_ino(getpid(), "net") != ino || t_netns_listen(-1, T_NETNS_PORT) != -EADDRINUSE)
+        f |= 32;
+    if (l >= 0) close(l);
+    if (nsfd >= 0) close(nsfd);
+    snprintf(why, sizeof(why), "f=%#x child=%d", f, code);
+    report("net_ns", f == 0, why);
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
@@ -10008,6 +10139,7 @@ int main(int argc, char **argv)
     test_pivot_root();
     test_user_ns();
     test_pid_ns();
+    test_net_ns();
 #if defined(__x86_64__)
     test_ustat_sysfs();
 #endif

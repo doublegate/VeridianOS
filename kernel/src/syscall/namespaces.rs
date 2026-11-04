@@ -164,8 +164,7 @@ fn unshare_checks(flags: u64, others: bool, vm_shared: bool) -> Result<(), Sysca
 /// CLONE_NEWUSER makes a user namespace ([`new_user_ns`]), whose root may
 /// then make the others, which belong to it; any other namespace needs
 /// CAP_SYS_ADMIN over the user namespace that will own it, the new one or
-/// the caller's (EPERM; unshare_nsproxy_namespaces), and a type not yet
-/// creatable is EINVAL.
+/// the caller's (EPERM; unshare_nsproxy_namespaces).
 /// Nothing changes unless everything succeeds.
 pub fn sys_unshare(flags: usize) -> SyscallResult {
     let flags = unshare_implied(flags as u64);
@@ -224,13 +223,12 @@ pub fn sys_unshare(flags: usize) -> SyscallResult {
     Ok(0)
 }
 
-/// A namespace set that could not be made, as an errno: a type not yet
-/// creatable and a second new PID namespace before the first is entered
-/// EINVAL, a namespace limit ENOSPC, a PID namespace whose user namespace
-/// is not below its parent's EPERM.
+/// A namespace set that could not be made, as an errno: a second new PID
+/// namespace before the first is entered EINVAL, a namespace limit ENOSPC, a
+/// PID namespace whose user namespace is not below its parent's EPERM.
 fn ns_error(e: ns::NsError) -> SyscallError {
     match e {
-        ns::NsError::Unsupported | ns::NsError::PidPending => SyscallError::InvalidArgument,
+        ns::NsError::PidPending => SyscallError::InvalidArgument,
         ns::NsError::NoSpace => SyscallError::NoSpace,
         ns::NsError::Permission => SyscallError::OperationNotPermitted,
     }

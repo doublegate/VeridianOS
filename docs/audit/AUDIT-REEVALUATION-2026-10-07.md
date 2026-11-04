@@ -24,7 +24,7 @@ to the last (Target) column here; the 2026-10-05 file keeps tracking N-01 to N-6
 
 | ID | Sev | Finding | Fix | Target |
 |---|---|---|---|---|
-| N-64 | Critical C | `bind`/`connect` decode a private 6-byte address format, not `struct sockaddr_in` (`syscall/mod.rs:3487-3499`, used at 3559, 3597); `sendto` uses the correct decoder | `parse_sockaddr` everywhere, check `addr_len`, EAFNOSUPPORT; delete the old format and its test (`mod.rs:4386`) | F1 |
+| N-64 | Critical C | `bind`/`connect` decode a private 6-byte address format, not `struct sockaddr_in` (`syscall/mod.rs:3487-3499`, used at 3559, 3597); `sendto` uses the correct decoder | `parse_sockaddr` everywhere, check `addr_len`, EAFNOSUPPORT; delete the old format and its test (`mod.rs:4386`) | F1; **fixed** in ADR 0022 H6: bind, connect and sendto decode with `parse_sockaddr` (EINVAL below 16 bytes, EAFNOSUPPORT for another family), the old format and its test are gone |
 | N-65 | Critical C | UDP cannot send or receive: `Socket::send/send_to` use a fresh unbound `UdpSocket` (`net/socket.rs:328,351`); the UDP header is never put on the wire (`net/udp.rs:176-182`); bind never registers the socket; a connected UDP socket receives through TCP (`socket.rs:390-393`) | one UDP endpoint per socket, registered on bind or auto-bound; build datagrams with `udp::send_packet` | F1 |
 | N-66 | High C | UDP receive is LIFO (`udp.rs:272`), a port-0 socket captures every datagram (`udp.rs:327`), no address/peer filter, checksum not verified | `VecDeque`, demux on (addr, port) + peer filter, verify checksum | F1 |
 | N-67 | High C | UDP checksum has no IPv6 pseudo-header (`udp.rs:68`; mandatory per RFC 8200 8.1) and sends 0 instead of 0xFFFF | shared RFC 1071 helper with v4/v6 pseudo-headers (also N-08) | F1 |

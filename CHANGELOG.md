@@ -337,6 +337,18 @@
   and pidfd_send_signal is EINVAL for a process outside it. The PI futex owner word and the
   robust-list owner check hold the namespace's thread ids, and SO_PEERCRED, F_GETLK's l_pid,
   TIOCGPGRP and tcgetpgrp report 0 for a process the caller's namespace does not number.
+- Network namespaces (ADR 0022 H6): unshare, clone and clone3 make one with CLONE_NEWNET and
+  setns joins one. The existing stack and every device are the initial namespace's; a new one
+  has only a loopback interface, down as Linux makes it, so a send or connect from a socket
+  made there is ENETUNREACH. Each namespace has its own ports, a socket keeps the namespace it
+  was made in, and only the initial namespace's listeners get arriving connections. A new
+  `/proc/net/dev` lists the reader's namespace's interfaces with their counters, and
+  `/proc/sys/user/max_net_namespaces` limits how many each user may make. kconfig's
+  CONFIG_NET_NS stays unset until an interface can be configured.
+- bind and connect on an AF_INET socket read a `struct sockaddr_in` (N-64): they decoded a
+  private 6-byte format, so every address from a C program was garbled. Shorter than a
+  sockaddr_in is EINVAL, another family EAFNOSUPPORT (sendto too, which was EINVAL), and a port
+  already listened on is EADDRINUSE (it was EINVAL).
 - rseq stays ENOSYS, as on Linux built without CONFIG_RSEQ: glibc runs without it and musl does
   not use it.
 - A signal from rt_sigqueueinfo, rt_tgsigqueueinfo or pidfd_send_signal that ends a sender
