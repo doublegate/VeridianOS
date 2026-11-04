@@ -182,18 +182,22 @@ pub const PR_CAP_AMBIENT_RAISE: u64 = 2;
 pub const PR_CAP_AMBIENT_LOWER: u64 = 3;
 pub const PR_CAP_AMBIENT_CLEAR_ALL: u64 = 4;
 
-/// The user IDs the UID-change rules look at.
+/// The user IDs the UID-change rules look at, with `root`: the kernel uid
+/// of uid 0 in the process's user namespace (Linux's make_kuid(ns, 0)),
+/// [`INVALID_ID`](super::userns::INVALID_ID) if it maps none, which no
+/// process has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Uids {
     pub ruid: u32,
     pub euid: u32,
     pub suid: u32,
     pub fsuid: u32,
+    pub root: u32,
 }
 
 impl Uids {
     const fn any_root(&self) -> bool {
-        self.ruid == 0 || self.euid == 0 || self.suid == 0
+        self.ruid == self.root || self.euid == self.root || self.suid == self.root
     }
 }
 
@@ -224,11 +228,16 @@ fn le32(v: &[u8], at: usize) -> u32 {
 
 impl FileCaps {
     /// A file's capabilities from its `security.capability` value, as exec
-    /// reads them (Linux's get_vfs_caps_from_disk, in the initial user
-    /// namespace): v1, v2 and v3 at their exact sizes, masked to the valid
-    /// capabilities; `None` for a v3 whose root id is not 0 (it grants
-    /// nothing outside its namespace); EINVAL for anything else.
-    pub fn from_xattr(value: &[u8]) -> Result<Option<Self>, SyscallError> {
+    /// in user namespace `ns` reads them (Linux's get_vfs_caps_from_disk):
+    /// v1, v2 and v3 at their exact sizes, masked to the valid
+    /// capabilities; `None` when the value's root id (a v3's, or 0) is not
+    /// root of `ns` or of a namespace above it (rootid_owns_currentns: the
+    /// capabilities were set for another namespace's root); EINVAL for
+    /// anything else.
+    pub fn from_xattr(
+        value: &[u8],
+        ns: &super::userns::UserNs,
+    ) -> Result<Option<Self>, SyscallError> {
         let bad = SyscallError::InvalidArgument;
         if value.len() < 4 {
             return Err(bad);
@@ -243,7 +252,12 @@ impl FileCaps {
         if value.len() != size {
             return Err(bad);
         }
-        if size == XATTR_CAPS_SZ_3 && le32(value, 20) != 0 {
+        let root = if size == XATTR_CAPS_SZ_3 {
+            le32(value, 20)
+        } else {
+            0
+        };
+        if !ns.root_owns(root) {
             return Ok(None);
         }
         let (high_p, high_i) = if size == XATTR_CAPS_SZ_1 {
@@ -267,28 +281,38 @@ impl FileCaps {
             || (value.len() == XATTR_CAPS_SZ_3 && rev(VFS_CAP_REVISION_3))
     }
 
-    /// The `security.capability` value getxattr returns for a stored one
-    /// (Linux's cap_inode_getsecurity, in the initial user namespace): a
-    /// v3 value with root id 0 is shown as v2, any other v2 or v3 value as
-    /// it is; anything else is EINVAL.
-    pub fn xattr_for_reader(stored: &[u8]) -> Result<Vec<u8>, SyscallError> {
-        if stored.len() == XATTR_CAPS_SZ_2
-            && le32(stored, 0) & !VFS_CAP_FLAGS_EFFECTIVE == VFS_CAP_REVISION_2
-        {
-            return Ok(Vec::from(stored));
-        }
-        if stored.len() == XATTR_CAPS_SZ_3
-            && le32(stored, 0) & !VFS_CAP_FLAGS_EFFECTIVE == VFS_CAP_REVISION_3
-        {
-            if le32(stored, 20) != 0 {
-                return Ok(Vec::from(stored));
+    /// The `security.capability` value getxattr returns to a reader in
+    /// user namespace `reader` for a stored one (Linux's
+    /// cap_inode_getsecurity). Its root id (a v3's, or 0 for v2) as the
+    /// reader sees it: a v3 value with that id when it is mapped and not 0;
+    /// otherwise a v2 value when the root id is root of the reader's
+    /// namespace or one above it, EOVERFLOW when not. Anything but a v2 or
+    /// v3 value is EINVAL.
+    pub fn xattr_for_reader(
+        stored: &[u8],
+        reader: &super::userns::UserNs,
+    ) -> Result<Vec<u8>, SyscallError> {
+        let rev = |want| le32(stored, 0) & !VFS_CAP_FLAGS_EFFECTIVE == want;
+        let root = if stored.len() == XATTR_CAPS_SZ_2 && rev(VFS_CAP_REVISION_2) {
+            0
+        } else if stored.len() == XATTR_CAPS_SZ_3 && rev(VFS_CAP_REVISION_3) {
+            le32(stored, 20)
+        } else {
+            return Err(SyscallError::InvalidArgument);
+        };
+        let effective = le32(stored, 0) & VFS_CAP_FLAGS_EFFECTIVE;
+        let mut out = Vec::from(&stored[..XATTR_CAPS_SZ_2]);
+        match reader.uid_up(root) {
+            Some(mapped) if mapped != 0 => {
+                out[0..4].copy_from_slice(&(VFS_CAP_REVISION_3 | effective).to_le_bytes());
+                out.extend_from_slice(&mapped.to_le_bytes());
             }
-            let magic = VFS_CAP_REVISION_2 | (le32(stored, 0) & VFS_CAP_FLAGS_EFFECTIVE);
-            let mut v2 = Vec::from(&stored[..XATTR_CAPS_SZ_2]);
-            v2[0..4].copy_from_slice(&magic.to_le_bytes());
-            return Ok(v2);
+            _ if reader.root_owns(root) => {
+                out[0..4].copy_from_slice(&(VFS_CAP_REVISION_2 | effective).to_le_bytes());
+            }
+            _ => return Err(SyscallError::Overflow),
         }
-        Err(SyscallError::InvalidArgument)
+        Ok(out)
     }
 }
 
@@ -303,14 +327,18 @@ pub struct ExecContext {
     /// (cwd, root) is shared with a process that is not exec'ing (Linux's
     /// LSM_UNSAFE_PTRACE without `ptracer_capable`, and LSM_UNSAFE_SHARE).
     pub unsafe_exec: bool,
-    /// The thread holds CAP_SETUID in the initial user namespace, which
-    /// lets an unsafe exec keep its new ids (Linux's
-    /// ns_capable(new->user_ns, CAP_SETUID)); not the thread's own set,
-    /// which may be a namespace's of its own.
+    /// The thread holds CAP_SETUID in its own user namespace, which lets an
+    /// unsafe exec keep its new ids (Linux's ns_capable(new->user_ns,
+    /// CAP_SETUID)). Set-ID bits apply only to a file whose owner and
+    /// group that namespace maps, so these are ids it could set anyway.
     pub may_setuid: bool,
     /// The new effective gid is the old filesystem gid or a supplementary
     /// group (Linux's `in_group_p(new->egid)`).
     pub egid_in_groups: bool,
+    /// The kernel uid of uid 0 in the process's user namespace, whose
+    /// root the root rules emulate (handle_privileged_root's
+    /// make_kuid(new->user_ns, 0); as in [`Uids`]).
+    pub root_uid: u32,
 }
 
 /// The result of exec for the capability sets and the effective IDs.
@@ -409,12 +437,12 @@ impl CapSets {
 
     /// The effective set access(2) checks with (Linux's do_faccessat),
     /// which acts as the caller's real self: unless SECBIT_NO_SETUID_FIXUP,
-    /// nothing for a real uid other than 0, and the permitted set for real
-    /// uid 0.
-    pub fn access_effective(&self, ruid: u32) -> LinuxCaps {
+    /// nothing for a real uid other than `root` (its namespace's uid 0, as
+    /// in [`Uids`]), and the permitted set for that one.
+    pub fn access_effective(&self, ruid: u32, root: u32) -> LinuxCaps {
         if self.secure(SECURE_NO_SETUID_FIXUP) {
             self.effective
-        } else if ruid == 0 {
+        } else if ruid == root {
             self.permitted
         } else {
             LinuxCaps::EMPTY
@@ -436,25 +464,27 @@ impl CapSets {
             // a non-root user, then exec, to drop everything.
             self.ambient = LinuxCaps::EMPTY;
         }
-        if old.euid == 0 && new.euid != 0 {
+        let root = old.root;
+        if old.euid == root && new.euid != root {
             self.effective = LinuxCaps::EMPTY;
         }
-        if old.euid != 0 && new.euid == 0 {
+        if old.euid != root && new.euid == root {
             self.effective = self.permitted;
         }
     }
 
     /// The fixup after setfsuid (Linux's `cap_task_fix_setuid` for
-    /// LSM_SETID_FS): leaving fsuid 0 drops the filesystem capabilities
-    /// from the effective set, reaching it raises them from the permitted set.
-    pub fn fix_setfsuid(&mut self, old_fsuid: u32, new_fsuid: u32) {
+    /// LSM_SETID_FS): leaving fsuid `root` (the namespace's uid 0, as in
+    /// [`Uids`]) drops the filesystem capabilities from the effective set,
+    /// reaching it raises them from the permitted set.
+    pub fn fix_setfsuid(&mut self, old_fsuid: u32, new_fsuid: u32, root: u32) {
         if self.secure(SECURE_NO_SETUID_FIXUP) {
             return;
         }
-        if old_fsuid == 0 && new_fsuid != 0 {
+        if old_fsuid == root && new_fsuid != root {
             self.effective = self.effective.minus(FS_SET);
         }
-        if old_fsuid != 0 && new_fsuid == 0 {
+        if old_fsuid != root && new_fsuid == root {
             self.effective = self.effective.union(self.permitted.intersect(FS_SET));
         }
     }
@@ -613,14 +643,15 @@ impl CapSets {
         // set-user-ID-root program with file capabilities, run by someone
         // else, gets only its file capabilities.
         let ruid = old_ruid;
-        let suid_root = ruid != 0 && euid == 0;
+        let root = ctx.root_uid;
+        let suid_root = ruid != root && euid == root;
         let root_rules = !old.secure(SECURE_NOROOT);
         let file_caps_only = has_fcap && suid_root;
         if root_rules && !file_caps_only {
-            if euid == 0 || ruid == 0 {
+            if euid == root || ruid == root {
                 new.permitted = old.bounding.union(old.inheritable);
             }
-            if euid == 0 {
+            if euid == root {
                 effective = true;
             }
         }
@@ -653,7 +684,7 @@ impl CapSets {
         let secure = id_changed
             || euid != ruid
             || egid != old_rgid
-            || (ruid != 0 && (effective || !new.permitted.is_subset_of(new.ambient)));
+            || (ruid != root && (effective || !new.permitted.is_subset_of(new.ambient)));
         Ok(ExecOutcome {
             caps: new,
             euid,
@@ -725,6 +756,7 @@ mod tests {
             euid: e,
             suid: s,
             fsuid: e,
+            root: 0,
         }
     }
 
@@ -748,6 +780,7 @@ mod tests {
     /// root id 0 read back as v2.
     #[test]
     fn file_capability_values_follow_linux() {
+        let initial = crate::process::userns::initial();
         fn value(magic: u32, words: &[u32]) -> Vec<u8> {
             let mut v = Vec::from(magic.to_le_bytes());
             for w in words {
@@ -757,28 +790,31 @@ mod tests {
         }
         let nbs = 1u32 << CAP_NET_BIND_SERVICE;
         let v2 = value(0x0200_0001, &[nbs, 0, 1 << (CAP_SYSLOG - 32), 0]);
-        let fc = FileCaps::from_xattr(&v2).unwrap().unwrap();
+        let fc = FileCaps::from_xattr(&v2, &initial).unwrap().unwrap();
         assert!(fc.effective);
         assert_eq!(fc.permitted, caps(&[CAP_NET_BIND_SERVICE, CAP_SYSLOG]));
         assert!(fc.inheritable.is_empty());
         let v1 = value(0x0100_0000, &[nbs, nbs]);
-        let one = FileCaps::from_xattr(&v1).unwrap().unwrap();
+        let one = FileCaps::from_xattr(&v1, &initial).unwrap().unwrap();
         assert!(!one.effective && one.inheritable.has(CAP_NET_BIND_SERVICE));
         // Bits past the last capability are dropped.
-        let wide = FileCaps::from_xattr(&value(0x0200_0000, &[0, 0, u32::MAX, 0]))
+        let wide = FileCaps::from_xattr(&value(0x0200_0000, &[0, 0, u32::MAX, 0]), &initial)
             .unwrap()
             .unwrap();
         assert_eq!(wide.permitted, LinuxCaps::from_words(0, u32::MAX));
         let mut v3 = value(0x0300_0000, &[nbs, 0, 0, 0, 0]);
         assert_eq!(
-            FileCaps::from_xattr(&v3).unwrap().unwrap().permitted,
+            FileCaps::from_xattr(&v3, &initial)
+                .unwrap()
+                .unwrap()
+                .permitted,
             caps(&[CAP_NET_BIND_SERVICE])
         );
         v3[20..24].copy_from_slice(&1000u32.to_le_bytes());
-        assert_eq!(FileCaps::from_xattr(&v3), Ok(None));
-        assert_eq!(FileCaps::from_xattr(&v2[..12]), Err(EINVAL));
+        assert_eq!(FileCaps::from_xattr(&v3, &initial), Ok(None));
+        assert_eq!(FileCaps::from_xattr(&v2[..12], &initial), Err(EINVAL));
         assert_eq!(
-            FileCaps::from_xattr(&value(0x0400_0000, &[0; 4])),
+            FileCaps::from_xattr(&value(0x0400_0000, &[0; 4]), &initial),
             Err(EINVAL)
         );
 
@@ -786,18 +822,18 @@ mod tests {
         assert!(!FileCaps::valid_to_write(&v1));
         assert!(!FileCaps::valid_to_write(&v2[..16]));
 
-        assert_eq!(FileCaps::xattr_for_reader(&v2).unwrap(), v2);
+        assert_eq!(FileCaps::xattr_for_reader(&v2, &initial).unwrap(), v2);
         assert_eq!(
-            FileCaps::xattr_for_reader(&v3).unwrap(),
+            FileCaps::xattr_for_reader(&v3, &initial).unwrap(),
             v3,
             "a foreign root id stays v3"
         );
         let rooted = value(0x0300_0001, &[nbs, 0, 0, 0, 0]);
         assert_eq!(
-            FileCaps::xattr_for_reader(&rooted).unwrap(),
+            FileCaps::xattr_for_reader(&rooted, &initial).unwrap(),
             value(0x0200_0001, &[nbs, 0, 0, 0])
         );
-        assert_eq!(FileCaps::xattr_for_reader(&v1), Err(EINVAL));
+        assert_eq!(FileCaps::xattr_for_reader(&v1, &initial), Err(EINVAL));
     }
 
     /// access(2) checks as the caller's real self (do_faccessat): a real
@@ -807,10 +843,10 @@ mod tests {
     fn access_checks_as_the_real_user() {
         let mut c = CapSets::ROOT;
         c.effective = caps(&[CAP_KILL]);
-        assert_eq!(c.access_effective(1000), LinuxCaps::EMPTY);
-        assert_eq!(c.access_effective(0), CapSets::ROOT.permitted);
+        assert_eq!(c.access_effective(1000, 0), LinuxCaps::EMPTY);
+        assert_eq!(c.access_effective(0, 0), CapSets::ROOT.permitted);
         c.securebits |= secbit(SECURE_NO_SETUID_FIXUP);
-        assert_eq!(c.access_effective(1000), caps(&[CAP_KILL]));
+        assert_eq!(c.access_effective(1000, 0), caps(&[CAP_KILL]));
     }
 
     #[test]
@@ -918,22 +954,22 @@ mod tests {
                 ..CapSets::ROOT
             }
         );
-        c.fix_setfsuid(0, 1000);
+        c.fix_setfsuid(0, 1000, 0);
         assert_eq!(c.effective, LinuxCaps::FULL);
     }
 
     #[test]
     fn fsuid_moves_the_filesystem_capabilities() {
         let mut c = CapSets::ROOT;
-        c.fix_setfsuid(0, 1000);
+        c.fix_setfsuid(0, 1000, 0);
         assert_eq!(c.effective, LinuxCaps::FULL.minus(FS_SET));
         assert!(c.capable(CAP_KILL) && !c.capable(CAP_DAC_OVERRIDE));
-        c.fix_setfsuid(1000, 0);
+        c.fix_setfsuid(1000, 0, 0);
         assert_eq!(c.effective, LinuxCaps::FULL);
         // Raised only from the permitted set.
         c.permitted = caps(&[CAP_CHOWN]);
         c.effective = LinuxCaps::EMPTY;
-        c.fix_setfsuid(1000, 0);
+        c.fix_setfsuid(1000, 0, 0);
         assert_eq!(c.effective, caps(&[CAP_CHOWN]));
     }
 
@@ -1220,12 +1256,11 @@ mod tests {
         assert_eq!(out.caps.permitted, LinuxCaps::FULL);
     }
 
-    /// An unsafe exec keeps a set-user-ID program's uid only with CAP_SETUID
-    /// in the initial user namespace (`may_setuid`), not with a full set
-    /// held in a namespace of the thread's own: root there, traced by
-    /// itself, running a set-uid-root program, must stay uid 1000.
+    /// An unsafe exec keeps a set-user-ID program's uid only with
+    /// CAP_SETUID (`may_setuid`): without it, traced by itself and running
+    /// a set-uid-root program, a process stays uid 1000.
     #[test]
-    fn an_unsafe_exec_needs_cap_setuid_outside_ones_own_namespace() {
+    fn an_unsafe_exec_keeps_new_ids_only_with_cap_setuid() {
         let own_ns_root = ExecContext {
             unsafe_exec: true,
             may_setuid: false,
@@ -1234,10 +1269,7 @@ mod tests {
         let out = CapSets::ROOT
             .after_exec(1000, 1000, 1000, 0, 1000, own_ns_root)
             .unwrap();
-        assert_eq!(
-            out.euid, 1000,
-            "CAP_SETUID of its own namespace does not count"
-        );
+        assert_eq!(out.euid, 1000, "no CAP_SETUID, no new uid");
         let privileged = ExecContext {
             unsafe_exec: true,
             may_setuid: true,
@@ -1308,5 +1340,73 @@ mod tests {
         let (e, p, i) = sets_from_user_data([[0, 0, 0], [u32::MAX, u32::MAX, u32::MAX]]);
         let high = LinuxCaps::from_bits(0x1ff << 32);
         assert_eq!((e, p, i), (high, high, high));
+    }
+
+    /// The root rules are those of the process's namespace's root
+    /// (make_kuid(ns, 0)): root of a namespace whose uid 0 is kernel uid
+    /// 1000 keeps everything across exec and loses it on leaving every
+    /// root ID, as the initial namespace's root does at uid 0.
+    #[test]
+    fn root_is_the_namespaces_root() {
+        let ns_root = ExecContext {
+            root_uid: 1000,
+            ..plain()
+        };
+        let out = CapSets::ROOT
+            .after_exec(1000, 1000, 1000, 1000, 1000, ns_root)
+            .unwrap();
+        assert_eq!(out.caps.effective, LinuxCaps::FULL);
+        assert!(!out.secure);
+        let out = CapSets::ROOT
+            .after_exec(1000, 1000, 1000, 1000, 1000, plain())
+            .unwrap();
+        assert!(
+            out.caps.permitted.is_empty(),
+            "kernel uid 1000 is not the initial namespace's root"
+        );
+        let rooted = |r, e, s| Uids {
+            root: 1000,
+            ..uids(r, e, s)
+        };
+        let mut c = CapSets::ROOT;
+        c.fix_setuid(rooted(1000, 1000, 1000), rooted(1001, 1001, 1001));
+        assert!(c.permitted.is_empty());
+        let mut c = CapSets::ROOT;
+        c.fix_setuid(uids(1000, 1000, 1000), uids(1001, 1001, 1001));
+        assert_eq!(c.permitted, CapSets::ROOT.permitted, "no root ID was held");
+        assert_eq!(
+            CapSets::ROOT.access_effective(1000, 1000),
+            CapSets::ROOT.permitted
+        );
+        assert!(CapSets::ROOT.access_effective(1000, 0).is_empty());
+    }
+
+    /// File capabilities in a namespace (get_vfs_caps_from_disk and
+    /// cap_inode_getsecurity): a v3 value for the namespace's root applies
+    /// there and reads back as v2; one for another root grants nothing and
+    /// cannot be read (EOVERFLOW); a v2 value applies everywhere.
+    #[test]
+    fn file_capabilities_follow_their_root() {
+        let ns = crate::process::userns::test_child(b"0 1000 1", b"0 1000 1");
+        let nbs = (1u32 << CAP_NET_BIND_SERVICE).to_le_bytes();
+        let v3 = |root: u32| {
+            let mut v = Vec::from(0x0300_0001u32.to_le_bytes());
+            v.extend_from_slice(&nbs);
+            v.extend_from_slice(&[0; 12]);
+            v.extend_from_slice(&root.to_le_bytes());
+            v
+        };
+        let mut v2 = Vec::from(0x0200_0001u32.to_le_bytes());
+        v2.extend_from_slice(&nbs);
+        v2.extend_from_slice(&[0; 12]);
+        assert!(FileCaps::from_xattr(&v3(1000), &ns).unwrap().is_some());
+        assert_eq!(FileCaps::from_xattr(&v3(2000), &ns), Ok(None));
+        assert!(FileCaps::from_xattr(&v2, &ns).unwrap().is_some());
+        assert_eq!(FileCaps::xattr_for_reader(&v3(1000), &ns).unwrap(), v2);
+        assert_eq!(FileCaps::xattr_for_reader(&v2, &ns).unwrap(), v2);
+        assert_eq!(
+            FileCaps::xattr_for_reader(&v3(2000), &ns),
+            Err(SyscallError::Overflow)
+        );
     }
 }

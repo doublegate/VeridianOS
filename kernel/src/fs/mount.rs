@@ -343,8 +343,24 @@ pub fn new_filesystem(
                 match key {
                     "size" => size = Some(tmpfs_size(value)?),
                     "mode" => mode = Some(number(value, 8)? as u32 & 0o7777),
-                    "uid" => uid = number(value, 10)? as u32,
-                    "gid" => gid = number(value, 10)? as u32,
+                    // The mounter's user namespace's IDs (shmem_parse_one's
+                    // make_kuid): one it does not map is a bad value.
+                    "uid" => {
+                        uid = crate::process::userns::current()
+                            .uid_down(
+                                u32::try_from(number(value, 10)?)
+                                    .map_err(|_| NewFsError::BadOption)?,
+                            )
+                            .ok_or(NewFsError::BadOption)?
+                    }
+                    "gid" => {
+                        gid = crate::process::userns::current()
+                            .gid_down(
+                                u32::try_from(number(value, 10)?)
+                                    .map_err(|_| NewFsError::BadOption)?,
+                            )
+                            .ok_or(NewFsError::BadOption)?
+                    }
                     _ => return Err(NewFsError::BadOption),
                 }
             }

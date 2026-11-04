@@ -250,11 +250,11 @@ fn read_source(inp: &File, offset: i64, buf: &mut [u8]) -> Result<usize, Syscall
         _ => {}
     }
     if seekable(inp) {
-        return inp.node.read(offset as usize, buf).map_err(map);
+        return inp.read_node(offset as usize, buf).map_err(map);
     }
     let mut retry = false;
     loop {
-        match inp.node.read(0, buf) {
+        match inp.read_node(0, buf) {
             Err(KernelError::WouldBlock)
                 if !inp.nonblock.load(core::sync::atomic::Ordering::Acquire) =>
             {

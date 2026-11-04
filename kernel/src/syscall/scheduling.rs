@@ -611,6 +611,9 @@ fn priority_targets(
             let key = match (which, who) {
                 (PRIO_PGRP, 0) => me.pgid.load(core::sync::atomic::Ordering::Acquire),
                 (PRIO_USER, 0) => me.credentials().ruid as u64,
+                // A uid of the caller's user namespace (make_kuid); one it
+                // does not map has no processes.
+                (PRIO_USER, w) => me.user_ns().uid_down(w).map_or(u64::MAX, u64::from),
                 (_, w) => w as u64,
             };
             let mut out = Vec::new();

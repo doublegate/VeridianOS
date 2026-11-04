@@ -301,8 +301,14 @@
   Set-ID bits are ignored unless the caller's user namespace maps both the file's owner and
   its group, as Linux's bprm_fill_uid. Writes to the map files and to `timens_offsets` check the
   credentials the descriptor was opened with, as Linux does. `/proc/<pid>` and its files are
-  now owned by the process's effective user and group while it is dumpable, as on Linux. Ids
-  are not translated yet (H4b).
+  now owned by the process's effective user and group while it is dumpable, as on Linux.
+- User and group ids are translated at the system-call boundary (ADR 0022 H4b): the set*id
+  calls, chown, setgroups and tmpfs's `uid=`/`gid=` take the caller's namespace's ids (one it
+  does not map is EINVAL), and the get*id calls, getgroups, stat, statx, SO_PEERCRED, waitid,
+  auxv, `/proc/<pid>/status` and siginfo show ids as the receiving namespace sees them (65534
+  when it does not map them). Root of a user namespace keeps its capabilities across exec and
+  loses them on leaving uid 0, as on Linux, and a file capability applies by its root id.
+  waitid now fills in si_uid, which it left 0. kconfig's CONFIG_USER_NS is now set.
 - rseq stays ENOSYS, as on Linux built without CONFIG_RSEQ: glibc runs without it and musl does
   not use it.
 - A signal from rt_sigqueueinfo, rt_tgsigqueueinfo or pidfd_send_signal that ends a sender

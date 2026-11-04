@@ -148,6 +148,8 @@ pub const SI_KERNEL: i32 = 0x80;
 pub const SI_QUEUE: i32 = -1;
 /// A POSIX timer expired (`process::posix_timer`).
 pub const SI_TIMER: i32 = -2;
+/// SIGIO from a file descriptor (SIL_POLL).
+pub const SI_SIGIO: i32 = -5;
 pub const SI_TKILL: i32 = -6;
 /// SIGCHLD `si_code`: how the child changed state.
 pub const CLD_EXITED: i32 = 1;
@@ -208,13 +210,45 @@ impl SigInfo {
         info
     }
 
+    /// Sent by `sender`, the calling process: its pid and its real uid as
+    /// its own user namespace sees it (prepare_kill_siginfo). Queueing
+    /// translates the uid for the receiver ([`Self::for_receiver`]).
+    pub fn from_sender(sig: usize, code: i32, sender: &Process) -> Self {
+        let uid = sender.user_ns().uid_munged(sender.credentials().ruid);
+        Self::from_process(sig, code, sender.pid.0, uid)
+    }
+
     /// Sent by the calling process to itself or another (SI_USER), as
     /// Linux's kill and its kernel-internal send_sig(sig, task, 0) do.
     pub fn from_current(sig: usize, code: i32) -> Self {
         match super::current_process() {
-            Some(p) => Self::from_process(sig, code, p.pid.0, p.credentials().ruid),
+            Some(p) => Self::from_sender(sig, code, &p),
             None => Self::kernel(sig),
         }
+    }
+
+    /// `self` as queued for `receiver` (send_signal_locked with
+    /// has_si_pid_and_uid): a signal from a process (si_code 0 or below,
+    /// in the kill and queued layouts) carries the sender's uid as the
+    /// sender's user namespace, the caller's, sees it; the receiver reads
+    /// it as its own namespace sees it, the overflow uid if unmapped. The
+    /// SI_TIMER and SI_SIGIO layouts hold no uid there and stay as they
+    /// are. A kernel siginfo (si_code above 0) is left alone too: SIGCHLD
+    /// already carries the uid as the parent sees it ([`Self::child`]),
+    /// where Linux 7.3 also passes it through the sender's namespace.
+    pub fn for_receiver(mut self, receiver: &Process) -> Self {
+        if self.si_code > 0 || self.si_code == SI_TIMER || self.si_code == SI_SIGIO {
+            return self;
+        }
+        let from = super::userns::current();
+        let to = receiver.user_ns();
+        if from.ident.id != to.ident.id {
+            let uid = from
+                .uid_down(self.uid())
+                .map_or(super::userns::OVERFLOW_ID, |kuid| to.uid_munged(kuid));
+            self.fields[0] = self.fields[0] as u32 as u64 | (uid as u64) << 32;
+        }
+        self
     }
 
     /// Sent by the kernel itself (SI_KERNEL).
@@ -222,10 +256,16 @@ impl SigInfo {
         Self::with(sig, SI_KERNEL)
     }
 
-    /// A child's state change (`code` is a CLD_ value): its pid, real user,
-    /// status (exit code, or the signal) and CPU times in clock ticks.
+    /// A child's state change (`code` is a CLD_ value): its pid, real user
+    /// (as its parent's user namespace sees it: do_notify_parent), status
+    /// (exit code, or the signal) and CPU times in clock ticks.
     pub fn child(sig: usize, code: i32, child: &Process, status: i32) -> Self {
-        let mut info = Self::from_process(sig, code, child.pid.0, child.credentials().ruid);
+        let ns = child
+            .parent()
+            .and_then(super::table::get_process)
+            .map_or_else(super::userns::initial, |p| p.user_ns());
+        let uid = ns.uid_munged(child.credentials().ruid);
+        let mut info = Self::from_process(sig, code, child.pid.0, uid);
         info.fields[1] = status as u32 as u64;
         let (user, system) = child.cpu_split().1;
         // clock_t in USER_HZ (100) ticks, as times() reports them.
@@ -872,6 +912,7 @@ pub fn send_info_to_process(
     } else if ignored(process, sig) {
         return Ok(true);
     } else {
+        let info = info.for_receiver(process);
         process
             .rt_queue
             .push(
@@ -917,7 +958,7 @@ pub fn send_to_current(sig: usize) {
     let (Some(process), Some(thread)) = (super::current_process(), super::current_thread()) else {
         return;
     };
-    let info = SigInfo::from_process(sig, SI_USER, process.pid.0, process.credentials().ruid);
+    let info = SigInfo::from_sender(sig, SI_USER, &process);
     #[cfg(feature = "alloc")]
     if process.dispatched.load(Ordering::Acquire) {
         let _ = send_to_thread(&process, &thread, info);
@@ -945,6 +986,7 @@ pub fn send_to_thread(
     if ignored(process, sig) {
         return Ok(());
     }
+    let info = info.for_receiver(process);
     thread
         .rt_queue
         .push(

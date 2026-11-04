@@ -370,10 +370,11 @@ pub fn sys_ptrace(request: usize, pid: usize, addr: usize, data: usize) -> Sysca
             let (parent_permitted, raw_capable) = parent
                 .common_ptrace_caps()
                 .ok_or(SyscallError::OperationNotPermitted)?;
-            // CAP_SYS_PTRACE counts in the initial user namespace only: it
+            // CAP_SYS_PTRACE counts in the initial user namespace only, a
+            // rule stricter than Linux's (which asks about the tracee's
+            // namespace) until H4c moves the ptrace checks together: it
             // also decides whether a set-ID exec under the trace keeps its
-            // privilege (tracer_capable), and the ids such an exec sets are
-            // the initial namespace's.
+            // privilege (tracer_capable).
             let parent_ns = parent.user_ns();
             let parent_capable = process::userns::initial().capable(
                 &parent_ns,

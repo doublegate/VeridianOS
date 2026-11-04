@@ -320,10 +320,10 @@ impl File {
         }
 
         if self.is_stream() {
-            return self.node.read(0, buffer);
+            return self.read_node(0, buffer);
         }
         let mut pos = self.position.write();
-        let bytes_read = self.node.read(*pos, buffer)?;
+        let bytes_read = self.read_node(*pos, buffer)?;
         *pos += bytes_read;
         Ok(bytes_read)
     }
@@ -374,6 +374,14 @@ impl File {
         let bytes_written = self.write_node(*pos, &data[..len])?;
         *pos += bytes_written;
         Ok(bytes_written)
+    }
+
+    /// Read from the node at `offset` with this descriptor's opener
+    /// ([`VfsNode::read_as`]).
+    ///
+    /// [`VfsNode::read_as`]: super::VfsNode::read_as
+    pub fn read_node(&self, offset: usize, buffer: &mut [u8]) -> Result<usize, KernelError> {
+        self.node.read_as(offset, buffer, self.opener.as_deref())
     }
 
     /// Write to the node at `offset` with this descriptor's opener

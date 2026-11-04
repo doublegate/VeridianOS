@@ -386,19 +386,16 @@ fn install_exec_credentials(
         (ids.set_uid, ids.set_gid)
     };
     let (new_euid, new_egid) = (set_uid.unwrap_or(old.euid), set_gid.unwrap_or(old.egid));
-    // CAP_SETUID counts in the initial user namespace only: the ids the
-    // program would keep are the initial namespace's (ADR 0022 H4a).
-    let may_setuid = super::userns::initial().capable(
-        &process.user_ns(),
-        old.euid,
-        thread.caps.lock().capable(super::linux_caps::CAP_SETUID),
-    );
+    // CAP_SETUID in the process's own user namespace: set-ID bits counted
+    // above only if it maps the file's owner and group.
+    let may_setuid = thread.caps.lock().capable(super::linux_caps::CAP_SETUID);
     let ctx = super::linux_caps::ExecContext {
         file: ids.file_caps,
         no_new_privs,
         unsafe_exec: traced_unprivileged || fs_shared,
         may_setuid,
         egid_in_groups: old.in_group(new_egid),
+        root_uid: process.user_ns().root_uid(),
     };
     // A copy: exec runs single-threaded, so nothing else changes this
     // thread's sets, and no thread's sets lock is held while the
@@ -686,7 +683,7 @@ fn exec_image(
         // bprm_fill_uid and get_file_caps).
         let suid = mnt_flags & crate::fs::mount::flags::NOSUID == 0;
         let file_caps = if suid {
-            exec_file_caps(&*file_node)?
+            exec_file_caps(&*file_node, &process.user_ns())?
         } else {
             None
         };
@@ -714,6 +711,7 @@ fn exec_image(
         let old = process.credentials();
         let ctx = super::linux_caps::ExecContext {
             file: Some(file),
+            root_uid: process.user_ns().root_uid(),
             ..Default::default()
         };
         current_thread
@@ -1196,11 +1194,13 @@ pub(crate) fn setup_exec_stack(
     secure: bool,
 ) -> Result<usize, KernelError> {
     let creds = process.credentials();
+    // As the process's own user namespace sees them (create_elf_tables).
+    let ns = process.user_ns();
     let process_aux = crate::elf::dynamic::ProcessAux {
-        uid: creds.ruid,
-        euid: creds.euid,
-        gid: creds.rgid,
-        egid: creds.egid,
+        uid: ns.uid_munged(creds.ruid),
+        euid: ns.uid_munged(creds.euid),
+        gid: ns.gid_munged(creds.rgid),
+        egid: ns.gid_munged(creds.egid),
         // Linux's secureexec, as exec decided it (`ExecOutcome::secure`).
         secure,
     };
@@ -1344,10 +1344,11 @@ pub(crate) fn exec_stack_layout<'a>(
 #[cfg(feature = "alloc")]
 fn exec_file_caps(
     node: &dyn crate::fs::VfsNode,
+    ns: &super::userns::UserNs,
 ) -> Result<Option<super::linux_caps::FileCaps>, KernelError> {
     match node.xattrs() {
         Ok(attrs) => match attrs.get(crate::fs::xattr::XATTR_NAME_CAPS) {
-            Some(value) => super::linux_caps::FileCaps::from_xattr(value).map_err(|_| {
+            Some(value) => super::linux_caps::FileCaps::from_xattr(value, ns).map_err(|_| {
                 KernelError::InvalidArgument {
                     name: "security.capability",
                     value: "not a file capability",
@@ -1378,9 +1379,12 @@ mod tests {
         let vfs = make_vfs_with_root();
         let root = vfs.root_fs().unwrap().root();
         let inner = root.create("prog", Permissions::from_mode(0o4755)).unwrap();
-        assert!(matches!(exec_file_caps(&*inner), Ok(None)));
+        assert!(matches!(
+            exec_file_caps(&*inner, &crate::process::userns::initial()),
+            Ok(None)
+        ));
         let stuck = Arc::new(StuckCaps(inner, true));
-        assert!(exec_file_caps(&*stuck).is_err());
+        assert!(exec_file_caps(&*stuck, &crate::process::userns::initial()).is_err());
     }
 
     /// An exec follows at most four `#!` interpreters, as Linux, and then

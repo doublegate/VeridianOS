@@ -984,6 +984,12 @@ mod tests {
             check(CLONE_THREAD | CLONE_SIGHAND | CLONE_VM | CLONE_FILES | ns::CLONE_NEWPID),
             EINVAL
         );
+        // A thread never gets a user namespace (or the privilege over its
+        // other namespaces that one confers) it would not run in.
+        assert_eq!(
+            check(CLONE_THREAD | CLONE_SIGHAND | CLONE_VM | ns::CLONE_NEWUSER),
+            EINVAL
+        );
         assert_eq!(check(CLONE_PARENT), EINVAL);
         assert_eq!(check(CLONE_VM | CLONE_SIGHAND), EINVAL);
         assert_eq!(check(CLONE_FILES), EINVAL);

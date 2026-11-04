@@ -89,7 +89,8 @@ Each group lands with its LTP cases. The counts are "missing" entries in the cov
     are done; no pidfd ioctls, one PID namespace level, KNOWN-LIMITATIONS)
   - unshare/setns (ADR 0022: H1 the framework, UTS, IPC and cgroup, H2 time and the mount
     namespaces of H3, mount(2), umount2, the per-mount flags and pivot_root are done; of H4 the
-    user namespace object, creation, maps and setns (H4a); H4b, H4c and H5-H6 the rest)
+    user namespace object, creation, maps and setns (H4a) and ids at the boundaries (H4b); H4c
+    and H5-H6 the rest)
   - real prctl, rseq (personality is done; rseq stays ENOSYS, as without CONFIG_RSEQ)
 - **signals (11)**
   - The pending/timedwait/suspend/queueinfo family, tkill/tgkill, pause, alarm, itimers,

@@ -225,8 +225,8 @@ pub(super) fn sys_net_getsockopt(
         SocketHandle::Unix(id) if (level, optname) == (SOL_SOCKET, SO_PEERCRED) => {
             // struct ucred { pid_t pid; uid_t uid; gid_t gid; }: at most
             // *optlen bytes of it, and *optlen set to what was copied.
-            let cred =
-                crate::net::unix_socket::peer_cred(id).ok_or(SyscallError::BadFileDescriptor)?;
+            let cred = crate::net::unix_socket::peer_cred(id, &crate::process::userns::current())
+                .ok_or(SyscallError::BadFileDescriptor)?;
             let mut bytes = [0u8; 12];
             bytes[..4].copy_from_slice(&cred.pid.to_ne_bytes());
             bytes[4..8].copy_from_slice(&cred.uid.to_ne_bytes());

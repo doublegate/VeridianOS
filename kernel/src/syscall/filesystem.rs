@@ -1396,13 +1396,16 @@ fn fill_x86_stat(metadata: &crate::fs::Metadata, rdev: u32, dev: u32, nlink: u32
     };
     let mode = type_bits | metadata.permissions.to_mode();
     let size = metadata.size as i64;
+    // The owner as the caller's user namespace sees it (cp_new_stat's
+    // from_kuid_munged): one it does not map reads as the overflow ID.
+    let ns = crate::process::userns::current();
     X86Stat {
         st_dev: dev as u64,
         st_ino: metadata.inode,
         st_nlink: nlink as u64,
         st_mode: mode,
-        st_uid: metadata.uid,
-        st_gid: metadata.gid,
+        st_uid: ns.uid_munged(metadata.uid),
+        st_gid: ns.gid_munged(metadata.gid),
         __pad0: 0,
         st_rdev: rdev as u64,
         st_size: size,
@@ -2315,11 +2318,10 @@ pub(crate) fn kill_one(
         return super::process::exit_current(0, sig as u32);
     }
     // The target sees the sender: SI_USER, the caller's pid and real user.
-    let info = crate::process::signals::SigInfo::from_process(
+    let info = crate::process::signals::SigInfo::from_sender(
         sig as usize,
         crate::process::signals::SI_USER,
-        caller.pid.0,
-        caller.credentials().ruid,
+        caller,
     );
     send_info(pid, sig, info)
 }
@@ -2860,7 +2862,8 @@ fn access_caller() -> Caller {
     c.fsuid = c.ruid;
     c.fsgid = c.rgid;
     if let Some(thread) = process::current_thread() {
-        caller.caps = thread.caps.lock().access_effective(caller.creds.ruid);
+        let root = caller.userns.root_uid();
+        caller.caps = thread.caps.lock().access_effective(caller.creds.ruid, root);
     }
     caller
 }
@@ -4522,7 +4525,7 @@ pub(super) fn pread_segs(
         dst,
         true,
         |kbuf| {
-            let n = file.node.read(at, kbuf).map_err(super::map_kernel_error)?;
+            let n = file.read_node(at, kbuf).map_err(super::map_kernel_error)?;
             at += n;
             Ok(n)
         },
@@ -4661,13 +4664,21 @@ pub(crate) fn may_chown(
 }
 
 /// Apply a chown to `node` ([`may_chown`], EPERM otherwise; FS-SEC-02).
-/// This used to be a no-op that reported success.
+/// This used to be a no-op that reported success. The IDs are the
+/// caller's user namespace's: one it does not map EINVAL (chown_common's
+/// make_kuid).
 pub(crate) fn chown_node(
     node: &alloc::sync::Arc<dyn crate::fs::VfsNode>,
     uid: usize,
     gid: usize,
 ) -> SyscallResult {
-    let (uid, gid) = (chown_id(uid), chown_id(gid));
+    let ns = crate::process::userns::current();
+    let uid = chown_id(uid)
+        .map(|u| ns.uid_down(u).ok_or(SyscallError::InvalidArgument))
+        .transpose()?;
+    let gid = chown_id(gid)
+        .map(|g| ns.gid_down(g).ok_or(SyscallError::InvalidArgument))
+        .transpose()?;
     if uid.is_none() && gid.is_none() {
         return Ok(0);
     }

@@ -102,7 +102,20 @@ them through an `nsproxy` (all but user, which lives in the credentials); `pid_f
      a user namespace needs CAP_SYS_ADMIN in the initial one, unless root sets
      `/proc/sys/kernel/unprivileged_userns_clone` to 1 (it is 0 by default), because a user
      namespace hands an ordinary user root-only kernel interfaces. H4b translates ids at the
-     boundaries, H4c moves the checks.
+     boundaries: credentials stay kernel ids, and an id a caller passes is its namespace's,
+     made a kernel id on the way in (make_kuid: unmapped EINVAL for the set*id calls, chown,
+     setgroups and tmpfs's `uid=`/`gid=`), while an id returned is shown as the receiver's
+     namespace sees it (from_kuid_munged: unmapped reads as 65534) in the get*id calls,
+     getgroups, stat and statx, SO_PEERCRED, waitid, auxv, `/proc/<pid>/status` (as the
+     opener's namespace sees it, seq_user_ns, like the map files) and siginfo, whose si_uid is
+     the sender's namespace's until the signal is queued and the receiver's after
+     (userns_fixup_signal_uid; SIGCHLD carries the child's uid as its parent sees it). With
+     ids translated, the set*id calls and exec take CAP_SETUID and CAP_SETGID in the caller's
+     own namespace (ns_capable_setid), and setgroups also needs its namespace to allow it
+     (userns_may_setgroups). Root, for the capability rules (the setuid fixup, exec's root
+     emulation, access), is the namespace's uid 0, not kernel uid 0; a file capability counts,
+     and reads back, by its root id as rootid_owns_currentns and cap_inode_getsecurity decide.
+     H4c moves the checks.
    - **H5, PID.** A process has an id at each level of its PID namespace, from its own up to the
      initial one; every interface that takes or returns a pid or tid translates through the
      caller's namespace (getpid, wait, kill, siginfo, signalfd, sched calls, ptrace, pidfd,

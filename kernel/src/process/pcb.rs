@@ -442,11 +442,15 @@ impl Process {
         f: impl FnOnce(&mut super::creds::Credentials) -> R,
     ) -> R {
         use super::linux_caps::Uids;
+        // Root is the process's namespace's (cap_emulate_setxuid's
+        // make_kuid(old->user_ns, 0)).
+        let root = self.user_ns().root_uid();
         let uids = |c: &super::creds::Credentials| Uids {
             ruid: c.ruid,
             euid: c.euid,
             suid: c.suid,
             fsuid: c.fsuid,
+            root,
         };
         let threads = self.threads.lock();
         let (result, old, new) = self.update_credentials(|c| {
@@ -457,7 +461,7 @@ impl Process {
         for thread in threads.values() {
             let mut caps = thread.caps.lock();
             if fs {
-                caps.fix_setfsuid(old.fsuid, new.fsuid);
+                caps.fix_setfsuid(old.fsuid, new.fsuid, root);
             } else {
                 caps.fix_setuid(old, new);
             }
@@ -958,7 +962,7 @@ impl Process {
         // without another instance, as kill does on Linux.
         let _ = self.rt_queue.push(
             &self.pending_signals,
-            info,
+            info.for_receiver(self),
             super::signals::Charge::of(self),
             super::signals::Overflow::Merge,
         );
@@ -1117,6 +1121,33 @@ mod tests {
         let (creds, caps) = proc.creds_and_caps(&threads[0]);
         assert_eq!((creds.ruid, creds.euid, creds.suid), (1000, 1000, 1000));
         assert_eq!(caps.permitted, LinuxCaps::EMPTY);
+    }
+
+    /// In a user namespace, the setuid fixup's root is the namespace's: its
+    /// uid 0 (kernel uid 1000 here) leaving every root ID drops the sets.
+    /// A signal from the initial namespace shows its sender as this
+    /// namespace sees it (userns_fixup_signal_uid); a kernel siginfo
+    /// (si_code above 0) and a timer's layout are left as they are.
+    #[test]
+    fn a_namespace_root_is_its_own_uid_0() {
+        use super::super::{
+            linux_caps::LinuxCaps,
+            signals::{SigInfo, CLD_EXITED, SI_TIMER, SI_USER},
+        };
+        let ns = super::super::userns::test_child(b"0 1000 1\n1 2000 1", b"0 1000 1");
+        let proc = make_process(6, "nsroot");
+        proc.set_user_ns(ns);
+        proc.change_uids(false, |c| c.setresuid(1000, 1000, 1000, true))
+            .unwrap();
+        let threads = with_threads(&proc, &[60]);
+        proc.change_uids(false, |c| c.setresuid(2000, 2000, 2000, true))
+            .unwrap();
+        assert_eq!(threads[0].caps.lock().permitted, LinuxCaps::EMPTY);
+        let from = |uid, code| SigInfo::from_process(10, code, 1, uid).for_receiver(&proc);
+        assert_eq!(from(2000, SI_USER).uid(), 1);
+        assert_eq!(from(0, SI_USER).uid(), 65534);
+        assert_eq!(from(0, CLD_EXITED).uid(), 0);
+        assert_eq!(from(7, SI_TIMER).uid(), 7, "a timer's overrun, not a uid");
     }
 
     /// A change of effective user or group makes the process non-dumpable

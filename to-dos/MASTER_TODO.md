@@ -370,7 +370,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
      IPC and cgroup) and H2 (time) are done; of H3 (mount), H3a (the namespaces and
      `/proc/<pid>/{mounts,mountinfo}`), H3b (mount(2) and umount2), H3c (per-mount flags) and
      H3d (pivot_root) are done; of H4 (user), H4a (the namespace, its creation, maps and setns)
-     is done, H4b (ids at the boundaries) and H4c (ns_capable sites) remain; then H5 PID and H6
+     and H4b (ids at the boundaries) are done, H4c (ns_capable sites) remains; then H5 PID and H6
      network.
   4. [ ] Architecture: the Linux ABI as a personality on the microkernel (decided 2026-11-03:
      option (b), over keeping Linux compatibility in the kernel for good), with one security

@@ -173,6 +173,12 @@ pub fn initial() -> Arc<UserNs> {
         .clone()
 }
 
+/// The calling process's user namespace (current_user_ns); the initial
+/// one in kernel context.
+pub fn current() -> Arc<UserNs> {
+    super::current_process().map_or_else(initial, |p| p.user_ns())
+}
+
 /// Why a user namespace could not be made (create_user_ns).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CreateError {
@@ -245,6 +251,25 @@ impl UserNs {
         self.gid_map.lock().up(kgid)
     }
 
+    /// A uid argument of a set*id call as a kernel uid (make_kuid):
+    /// (uid_t)-1, "leave unchanged", stays as it is; one this namespace
+    /// does not map is None, which those calls fail with EINVAL.
+    pub fn uid_arg(&self, uid: u32) -> Option<u32> {
+        if uid == INVALID_ID {
+            Some(uid)
+        } else {
+            self.uid_down(uid)
+        }
+    }
+
+    pub fn gid_arg(&self, gid: u32) -> Option<u32> {
+        if gid == INVALID_ID {
+            Some(gid)
+        } else {
+            self.gid_down(gid)
+        }
+    }
+
     /// from_kuid_munged: unmapped reads as [`OVERFLOW_ID`].
     pub fn uid_munged(&self, kuid: u32) -> u32 {
         self.uid_up(kuid).unwrap_or(OVERFLOW_ID)
@@ -252,6 +277,28 @@ impl UserNs {
 
     pub fn gid_munged(&self, kgid: u32) -> u32 {
         self.gid_up(kgid).unwrap_or(OVERFLOW_ID)
+    }
+
+    /// The kernel uid of this namespace's uid 0 (make_kuid(ns, 0)), or
+    /// [`INVALID_ID`] when it maps none, which no process has.
+    pub fn root_uid(&self) -> u32 {
+        self.uid_down(0).unwrap_or(INVALID_ID)
+    }
+
+    /// Whether kernel uid `kuid` is uid 0 in this namespace or in one above
+    /// it (rootid_owns_currentns): file capabilities stored for that root
+    /// apply here.
+    pub fn root_owns(&self, kuid: u32) -> bool {
+        let mut ns = self;
+        loop {
+            if ns.uid_up(kuid) == Some(0) {
+                return true;
+            }
+            match &ns.parent {
+                Some(parent) => ns = parent,
+                None => return false,
+            }
+        }
     }
 
     /// Whether `self` is `ancestor` or below it (in_userns).
@@ -517,6 +564,26 @@ pub fn parse_map(text: &[u8]) -> Result<Vec<Extent>, MapError> {
     Ok(extents)
 }
 
+/// A child of the initial namespace, made by uid 1000, with `uid_map` and
+/// `gid_map` written by the initial namespace's root (tests).
+#[cfg(test)]
+pub(crate) fn test_child(uid_map: &[u8], gid_map: &[u8]) -> Arc<UserNs> {
+    use super::{
+        creds::{Caller, Credentials},
+        linux_caps::LinuxCaps,
+    };
+    let init = initial();
+    let ns = UserNs::create(&init, 1000, 1000, false, true).unwrap();
+    let root = Caller {
+        creds: Credentials::new(0, 0),
+        caps: LinuxCaps::FULL,
+        userns: init,
+    };
+    ns.write_map(false, &root, &root, 0, uid_map).unwrap();
+    ns.write_map(true, &root, &root, 0, gid_map).unwrap();
+    ns
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -775,5 +842,35 @@ mod tests {
         drop(other);
         assert!(!COUNTS.lock().contains_key(&4_000_003));
         COUNTS.lock().remove(&4_000_002);
+    }
+
+    /// IDs cross into and out of a namespace as Linux's make_kuid and
+    /// from_kuid_munged: (uid_t)-1 stays "unchanged", an unmapped ID is
+    /// refused going in and reads as the overflow ID coming out.
+    #[test]
+    fn ids_translate_at_the_boundary() {
+        let ns = test_child(b"0 1000 1\n1 100000 10", b"0 1000 1");
+        assert_eq!(ns.uid_arg(0), Some(1000));
+        assert_eq!(ns.uid_arg(5), Some(100_004));
+        assert_eq!(ns.uid_arg(11), None);
+        assert_eq!(ns.uid_arg(u32::MAX), Some(u32::MAX));
+        assert_eq!(ns.gid_arg(1), None);
+        assert_eq!(ns.uid_munged(100_009), 10);
+        assert_eq!(ns.uid_munged(0), OVERFLOW_ID);
+        assert_eq!(ns.gid_munged(1000), 0);
+        assert_eq!(ns.root_uid(), 1000);
+        assert_eq!(initial().root_uid(), 0);
+        let unmapped = UserNs::create(&initial(), 1000, 1000, false, false).unwrap();
+        assert_eq!(unmapped.root_uid(), INVALID_ID);
+    }
+
+    /// rootid_owns_currentns: the root id is uid 0 here or above.
+    #[test]
+    fn a_root_id_owns_the_namespaces_it_is_root_of() {
+        let ns = test_child(b"0 1000 1", b"0 1000 1");
+        assert!(ns.root_owns(1000), "this namespace's root");
+        assert!(ns.root_owns(0), "the initial namespace's root");
+        assert!(!ns.root_owns(2000));
+        assert!(!initial().root_owns(1000));
     }
 }

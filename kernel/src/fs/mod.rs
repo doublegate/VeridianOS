@@ -475,6 +475,20 @@ pub trait VfsNode: Send + Sync {
     /// Write data to the node
     fn write(&self, offset: usize, data: &[u8]) -> Result<usize, KernelError>;
 
+    /// [`Self::read`] through a descriptor opened with `opener`'s
+    /// credentials (None if the file does not record them), for the files
+    /// that show IDs as the opener's user namespace sees them (Linux's
+    /// seq_user_ns): procfs's status and ID maps.
+    fn read_as(
+        &self,
+        offset: usize,
+        buffer: &mut [u8],
+        opener: Option<&crate::process::creds::Caller>,
+    ) -> Result<usize, KernelError> {
+        let _ = opener;
+        self.read(offset, buffer)
+    }
+
     /// [`Self::write`] through a descriptor opened with `opener`'s
     /// credentials (Linux's file->f_cred; None if the file does not record
     /// them), for the files whose checks are the opener's: procfs's ID

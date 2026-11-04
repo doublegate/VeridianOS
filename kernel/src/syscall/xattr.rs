@@ -196,7 +196,7 @@ fn get(
     // (cap_inode_getsecurity).
     let converted;
     let found = if name == xattr::XATTR_NAME_CAPS {
-        converted = FileCaps::xattr_for_reader(found)?;
+        converted = FileCaps::xattr_for_reader(found, &crate::process::userns::current())?;
         &converted[..]
     } else {
         found

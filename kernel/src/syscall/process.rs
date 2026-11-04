@@ -956,28 +956,42 @@ pub fn sys_setpriority(which: usize, who: usize, priority: usize) -> SyscallResu
 // Identity syscalls (170-175)
 // ============================================================================
 
-/// getuid: the real user ID.
-pub fn sys_getuid() -> SyscallResult {
+/// The calling process and its user namespace.
+fn me_and_ns() -> Result<
+    (
+        alloc::sync::Arc<crate::process::Process>,
+        alloc::sync::Arc<crate::process::userns::UserNs>,
+    ),
+    SyscallError,
+> {
     let proc = current_process().ok_or(SyscallError::InvalidState)?;
-    Ok(proc.credentials().ruid as usize)
+    let ns = proc.user_ns();
+    Ok((proc, ns))
+}
+
+/// getuid: the real user ID, as the caller's user namespace sees it
+/// (from_kuid_munged: one it does not map reads as the overflow uid).
+pub fn sys_getuid() -> SyscallResult {
+    let (proc, ns) = me_and_ns()?;
+    Ok(ns.uid_munged(proc.credentials().ruid) as usize)
 }
 
 /// geteuid: the effective user ID.
 pub fn sys_geteuid() -> SyscallResult {
-    let proc = current_process().ok_or(SyscallError::InvalidState)?;
-    Ok(proc.credentials().euid as usize)
+    let (proc, ns) = me_and_ns()?;
+    Ok(ns.uid_munged(proc.credentials().euid) as usize)
 }
 
 /// getgid: the real group ID.
 pub fn sys_getgid() -> SyscallResult {
-    let proc = current_process().ok_or(SyscallError::InvalidState)?;
-    Ok(proc.credentials().rgid as usize)
+    let (proc, ns) = me_and_ns()?;
+    Ok(ns.gid_munged(proc.credentials().rgid) as usize)
 }
 
 /// getegid: the effective group ID.
 pub fn sys_getegid() -> SyscallResult {
-    let proc = current_process().ok_or(SyscallError::InvalidState)?;
-    Ok(proc.credentials().egid as usize)
+    let (proc, ns) = me_and_ns()?;
+    Ok(ns.gid_munged(proc.credentials().egid) as usize)
 }
 
 /// An ID argument: uid_t/gid_t is 32 bits, so the upper half of the
@@ -986,18 +1000,14 @@ fn id_arg(arg: usize) -> u32 {
     arg as u32
 }
 
-/// Whether the calling thread, in user namespace `ns`, holds `cap` in the
-/// initial one. The ids these calls take are not translated yet (ADR 0022
-/// H4b), so a capability held only in a namespace of the process's own,
-/// which Linux's ns_capable_setid would accept for ids mapped there, must
-/// not let it set the initial namespace's ids, uid 0 among them.
-fn may_set_ids(
-    me: &crate::process::thread::Thread,
-    ns: &crate::process::userns::UserNs,
-    euid: u32,
-    cap: u32,
-) -> bool {
-    crate::process::userns::initial().capable(ns, euid, me.caps.lock().capable(cap))
+/// A uid argument as a kernel uid in user namespace `ns` (make_kuid);
+/// (uid_t)-1 stays, one `ns` does not map EINVAL.
+fn kuid_arg(ns: &crate::process::userns::UserNs, arg: usize) -> Result<u32, SyscallError> {
+    ns.uid_arg(id_arg(arg)).ok_or(SyscallError::InvalidArgument)
+}
+
+fn kgid_arg(ns: &crate::process::userns::UserNs, arg: usize) -> Result<u32, SyscallError> {
+    ns.gid_arg(id_arg(arg)).ok_or(SyscallError::InvalidArgument)
 }
 
 /// A change of the user IDs, with the capability fixup on every thread
@@ -1005,17 +1015,21 @@ fn may_set_ids(
 /// map that change_uids holds while it fixes every thread's sets: read
 /// before, a concurrent setuid on another thread could clear this thread's
 /// capabilities in between, and the stale answer would let it set uid 0
-/// back (PR #33 review). It counts only in the initial user namespace
-/// ([`may_set_ids`]).
+/// back (PR #33 review). It is the thread's own effective capability,
+/// which is ns_capable_setid over its own user namespace: the IDs given
+/// are that namespace's, translated to kernel IDs, so it can only reach
+/// IDs the namespace maps.
 fn change_uids<R>(
+    proc: &crate::process::Process,
     fs: bool,
     f: impl FnOnce(&mut crate::process::creds::Credentials, bool) -> R,
 ) -> Result<R, SyscallError> {
     let me = crate::process::current_thread().ok_or(SyscallError::InvalidState)?;
-    let proc = current_process().ok_or(SyscallError::InvalidState)?;
-    let ns = proc.user_ns();
     Ok(proc.change_uids(fs, |c| {
-        let may = may_set_ids(&me, &ns, c.euid, crate::process::linux_caps::CAP_SETUID);
+        let may = me
+            .caps
+            .lock()
+            .capable(crate::process::linux_caps::CAP_SETUID);
         f(c, may)
     }))
 }
@@ -1024,68 +1038,89 @@ fn change_uids<R>(
 /// fixup: Linux has none for them). CAP_SETGID is read with the change,
 /// under the thread map, which a user-ID change holds while it clears every
 /// thread's sets, so a concurrent privilege drop cannot leave a stale
-/// answer (as in [`change_uids`]). It counts only in the initial user
-/// namespace ([`may_set_ids`]).
+/// answer (as in [`change_uids`]).
 fn change_gids<R>(
+    proc: &crate::process::Process,
     f: impl FnOnce(&mut crate::process::creds::Credentials, bool) -> R,
 ) -> Result<R, SyscallError> {
     let me = crate::process::current_thread().ok_or(SyscallError::InvalidState)?;
-    let proc = current_process().ok_or(SyscallError::InvalidState)?;
-    let ns = proc.user_ns();
     let _threads = proc.threads.lock();
     Ok(proc.update_credentials(|c| {
-        let may = may_set_ids(&me, &ns, c.euid, crate::process::linux_caps::CAP_SETGID);
+        let may = me
+            .caps
+            .lock()
+            .capable(crate::process::linux_caps::CAP_SETGID);
         f(c, may)
     }))
 }
 
-/// setuid: Linux rules (`Credentials::setuid`).
+/// setuid: Linux rules (`Credentials::setuid`); an ID the caller's user
+/// namespace does not map EINVAL.
 pub fn sys_setuid(uid: usize) -> SyscallResult {
-    change_uids(false, |c, may| c.setuid(id_arg(uid), may))??;
+    let (proc, ns) = me_and_ns()?;
+    let uid = kuid_arg(&ns, uid)?;
+    change_uids(&proc, false, |c, may| c.setuid(uid, may))??;
     Ok(0)
 }
 
 /// setgid: Linux rules (`Credentials::setgid`).
 pub fn sys_setgid(gid: usize) -> SyscallResult {
-    change_gids(|c, may| c.setgid(id_arg(gid), may))??;
+    let (proc, ns) = me_and_ns()?;
+    let gid = kgid_arg(&ns, gid)?;
+    change_gids(&proc, |c, may| c.setgid(gid, may))??;
     Ok(0)
 }
 
 /// setreuid(ruid, euid); -1 leaves an ID unchanged.
 pub fn sys_setreuid(r: usize, e: usize) -> SyscallResult {
-    change_uids(false, |c, may| c.setreuid(id_arg(r), id_arg(e), may))??;
+    let (proc, ns) = me_and_ns()?;
+    let (r, e) = (kuid_arg(&ns, r)?, kuid_arg(&ns, e)?);
+    change_uids(&proc, false, |c, may| c.setreuid(r, e, may))??;
     Ok(0)
 }
 
 /// setregid(rgid, egid); -1 leaves an ID unchanged.
 pub fn sys_setregid(r: usize, e: usize) -> SyscallResult {
-    change_gids(|c, may| c.setregid(id_arg(r), id_arg(e), may))??;
+    let (proc, ns) = me_and_ns()?;
+    let (r, e) = (kgid_arg(&ns, r)?, kgid_arg(&ns, e)?);
+    change_gids(&proc, |c, may| c.setregid(r, e, may))??;
     Ok(0)
 }
 
 /// setresuid(ruid, euid, suid); -1 leaves an ID unchanged.
 pub fn sys_setresuid(r: usize, e: usize, s: usize) -> SyscallResult {
-    change_uids(false, |c, may| {
-        c.setresuid(id_arg(r), id_arg(e), id_arg(s), may)
-    })??;
+    let (proc, ns) = me_and_ns()?;
+    let (r, e, s) = (kuid_arg(&ns, r)?, kuid_arg(&ns, e)?, kuid_arg(&ns, s)?);
+    change_uids(&proc, false, |c, may| c.setresuid(r, e, s, may))??;
     Ok(0)
 }
 
 /// setresgid(rgid, egid, sgid); -1 leaves an ID unchanged.
 pub fn sys_setresgid(r: usize, e: usize, s: usize) -> SyscallResult {
-    change_gids(|c, may| c.setresgid(id_arg(r), id_arg(e), id_arg(s), may))??;
+    let (proc, ns) = me_and_ns()?;
+    let (r, e, s) = (kgid_arg(&ns, r)?, kgid_arg(&ns, e)?, kgid_arg(&ns, s)?);
+    change_gids(&proc, |c, may| c.setresgid(r, e, s, may))??;
     Ok(0)
 }
 
-/// setfsuid(fsuid): the old filesystem uid, whether or not it changed;
-/// never fails (Linux).
+/// setfsuid(fsuid): the old filesystem uid as the caller's namespace sees
+/// it, whether or not it changed; never fails (Linux). An ID the namespace
+/// does not map changes nothing.
 pub fn sys_setfsuid(uid: usize) -> SyscallResult {
-    Ok(change_uids(true, |c, may| c.setfsuid(id_arg(uid), may))? as usize)
+    use crate::process::creds::UNCHANGED;
+    let (proc, ns) = me_and_ns()?;
+    let uid = ns.uid_down(id_arg(uid)).unwrap_or(UNCHANGED);
+    let old = change_uids(&proc, true, |c, may| c.setfsuid(uid, may))?;
+    Ok(ns.uid_munged(old) as usize)
 }
 
 /// setfsgid(gid): the old filesystem gid, as setfsuid.
 pub fn sys_setfsgid(gid: usize) -> SyscallResult {
-    Ok(change_gids(|c, may| c.setfsgid(id_arg(gid), may))? as usize)
+    use crate::process::creds::UNCHANGED;
+    let (proc, ns) = me_and_ns()?;
+    let gid = ns.gid_down(id_arg(gid)).unwrap_or(UNCHANGED);
+    let old = change_gids(&proc, |c, may| c.setfsgid(gid, may))?;
+    Ok(ns.gid_munged(old) as usize)
 }
 
 /// getresuid / getresgid: write the three IDs (each a 4-byte uid_t) to
@@ -1098,25 +1133,29 @@ fn write_id_triple(ids: [u32; 3], ptrs: [usize; 3]) -> SyscallResult {
 }
 
 pub fn sys_getresuid(r: usize, e: usize, s: usize) -> SyscallResult {
-    let c = current_process()
-        .ok_or(SyscallError::InvalidState)?
-        .credentials();
-    write_id_triple([c.ruid, c.euid, c.suid], [r, e, s])
+    let (proc, ns) = me_and_ns()?;
+    let c = proc.credentials();
+    write_id_triple(
+        [c.ruid, c.euid, c.suid].map(|id| ns.uid_munged(id)),
+        [r, e, s],
+    )
 }
 
 pub fn sys_getresgid(r: usize, e: usize, s: usize) -> SyscallResult {
-    let c = current_process()
-        .ok_or(SyscallError::InvalidState)?
-        .credentials();
-    write_id_triple([c.rgid, c.egid, c.sgid], [r, e, s])
+    let (proc, ns) = me_and_ns()?;
+    let c = proc.credentials();
+    write_id_triple(
+        [c.rgid, c.egid, c.sgid].map(|id| ns.gid_munged(id)),
+        [r, e, s],
+    )
 }
 
 /// getgroups(size, list): with size 0, the number of supplementary
-/// groups; otherwise copies them (EINVAL if `size` is too small).
+/// groups; otherwise copies them as the caller's namespace sees them
+/// (EINVAL if `size` is too small).
 pub fn sys_getgroups(size: usize, list: usize) -> SyscallResult {
-    let c = current_process()
-        .ok_or(SyscallError::InvalidState)?
-        .credentials();
+    let (proc, ns) = me_and_ns()?;
+    let c = proc.credentials();
     let groups = c.groups();
     let size = size as u32 as i32;
     if size < 0 {
@@ -1129,24 +1168,39 @@ pub fn sys_getgroups(size: usize, list: usize) -> SyscallResult {
         return Err(SyscallError::InvalidArgument);
     }
     for (i, &g) in groups.iter().enumerate() {
-        super::userspace::write_user::<u32>(list + i * 4, g)?;
+        super::userspace::write_user::<u32>(list + i * 4, ns.gid_munged(g))?;
     }
     Ok(groups.len())
 }
 
-/// setgroups(size, list): replace the supplementary groups (CAP_SETGID;
-/// EINVAL above NGROUPS_MAX).
+/// setgroups(size, list): replace the supplementary groups. It needs
+/// CAP_SETGID and a namespace that allows it (may_setgroups: a gid map
+/// written and setgroups not denied), else EPERM; EINVAL above
+/// NGROUPS_MAX or for a group the namespace does not map
+/// (groups_from_user).
 pub fn sys_setgroups(size: usize, list: usize) -> SyscallResult {
     use crate::process::creds::NGROUPS_MAX;
+    let (proc, ns) = me_and_ns()?;
+    // may_setgroups first (EPERM before any EINVAL or EFAULT, as Linux);
+    // change_gids checks CAP_SETGID again under the thread map.
+    let me = crate::process::current_thread().ok_or(SyscallError::InvalidState)?;
+    let may = me
+        .caps
+        .lock()
+        .capable(crate::process::linux_caps::CAP_SETGID);
+    if !may || !ns.may_setgroups() {
+        return Err(SyscallError::OperationNotPermitted);
+    }
     let size = size as u32 as i32;
     if size < 0 || size as usize > NGROUPS_MAX {
         return Err(SyscallError::InvalidArgument);
     }
     let mut groups = [0u32; NGROUPS_MAX];
     for (i, slot) in groups.iter_mut().take(size as usize).enumerate() {
-        *slot = super::userspace::read_user::<u32>(list + i * 4)?;
+        let gid = super::userspace::read_user::<u32>(list + i * 4)?;
+        *slot = ns.gid_down(gid).ok_or(SyscallError::InvalidArgument)?;
     }
-    change_gids(|c, may| c.setgroups(&groups[..size as usize], may))??;
+    change_gids(&proc, |c, may| c.setgroups(&groups[..size as usize], may))??;
     Ok(0)
 }
 
@@ -1502,11 +1556,10 @@ pub fn sys_tkill(tid: usize, signal: usize) -> SyscallResult {
             {
                 if let Some(thread) = target.get_thread(ThreadId(tid as u64)) {
                     super::filesystem::kill_one(&caller, pid, 0)?;
-                    let info = crate::process::signals::SigInfo::from_process(
+                    let info = crate::process::signals::SigInfo::from_sender(
                         sig as usize,
                         crate::process::signals::SI_TKILL,
-                        caller.pid.0,
-                        caller.credentials().ruid,
+                        &caller,
                     );
                     crate::process::signals::send_to_thread(&target, &thread, info)
                         .map_err(super::map_kernel_error)?;
@@ -1605,7 +1658,10 @@ pub fn sys_waitid(
     }
 
     if infop != 0 {
-        let info = waitid_siginfo(waited.pid.0, waited.status);
+        // The child's real uid as the caller's user namespace sees it
+        // (wait_task_zombie's from_kuid_munged).
+        let uid = crate::process::userns::current().uid_munged(waited.uid);
+        let info = waitid_siginfo(waited.pid.0, uid, waited.status);
         // SAFETY: copy_to_user validates that infop is writable user memory.
         unsafe { crate::syscall::userspace::copy_to_user(infop, &info) }?;
     }
@@ -1615,9 +1671,10 @@ pub fn sys_waitid(
     Ok(0)
 }
 
-/// A Linux `siginfo_t` (128 bytes) for a waitid result; all zero when no
-/// child changed state (WNOHANG).
-fn waitid_siginfo(pid: u64, status: i32) -> [u8; 128] {
+/// A Linux `siginfo_t` (128 bytes) for a waitid result: the child's pid
+/// and real uid `uid`, how it changed state; all zero when no child
+/// changed state (WNOHANG).
+fn waitid_siginfo(pid: u64, uid: u32, status: i32) -> [u8; 128] {
     const SIGCHLD: i32 = 17;
     const CLD_EXITED: i32 = 1;
     const CLD_KILLED: i32 = 2;
@@ -1643,6 +1700,7 @@ fn waitid_siginfo(pid: u64, status: i32) -> [u8; 128] {
     info[0..4].copy_from_slice(&SIGCHLD.to_ne_bytes()); // si_signo
     info[8..12].copy_from_slice(&code.to_ne_bytes()); // si_code
     info[16..20].copy_from_slice(&(pid as i32).to_ne_bytes()); // si_pid
+    info[20..24].copy_from_slice(&uid.to_ne_bytes()); // si_uid
     info[24..28].copy_from_slice(&value.to_ne_bytes()); // si_status
     info
 }
@@ -1657,18 +1715,19 @@ mod waitid_tests {
 
     #[test]
     fn siginfo_encodes_exit_kill_and_nothing() {
-        let exited = waitid_siginfo(42, 3 << 8);
+        let exited = waitid_siginfo(42, 1000, 3 << 8);
         assert_eq!((field(&exited, 0), field(&exited, 8)), (17, 1));
         assert_eq!((field(&exited, 16), field(&exited, 24)), (42, 3));
-        let killed = waitid_siginfo(7, 9);
+        assert_eq!(field(&exited, 20), 1000, "si_uid");
+        let killed = waitid_siginfo(7, 1000, 9);
         assert_eq!((field(&killed, 8), field(&killed, 24)), (2, 9));
-        let dumped = waitid_siginfo(7, 0x8b);
+        let dumped = waitid_siginfo(7, 1000, 0x8b);
         assert_eq!((field(&dumped, 8), field(&dumped, 24)), (3, 11));
-        assert!(waitid_siginfo(0, 0).iter().all(|&b| b == 0));
+        assert!(waitid_siginfo(0, 0, 0).iter().all(|&b| b == 0));
         // Stopped by SIGTSTP, and continued (N-99).
-        let stopped = waitid_siginfo(7, 0x7f | (20 << 8));
+        let stopped = waitid_siginfo(7, 1000, 0x7f | (20 << 8));
         assert_eq!((field(&stopped, 8), field(&stopped, 24)), (5, 20));
-        let continued = waitid_siginfo(7, 0xffff);
+        let continued = waitid_siginfo(7, 1000, 0xffff);
         assert_eq!((field(&continued, 8), field(&continued, 24)), (6, 18));
     }
 }

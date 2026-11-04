@@ -200,7 +200,7 @@ pub fn sys_pidfd_send_signal(pidfd: usize, sig: usize, info: usize, flags: usize
         } else {
             SI_USER
         };
-        SigInfo::from_process(sig as usize, code, caller.pid.0, caller.credentials().ruid)
+        SigInfo::from_sender(sig as usize, code, &caller)
     };
     let target = process::get_process(pid).ok_or(SyscallError::ProcessNotFound)?;
     match scope {

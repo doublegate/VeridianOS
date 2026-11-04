@@ -9498,6 +9498,38 @@ static void test_user_ns(void)
                 t_write_text("/proc/self/setgroups", "deny") != 0 ||
                 t_write_text("/proc/self/gid_map", "0 65534 1") != 0)
                 k |= 2;
+            /* IDs as this namespace sees them (ADR 0022 H4b): its own
+             * are 0; root's files, unmapped, show the overflow IDs; an
+             * unmapped ID is EINVAL; setgroups stays denied. */
+            struct stat rs;
+            char text[1024];
+            if (getuid() != 0 || geteuid() != 0 || getgid() != 0 || getegid() != 0) k |= 8;
+            if (stat("/", &rs) != 0 || rs.st_uid != 65534 || rs.st_gid != 65534) k |= 16;
+            if (!(setuid(5) == -1 && errno == EINVAL) ||
+                !(setgroups(0, NULL) == -1 && errno == EPERM))
+                k |= 32;
+            if (t_read_text("/proc/self/status", text, sizeof(text)) <= 0 ||
+                !strstr(text, "Uid:\t0\t0\t0\t0\n"))
+                k |= 64;
+            /* Its root keeps its capabilities across exec. */
+            int pfd[2];
+            if (pipe(pfd) != 0) _exit(0x7c);
+            pid_t e = fork();
+            if (e == 0) {
+                dup2(pfd[1], 1);
+                execl("/bin/cat", "cat", "/proc/self/status", (char *)NULL);
+                _exit(1);
+            }
+            close(pfd[1]);
+            ssize_t got = 0, n;
+            while (got < (ssize_t)sizeof(text) - 1 &&
+                   (n = read(pfd[0], text + got, sizeof(text) - 1 - got)) > 0)
+                got += n;
+            text[got] = 0;
+            close(pfd[0]);
+            waitpid(e, NULL, 0);
+            const char *eff = strstr(text, "CapEff:\t");
+            if (!eff || strncmp(eff + 8, "0000000000000000", 16) == 0) k |= 128;
             if (!(setns(init_ns, CLONE_NEWUSER) == -1 && errno == EPERM)) k |= 4;
             /* Its capabilities here set no ids outside: an unmapped id
              * fails (Linux EINVAL; EPERM until ids are translated). */
@@ -9510,6 +9542,13 @@ static void test_user_ns(void)
         if (t_read_text("/proc/sys/user/max_user_namespaces", buf, sizeof(buf)) <= 0 ||
             atoi(buf) <= 0)
             g |= 128;
+        /* waitid reports the child's real uid. */
+        c = fork();
+        if (c == 0) _exit(0);
+        siginfo_t si;
+        memset(&si, 0, sizeof(si));
+        if (waitid(P_PID, c, &si, WEXITED) != 0 || si.si_pid != c || si.si_uid != getuid())
+            g |= 256;
         if (g != 0) {
             printf("user-ns g=%#x\n", g);
             fflush(stdout);

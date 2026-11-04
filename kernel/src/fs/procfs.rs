@@ -535,6 +535,18 @@ impl VfsNode for ProcNode {
     }
 
     fn read(&self, offset: usize, buffer: &mut [u8]) -> Result<usize, KernelError> {
+        self.read_as(offset, buffer, None)
+    }
+
+    /// The process files show IDs as the opener's user namespace sees them
+    /// (seq_user_ns), the reader's when no opener is recorded.
+    fn read_as(
+        &self,
+        offset: usize,
+        buffer: &mut [u8],
+        opener: Option<&crate::process::creds::Caller>,
+    ) -> Result<usize, KernelError> {
+        let viewer = opener.map_or_else(crate::process::userns::current, |o| o.userns.clone());
         let content = match &self.node_type {
             ProcNodeType::SystemFile(name) => {
                 match name.as_str() {
@@ -669,7 +681,7 @@ impl VfsNode for ProcNode {
                                 pid,
                                 parent.0,
                                 state,
-                                status_ids(&process.credentials()),
+                                status_ids(&process.credentials(), &viewer),
                                 caps
                             )
                         } else {
@@ -677,12 +689,9 @@ impl VfsNode for ProcNode {
                         }
                     }
                     "timens_offsets" => timens_offsets_text(*pid).unwrap_or_default(),
-                    // In the reader's terms (proc_id_map_open's seq_ns).
+                    // In the opener's terms (proc_id_map_open's seq_ns).
                     "uid_map" | "gid_map" => user_ns_of(*pid)
-                        .map(|ns| {
-                            let reader = crate::process::creds::Caller::current().userns;
-                            ns.map_text(name == "gid_map", &reader)
-                        })
+                        .map(|ns| ns.map_text(name == "gid_map", &viewer))
                         .unwrap_or_default(),
                     "setgroups" => user_ns_of(*pid)
                         .map(|ns| String::from(ns.setgroups_text()))
@@ -1269,18 +1278,31 @@ fn generate_cpuinfo() -> String {
 
 /// The `Uid:`, `Gid:` and `Groups:` lines of /proc/[pid]/status, as Linux
 /// prints them: real, effective, saved and filesystem IDs, tab-separated,
-/// then the supplementary groups separated by spaces.
-fn status_ids(c: &crate::process::creds::Credentials) -> String {
+/// then the supplementary groups separated by spaces, each as user
+/// namespace `ns` sees it (the overflow ID if unmapped).
+fn status_ids(
+    c: &crate::process::creds::Credentials,
+    ns: &crate::process::userns::UserNs,
+) -> String {
     let mut groups = String::new();
-    for (i, g) in c.groups().iter().enumerate() {
+    for (i, &g) in c.groups().iter().enumerate() {
         if i > 0 {
             groups.push(' ');
         }
-        groups.push_str(&format!("{}", g));
+        groups.push_str(&format!("{}", ns.gid_munged(g)));
     }
+    let (u, g) = (|id| ns.uid_munged(id), |id| ns.gid_munged(id));
     format!(
         "Uid:\t{}\t{}\t{}\t{}\nGid:\t{}\t{}\t{}\t{}\nGroups:\t{}\n",
-        c.ruid, c.euid, c.suid, c.fsuid, c.rgid, c.egid, c.sgid, c.fsgid, groups
+        u(c.ruid),
+        u(c.euid),
+        u(c.suid),
+        u(c.fsuid),
+        g(c.rgid),
+        g(c.egid),
+        g(c.sgid),
+        g(c.fsgid),
+        groups
     )
 }
 
@@ -1579,13 +1601,13 @@ mod tests {
         c.setfsgid(8, true);
         c.setresuid(1, 2, 3, true).unwrap();
         assert_eq!(
-            status_ids(&c),
+            status_ids(&c, &crate::process::userns::initial()),
             "Uid:\t1\t2\t3\t2\nGid:\t5\t6\t7\t8\nGroups:\t10 20\n"
         );
         let mut c = crate::process::creds::Credentials::new(0, 0);
         c.setfsuid(1000, true);
         assert_eq!(
-            status_ids(&c),
+            status_ids(&c, &crate::process::userns::initial()),
             "Uid:\t0\t0\t0\t1000\nGid:\t0\t0\t0\t0\nGroups:\t\n"
         );
     }

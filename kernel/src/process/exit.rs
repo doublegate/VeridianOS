@@ -114,6 +114,8 @@ pub fn wait_process_with_options(
 #[derive(Debug, Clone, Copy)]
 pub struct Waited {
     pub pid: ProcessId,
+    /// The child's real uid (a kernel ID).
+    pub uid: u32,
     pub status: i32,
     /// The child's CPU time and its waited-for children's (wait4 and
     /// waitid's rusage, as Linux's getrusage(RUSAGE_BOTH) of the child).
@@ -127,6 +129,7 @@ impl Waited {
     fn of(child: &super::Process, status: i32) -> Self {
         Self {
             pid: child.pid,
+            uid: child.credentials().ruid,
             status,
             usage: child.cpu_times().plus(child.children_cpu_times()),
             maxrss_pages: child.peak_rss_pages().max(child.children_peak_rss_pages()),
@@ -135,6 +138,7 @@ impl Waited {
 
     const NOTHING: Self = Self {
         pid: ProcessId(0),
+        uid: 0,
         status: 0,
         usage: crate::sched::cputime::CpuTimes::ZERO,
         maxrss_pages: 0,
