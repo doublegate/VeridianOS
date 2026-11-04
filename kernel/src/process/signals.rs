@@ -210,12 +210,14 @@ impl SigInfo {
         info
     }
 
-    /// Sent by `sender`, the calling process: its pid and its real uid as
-    /// its own user namespace sees it (prepare_kill_siginfo). Queueing
-    /// translates the uid for the receiver ([`Self::for_receiver`]).
+    /// Sent by `sender`, the calling process: its pid as its own PID
+    /// namespace numbers it and its real uid as its own user namespace sees
+    /// it (prepare_kill_siginfo). Queueing translates them for the
+    /// receiver ([`Self::for_receiver`]).
     pub fn from_sender(sig: usize, code: i32, sender: &Process) -> Self {
         let uid = sender.user_ns().uid_munged(sender.credentials().ruid);
-        Self::from_process(sig, code, sender.pid.0, uid)
+        let pid = super::pidns::nr_in(sender.pid.0, &sender.pid_ns());
+        Self::from_process(sig, code, pid, uid)
     }
 
     /// Sent by the calling process to itself or another (SI_USER), as
@@ -235,10 +237,15 @@ impl SigInfo {
     /// SI_TIMER and SI_SIGIO layouts hold no uid there and stay as they
     /// are. A kernel siginfo (si_code above 0) is left alone too: SIGCHLD
     /// already carries the uid as the parent sees it ([`Self::child`]),
-    /// where Linux 7.3 also passes it through the sender's namespace.
+    /// where Linux 7.3 also passes it through the sender's namespace. A
+    /// sender the receiver's PID namespace does not number (one above it)
+    /// shows as pid 0.
     pub fn for_receiver(mut self, receiver: &Process) -> Self {
         if self.si_code > 0 || self.si_code == SI_TIMER || self.si_code == SI_SIGIO {
             return self;
+        }
+        if sender_outside(receiver) {
+            self.fields[0] &= !0xffff_ffff;
         }
         let from = super::userns::current();
         let to = receiver.user_ns();
@@ -260,12 +267,16 @@ impl SigInfo {
     /// (as its parent's user namespace sees it: do_notify_parent), status
     /// (exit code, or the signal) and CPU times in clock ticks.
     pub fn child(sig: usize, code: i32, child: &Process, status: i32) -> Self {
-        let ns = child
-            .parent()
-            .and_then(super::table::get_process)
+        let parent = child.parent().and_then(super::table::get_process);
+        let ns = parent
+            .as_ref()
             .map_or_else(super::userns::initial, |p| p.user_ns());
         let uid = ns.uid_munged(child.credentials().ruid);
-        let mut info = Self::from_process(sig, code, child.pid.0, uid);
+        // The child's pid as the parent's PID namespace numbers it.
+        let pid = parent.as_ref().map_or(child.pid.0, |p| {
+            super::pidns::nr_in(child.pid.0, &p.pid_ns())
+        });
+        let mut info = Self::from_process(sig, code, pid, uid);
         info.fields[1] = status as u32 as u64;
         let (user, system) = child.cpu_split().1;
         // clock_t in USER_HZ (100) ticks, as times() reports them.
@@ -773,6 +784,48 @@ pub const fn default_action(sig: usize) -> DefaultAction {
     }
 }
 
+/// Whether the sender of a signal to `target` -- the calling process -- is
+/// outside `target`'s PID namespace (in one above it, or the kernel's own
+/// context), as send_signal_locked's `!task_pid_nr_ns(current, ...)`.
+fn sender_outside(target: &Process) -> bool {
+    let ns = target.pid_ns();
+    match super::current_process() {
+        Some(sender) => super::pidns::nr_in(sender.pid.0, &ns) == 0,
+        None => !ns.is_initial(),
+    }
+}
+
+/// Linux's SIGNAL_UNKILLABLE rule (sig_task_ignored): the init of a PID
+/// namespace below the initial one takes only the signals it has a handler
+/// for, except that SIGKILL and SIGSTOP still reach it from the kernel
+/// (SI_KERNEL) or from an ancestor namespace. Such a signal is dropped
+/// when generated, unless the target thread (`thread`, or the process's
+/// first) blocks it: then it waits, and delivery drops it if the action
+/// is still the default ([`init_skips`]), as Linux's sig_ignored and
+/// get_signal.
+pub fn init_ignores(process: &Process, thread: Option<&Thread>, info: &SigInfo) -> bool {
+    let sig = info.signo();
+    if !process.is_ns_init() || process.get_signal_handler(sig).unwrap_or(SIG_DFL) != SIG_DFL {
+        return false;
+    }
+    let first = process.get_thread(crate::process::ThreadId(process.pid.0));
+    let blocked = thread
+        .or(first.as_deref())
+        .is_some_and(|t| t.sigmask.load(Ordering::Acquire) & sig_bit(sig) != 0);
+    if blocked && sig != SIGKILL {
+        return false;
+    }
+    let force = info.si_code == SI_KERNEL || sender_outside(process);
+    !(force && (sig == SIGKILL || sig == SIGSTOP))
+}
+
+/// At delivery, a signal with the default action that the init of a PID
+/// namespace takes no default action on (all but SIGKILL and SIGSTOP,
+/// get_signal's SIGNAL_UNKILLABLE check).
+fn init_skips(process: &Process, sig: usize) -> bool {
+    sig != SIGKILL && sig != SIGSTOP && process.is_ns_init()
+}
+
 /// Whether sending `sig` to `process` would only be ignored (SIG_IGN, or
 /// SIG_DFL with a default action of ignore). Such a signal is dropped when
 /// generated (N-98). SIGCONT's continuing happens when it is sent, so with
@@ -907,6 +960,9 @@ pub fn send_info_to_process(
         return Ok(false);
     }
     job_control_on_send(process, sig);
+    if init_ignores(process, None, &info) {
+        return Ok(true);
+    }
     if sig == SIGKILL {
         super::exit::set_kill_pending(process, SIGKILL as u32);
     } else if ignored(process, sig) {
@@ -983,7 +1039,7 @@ pub fn send_to_thread(
         return Ok(());
     }
     job_control_on_send(process, sig);
-    if ignored(process, sig) {
+    if ignored(process, sig) || init_ignores(process, Some(thread), &info) {
         return Ok(());
     }
     let info = info.for_receiver(process);
@@ -1648,6 +1704,7 @@ mod generic {
                     process.signal_action(sig).unwrap_or((SIG_DFL, (0, 0, 0)));
                 match handler {
                     SIG_IGN => None,
+                    SIG_DFL if init_skips(&process, sig) => None,
                     SIG_DFL => match default_action(sig) {
                         DefaultAction::Terminate | DefaultAction::CoreDump => Some(sig),
                         DefaultAction::Stop => {
@@ -2088,6 +2145,7 @@ mod frame {
                     process.signal_action(sig).unwrap_or((SIG_DFL, (0, 0, 0)));
                 match handler {
                     SIG_IGN => None,
+                    SIG_DFL if init_skips(&process, sig) => None,
                     SIG_DFL => match default_action(sig) {
                         DefaultAction::Terminate | DefaultAction::CoreDump => Some(sig),
                         DefaultAction::Stop => {

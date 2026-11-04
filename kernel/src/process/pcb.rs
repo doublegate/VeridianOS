@@ -211,6 +211,9 @@ pub struct Process {
     /// making another user namespace leaves it, so what the process held
     /// before stays guarded by the privilege of the namespace it was in.
     mm_userns: Mutex<alloc::sync::Arc<super::userns::UserNs>>,
+    /// The PID namespace it is in (Linux's task_active_pid_ns): the one
+    /// its parent's children go to at fork, fixed from then on.
+    pid_ns: Mutex<alloc::sync::Arc<super::pidns::PidNs>>,
 
     /// Process group ID (initialized to pid)
     pub pgid: AtomicU64,
@@ -375,6 +378,24 @@ impl Process {
     /// Set the user namespace its memory belongs to (exec and fork).
     pub fn set_mm_user_ns(&self, ns: alloc::sync::Arc<super::userns::UserNs>) {
         *self.mm_userns.lock() = ns;
+    }
+
+    /// The PID namespace it is in (`pid_ns`).
+    pub fn pid_ns(&self) -> alloc::sync::Arc<super::pidns::PidNs> {
+        self.pid_ns.lock().clone()
+    }
+
+    /// Put it in PID namespace `ns` (fork, before anyone can see it).
+    pub fn set_pid_ns(&self, ns: alloc::sync::Arc<super::pidns::PidNs>) {
+        *self.pid_ns.lock() = ns;
+    }
+
+    /// Whether it is the init of a PID namespace below the initial one,
+    /// whose signals from inside that namespace are only those it handles
+    /// (Linux's SIGNAL_UNKILLABLE).
+    pub fn is_ns_init(&self) -> bool {
+        let ns = self.pid_ns();
+        !ns.is_initial() && ns.reaper() == Some(self.pid.0)
     }
 
     /// The process's resource limits.
@@ -575,6 +596,7 @@ impl Process {
             creds: Mutex::new(super::creds::Credentials::new(0, 0)),
             userns: Mutex::new(super::userns::initial()),
             mm_userns: Mutex::new(super::userns::initial()),
+            pid_ns: Mutex::new(super::pidns::initial()),
             pgid: AtomicU64::new(pid.0),
             tracer: AtomicU64::new(0),
             tracer_cred: Mutex::new(None),
@@ -1153,6 +1175,56 @@ mod tests {
         let (creds, caps) = proc.creds_and_caps(&threads[0]);
         assert_eq!((creds.ruid, creds.euid, creds.suid), (1000, 1000, 1000));
         assert_eq!(caps.permitted, LinuxCaps::EMPTY);
+    }
+
+    /// A PID namespace's init takes only the signals it handles; SIGKILL
+    /// and SIGSTOP still reach it from outside its namespace (here the
+    /// kernel's context, as no process is current), and a sender outside
+    /// shows as pid 0 (SIGNAL_UNKILLABLE, send_signal_locked).
+    #[test]
+    fn a_pid_namespace_init_takes_only_what_it_handles() {
+        use super::super::{
+            pidns,
+            signals::{init_ignores, SigInfo, SI_USER},
+        };
+        let ns =
+            pidns::PidNs::create(&pidns::initial(), &super::super::userns::initial(), 0).unwrap();
+        let init = make_process(7_000_001, "nsinit");
+        pidns::reserve(&ns, &[], |_| false)
+            .unwrap()
+            .commit(init.pid.0);
+        init.set_pid_ns(ns.clone());
+        assert!(init.is_ns_init());
+        let user = |sig| SigInfo::from_process(sig, SI_USER, 77, 0);
+        assert!(
+            init_ignores(&init, None, &user(15)),
+            "SIGTERM with no handler"
+        );
+        assert!(!init_ignores(&init, None, &user(9)), "SIGKILL from outside");
+        assert!(
+            !init_ignores(&init, None, &user(19)),
+            "SIGSTOP from outside"
+        );
+        // Blocked, it waits for delivery to decide.
+        let t = with_threads(&init, &[init.pid.0]);
+        t[0].sigmask
+            .store(1 << 14, core::sync::atomic::Ordering::Release);
+        assert!(!init_ignores(&init, None, &user(15)), "a blocked signal");
+        t[0].sigmask.store(0, core::sync::atomic::Ordering::Release);
+        init.set_signal_handler(15, 0x4000).unwrap();
+        assert!(!init_ignores(&init, None, &user(15)), "a handled signal");
+        assert_eq!(user(10).for_receiver(&init).pid(), 0);
+        // Its second process is no init; the initial namespace's 1 is not
+        // one of these either.
+        let other = make_process(7_000_002, "nsother");
+        pidns::reserve(&ns, &[], |_| false)
+            .unwrap()
+            .commit(other.pid.0);
+        other.set_pid_ns(ns.clone());
+        assert!(!other.is_ns_init() && !init_ignores(&other, None, &user(15)));
+        assert!(!make_process(1, "init").is_ns_init());
+        pidns::release(init.pid.0);
+        pidns::release(other.pid.0);
     }
 
     /// In a user namespace, the setuid fixup's root is the namespace's: its

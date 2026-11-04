@@ -36,6 +36,7 @@ pub mod memory;
 pub mod ns;
 pub mod pcb;
 pub mod personality;
+pub mod pidns;
 pub mod posix_timer;
 pub mod rlimit;
 pub mod robust_list;
@@ -559,6 +560,57 @@ pub(crate) fn remove_waited(pid: ProcessId) {
     if process.memory_space.lock().get_page_table() == 0 {
         release_reaped(pid.0);
     }
+    release_numbers(&process);
+    // An init waiting for its namespace to empty (`exit::zap_pid_ns`) looks
+    // again.
+    crate::sched::dispatch::PROCESS_EVENTS.wake_all();
+}
+
+/// A reaped process's numbers in PID namespaces below the initial one are
+/// free, and its threads' (Linux's release_task freeing their struct pid):
+/// its own once no live process has it as its process group or session,
+/// as a group's id stays its leader's while the group lives. Its group and
+/// session ids are looked at again too, for a leader reaped before them.
+#[cfg(feature = "alloc")]
+fn release_numbers(process: &Process) {
+    let tids: alloc::vec::Vec<u64> = process
+        .threads
+        .lock()
+        .keys()
+        .map(|t| t.0)
+        .filter(|&t| t != process.pid.0)
+        .collect();
+    for tid in tids {
+        pidns::release(tid);
+    }
+    let pgid = process.pgid.load(Ordering::Acquire);
+    let sid = process.sid.load(Ordering::Acquire);
+    for kid in [process.pid.0, pgid, sid] {
+        release_if_unused(kid);
+    }
+}
+
+/// Free `kid`'s PID namespace numbers if it no longer names a live
+/// process, process group or session: after a reap, and after setpgid or
+/// setsid leaves a group or session whose leader is gone.
+#[cfg(feature = "alloc")]
+pub(crate) fn release_if_unused(kid: u64) {
+    if pidns::is_registered(kid) && !names_live(kid) {
+        pidns::release(kid);
+    }
+}
+
+/// Whether `kid` is a live process's id, process group or session.
+#[cfg(feature = "alloc")]
+fn names_live(kid: u64) -> bool {
+    if table::get_process(ProcessId(kid)).is_some() {
+        return true;
+    }
+    let mut used = false;
+    table::PROCESS_TABLE.for_each(|p| {
+        used |= p.pgid.load(Ordering::Acquire) == kid || p.sid.load(Ordering::Acquire) == kid
+    });
+    used
 }
 
 /// The page tables of `pid` are freed: nothing of it is waited for.

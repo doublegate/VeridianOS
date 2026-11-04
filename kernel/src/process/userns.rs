@@ -115,41 +115,82 @@ pub struct UserNs {
 
 /// `/proc/sys/kernel/unprivileged_userns_clone` (0 or 1).
 pub static UNPRIVILEGED_CLONE: AtomicU32 = AtomicU32::new(0);
+/// A per-user limit on how many namespaces of one type exist (Linux's
+/// ucounts for UCOUNT_USER_NAMESPACES and its siblings): each creating user
+/// (by kernel uid) may have up to `max` that still exist.
+pub struct Ucount {
+    /// The limit (`/proc/sys/user/max_*_namespaces`).
+    pub max: AtomicU32,
+    counts: Mutex<alloc::collections::BTreeMap<u32, u32>>,
+}
+
+impl Ucount {
+    pub const fn new(max: u32) -> Self {
+        Self {
+            max: AtomicU32::new(max),
+            counts: Mutex::new(alloc::collections::BTreeMap::new()),
+        }
+    }
+
+    /// Count one more for `uid` unless that reaches the limit.
+    pub fn charge(&self, uid: u32) -> bool {
+        let max = self.max.load(Ordering::Relaxed);
+        let mut counts = self.counts.lock();
+        let n = counts.entry(uid).or_insert(0);
+        if *n >= max {
+            if *n == 0 {
+                counts.remove(&uid);
+            }
+            return false;
+        }
+        *n += 1;
+        true
+    }
+
+    /// Count one of `uid`'s less.
+    pub fn uncharge(&self, uid: u32) {
+        let mut counts = self.counts.lock();
+        if let Some(n) = counts.get_mut(&uid) {
+            *n -= 1;
+            if *n == 0 {
+                counts.remove(&uid);
+            }
+        }
+    }
+
+    /// How many `uid` has.
+    #[cfg(test)]
+    pub fn count(&self, uid: u32) -> u32 {
+        self.counts.lock().get(&uid).copied().unwrap_or(0)
+    }
+
+    /// Put `uid` at the limit.
+    #[cfg(test)]
+    pub fn fill(&self, uid: u32) {
+        let max = self.max.load(Ordering::Relaxed);
+        self.counts.lock().insert(uid, max);
+    }
+
+    /// Forget `uid`'s count.
+    #[cfg(test)]
+    pub fn clear(&self, uid: u32) {
+        self.counts.lock().remove(&uid);
+    }
+}
+
 /// `/proc/sys/user/max_user_namespaces`: how many user namespaces one user
 /// may have made, as Linux's ucounts limit (whose default is half of
 /// threads-max, which this matches for a machine of about 4 GiB).
-pub static MAX_USER_NAMESPACES: AtomicU32 = AtomicU32::new(DEFAULT_MAX_USER_NAMESPACES);
-/// The default of [`MAX_USER_NAMESPACES`].
+pub static USER_NAMESPACES: Ucount = Ucount::new(DEFAULT_MAX_USER_NAMESPACES);
+/// The default of [`USER_NAMESPACES`]' limit, and of the other types'.
 pub const DEFAULT_MAX_USER_NAMESPACES: u32 = 15_000;
-/// How many user namespaces each user (by kernel uid) has made that still
-/// exist (Linux's UCOUNT_USER_NAMESPACES).
-static COUNTS: Mutex<alloc::collections::BTreeMap<u32, u32>> =
-    Mutex::new(alloc::collections::BTreeMap::new());
 
-/// Count one more user namespace for `uid` unless that reaches the limit.
 fn charge(uid: u32) -> bool {
-    let max = MAX_USER_NAMESPACES.load(Ordering::Relaxed);
-    let mut counts = COUNTS.lock();
-    let n = counts.entry(uid).or_insert(0);
-    if *n >= max {
-        if *n == 0 {
-            counts.remove(&uid);
-        }
-        return false;
-    }
-    *n += 1;
-    true
+    USER_NAMESPACES.charge(uid)
 }
 
-/// Count one user namespace of `uid`'s less.
 fn uncharge(uid: u32) {
-    let mut counts = COUNTS.lock();
-    if let Some(n) = counts.get_mut(&uid) {
-        *n -= 1;
-        if *n == 0 {
-            counts.remove(&uid);
-        }
-    }
+    USER_NAMESPACES.uncharge(uid)
 }
 
 static INITIAL: Once<Arc<UserNs>> = Once::new();
@@ -844,18 +885,18 @@ mod tests {
         let init = initial();
         assert!(charge(4_000_001));
         uncharge(4_000_001);
-        assert!(!COUNTS.lock().contains_key(&4_000_001));
-        let max = MAX_USER_NAMESPACES.load(Ordering::Relaxed);
-        COUNTS.lock().insert(4_000_002, max);
+        assert!(!USER_NAMESPACES.counts.lock().contains_key(&4_000_001));
+        let max = USER_NAMESPACES.max.load(Ordering::Relaxed);
+        USER_NAMESPACES.counts.lock().insert(4_000_002, max);
         assert_eq!(
             UserNs::create(&init, 4_000_002, 0, false, false).err(),
             Some(CreateError::NoSpace)
         );
         let other = UserNs::create(&init, 4_000_003, 0, false, false).unwrap();
-        assert_eq!(COUNTS.lock().get(&4_000_003), Some(&1));
+        assert_eq!(USER_NAMESPACES.counts.lock().get(&4_000_003), Some(&1));
         drop(other);
-        assert!(!COUNTS.lock().contains_key(&4_000_003));
-        COUNTS.lock().remove(&4_000_002);
+        assert!(!USER_NAMESPACES.counts.lock().contains_key(&4_000_003));
+        USER_NAMESPACES.counts.lock().remove(&4_000_002);
     }
 
     /// IDs cross into and out of a namespace as Linux's make_kuid and

@@ -592,6 +592,10 @@ pub fn exit_dispatched(exit_code: i32, group: bool) -> ! {
             })
         };
         if !others_alive {
+            // The init of a PID namespace takes the rest of it along first.
+            if process.is_ns_init() {
+                zap_pid_ns(&process);
+            }
             cleanup_process(&process);
             process.set_state(ProcessState::Zombie);
             notify_parent_sigchld(
@@ -606,6 +610,52 @@ pub fn exit_dispatched(exit_code: i32, group: bool) -> ! {
         dispatch::io_event();
     }
     dispatch::exit_current_task()
+}
+
+/// The init of a PID namespace below the initial one is exiting (Linux's
+/// zap_pid_ns_processes): no process can be made in the namespace any
+/// more, every other process numbered in it -- in it or in one below it --
+/// gets SIGKILL, and init waits, reaping those that are its children, until
+/// none is left, so that its own parent sees it exit last. One whose parent
+/// is outside the namespace waits for that parent's reap, as on Linux.
+#[cfg(feature = "alloc")]
+fn zap_pid_ns(init: &Process) {
+    let ns = init.pid_ns();
+    ns.stop_adding();
+    let others = || {
+        let mut left = Vec::new();
+        table::PROCESS_TABLE.for_each(|p| {
+            if p.pid != init.pid && super::pidns::nr_in(p.pid.0, &ns) != 0 {
+                left.push(p.pid);
+            }
+        });
+        left
+    };
+    for pid in others() {
+        let _ = kill_process_info(
+            pid,
+            signals::SIGKILL,
+            SigInfo::kernel(signals::SIGKILL as usize),
+        );
+    }
+    // A zombie child whose last task is off the CPU is reaped here.
+    let reapable = || {
+        init.children.lock().iter().copied().find(|c| {
+            table::get_process(*c).is_some_and(|p| {
+                p.get_state() == ProcessState::Zombie && sched::dispatch::tasks_of(c.0).is_empty()
+            })
+        })
+    };
+    loop {
+        while let Some(child) = reapable() {
+            init.children.lock().retain(|&p| p != child);
+            super::remove_waited(child);
+        }
+        if others().is_empty() {
+            return;
+        }
+        sched::dispatch::PROCESS_EVENTS.wait_until(|| reapable().is_some() || others().is_empty());
+    }
 }
 
 // ============================================================================
@@ -882,17 +932,28 @@ pub fn cleanup_process(process: &Process) {
         );
     });
 
-    // Reparent children to init if not zombie
+    // Reparent children to the init of the process's PID namespace (Linux's
+    // find_child_reaper; 1 in the initial one) if not zombie. An init
+    // exiting has reaped its own already (`zap_pid_ns`).
     #[cfg(feature = "alloc")]
     {
         let children: Vec<ProcessId> = process.children.lock().clone();
         if !children.is_empty() && process.get_state() != ProcessState::Zombie {
-            if let Some(init_process) = table::get_process(ProcessId(1)) {
+            let reaper = process
+                .pid_ns()
+                .reaper()
+                .filter(|&r| r != process.pid.0)
+                .and_then(|r| table::get_process(ProcessId(r)))
+                .or_else(|| table::get_process(ProcessId(1)));
+            if let Some(reaper) = reaper {
                 for child_pid in children {
                     if let Some(child) = table::get_process(child_pid) {
-                        child.set_parent(Some(ProcessId(1)));
-                        init_process.children.lock().push(child_pid);
-                        println!("[PROCESS] Reparented process {} to init", child_pid);
+                        child.set_parent(Some(reaper.pid));
+                        reaper.children.lock().push(child_pid);
+                        println!(
+                            "[PROCESS] Reparented process {} to {}",
+                            child_pid, reaper.pid.0
+                        );
                     }
                 }
             }
@@ -942,6 +1003,7 @@ pub(crate) fn discard_unstarted(process: &Process) {
         parent.children.lock().retain(|&p| p != process.pid);
     }
     let _ = table::remove_process(process.pid);
+    super::pidns::release(process.pid.0);
 }
 
 // ============================================================================
@@ -956,6 +1018,11 @@ pub fn cleanup_thread(process: &Process, tid: ThreadId) -> Result<(), KernelErro
     // spinning on this lock with interrupts off could never answer, so both
     // would wait forever (N-139).
     let removed = process.threads.lock().remove(&tid);
+    // Its numbers in PID namespaces below the initial one are free; the
+    // first thread's are the process's, released when it is reaped.
+    if removed.is_some() && tid.0 != process.pid.0 {
+        super::pidns::release(tid.0);
+    }
     if let Some(thread) = removed {
         // Per-thread progress lines only with the `trace` feature: every
         // exited thread comes through here, and each console byte is a VM

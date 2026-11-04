@@ -2232,18 +2232,24 @@ pub fn sys_kill(pid: usize, signal: usize) -> SyscallResult {
     let caller = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
 
     // A pid_t: its low 32 bits; -INT_MIN names no group (Linux's
-    // kill_something_info).
+    // kill_something_info). A pid or group as the caller's PID namespace
+    // numbers it; one it does not name is ESRCH.
+    let ns = caller.pid_ns();
+    let kid = |nr: i32| crate::process::pidns::find(nr.unsigned_abs() as u64, &ns).unwrap_or(0);
     match pid as u32 as i32 {
-        p if p > 0 => kill_one(&caller, crate::process::ProcessId(p as u64), sig),
+        p if p > 0 => kill_one(&caller, crate::process::ProcessId(kid(p)), sig),
         i32::MIN => Err(SyscallError::ProcessNotFound),
         0 => kill_matching(&caller, sig, |p| {
             p.pgid.load(core::sync::atomic::Ordering::Relaxed)
                 == caller.pgid.load(core::sync::atomic::Ordering::Relaxed)
         }),
-        // Every process the caller may signal except init and itself.
-        -1 => kill_matching(&caller, sig, |p| p.pid.0 != 1 && p.pid != caller.pid),
+        // Every process the caller's PID namespace numbers that it may
+        // signal, except that namespace's init (1 there) and itself.
+        -1 => kill_matching(&caller, sig, |p| {
+            crate::process::pidns::nr_in(p.pid.0, &ns) > 1 && p.pid != caller.pid
+        }),
         p => {
-            let pgid = p.unsigned_abs() as u64;
+            let pgid = kid(p);
             kill_matching(&caller, sig, |p| {
                 p.pgid.load(core::sync::atomic::Ordering::Relaxed) == pgid
             })
@@ -2775,6 +2781,19 @@ pub fn sys_lstat(path_ptr: usize, stat_buf: usize) -> SyscallResult {
     sys_fstatat(AT_FDCWD, path_ptr, stat_buf, AT_SYMLINK_NOFOLLOW)
 }
 
+/// Why reading a link failed, as an errno: EINVAL for a node that is not a
+/// symlink, otherwise the link's own error (a `/proc/<pid>/ns` link with no
+/// namespace behind it is ENOENT, one the caller may not read EACCES, as
+/// Linux's proc_ns_readlink).
+pub(crate) fn readlink_error(e: crate::error::KernelError) -> SyscallError {
+    use crate::error::{FsError, KernelError};
+    match e {
+        KernelError::FsError(FsError::NotFound) => SyscallError::ResourceNotFound,
+        KernelError::FsError(FsError::PermissionDenied) => SyscallError::PermissionDenied,
+        _ => SyscallError::InvalidArgument,
+    }
+}
+
 /// Read the target of a symbolic link (syscall 152).
 ///
 /// Reads the target path that a symbolic link points to, without following
@@ -2800,7 +2819,8 @@ pub fn sys_lstat(path_ptr: usize, stat_buf: usize) -> SyscallResult {
 /// # Errors
 /// - If the VFS node at `path` does not support `readlink()` (i.e., is not a
 ///   symbolic link), the VfsNode default implementation returns
-///   `NotImplemented`, which is mapped to `InvalidArgument` here.
+///   `NotImplemented`, which is mapped to `InvalidArgument` here; a link's own
+///   errors go through [`readlink_error`].
 pub fn sys_readlink(path_ptr: usize, buf: usize, bufsiz: usize) -> SyscallResult {
     let path = read_user_path(path_ptr)?;
     if bufsiz == 0 {
@@ -2816,7 +2836,7 @@ pub fn sys_readlink(path_ptr: usize, buf: usize, bufsiz: usize) -> SyscallResult
 
     // readlink operates on the link node itself; if the node is not a
     // symlink, readlink() returns NotImplemented or NotASymlink.
-    let target = node.readlink().map_err(|_| SyscallError::InvalidArgument)?;
+    let target = node.readlink().map_err(readlink_error)?;
 
     let bytes = target.as_bytes();
     let to_copy = core::cmp::min(bytes.len(), bufsiz);

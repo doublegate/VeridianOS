@@ -5561,6 +5561,7 @@ static void test_mount_calls(void);
 static void test_mount_flags(void);
 static void test_pivot_root(void);
 static void test_user_ns(void);
+static void test_pid_ns(void);
 
 /* Tests `--only NAME` can run alone (for debugging a single test). */
 static const struct {
@@ -5587,6 +5588,7 @@ static const struct {
     {"mount_flags", test_mount_flags},
     {"pivot_root", test_pivot_root},
     {"user_ns", test_user_ns},
+    {"pid_ns", test_pid_ns},
     {"threads", test_threads},
     {"cow_race", test_cow_race},
     {"signals", test_signals},
@@ -9609,6 +9611,157 @@ static void test_user_ns(void)
     report("user_ns", code == 0, why);
 }
 
+/* PID namespaces, as Linux 7.3 (ADR 0022 H5). A child unshares
+ * CLONE_NEWPID; its next child is the new namespace's init, 1 there with
+ * no parent it can see, whose own child is 2. Inside, the init takes only
+ * the signals it handles, a procfs mounted there lists 1 and 2, and status
+ * shows NSpid from that mount's view; outside, the init is seen by its
+ * kernel pid, NSpid shows both levels and the nsfs ioctls translate. When
+ * the init exits the rest of the namespace goes with it and no process can
+ * be made there any more (ENOMEM). */
+#ifndef CLONE_NEWPID
+#define CLONE_NEWPID 0x20000000
+#endif
+#define T_NS_GET_PID_FROM_PIDNS 0x8004b706
+#define T_NS_GET_PID_IN_PIDNS 0x8004b708
+
+/* How many process directories a procfs at `dir` lists, and whether they
+ * are exactly "1" and "2". */
+static int t_pidns_listing(const char *dir)
+{
+    DIR *d = opendir(dir);
+    if (!d) return -1;
+    int n = 0, one = 0, two = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
+        n++;
+        one |= strcmp(e->d_name, "1") == 0;
+        two |= strcmp(e->d_name, "2") == 0;
+    }
+    closedir(d);
+    return n == 2 && one && two ? 0 : n + 100;
+}
+
+/* Whether the status file at `path` has the line `want`. */
+static int t_status_has(const char *path, const char *want)
+{
+    char text[2048];
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 0;
+    ssize_t n = read(fd, text, sizeof(text) - 1);
+    close(fd);
+    if (n <= 0) return 0;
+    text[n] = 0;
+    return strstr(text, want) != NULL;
+}
+
+/* The namespace's init: its own child, a procfs of its own, then it
+ * waits for the go-ahead and exits, taking the child with it. */
+static int t_pidns_init(int ready, int go)
+{
+    int f = 0;
+    char c;
+    if (getpid() != 1 || getppid() != 0) f |= 1;
+    /* Its group and session are led from outside the namespace. */
+    if (getpgid(0) != 0 || getsid(0) != 0) f |= 2;
+    int sync[2];
+    if (pipe(sync) != 0) return 64;
+    pid_t g = fork();
+    if (g == 0) {
+        int bad = getpid() != 2 || getppid() != 1;
+        /* From inside, the init's default actions are not taken. */
+        bad |= kill(1, SIGTERM) != 0 || kill(1, SIGKILL) != 0;
+        if (write(sync[1], bad ? "b" : "o", 1) != 1) _exit(1);
+        for (;;) pause();
+    }
+    if (g != 2) f |= 4;
+    if (read(sync[0], &c, 1) != 1 || c != 'o') f |= 8;
+    /* A procfs mounted here shows this namespace (in a mount namespace of
+     * its own, so nothing is left behind). */
+    if (unshare(CLONE_NEWNS) != 0 ||
+        mount("proc", "/tmp/pidns-proc", "proc", 0, NULL) != 0 ||
+        t_pidns_listing("/tmp/pidns-proc") != 0 ||
+        !t_status_has("/tmp/pidns-proc/self/status", "NSpid:\t1\n") ||
+        !t_status_has("/tmp/pidns-proc/2/status", "PPid:\t1\n"))
+        f |= 16;
+    if (write(ready, "r", 1) != 1) f |= 32;
+    if (read(go, &c, 1) != 1) f |= 32;
+    return f;
+}
+
+/* The process that made the namespace: it sees the init from outside. */
+static int t_pidns_maker(void)
+{
+    int f = 0;
+    char c, buf[128];
+    if (unshare(CLONE_NEWPID) != 0) return 1;
+    /* A second one before the first is entered (copy_pid_ns), and the
+     * namespace for children has no init yet. */
+    if (!(unshare(CLONE_NEWPID) == -1 && errno == EINVAL)) f |= 2;
+    if (!(readlink("/proc/self/ns/pid_for_children", buf, sizeof(buf)) == -1 &&
+          errno == ENOENT))
+        f |= 1 << 16;
+    int ready[2], go[2];
+    if (pipe(ready) != 0 || pipe(go) != 0) return 4;
+    pid_t init = fork();
+    if (init == 0) _exit(t_pidns_init(ready[1], go[0]));
+    if (init < 0 || read(ready[0], &c, 1) != 1) return 8;
+    /* Our own namespace is unchanged; its init is ours to see. */
+    if (getpid() == 1 || init == 1) f |= 16;
+    char path[64], want[64];
+    snprintf(path, sizeof(path), "/proc/%d/status", (int)init);
+    snprintf(want, sizeof(want), "NSpid:\t%d\t1\n", (int)init);
+    if (!t_status_has(path, want)) f |= 32;
+    if (readlink("/proc/self/ns/pid_for_children", buf, sizeof(buf)) <= 0) f |= 32;
+    snprintf(path, sizeof(path), "/proc/%d/ns/pid", (int)init);
+    int nsfd = open(path, O_RDONLY | O_CLOEXEC);
+    pid_t grandchild = nsfd < 0 ? -1 : ioctl(nsfd, T_NS_GET_PID_FROM_PIDNS, 2);
+    if (nsfd < 0 || ioctl(nsfd, T_NS_GET_PID_FROM_PIDNS, 1) != init ||
+        ioctl(nsfd, T_NS_GET_PID_IN_PIDNS, init) != 1 || grandchild <= 0 ||
+        !(ioctl(nsfd, T_NS_GET_PID_IN_PIDNS, getpid()) == -1 && errno == ESRCH))
+        f |= 64;
+    int parent = nsfd < 0 ? -1 : ioctl(nsfd, T_NS_GET_PARENT);
+    if (parent < 0) f |= 64;
+    else close(parent);
+    if (nsfd >= 0) close(nsfd);
+    /* The init exits, and its child with it. */
+    if (write(go[1], "g", 1) != 1) f |= 128;
+    int st;
+    if (waitpid(init, &st, 0) != init || !WIFEXITED(st)) f |= 128;
+    else f |= WEXITSTATUS(st) << 8;
+    if (grandchild > 0 && !(kill(grandchild, 0) == -1 && errno == ESRCH)) f |= 128;
+    /* No process can be made there any more. */
+    pid_t late = fork();
+    if (late == 0) _exit(0);
+    if (late >= 0) {
+        waitpid(late, NULL, 0);
+        f |= 1 << 15;
+    } else if (errno != ENOMEM) {
+        f |= 1 << 15;
+    }
+    return f;
+}
+
+static void test_pid_ns(void)
+{
+    char why[96];
+    mkdir("/tmp/pidns-proc", 0755);
+    int code = -1;
+    pid_t maker = fork();
+    if (maker == 0) {
+        int f = t_pidns_maker();
+        printf("pid-ns maker f=%#x\n", f);
+        fflush(stdout);
+        _exit(f == 0 ? 0 : 1);
+    }
+    int st;
+    if (maker > 0 && waitpid(maker, &st, 0) == maker && WIFEXITED(st)) code = WEXITSTATUS(st);
+    rmdir("/tmp/pidns-proc");
+    snprintf(why, sizeof(why), "code=%d", code);
+    report("pid_ns", code == 0, why);
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
@@ -9735,6 +9888,7 @@ int main(int argc, char **argv)
     test_mount_flags();
     test_pivot_root();
     test_user_ns();
+    test_pid_ns();
 #if defined(__x86_64__)
     test_ustat_sysfs();
 #endif

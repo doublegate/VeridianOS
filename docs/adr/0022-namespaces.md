@@ -144,6 +144,27 @@ them through an `nsproxy` (all but user, which lives in the credentials); `pid_f
      SO_PEERCRED, futex and robust-list words, `/proc`). A namespace's first process is its init:
      orphans are reparented to it, and its exit kills the rest of the namespace. procfs shows
      the PID namespace it was mounted in.
+     H5a makes the namespaces (`process/pidns.rs`). A kernel id stays the number in the
+     initial namespace, so nothing changes for a process there; an id made below it gets a
+     registry entry with its number at each level (Linux's `struct pid`), and a namespace maps
+     its numbers back to kernel ids. Numbers count up from 1 in each namespace and are not
+     handed out again, as the initial namespace's kernel ids; a process group's or session's
+     number lives while a member does. The rules are Linux's: copy_pid_ns (a new one below the
+     namespace for children, only while that is the caller's own; ENOSPC past 32 levels or
+     max_pid_namespaces), pidns_install (setns to the caller's own or one below it, for its
+     children), copy_process (no thread of a process whose children go elsewhere), alloc_pid
+     (clone3's set_tid has an entry per level from the innermost out; ENOMEM once the
+     namespace's init has exited), find_child_reaper (orphans go to that init), SIGNAL_UNKILLABLE
+     (from inside, the init takes only signals it handles; SIGKILL and SIGSTOP reach it from the
+     kernel or an ancestor namespace) and zap_pid_ns_processes (its exit kills the rest and waits
+     for them). getpid and its family, fork and clone, wait4 and waitid, kill, tkill and tgkill,
+     si_pid (zero for a sender above the receiver), the process group and session calls,
+     set_tid_address, the nsfs ioctls and procfs (which records the mounter's namespace) are
+     translated. H5b translates the remaining crossings: the scheduling and priority calls,
+     prlimit, ptrace and its event messages, the pidfd calls and fdinfo, process_vm_*, kcmp,
+     capget and capset, CPU clock ids, SIGEV_THREAD_ID, the robust-list and PI futex owner words,
+     SO_PEERCRED and SCM_CREDENTIALS, F_GETLK, F_SETOWN and F_GETOWN, and a terminal's process
+     group.
    - **H6, network.** The network stack's global tables move into a `NetNs`; the existing stack
      becomes the initial namespace, and a new namespace starts with only its own loopback, as on
      Linux. Sockets belong to the namespace they were created in; moving devices between

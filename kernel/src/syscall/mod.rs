@@ -2174,13 +2174,12 @@ fn sys_readlinkat(dirfd: usize, path_ptr: usize, buf_ptr: usize, buf_size: usize
             .map_err(filesystem::map_resolve_err)?
     };
     validate_user_buffer(buf_ptr, buf_size)?;
-    let target = node.readlink().map_err(|_| {
-        if empty {
-            SyscallError::ResourceNotFound
-        } else {
-            SyscallError::InvalidArgument
-        }
-    })?;
+    let target = node
+        .readlink()
+        .map_err(|e| match filesystem::readlink_error(e) {
+            SyscallError::InvalidArgument if empty => SyscallError::ResourceNotFound,
+            e => e,
+        })?;
 
     let bytes = target.as_bytes();
     let copy_len = bytes.len().min(buf_size);
@@ -2267,12 +2266,9 @@ fn sys_set_tid_address(tidptr: usize) -> SyscallResult {
             .store(tidptr, core::sync::atomic::Ordering::Release);
     }
 
-    // Return the caller's TID (Linux returns the thread's tid, but in
-    // VeridianOS single-threaded processes use pid as tid)
-    let tid = crate::process::current_thread()
-        .map(|t| t.tid.0 as usize)
-        .unwrap_or(proc.pid.0 as usize);
-    Ok(tid)
+    // The caller's TID, as its PID namespace numbers it (task_pid_vnr).
+    let tid = crate::process::current_thread().map_or(proc.pid.0, |t| t.tid.0);
+    Ok(crate::process::pidns::nr_in(tid, &proc.pid_ns()) as usize)
 }
 
 /// set_robust_list(head, len): the calling thread's robust futex list,

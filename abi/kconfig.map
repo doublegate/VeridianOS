@@ -37,7 +37,7 @@ CONFIG_IPC_NS y needs=unshare,setns  # H1; Linux's Kconfig would need SYSVIPC or
 CONFIG_TIME_NS y needs=unshare,setns,clock_gettime  # H2
 CONFIG_MNT_NS y needs=unshare,setns,mount,umount2,pivot_root  # H3a namespaces, H3b mount(2) and umount2, H3d pivot_root
 CONFIG_USER_NS y  # H4a creates and maps them, H4b translates ids, H4c checks privilege per namespace
-CONFIG_PID_NS n  # H5
+CONFIG_PID_NS y  # H5a the namespaces and the main interfaces, H5b the remaining pid crossings
 CONFIG_NET_NS n  # H6
 CONFIG_CHECKPOINT_RESTORE n  # kcmp only; no PR_SET_MM, map_files or msg_next_id
 CONFIG_SECCOMP n  # no seccomp(2)

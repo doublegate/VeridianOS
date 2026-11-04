@@ -217,6 +217,8 @@ fn ns_link_target(pid: Option<u64>, name: &str) -> Result<crate::process::ns::Ns
     Ok(match name {
         "pid" => ns::pid_of(&process),
         "user" => ns::user_of(&process),
+        // None until the namespace has its init (pidns_for_children_get).
+        "pid_for_children" if set.pid_for_children.reaper().is_none() => return Err(not_found()),
         "pid_for_children" => set.get(NsKind::Pid),
         "time" => NsRef::Time(set.time.clone()),
         "time_for_children" => set.get(NsKind::Time),
@@ -237,6 +239,10 @@ fn ns_owner_key(pid: Option<u64>) -> String {
 /// ProcFS node
 struct ProcNode {
     node_type: ProcNodeType,
+    /// The PID namespace of the mount it is in (Linux's proc_pid_ns): its
+    /// process directories, `self` and the pids in its files are as that
+    /// namespace numbers them.
+    ns: Arc<crate::process::pidns::PidNs>,
 }
 
 /// A writable sysctl.
@@ -251,6 +257,8 @@ enum Sysctl {
     /// `user/max_user_namespaces`: how many user namespaces may exist
     /// below the initial one.
     MaxUserNamespaces,
+    /// `user/max_pid_namespaces` (ADR 0022 H5), likewise.
+    MaxPidNamespaces,
 }
 
 impl Sysctl {
@@ -265,6 +273,7 @@ impl Sysctl {
         match name {
             "sys/kernel/unprivileged_userns_clone" => Some(Self::UnprivilegedUsernsClone),
             "sys/user/max_user_namespaces" => Some(Self::MaxUserNamespaces),
+            "sys/user/max_pid_namespaces" => Some(Self::MaxPidNamespaces),
             _ => None,
         }
     }
@@ -278,7 +287,10 @@ impl Sysctl {
             Self::UnprivilegedUsernsClone => {
                 userns::UNPRIVILEGED_CLONE.load(Ordering::Acquire) as usize
             }
-            Self::MaxUserNamespaces => userns::MAX_USER_NAMESPACES.load(Ordering::Acquire) as usize,
+            Self::MaxUserNamespaces => userns::USER_NAMESPACES.max.load(Ordering::Acquire) as usize,
+            Self::MaxPidNamespaces => crate::process::pidns::PID_NAMESPACES
+                .max
+                .load(Ordering::Acquire) as usize,
         }
     }
 
@@ -293,7 +305,8 @@ impl Sysctl {
         let (store, max) = match self {
             Self::Inotify(limit) => return limit.write(text),
             Self::UnprivilegedUsernsClone => (&userns::UNPRIVILEGED_CLONE, 1),
-            Self::MaxUserNamespaces => (&userns::MAX_USER_NAMESPACES, i32::MAX as u32),
+            Self::MaxUserNamespaces => (&userns::USER_NAMESPACES.max, i32::MAX as u32),
+            Self::MaxPidNamespaces => (&crate::process::pidns::PID_NAMESPACES.max, i32::MAX as u32),
         };
         let value = core::str::from_utf8(text)
             .ok()
@@ -390,28 +403,65 @@ impl ProcNode {
 }
 
 impl ProcNode {
+    /// A node in the initial PID namespace's view.
+    #[cfg(test)]
+    fn of(node_type: ProcNodeType) -> Self {
+        Self {
+            node_type,
+            ns: crate::process::pidns::initial(),
+        }
+    }
+
+    #[cfg(test)]
     fn new_root() -> Self {
-        Self {
-            node_type: ProcNodeType::Root,
-        }
+        Self::of(ProcNodeType::Root)
     }
 
+    #[cfg(test)]
     fn new_process_dir(pid: u64) -> Self {
-        Self {
-            node_type: ProcNodeType::ProcessDir(pid),
-        }
+        Self::of(ProcNodeType::ProcessDir(pid))
     }
 
+    #[cfg(test)]
     fn new_process_file(pid: u64, name: String) -> Self {
+        Self::of(ProcNodeType::ProcessFile(pid, name))
+    }
+
+    #[cfg(test)]
+    fn new_system_file(name: String) -> Self {
+        Self::of(ProcNodeType::SystemFile(name))
+    }
+
+    /// A node below this one, in the same mount's view.
+    fn child(&self, node_type: ProcNodeType) -> Self {
         Self {
-            node_type: ProcNodeType::ProcessFile(pid, name),
+            node_type,
+            ns: self.ns.clone(),
         }
     }
 
-    fn new_system_file(name: String) -> Self {
-        Self {
-            node_type: ProcNodeType::SystemFile(name),
-        }
+    fn process_dir(&self, pid: u64) -> Self {
+        self.child(ProcNodeType::ProcessDir(pid))
+    }
+
+    fn process_file(&self, pid: u64, name: String) -> Self {
+        self.child(ProcNodeType::ProcessFile(pid, name))
+    }
+
+    fn system_file(&self, name: String) -> Self {
+        self.child(ProcNodeType::SystemFile(name))
+    }
+
+    /// Kernel id `kid` as this mount's PID namespace numbers it (0: not
+    /// there).
+    fn nr(&self, kid: u64) -> u64 {
+        crate::process::pidns::nr_in(kid, &self.ns)
+    }
+
+    /// The calling process, if this mount's namespace numbers it (Linux's
+    /// /proc/self, which names nothing for a caller above it).
+    fn me(&self) -> Option<Arc<crate::process::Process>> {
+        crate::process::current_process().filter(|p| self.nr(p.pid.0) != 0)
     }
 
     /// The node's path below /proc, which names it uniquely: "" for the
@@ -448,10 +498,9 @@ impl ProcNode {
     fn parent_inode(&self) -> u64 {
         match &self.node_type {
             ProcNodeType::SubDir(dir) => match dir.rsplit_once('/') {
-                Some((parent, _)) => ProcNode {
-                    node_type: ProcNodeType::SubDir(String::from(parent)),
-                }
-                .inode(),
+                Some((parent, _)) => self
+                    .child(ProcNodeType::SubDir(String::from(parent)))
+                    .inode(),
                 None => 1,
             },
             // The root's parent is outside procfs; Linux reports the mount
@@ -670,7 +719,9 @@ impl VfsNode for ProcNode {
                             #[cfg(not(feature = "alloc"))]
                             let name = "process";
 
-                            let parent = process.parent().unwrap_or(crate::process::ProcessId(0));
+                            // As this mount's namespace numbers them (0 for a
+                            // parent above it).
+                            let parent = process.parent().map_or(0, |p| self.nr(p.0));
 
                             // The sets are per thread; the process's are its
                             // main thread's, as on Linux.
@@ -681,12 +732,13 @@ impl VfsNode for ProcNode {
                                 .unwrap_or_default();
 
                             format!(
-                                "Name:\t{}\nPid:\t{}\nPPid:\t{}\nState:\t{}\n{}{}",
+                                "Name:\t{}\nPid:\t{}\nPPid:\t{}\nState:\t{}\n{}{}{}",
                                 name,
-                                pid,
-                                parent.0,
+                                self.nr(*pid),
+                                parent,
                                 state,
                                 status_ids(&process.credentials(), &viewer),
+                                status_nspids(&process, &self.ns),
                                 caps
                             )
                         } else {
@@ -879,13 +931,18 @@ impl VfsNode for ProcNode {
                     inode: 0,
                 });
 
-                // Add process directories for all running processes
+                // A directory for each process this mount's PID namespace
+                // numbers, by that number.
                 if let Some(process_list) = crate::process::get_process_list() {
                     for pid in process_list {
+                        let nr = self.nr(pid);
+                        if nr == 0 {
+                            continue;
+                        }
                         entries.push(DirEntry {
-                            name: format!("{}", pid),
+                            name: format!("{}", nr),
                             node_type: NodeType::Directory,
-                            inode: ProcNode::new_process_dir(pid).inode(),
+                            inode: self.process_dir(pid).inode(),
                         });
                     }
                 } else {
@@ -893,7 +950,7 @@ impl VfsNode for ProcNode {
                     entries.push(DirEntry {
                         name: String::from("1"),
                         node_type: NodeType::Directory,
-                        inode: ProcNode::new_process_dir(1).inode(),
+                        inode: self.process_dir(1).inode(),
                     });
                 }
             }
@@ -967,7 +1024,10 @@ impl VfsNode for ProcNode {
                         ("version", NodeType::File),
                     ],
                     "sys/kernel/random" => &[("boot_id", NodeType::File)],
-                    "sys/user" => &[("max_user_namespaces", NodeType::File)],
+                    "sys/user" => &[
+                        ("max_pid_namespaces", NodeType::File),
+                        ("max_user_namespaces", NodeType::File),
+                    ],
                     _ => return Err(KernelError::FsError(FsError::NotADirectory)),
                 };
                 for (name, node_type) in listed {
@@ -990,9 +1050,11 @@ impl VfsNode for ProcNode {
                 .and_then(|node| node.metadata())
                 .map(|m| m.inode)
                 .unwrap_or_else(|_| {
-                    ProcNode {
-                        node_type: ProcNodeType::SubDir(format!("{}/{}", self.key(), entry.name)),
-                    }
+                    self.child(ProcNodeType::SubDir(format!(
+                        "{}/{}",
+                        self.key(),
+                        entry.name
+                    )))
                     .inode()
                 });
         }
@@ -1005,26 +1067,30 @@ impl VfsNode for ProcNode {
                 // Check for system files
                 match name {
                     "version" | "uptime" | "meminfo" | "cpuinfo" | "loadavg" | "filesystems" => {
-                        Ok(Arc::new(ProcNode::new_system_file(String::from(name)))
-                            as Arc<dyn VfsNode>)
+                        Ok(Arc::new(self.system_file(String::from(name))) as Arc<dyn VfsNode>)
                     }
-                    "mounts" => Ok(Arc::new(ProcNode {
-                        node_type: ProcNodeType::Link("mounts", "self/mounts"),
-                    }) as Arc<dyn VfsNode>),
+                    "mounts" => Ok(
+                        Arc::new(self.child(ProcNodeType::Link("mounts", "self/mounts")))
+                            as Arc<dyn VfsNode>,
+                    ),
                     // Virtual subdirectories for Qt/KDE compatibility
-                    "sys" => Ok(Arc::new(ProcNode {
-                        node_type: ProcNodeType::SubDir(String::from("sys")),
-                    }) as Arc<dyn VfsNode>),
-                    "self" => Ok(Arc::new(ProcNode {
-                        node_type: ProcNodeType::SubDir(String::from("self")),
-                    }) as Arc<dyn VfsNode>),
+                    "sys" => Ok(
+                        Arc::new(self.child(ProcNodeType::SubDir(String::from("sys"))))
+                            as Arc<dyn VfsNode>,
+                    ),
+                    // Nothing for a caller this mount's namespace does not
+                    // number.
+                    "self" if self.me().is_some() => Ok(Arc::new(
+                        self.child(ProcNodeType::SubDir(String::from("self"))),
+                    ) as Arc<dyn VfsNode>),
                     _ => {
-                        // Try to parse as PID
-                        if let Ok(pid) = name.parse::<u64>() {
+                        // A pid as this mount's PID namespace numbers it.
+                        if let Some(pid) = name.parse::<u64>().ok().and_then(|nr| self.ns.find(nr))
+                        {
                             // Validate PID exists in process table
                             if crate::process::get_process(crate::process::ProcessId(pid)).is_some()
                             {
-                                Ok(Arc::new(ProcNode::new_process_dir(pid)) as Arc<dyn VfsNode>)
+                                Ok(Arc::new(self.process_dir(pid)) as Arc<dyn VfsNode>)
                             } else {
                                 Err(KernelError::FsError(FsError::NotFound))
                             }
@@ -1036,95 +1102,92 @@ impl VfsNode for ProcNode {
             }
             ProcNodeType::ProcessDir(pid) => match name {
                 "status" | "cmdline" | "timens_offsets" | "mounts" | "mountinfo" | "uid_map"
-                | "gid_map" | "setgroups" => Ok(Arc::new(ProcNode::new_process_file(
-                    *pid,
-                    String::from(name),
-                )) as Arc<dyn VfsNode>),
-                "ns" => Ok(Arc::new(ProcNode {
-                    node_type: ProcNodeType::NsDir(Some(*pid)),
-                }) as Arc<dyn VfsNode>),
+                | "gid_map" | "setgroups" => {
+                    Ok(Arc::new(self.process_file(*pid, String::from(name))) as Arc<dyn VfsNode>)
+                }
+                "ns" => {
+                    Ok(Arc::new(self.child(ProcNodeType::NsDir(Some(*pid)))) as Arc<dyn VfsNode>)
+                }
                 _ => Err(KernelError::FsError(FsError::NotFound)),
             },
             ProcNodeType::SubDir(dir_name) => {
                 // Handle /proc/sys/*, /proc/self/*
                 match dir_name.as_str() {
                     "sys" => match name {
-                        "fs" | "kernel" | "user" => Ok(Arc::new(ProcNode {
-                            node_type: ProcNodeType::SubDir(format!("sys/{}", name)),
-                        })
+                        "fs" | "kernel" | "user" => Ok(Arc::new(
+                            self.child(ProcNodeType::SubDir(format!("sys/{}", name))),
+                        )
                             as Arc<dyn VfsNode>),
                         _ => Err(KernelError::FsError(FsError::NotFound)),
                     },
                     "sys/fs" => match name {
-                        "inotify" => Ok(Arc::new(ProcNode {
-                            node_type: ProcNodeType::SubDir(String::from("sys/fs/inotify")),
-                        }) as Arc<dyn VfsNode>),
+                        "inotify" => Ok(Arc::new(
+                            self.child(ProcNodeType::SubDir(String::from("sys/fs/inotify"))),
+                        ) as Arc<dyn VfsNode>),
                         _ => Err(KernelError::FsError(FsError::NotFound)),
                     },
                     "sys/fs/inotify" => match name {
-                        "max_queued_events" | "max_user_instances" | "max_user_watches" => {
-                            Ok(Arc::new(ProcNode::new_system_file(format!(
-                                "sys/fs/inotify/{}",
-                                name
-                            ))) as Arc<dyn VfsNode>)
-                        }
+                        "max_queued_events" | "max_user_instances" | "max_user_watches" => Ok(
+                            Arc::new(self.system_file(format!("sys/fs/inotify/{}", name)))
+                                as Arc<dyn VfsNode>,
+                        ),
                         _ => Err(KernelError::FsError(FsError::NotFound)),
                     },
                     "sys/kernel" => match name {
-                        "core_pattern" => Ok(Arc::new(ProcNode::new_system_file(String::from(
-                            "core_pattern",
-                        ))) as Arc<dyn VfsNode>),
-                        "cap_last_cap" | "pid_max" | "ostype" | "osrelease" | "tainted"
-                        | "hostname" | "domainname" => {
-                            Ok(Arc::new(ProcNode::new_system_file(String::from(name)))
+                        "core_pattern" => {
+                            Ok(Arc::new(self.system_file(String::from("core_pattern")))
                                 as Arc<dyn VfsNode>)
                         }
+                        "cap_last_cap" | "pid_max" | "ostype" | "osrelease" | "tainted"
+                        | "hostname" | "domainname" => {
+                            Ok(Arc::new(self.system_file(String::from(name))) as Arc<dyn VfsNode>)
+                        }
                         // Not /proc/version, which has the same file name.
-                        "version" => Ok(Arc::new(ProcNode::new_system_file(String::from(
-                            "sys/kernel/version",
-                        ))) as Arc<dyn VfsNode>),
-                        "random" => Ok(Arc::new(ProcNode {
-                            node_type: ProcNodeType::SubDir(String::from("sys/kernel/random")),
-                        }) as Arc<dyn VfsNode>),
-                        "unprivileged_userns_clone" => Ok(Arc::new(ProcNode::new_system_file(
-                            String::from("sys/kernel/unprivileged_userns_clone"),
-                        ))
+                        "version" => Ok(Arc::new(
+                            self.system_file(String::from("sys/kernel/version")),
+                        ) as Arc<dyn VfsNode>),
+                        "random" => Ok(Arc::new(
+                            self.child(ProcNodeType::SubDir(String::from("sys/kernel/random"))),
+                        ) as Arc<dyn VfsNode>),
+                        "unprivileged_userns_clone" => Ok(Arc::new(
+                            self.system_file(String::from("sys/kernel/unprivileged_userns_clone")),
+                        )
                             as Arc<dyn VfsNode>),
                         _ => Err(KernelError::FsError(FsError::NotFound)),
                     },
                     "sys/user" => match name {
-                        "max_user_namespaces" => Ok(Arc::new(ProcNode::new_system_file(
-                            String::from("sys/user/max_user_namespaces"),
-                        )) as Arc<dyn VfsNode>),
-                        _ => Err(KernelError::FsError(FsError::NotFound)),
-                    },
-                    "sys/kernel/random" => match name {
-                        "boot_id" => {
-                            Ok(Arc::new(ProcNode::new_system_file(String::from("boot_id")))
+                        "max_user_namespaces" | "max_pid_namespaces" => {
+                            Ok(Arc::new(self.system_file(format!("sys/user/{}", name)))
                                 as Arc<dyn VfsNode>)
                         }
                         _ => Err(KernelError::FsError(FsError::NotFound)),
                     },
+                    "sys/kernel/random" => {
+                        match name {
+                            "boot_id" => Ok(Arc::new(self.system_file(String::from("boot_id")))
+                                as Arc<dyn VfsNode>),
+                            _ => Err(KernelError::FsError(FsError::NotFound)),
+                        }
+                    }
                     "self" => match name {
-                        "exe" => Ok(Arc::new(ProcNode {
-                            node_type: ProcNodeType::SelfExe,
-                        }) as Arc<dyn VfsNode>),
-                        "ns" => Ok(Arc::new(ProcNode {
-                            node_type: ProcNodeType::NsDir(None),
-                        }) as Arc<dyn VfsNode>),
+                        "exe" => {
+                            Ok(Arc::new(self.child(ProcNodeType::SelfExe)) as Arc<dyn VfsNode>)
+                        }
+                        "ns" => {
+                            Ok(Arc::new(self.child(ProcNodeType::NsDir(None))) as Arc<dyn VfsNode>)
+                        }
                         // The caller's own files, as /proc/<its pid>/...
                         // (Linux's /proc/self is a link to that directory).
                         "status" | "cmdline" | "timens_offsets" | "mounts" | "mountinfo"
-                        | "uid_map" | "gid_map" | "setgroups" => crate::process::current_process()
+                        | "uid_map" | "gid_map" | "setgroups" => self
+                            .me()
                             .map(|p| {
-                                Arc::new(ProcNode::new_process_file(p.pid.0, String::from(name)))
+                                Arc::new(self.process_file(p.pid.0, String::from(name)))
                                     as Arc<dyn VfsNode>
                             })
                             .ok_or(KernelError::FsError(FsError::NotFound)),
-                        "maps" => Ok(
-                            Arc::new(ProcNode::new_system_file(format!("self/{}", name)))
-                                as Arc<dyn VfsNode>,
-                        ),
+                        "maps" => Ok(Arc::new(self.system_file(format!("self/{}", name)))
+                            as Arc<dyn VfsNode>),
                         _ => Err(KernelError::FsError(FsError::NotFound)),
                     },
                     _ => Err(KernelError::FsError(FsError::NotFound)),
@@ -1134,9 +1197,7 @@ impl VfsNode for ProcNode {
                 .iter()
                 .find(|&&link| link == name)
                 .map(|&link| {
-                    Arc::new(ProcNode {
-                        node_type: ProcNodeType::NsLink(*pid, link),
-                    }) as Arc<dyn VfsNode>
+                    Arc::new(self.child(ProcNodeType::NsLink(*pid, link))) as Arc<dyn VfsNode>
                 })
                 .ok_or(KernelError::FsError(FsError::NotFound)),
             _ => Err(KernelError::FsError(FsError::NotADirectory)),
@@ -1311,6 +1372,44 @@ fn status_ids(
     )
 }
 
+/// The `NStgid:`, `NSpid:`, `NSpgid:` and `NSsid:` lines of
+/// /proc/[pid]/status, as Linux's proc_pid_status: from the mount's PID
+/// namespace `ns` down to the process's own, its number at each level, and
+/// its group's and session's in each of those namespaces (0 where one has
+/// none).
+fn status_nspids(
+    process: &crate::process::Process,
+    ns: &Arc<crate::process::pidns::PidNs>,
+) -> String {
+    use crate::process::pidns;
+    let pid = process.pid.0;
+    // Taken once each: the process may be reaped meanwhile.
+    let levels = pidns::levels_from(pid, ns);
+    let own_nrs = pidns::nrs_from(pid, ns);
+    let line = |name: &str, kid: u64, own: bool| {
+        let mut text = format!("{}:", name);
+        for (i, level) in levels.iter().enumerate() {
+            let nr = if own {
+                own_nrs.get(i).copied().unwrap_or(0)
+            } else {
+                pidns::nr_in(kid, level)
+            };
+            text.push_str(&format!("\t{}", nr));
+        }
+        text.push('\n');
+        text
+    };
+    let pgid = process.pgid.load(core::sync::atomic::Ordering::Acquire);
+    let sid = process.sid.load(core::sync::atomic::Ordering::Acquire);
+    format!(
+        "{}{}{}{}",
+        line("NStgid", pid, true),
+        line("NSpid", pid, true),
+        line("NSpgid", pgid, false),
+        line("NSsid", sid, false)
+    )
+}
+
 /// The capability lines of /proc/[pid]/status, as Linux prints them (ADR
 /// 0020): each set as 16 hexadecimal digits.
 fn status_caps(c: &crate::process::linux_caps::CapSets) -> String {
@@ -1362,10 +1461,15 @@ fn generate_loadavg() -> String {
         (1, 1)
     };
 
-    // Find highest PID for last field
-    let last_pid = crate::process::get_process_list()
-        .and_then(|pids| pids.iter().copied().max())
-        .unwrap_or(1);
+    // The last pid handed out in the reader's PID namespace (Linux's idr
+    // cursor), the highest process id in the initial one.
+    let last_pid = crate::process::pidns::current()
+        .last_nr()
+        .unwrap_or_else(|| {
+            crate::process::get_process_list()
+                .and_then(|pids| pids.iter().copied().max())
+                .unwrap_or(1)
+        });
 
     // Linux format: 1min 5min 15min running/total last_pid
     let [one, five, fifteen] =
@@ -1473,9 +1577,19 @@ pub struct ProcFs {
 }
 
 impl ProcFs {
+    /// A procfs for the caller's PID namespace, the one a mount of it shows
+    /// (Linux's proc_fill_super takes the mounter's task_active_pid_ns).
     pub fn new() -> Self {
+        Self::for_ns(crate::process::pidns::current())
+    }
+
+    /// A procfs showing PID namespace `ns`.
+    pub fn for_ns(ns: Arc<crate::process::pidns::PidNs>) -> Self {
         Self {
-            root: Arc::new(ProcNode::new_root()),
+            root: Arc::new(ProcNode {
+                node_type: ProcNodeType::Root,
+                ns,
+            }),
         }
     }
 }
@@ -1617,6 +1731,44 @@ mod tests {
         );
     }
 
+    /// The NS lines go from the mount's PID namespace down to the
+    /// process's own; a group led from above shows as 0 below.
+    #[test]
+    fn status_shows_the_pid_at_each_level() {
+        use crate::process::{pidns, userns, Process, ProcessId, ProcessPriority};
+        let init = pidns::initial();
+        let ns = pidns::PidNs::create(&init, &userns::initial(), 0).unwrap();
+        let p = Process::new(
+            ProcessId(7_100_001),
+            None,
+            String::from("t"),
+            ProcessPriority::Normal,
+        );
+        pidns::reserve(&ns, &[], |_| false).unwrap().commit(p.pid.0);
+        p.set_pid_ns(ns.clone());
+        p.pgid
+            .store(7_100_000, core::sync::atomic::Ordering::Release);
+        assert_eq!(
+            status_nspids(&p, &init),
+            "NStgid:\t7100001\t1\nNSpid:\t7100001\t1\nNSpgid:\t7100000\t0\nNSsid:\t7100001\t1\n"
+        );
+        assert_eq!(
+            status_nspids(&p, &ns),
+            "NStgid:\t1\nNSpid:\t1\nNSpgid:\t0\nNSsid:\t1\n"
+        );
+        // A mount of its namespace lists it as 1 and finds it by that.
+        let root = ProcNode::of(ProcNodeType::Root);
+        let mine = root.child(ProcNodeType::Root);
+        assert_eq!(mine.nr(p.pid.0), 7_100_001);
+        let theirs = ProcNode {
+            node_type: ProcNodeType::Root,
+            ns: ns.clone(),
+        };
+        assert_eq!(theirs.nr(p.pid.0), 1);
+        assert_eq!(theirs.nr(1), 0, "the initial namespace's 1 is not there");
+        pidns::release(p.pid.0);
+    }
+
     /// Status shows the five capability sets as Linux does: 16 hex digits,
     /// in the order inheritable, permitted, effective, bounding, ambient.
     #[test]
@@ -1651,9 +1803,7 @@ mod tests {
     /// libcap and LTP read to size their sets.
     #[test]
     fn cap_last_cap_names_the_highest_capability() {
-        let dir = ProcNode {
-            node_type: ProcNodeType::SubDir(String::from("sys/kernel")),
-        };
+        let dir = ProcNode::of(ProcNodeType::SubDir(String::from("sys/kernel")));
         let file = dir.lookup("cap_last_cap").unwrap();
         let mut buf = [0u8; 16];
         let n = file.read(0, &mut buf).unwrap();
@@ -1664,9 +1814,7 @@ mod tests {
     /// release and version, and /proc/version names all three (ADR 0021).
     #[test]
     fn kernel_identity_files_match_uname() {
-        let dir = ProcNode {
-            node_type: ProcNodeType::SubDir(String::from("sys/kernel")),
-        };
+        let dir = ProcNode::of(ProcNodeType::SubDir(String::from("sys/kernel")));
         let read = |node: Arc<dyn VfsNode>| {
             let mut buf = [0u8; 160];
             let n = node.read(0, &mut buf).unwrap();
@@ -1701,6 +1849,12 @@ mod tests {
         assert_eq!(switch.get(), 0);
         assert_eq!(
             max.get(),
+            crate::process::userns::DEFAULT_MAX_USER_NAMESPACES as usize
+        );
+        let pid_max = Sysctl::from_name("sys/user/max_pid_namespaces").unwrap();
+        assert!(pid_max.write(b"-3").is_err());
+        assert_eq!(
+            pid_max.get(),
             crate::process::userns::DEFAULT_MAX_USER_NAMESPACES as usize
         );
     }
@@ -1744,11 +1898,12 @@ mod tests {
                 ][..],
             ),
             ("sys/kernel/random", &["boot_id"][..]),
-            ("sys/user", &["max_user_namespaces"][..]),
+            (
+                "sys/user",
+                &["max_pid_namespaces", "max_user_namespaces"][..],
+            ),
         ] {
-            let node = ProcNode {
-                node_type: ProcNodeType::SubDir(String::from(dir)),
-            };
+            let node = ProcNode::of(ProcNodeType::SubDir(String::from(dir)));
             let mut got = names(&node);
             got.sort();
             assert_eq!(got, want, "/proc/{}", dir);
@@ -1768,9 +1923,7 @@ mod tests {
     /// VeridianOS ids do not wrap at it (docs/KNOWN-LIMITATIONS.md).
     #[test]
     fn pid_max_is_the_linux_64_bit_limit() {
-        let dir = ProcNode {
-            node_type: ProcNodeType::SubDir(String::from("sys/kernel")),
-        };
+        let dir = ProcNode::of(ProcNodeType::SubDir(String::from("sys/kernel")));
         let file = dir.lookup("pid_max").unwrap();
         let mut buf = [0u8; 16];
         let n = file.read(0, &mut buf).unwrap();
@@ -1804,9 +1957,7 @@ mod tests {
     /// /proc/sys/fs/inotify has the inotify limits, Linux's defaults.
     #[test]
     fn inotify_limits_are_linux_defaults() {
-        let dir = ProcNode {
-            node_type: ProcNodeType::SubDir(String::from("sys/fs/inotify")),
-        };
+        let dir = ProcNode::of(ProcNodeType::SubDir(String::from("sys/fs/inotify")));
         for (name, want) in [
             ("max_queued_events", &b"16384\n"[..]),
             ("max_user_instances", &b"128\n"[..]),

@@ -87,10 +87,10 @@ struct CloneRequest {
     tls: usize,
     /// Where CLONE_PIDFD stores the pidfd.
     pidfd: usize,
-    /// clone3's set_tid: the ID the child is to have in the one PID
-    /// namespace level there is here.
-    set_tid: Option<i32>,
-    /// set_tid named more levels than there are (EINVAL).
+    /// clone3's set_tid: the ID the child is to have in its PID namespace
+    /// (`set_tid[0]`) and in each one above it, the first `set_tid_levels`.
+    set_tid: [i32; MAX_PID_NS_LEVEL as usize],
+    /// How many set_tid entries there are.
     set_tid_levels: u64,
     /// clone3's CLONE_INTO_CGROUP descriptor.
     cgroup: u64,
@@ -195,7 +195,10 @@ impl CloneArgs {
 /// keeps them for reuse), CLONE_SIGHAND with CLONE_CLEAR_SIGHAND, an exit
 /// signal for a thread or a CLONE_PARENT child, a stack without a size or
 /// a size without a stack, and a stack not wholly in user space are EINVAL.
-fn clone3_request(args: &CloneArgs, set_tid: Option<i32>) -> Result<CloneRequest, SyscallError> {
+fn clone3_request(
+    args: &CloneArgs,
+    set_tid: [i32; MAX_PID_NS_LEVEL as usize],
+) -> Result<CloneRequest, SyscallError> {
     let known = CLONE_LEGACY_FLAGS
         | CLONE_CLEAR_SIGHAND
         | CLONE_INTO_CGROUP
@@ -263,14 +266,15 @@ pub fn sys_clone3(uargs: usize, size: usize) -> Result<usize, SyscallError> {
     let args = CloneArgs::decode(&raw[..len]);
     args.check(size)?;
     // The whole array is read (EFAULT); its first entry is for the
-    // innermost PID namespace, the only one here.
-    let set_tid = if args.set_tid_size != 0 {
+    // child's PID namespace, the next for the one above, and so on.
+    let mut set_tid = [0i32; MAX_PID_NS_LEVEL as usize];
+    if args.set_tid_size != 0 {
         let mut ids = alloc::vec![0u8; args.set_tid_size as usize * 4];
         super::userspace::read_user_bytes(args.set_tid as usize, &mut ids)?;
-        Some(i32::from_ne_bytes([ids[0], ids[1], ids[2], ids[3]]))
-    } else {
-        None
-    };
+        for (slot, b) in set_tid.iter_mut().zip(ids.chunks_exact(4)) {
+            *slot = i32::from_ne_bytes([b[0], b[1], b[2], b[3]]);
+        }
+    }
     kernel_clone(clone3_request(&args, set_tid)?)
 }
 
@@ -365,13 +369,13 @@ fn request_checks(req: &mut CloneRequest, admin: bool) -> Result<(), SyscallErro
     Ok(())
 }
 
-/// set_tid's own rules (Linux's alloc_pid): more IDs than PID namespace
-/// levels (one here), or an ID below 1 or not below pid_max, are EINVAL;
-/// choosing one needs CAP_CHECKPOINT_RESTORE or CAP_SYS_ADMIN over the
-/// user namespace that owns the child's PID namespace
-/// (checkpoint_restore_ns_capable; `may_choose`; EPERM).
-fn set_tid_checks(tid: i32, levels: u64, may_choose: bool) -> Result<u64, SyscallError> {
-    if levels > 1 || tid < 1 || tid as u64 >= crate::process::PID_MAX {
+/// set_tid's rules for the initial PID namespace's entry, the kernel id
+/// (Linux's alloc_pid at level 0): an ID below 1 or not below pid_max is
+/// EINVAL; choosing one needs CAP_CHECKPOINT_RESTORE or CAP_SYS_ADMIN over
+/// the initial user namespace (checkpoint_restore_ns_capable;
+/// `may_choose`; EPERM). The other levels' are `pidns::reserve`'s.
+fn set_tid_checks(tid: i32, may_choose: bool) -> Result<u64, SyscallError> {
+    if tid < 1 || tid as u64 >= crate::process::PID_MAX {
         return Err(SyscallError::InvalidArgument);
     }
     if !may_choose {
@@ -380,10 +384,13 @@ fn set_tid_checks(tid: i32, levels: u64, may_choose: bool) -> Result<u64, Syscal
     Ok(tid as u64)
 }
 
-/// Linux's kernel_clone: check `req` ([`request_checks`]), claim a set_tid
-/// ID (EEXIST when taken), refuse CLONE_INTO_CGROUP (EBADF: there is no
-/// cgroup filesystem, so no descriptor names a cgroup; Linux checks it
-/// after the ID and the pidfd), and make the thread or process.
+/// Linux's kernel_clone: check `req` ([`request_checks`]; a thread of a
+/// process whose children go to another PID namespace than its own is
+/// EINVAL), make the namespaces, reserve the child's number in each PID
+/// namespace level below the initial one and claim its kernel id, with
+/// set_tid's choices ([`pid_numbers`]), refuse CLONE_INTO_CGROUP (EBADF:
+/// there is no cgroup filesystem, so no descriptor names a cgroup; Linux
+/// checks it after the ID and the pidfd), and make the thread or process.
 fn kernel_clone(mut req: CloneRequest) -> Result<usize, SyscallError> {
     use crate::process::linux_caps::{CAP_CHECKPOINT_RESTORE, CAP_SYS_ADMIN};
     let caller = process::creds::Caller::current();
@@ -403,32 +410,76 @@ fn kernel_clone(mut req: CloneRequest) -> Result<usize, SyscallError> {
     let current_ns = process::current_thread()
         .ok_or(SyscallError::InvalidState)?
         .namespaces();
+    let active = process::pidns::current();
+    if req.on(CLONE_THREAD) && active.ident.id != current_ns.pid_for_children.ident.id {
+        return Err(SyscallError::InvalidArgument);
+    }
     // copy_namespaces: over the user namespace the child's credentials
     // are in, whose root a new one's creator is.
     let admin = caller.ns_capable(&owner, CAP_SYS_ADMIN);
-    let namespaces = ns::for_clone(&current_ns, req.flags, admin, &owner).map_err(|e| match e {
+    let namespaces = ns::for_clone(
+        &current_ns,
+        req.flags,
+        admin,
+        &owner,
+        &active,
+        caller.creds.euid,
+    )
+    .map_err(|e| match e {
         ns::CloneNsError::Permission => SyscallError::OperationNotPermitted,
         ns::CloneNsError::Invalid => SyscallError::InvalidArgument,
+        ns::CloneNsError::NoSpace => SyscallError::NoSpace,
     })?;
-    let claim = match req.set_tid {
-        Some(tid) => {
-            let pid_owner = &namespaces.pid_for_children.owner;
-            let may = caller.ns_capable(pid_owner, CAP_CHECKPOINT_RESTORE)
-                || caller.ns_capable(pid_owner, CAP_SYS_ADMIN);
-            let id = set_tid_checks(tid, req.set_tid_levels, may)?;
-            Some(process::IdClaim::new(id).ok_or(SyscallError::FileExists)?)
-        }
-        None => None,
+    let may_choose = |owner: &process::userns::UserNs| {
+        caller.ns_capable(owner, CAP_CHECKPOINT_RESTORE) || caller.ns_capable(owner, CAP_SYS_ADMIN)
     };
+    let (numbers, claim) = pid_numbers(&req, &namespaces.pid_for_children, may_choose)?;
     if req.on(CLONE_INTO_CGROUP) {
         return Err(SyscallError::BadFileDescriptor);
     }
     let id = claim.as_ref().map(|c| c.id());
     if req.on(CLONE_THREAD) {
-        thread_clone(&req, id, namespaces)
+        thread_clone(&req, id, numbers, namespaces)
     } else {
-        process_clone(&req, id, namespaces, user_ns)
+        process_clone(&req, id, numbers, namespaces, user_ns)
     }
+}
+
+/// The child's numbers (Linux's alloc_pid): with set_tid, more entries
+/// than PID namespace levels are EINVAL; then each level from the child's
+/// namespace up, as `pidns::reserve` and, for the initial namespace's
+/// entry, [`set_tid_checks`] and the kernel id's claim (EEXIST when taken).
+fn pid_numbers(
+    req: &CloneRequest,
+    ns: &alloc::sync::Arc<process::pidns::PidNs>,
+    may_choose: impl Fn(&process::userns::UserNs) -> bool,
+) -> Result<(process::pidns::Reservation, Option<process::IdClaim>), SyscallError> {
+    let levels = req.set_tid_levels as usize;
+    if levels > ns.level + 1 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let chosen: alloc::vec::Vec<u64> = req.set_tid[..levels.min(ns.level)]
+        .iter()
+        .map(|&t| t.max(0) as u64)
+        .collect();
+    let numbers = process::pidns::reserve(ns, &chosen, &may_choose).map_err(|e| {
+        use process::pidns::AllocError;
+        match e {
+            AllocError::Invalid => SyscallError::InvalidArgument,
+            AllocError::Permission => SyscallError::OperationNotPermitted,
+            AllocError::Exists => SyscallError::FileExists,
+            AllocError::Dead => SyscallError::OutOfMemory,
+            AllocError::Exhausted => SyscallError::WouldBlock,
+        }
+    })?;
+    let claim = if levels == ns.level + 1 {
+        let initial = process::userns::initial();
+        let id = set_tid_checks(req.set_tid[ns.level], may_choose(&initial))?;
+        Some(process::IdClaim::new(id).ok_or(SyscallError::FileExists)?)
+    } else {
+        None
+    };
+    Ok((numbers, claim))
 }
 
 /// A clone without CLONE_THREAD: a new process, as fork or vfork (N-210).
@@ -439,6 +490,7 @@ fn kernel_clone(mut req: CloneRequest) -> Result<usize, SyscallError> {
 fn process_clone(
     req: &CloneRequest,
     id: Option<u64>,
+    numbers: process::pidns::Reservation,
     namespaces: alloc::sync::Arc<ns::Namespaces>,
     user_ns: Option<alloc::sync::Arc<process::userns::UserNs>>,
 ) -> Result<usize, SyscallError> {
@@ -473,6 +525,7 @@ fn process_clone(
         pidfd: on(CLONE_PIDFD).then_some(req.pidfd),
         pidfd_autokill: on(CLONE_PIDFD_AUTOKILL),
         pid: id.map(process::ProcessId),
+        pid_numbers: Some(process::pidns::Pending::new(numbers)),
         clear_sighand: on(CLONE_CLEAR_SIGHAND),
         no_new_privs: on(CLONE_NNP),
         autoreap: on(CLONE_AUTOREAP),
@@ -508,6 +561,7 @@ fn process_clone(
 fn thread_clone(
     req: &CloneRequest,
     id: Option<u64>,
+    numbers: process::pidns::Reservation,
     namespaces: alloc::sync::Arc<ns::Namespaces>,
 ) -> Result<usize, SyscallError> {
     let (newsp, tls) = (req.stack, req.tls);
@@ -599,6 +653,11 @@ fn thread_clone(
 
     let thread = builder.build().map_err(|_| SyscallError::InvalidState)?;
     let tid = thread.tid;
+    // The thread's number in each PID namespace level; released again by
+    // `cleanup_thread`, or below if the thread never joins the process.
+    numbers.commit(tid.0);
+    let vtid = process::pidns::nr_in(tid.0, &proc.pid_ns()) as u32;
+    let release_numbers = || process::pidns::release(tid.0);
     // A new thread starts with its creator's blocked mask (N-109), command
     // name (N-227), no_new_privs and capability sets (ADR 0020), as Linux
     // copies them. The sets are copied again once the thread is in the
@@ -687,8 +746,10 @@ fn thread_clone(
         // `copy_to_user` performs its own bounds check as a defence-in-depth
         // measure.  The write is a single u32 which is naturally aligned.
         unsafe {
-            crate::syscall::userspace::copy_to_user(parent_tid_ptr, &(tid.0 as u32))
-                .map_err(|_| SyscallError::InvalidPointer)?;
+            crate::syscall::userspace::copy_to_user(parent_tid_ptr, &vtid).map_err(|_| {
+                release_numbers();
+                SyscallError::InvalidPointer
+            })?;
         }
     }
 
@@ -703,8 +764,10 @@ fn thread_clone(
         // SAFETY: `child_tid_ptr` was validated above via `validate_user_ptr`.
         // The pointer targets shared user memory (CLONE_VM is set).
         unsafe {
-            crate::syscall::userspace::copy_to_user(child_tid_ptr, &(tid.0 as u32))
-                .map_err(|_| SyscallError::InvalidPointer)?;
+            crate::syscall::userspace::copy_to_user(child_tid_ptr, &vtid).map_err(|_| {
+                release_numbers();
+                SyscallError::InvalidPointer
+            })?;
         }
     }
 
@@ -712,12 +775,11 @@ fn thread_clone(
     // it runs (EFAULT if the store faults; the thread never starts).
     #[cfg(feature = "alloc")]
     let pidfd = if req.on(CLONE_PIDFD) {
-        Some(super::pidfd::install_at(
-            &proc,
-            Some(tid),
-            req.pidfd,
-            false,
-        )?)
+        Some(
+            super::pidfd::install_at(&proc, Some(tid), req.pidfd, false).inspect_err(|_| {
+                release_numbers();
+            })?,
+        )
     } else {
         None
     };
@@ -736,6 +798,7 @@ fn thread_clone(
     // leaving the task's thread_ref pointing at a dead stack slot.
     let thread = proc.add_thread(thread).map_err(|_| {
         undo_pidfd();
+        release_numbers();
         SyscallError::InvalidState
     })?;
     // A set*id call on another thread fixes every thread's sets under the
@@ -760,7 +823,7 @@ fn thread_clone(
         undo_pidfd();
         return Err(SyscallError::OutOfMemory);
     }
-    Ok(tid.0 as usize)
+    Ok(vtid as usize)
 }
 
 #[cfg(test)]
@@ -768,6 +831,8 @@ mod tests {
     use super::*;
 
     const EINVAL: Result<(), SyscallError> = Err(SyscallError::InvalidArgument);
+
+    const NO_IDS: [i32; MAX_PID_NS_LEVEL as usize] = [0; MAX_PID_NS_LEVEL as usize];
 
     fn args(flags: u64) -> CloneArgs {
         CloneArgs {
@@ -840,26 +905,26 @@ mod tests {
 
     #[test]
     fn clone3_refuses_unknown_and_reused_flags() {
-        assert!(clone3_request(&args(CLONE_VM), None).is_ok());
+        assert!(clone3_request(&args(CLONE_VM), NO_IDS).is_ok());
         // Past the flags clone3 knows.
         assert_eq!(
-            clone3_request(&args(1 << 40), None),
+            clone3_request(&args(1 << 40), NO_IDS),
             Err(SyscallError::InvalidArgument)
         );
         // CLONE_DETACHED and the CSIGNAL bits are kept for reuse, except
         // CLONE_NEWTIME.
-        assert!(clone3_request(&args(CLONE_DETACHED), None).is_err());
-        assert!(clone3_request(&args(17), None).is_err());
-        assert!(clone3_request(&args(CLONE_NEWTIME), None).is_ok());
-        assert!(clone3_request(&args(CLONE_SIGHAND | CLONE_CLEAR_SIGHAND), None).is_err());
-        assert!(clone3_request(&args(CLONE_CLEAR_SIGHAND), None).is_ok());
+        assert!(clone3_request(&args(CLONE_DETACHED), NO_IDS).is_err());
+        assert!(clone3_request(&args(17), NO_IDS).is_err());
+        assert!(clone3_request(&args(CLONE_NEWTIME), NO_IDS).is_ok());
+        assert!(clone3_request(&args(CLONE_SIGHAND | CLONE_CLEAR_SIGHAND), NO_IDS).is_err());
+        assert!(clone3_request(&args(CLONE_CLEAR_SIGHAND), NO_IDS).is_ok());
         // An exit signal for a thread, or for a CLONE_PARENT child.
         for flags in [CLONE_THREAD, CLONE_PARENT] {
             let a = CloneArgs {
                 exit_signal: 17,
                 ..args(flags)
             };
-            assert!(clone3_request(&a, None).is_err());
+            assert!(clone3_request(&a, NO_IDS).is_err());
         }
     }
 
@@ -870,18 +935,18 @@ mod tests {
             stack_size,
             ..args(0)
         };
-        assert_eq!(clone3_request(&stack(0, 0), None).map(|r| r.stack), Ok(0));
-        assert!(clone3_request(&stack(0, 4096), None).is_err());
-        assert!(clone3_request(&stack(0x10_0000, 0), None).is_err());
+        assert_eq!(clone3_request(&stack(0, 0), NO_IDS).map(|r| r.stack), Ok(0));
+        assert!(clone3_request(&stack(0, 4096), NO_IDS).is_err());
+        assert!(clone3_request(&stack(0x10_0000, 0), NO_IDS).is_err());
         assert_eq!(
-            clone3_request(&stack(0x10_0000, 0x4000), None).map(|r| r.stack),
+            clone3_request(&stack(0x10_0000, 0x4000), NO_IDS).map(|r| r.stack),
             Ok(0x10_4000)
         );
         // Not wholly user memory, or wrapping.
         let end = user_space_end() as u64;
-        assert!(clone3_request(&stack(end - 0x1000, 0x2000), None).is_err());
-        assert!(clone3_request(&stack(u64::MAX - 0xfff, 0x2000), None).is_err());
-        assert!(clone3_request(&stack(end - 0x2000, 0x2000), None).is_ok());
+        assert!(clone3_request(&stack(end - 0x1000, 0x2000), NO_IDS).is_err());
+        assert!(clone3_request(&stack(u64::MAX - 0xfff, 0x2000), NO_IDS).is_err());
+        assert!(clone3_request(&stack(end - 0x2000, 0x2000), NO_IDS).is_ok());
     }
 
     #[test]
@@ -893,9 +958,11 @@ mod tests {
             set_tid_size: 1,
             ..args(CLONE_PIDFD | CLONE_PARENT_SETTID)
         };
-        let r = clone3_request(&a, Some(400)).unwrap();
+        let mut ids = [0; MAX_PID_NS_LEVEL as usize];
+        ids[0] = 400;
+        let r = clone3_request(&a, ids).unwrap();
         assert_eq!((r.pidfd, r.parent_tid), (0x5000, 0x6000));
-        assert_eq!((r.set_tid, r.set_tid_levels), (Some(400), 1));
+        assert_eq!((r.set_tid[0], r.set_tid_levels), (400, 1));
     }
 
     #[test]
@@ -973,7 +1040,9 @@ mod tests {
                 &ns::initial(),
                 alone.flags,
                 false,
-                &crate::process::userns::initial()
+                &crate::process::userns::initial(),
+                &crate::process::pidns::initial(),
+                0
             ),
             Err(ns::CloneNsError::Permission)
         ));
@@ -1027,28 +1096,60 @@ mod tests {
 
     #[test]
     fn set_tid_is_in_range_and_privileged() {
-        assert_eq!(
-            set_tid_checks(0, 1, true),
-            Err(SyscallError::InvalidArgument)
-        );
-        assert_eq!(
-            set_tid_checks(-1, 1, true),
-            Err(SyscallError::InvalidArgument)
-        );
+        assert_eq!(set_tid_checks(0, true), Err(SyscallError::InvalidArgument));
+        assert_eq!(set_tid_checks(-1, true), Err(SyscallError::InvalidArgument));
         let max = crate::process::PID_MAX as i32;
         assert_eq!(
-            set_tid_checks(max, 1, true),
+            set_tid_checks(max, true),
             Err(SyscallError::InvalidArgument)
         );
-        assert_eq!(set_tid_checks(max - 1, 1, true), Ok(max as u64 - 1));
-        // More levels than the one PID namespace.
+        assert_eq!(set_tid_checks(max - 1, true), Ok(max as u64 - 1));
         assert_eq!(
-            set_tid_checks(400, 2, true),
-            Err(SyscallError::InvalidArgument)
-        );
-        assert_eq!(
-            set_tid_checks(400, 1, false),
+            set_tid_checks(400, false),
             Err(SyscallError::OperationNotPermitted)
         );
+    }
+
+    /// alloc_pid's set_tid walk: no more entries than levels, the first for
+    /// the child's namespace, the last (at full length) the kernel id.
+    #[test]
+    fn set_tid_names_one_id_per_level() {
+        use crate::process::pidns::{self, PidNs};
+        let with = |ids: &[i32]| {
+            let mut req = request(0);
+            req.set_tid[..ids.len()].copy_from_slice(ids);
+            req.set_tid_levels = ids.len() as u64;
+            req
+        };
+        let init = pidns::initial();
+        assert!(matches!(
+            pid_numbers(&with(&[400, 401]), &init, |_| true),
+            Err(SyscallError::InvalidArgument)
+        ));
+        let ns = PidNs::create(&init, &crate::process::userns::initial(), 0).unwrap();
+        assert!(matches!(
+            pid_numbers(&with(&[1, 2, 3]), &ns, |_| true),
+            Err(SyscallError::InvalidArgument)
+        ));
+        // Only the namespace's own entry: no kernel id is chosen.
+        let (r, claim) = pid_numbers(&with(&[1]), &ns, |_| true).unwrap();
+        assert_eq!(r.innermost(), Some(1));
+        assert!(claim.is_none());
+        r.commit(3_900_001);
+        // Both: a kernel id too, checked last.
+        let (r, claim) = pid_numbers(&with(&[5, 3_900_002]), &ns, |_| true).unwrap();
+        assert_eq!(r.innermost(), Some(5));
+        assert_eq!(claim.as_ref().map(|c| c.id()), Some(3_900_002));
+        drop(r);
+        assert!(matches!(
+            pid_numbers(&with(&[5, 0]), &ns, |_| true),
+            Err(SyscallError::InvalidArgument)
+        ));
+        assert!(ns.find(5).is_none(), "a failed walk frees what it reserved");
+        assert!(matches!(
+            pid_numbers(&with(&[1]), &ns, |_| true),
+            Err(SyscallError::FileExists)
+        ));
+        pidns::release(3_900_001);
     }
 }

@@ -56,6 +56,10 @@ pub struct ForkOptions {
     pub pidfd_autokill: bool,
     /// clone3's set_tid: the child's ID, claimed (`process::IdClaim`).
     pub pid: Option<ProcessId>,
+    /// Its numbers in the PID namespaces below the initial one, reserved
+    /// by the clone (with set_tid's choices); the fork reserves them
+    /// itself when None.
+    pub pid_numbers: Option<super::pidns::Pending>,
     /// CLONE_CLEAR_SIGHAND: handlers other than SIG_IGN start as SIG_DFL,
     /// and every action's flags and mask are cleared (Linux's
     /// flush_signal_handlers).
@@ -92,6 +96,7 @@ impl Default for ForkOptions {
             pidfd: None,
             pidfd_autokill: false,
             pid: None,
+            pid_numbers: None,
             clear_sighand: false,
             no_new_privs: false,
             autoreap: false,
@@ -137,6 +142,24 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
 
     let current_thread = super::current_thread().ok_or(KernelError::ThreadNotFound { tid: 0 })?;
 
+    // The child goes in the PID namespace for its parent's children, with
+    // a number at each level (alloc_pid): one whose init has exited takes
+    // no more (ENOMEM).
+    let pid_ns = opts.namespaces.as_ref().map_or_else(
+        || current_thread.namespaces().pid_for_children.clone(),
+        |n| n.pid_for_children.clone(),
+    );
+    let numbers = match opts.pid_numbers.as_ref().and_then(|p| p.take()) {
+        Some(r) => r,
+        None => super::pidns::reserve(&pid_ns, &[], |_| false).map_err(|e| match e {
+            super::pidns::AllocError::Exhausted => KernelError::WouldBlock,
+            _ => KernelError::OutOfMemory {
+                requested: 0,
+                available: 0,
+            },
+        })?,
+    };
+
     // Create new process as copy of current
     // The child has its parent's credentials: a process that dropped to
     // an unprivileged uid used to fork children running as root (N-93). The
@@ -158,6 +181,9 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
     new_process.set_mm_user_ns(current_process.mm_user_ns());
 
     let new_pid = new_process.pid;
+    new_process.set_pid_ns(pid_ns.clone());
+    // Released again by `discard_unstarted` if the fork fails.
+    numbers.commit(new_pid.0);
 
     // Everything that can fail once the child exists. On failure the child
     // is freed whole (N-46): its address space, frames, page tables, kernel
@@ -431,18 +457,24 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
         // Linux). They are ordinary user stores, so page protection applies,
         // and as on Linux (put_user, result unused) a store that cannot be made
         // is skipped rather than failing a clone whose child already exists.
-        let tid_bytes = (new_tid.0 as u32).to_ne_bytes();
+        // Each stores the TID as its reader sees it: the child its number
+        // in its own namespace (schedule_tail's task_pid_vnr), the parent
+        // its number in the parent's (kernel_clone's pid_vnr).
         if let Some(ptr) = opts.child_settid {
-            let _ = new_process
-                .memory_space
-                .lock()
-                .write_bytes_private(ptr as u64, &tid_bytes, false);
+            let nr = super::pidns::nr_in(new_tid.0, &pid_ns) as u32;
+            let _ = new_process.memory_space.lock().write_bytes_private(
+                ptr as u64,
+                &nr.to_ne_bytes(),
+                false,
+            );
         }
         if let Some(ptr) = opts.parent_settid {
-            let _ = current_process
-                .memory_space
-                .lock()
-                .write_bytes_private(ptr as u64, &tid_bytes, false);
+            let nr = super::pidns::nr_in(new_tid.0, &current_process.pid_ns()) as u32;
+            let _ = current_process.memory_space.lock().write_bytes_private(
+                ptr as u64,
+                &nr.to_ne_bytes(),
+                false,
+            );
         }
 
         // The calling thread's blocked mask (per thread, N-109), alternate
@@ -476,8 +508,15 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
             // not). Without namespace flags it cannot fail.
             let current = current_thread.namespaces();
             let flags = if opts.share_vm { 0x100 } else { 0 };
-            super::ns::for_clone(&current, flags, false, &current_process.user_ns())
-                .unwrap_or(current)
+            super::ns::for_clone(
+                &current,
+                flags,
+                false,
+                &current_process.user_ns(),
+                &current_process.pid_ns(),
+                0,
+            )
+            .unwrap_or(current)
         }));
         // The sets read with the credentials (above), not re-read here: a
         // set*id call on another thread in between would pair root IDs
@@ -518,6 +557,18 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
 
     // Add process to table. A fresh pid cannot already be there.
     table::add_process(new_process)?;
+    // Its namespace's init began exiting meanwhile: its kill of the
+    // namespace may have missed this child, which goes again (ENOMEM), as
+    // Linux's alloc_pid checks PIDNS_ADDING with the number's insert.
+    if !pid_ns.adding() {
+        if let Some(child) = table::get_process(new_pid) {
+            super::exit::discard_unstarted(&child);
+        }
+        return Err(KernelError::OutOfMemory {
+            requested: 0,
+            available: 0,
+        });
+    }
 
     // Registered in its container's PID namespace only now, so a fork that
     // failed above leaves nothing there.

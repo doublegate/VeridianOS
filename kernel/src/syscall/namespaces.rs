@@ -194,10 +194,11 @@ pub fn sys_unshare(flags: usize) -> SyscallResult {
         } else {
             flags
         };
+        let active = process::pidns::current();
         Some(Arc::new(
             current
-                .copy_with(flags, &owner)
-                .map_err(|_| SyscallError::InvalidArgument)?,
+                .copy_for(flags, &owner, &active, caller.creds.euid)
+                .map_err(ns_error)?,
         ))
     } else {
         None
@@ -223,6 +224,18 @@ pub fn sys_unshare(flags: usize) -> SyscallResult {
     Ok(0)
 }
 
+/// A namespace set that could not be made, as an errno: a type not yet
+/// creatable and a second new PID namespace before the first is entered
+/// EINVAL, a namespace limit ENOSPC, a PID namespace whose user namespace
+/// is not below its parent's EPERM.
+fn ns_error(e: ns::NsError) -> SyscallError {
+    match e {
+        ns::NsError::Unsupported | ns::NsError::PidPending => SyscallError::InvalidArgument,
+        ns::NsError::NoSpace => SyscallError::NoSpace,
+        ns::NsError::Permission => SyscallError::OperationNotPermitted,
+    }
+}
+
 /// The namespaces of the process `target` as setns from a pidfd takes
 /// them: its first thread's set (the one `/proc/<pid>/ns` shows).
 fn namespaces_of(target: &process::Process) -> Option<Arc<ns::Namespaces>> {
@@ -241,7 +254,9 @@ fn namespaces_of(target: &process::Process) -> Option<Arc<ns::Namespaces>> {
 /// CAP_SYS_ADMIN over its owner and CAP_SYS_CHROOT and CAP_SYS_ADMIN in
 /// the caller's own (mntns_install), and a filesystem state no other thread
 /// shares (EINVAL), since joining it moves the root and working directory to
-/// its root; a user namespace (userns_install) not the caller's own (EINVAL:
+/// its root; a PID namespace (pidns_install) then also the caller's own or
+/// one below it (EINVAL), which becomes the one for its children; a user
+/// namespace (userns_install) not the caller's own (EINVAL:
 /// re-entering it would give back dropped capabilities), from a
 /// single-threaded caller with its own filesystem state (EINVAL), and
 /// CAP_SYS_ADMIN over it (EPERM). The checks after a user namespace in one
@@ -288,6 +303,18 @@ fn install_check(ns: &NsRef) -> Result<(), SyscallError> {
                 .load(core::sync::atomic::Ordering::Acquire)
                 != 1
             {
+                return Err(SyscallError::InvalidArgument);
+            }
+            Ok(())
+        }
+        NsKind::Pid => {
+            if !admin_over(&caller) {
+                return Err(SyscallError::OperationNotPermitted);
+            }
+            let NsRef::Pid(target) = ns else {
+                return Err(SyscallError::InvalidArgument);
+            };
+            if !process::pidns::current().contains(target) {
                 return Err(SyscallError::InvalidArgument);
             }
             Ok(())
@@ -484,14 +511,59 @@ fn owner_for_caller(ns: &NsRef) -> Result<Arc<UserNs>, SyscallError> {
     Err(SyscallError::OperationNotPermitted)
 }
 
+/// NS_GET_PARENT for a PID namespace (pidns_get_parent): its parent, if
+/// that is the caller's PID namespace or below it (EPERM otherwise, and for
+/// the initial namespace).
+fn pid_parent_for_caller(
+    ns: &Arc<process::pidns::PidNs>,
+) -> Result<Arc<process::pidns::PidNs>, SyscallError> {
+    let parent = ns
+        .parent
+        .clone()
+        .ok_or(SyscallError::OperationNotPermitted)?;
+    if process::pidns::current().contains(&parent) {
+        Ok(parent)
+    } else {
+        Err(SyscallError::OperationNotPermitted)
+    }
+}
+
+/// The NS_GET_*_PIDNS translations (ns_ioctl): FROM takes `id` as PID
+/// namespace `ns` numbers it and gives the caller's number, IN the other
+/// way; the TGID forms give the task's process. No such task, or none the
+/// other side numbers, is ESRCH.
+fn pid_translate(cmd: u32, ns: &Arc<process::pidns::PidNs>, id: i32) -> SyscallResult {
+    use process::pidns;
+    let from = matches!(cmd, NS_GET_PID_FROM_PIDNS | NS_GET_TGID_FROM_PIDNS);
+    let tgid = matches!(cmd, NS_GET_TGID_FROM_PIDNS | NS_GET_TGID_IN_PIDNS);
+    let mine = pidns::current();
+    let (lookup, report) = if from { (ns, &mine) } else { (&mine, ns) };
+    let kid = (id > 0)
+        .then(|| pidns::find(id as u64, lookup))
+        .flatten()
+        .ok_or(SyscallError::ProcessNotFound)?;
+    // The task, and for the TGID forms its process (task_tgid_nr_ns).
+    let owner = if process::get_process(process::ProcessId(kid)).is_some() {
+        kid
+    } else {
+        super::process::process_of_thread(kid as usize)
+            .ok_or(SyscallError::ProcessNotFound)?
+            .0
+    };
+    match pidns::nr_in(if tgid { owner } else { kid }, report) {
+        0 => Err(SyscallError::ProcessNotFound),
+        nr => Ok(nr as usize),
+    }
+}
+
 /// An nsfs ioctl on `file`, or None if it is not an nsfs file:
 /// NS_GET_NSTYPE gives the type's CLONE_NEW* flag; NS_GET_ID stores the
 /// 64-bit id at `arg`; NS_GET_USERNS opens the owning user namespace and,
 /// for a user namespace, NS_GET_PARENT its parent ([`owner_for_caller`]);
-/// NS_GET_PARENT is EINVAL for types without a parent and EPERM for the
-/// initial PID namespace; NS_GET_OWNER_UID stores a user namespace's
-/// creator as the caller's namespace sees it (EINVAL for other types);
-/// the NS_GET_*_PIDNS
+/// NS_GET_PARENT is EINVAL for types without a parent and, for a PID
+/// namespace, its parent ([`pid_parent_for_caller`]); NS_GET_OWNER_UID stores a
+/// user namespace's creator as the caller's namespace sees it (EINVAL for other
+/// types); the NS_GET_*_PIDNS
 /// translations map a pid between a PID namespace and the caller's
 /// (EINVAL for other types, ESRCH for no such task); anything else ENOTTY.
 pub(super) fn nsfs_ioctl(
@@ -508,7 +580,12 @@ pub(super) fn nsfs_ioctl(
         NS_GET_USERNS => owner_for_caller(ns).and_then(|o| open_ns(NsRef::User(o))),
         NS_GET_PARENT => match kind {
             NsKind::User => owner_for_caller(ns).and_then(|o| open_ns(NsRef::User(o))),
-            NsKind::Pid => Err(SyscallError::OperationNotPermitted),
+            NsKind::Pid => match &ns {
+                NsRef::Pid(pid_ns) => {
+                    pid_parent_for_caller(pid_ns).and_then(|parent| open_ns(NsRef::Pid(parent)))
+                }
+                _ => Err(SyscallError::InvalidArgument),
+            },
             _ => Err(SyscallError::InvalidArgument),
         },
         NS_GET_OWNER_UID => match ns {
@@ -521,27 +598,10 @@ pub(super) fn nsfs_ioctl(
         NS_GET_PID_FROM_PIDNS
         | NS_GET_TGID_FROM_PIDNS
         | NS_GET_PID_IN_PIDNS
-        | NS_GET_TGID_IN_PIDNS => {
-            if kind != NsKind::Pid {
-                Err(SyscallError::InvalidArgument)
-            } else {
-                // One PID namespace: a pid is the same in both.
-                let id = arg as u32 as i32;
-                let tgid = matches!(cmd as u32, NS_GET_TGID_FROM_PIDNS | NS_GET_TGID_IN_PIDNS);
-                let owner = (id > 0)
-                    .then(|| {
-                        process::get_process(process::ProcessId(id as u64))
-                            .map(|p| p.pid)
-                            .or_else(|| super::process::process_of_thread(id as usize))
-                    })
-                    .flatten();
-                match owner {
-                    Some(p) if tgid => Ok(p.0 as usize),
-                    Some(_) => Ok(id as usize),
-                    None => Err(SyscallError::ProcessNotFound),
-                }
-            }
-        }
+        | NS_GET_TGID_IN_PIDNS => match &ns {
+            NsRef::Pid(pid_ns) => pid_translate(cmd as u32, pid_ns, arg as u32 as i32),
+            _ => Err(SyscallError::InvalidArgument),
+        },
         _ => Err(SyscallError::NotATerminal),
     })
 }

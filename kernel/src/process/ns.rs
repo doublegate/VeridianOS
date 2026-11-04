@@ -4,16 +4,17 @@
 //! Each namespace has Linux's identity: an inode number on nsfs (the
 //! initial namespaces Linux's fixed values, new ones from 0xF0000000) and a
 //! 64-bit id (the initial ones 1 to 8, new ones from 9). UTS, IPC, cgroup
-//! (ADR 0022 step H1), time (H2) and mount (H3) namespaces can be created;
-//! the other types exist only as their initial namespace until their steps,
-//! and asking for a new one is EINVAL, as on Linux built without that type.
+//! (ADR 0022 step H1), time (H2), mount (H3), user (H4) and PID (H5)
+//! namespaces can be created; a network namespace exists only as the
+//! initial one until its step, and asking for a new one is EINVAL, as on
+//! Linux built without that type.
 
 use alloc::{string::String, sync::Arc};
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use spin::Mutex;
 
-use super::userns::UserNs;
+use super::{pidns::PidNs, userns::UserNs};
 
 /// CLONE_NEW* flags, as `include/uapi/linux/sched.h`.
 pub const CLONE_NEWTIME: u64 = 0x0000_0080;
@@ -39,9 +40,9 @@ pub const CLONE_NS_ALL: u64 = CLONE_NEWTIME
 /// unshare_nsproxy_namespaces does.
 pub const CLONE_EMPTY_MNTNS: u64 = 1 << 37;
 /// The types a new namespace can be made of so far (ADR 0022 steps H1 to
-/// H3).
+/// H5; CLONE_NEWUSER is the credentials').
 pub const CREATABLE: u64 =
-    CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWCGROUP | CLONE_NEWTIME | CLONE_NEWNS;
+    CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWCGROUP | CLONE_NEWTIME | CLONE_NEWNS | CLONE_NEWPID;
 
 /// The clock ids a time namespace offsets (`include/uapi/linux/time.h`).
 pub const CLOCK_MONOTONIC: i32 = 1;
@@ -346,6 +347,7 @@ pub enum NsRef {
     Time(Arc<TimeNs>),
     Mnt(Arc<MntNs>),
     Plain(Arc<PlainNs>),
+    Pid(Arc<PidNs>),
     User(Arc<UserNs>),
 }
 
@@ -356,6 +358,7 @@ impl NsRef {
             NsRef::Time(ns) => ns.ident,
             NsRef::Mnt(ns) => ns.ident,
             NsRef::Plain(ns) => ns.ident,
+            NsRef::Pid(ns) => ns.ident,
             NsRef::User(ns) => ns.ident,
         }
     }
@@ -368,6 +371,7 @@ impl NsRef {
             NsRef::Time(ns) => Some(ns.owner.clone()),
             NsRef::Mnt(ns) => Some(ns.owner.clone()),
             NsRef::Plain(ns) => Some(ns.owner.clone()),
+            NsRef::Pid(ns) => Some(ns.owner.clone()),
             NsRef::User(ns) => ns.parent.clone(),
         }
     }
@@ -383,14 +387,13 @@ impl NsRef {
 }
 
 /// A thread's namespaces (Linux's nsproxy; the user namespace belongs to
-/// the credentials and the PID namespace a process is in to the process,
-/// both the initial ones until ADR 0022's H4 and H5).
+/// the credentials and the PID namespace a process is in to the process).
 #[derive(Clone)]
 pub struct Namespaces {
     pub uts: Arc<UtsNs>,
     pub ipc: Arc<PlainNs>,
     pub mnt: Arc<MntNs>,
-    pub pid_for_children: Arc<PlainNs>,
+    pub pid_for_children: Arc<PidNs>,
     pub net: Arc<PlainNs>,
     pub cgroup: Arc<PlainNs>,
     pub time: Arc<TimeNs>,
@@ -417,11 +420,18 @@ impl core::fmt::Debug for Namespaces {
 pub enum NsError {
     /// A type that cannot be created yet (EINVAL, as Linux without it).
     Unsupported,
+    /// A new PID namespace from a caller whose children already go to
+    /// another one than its own (EINVAL, copy_pid_ns).
+    PidPending,
+    /// ENOSPC: a namespace limit (too deep, or max_*_namespaces).
+    NoSpace,
+    /// EPERM: a new PID namespace's user namespace is not below its
+    /// parent's.
+    Permission,
 }
 
 struct Initial {
     set: Arc<Namespaces>,
-    pid: Arc<PlainNs>,
 }
 
 static INITIAL: spin::Once<Initial> = spin::Once::new();
@@ -435,7 +445,6 @@ fn initial_all() -> &'static Initial {
                 owner: owner.clone(),
             })
         };
-        let pid = plain(NsKind::Pid);
         // The initial time namespace's offsets are 0 and fixed.
         let time = Arc::new(TimeNs {
             ident: NsIdent::initial(NsKind::Time),
@@ -459,13 +468,12 @@ fn initial_all() -> &'static Initial {
                     owner: owner.clone(),
                     mounts: crate::fs::initial_mounts(),
                 }),
-                pid_for_children: pid.clone(),
+                pid_for_children: super::pidns::initial(),
                 net: plain(NsKind::Net),
                 cgroup: plain(NsKind::Cgroup),
                 time: time.clone(),
                 time_for_children: time,
             }),
-            pid,
         }
     })
 }
@@ -481,10 +489,9 @@ pub fn user_of(process: &super::Process) -> NsRef {
     NsRef::User(process.user_ns())
 }
 
-/// The PID namespace a process is in (only the initial one until ADR
-/// 0022's H5).
-pub fn pid_of(_process: &super::Process) -> NsRef {
-    NsRef::Plain(initial_all().pid.clone())
+/// The PID namespace a process is in.
+pub fn pid_of(process: &super::Process) -> NsRef {
+    NsRef::Pid(process.pid_ns())
 }
 
 impl Namespaces {
@@ -496,7 +503,7 @@ impl Namespaces {
             NsKind::Uts => NsRef::Uts(self.uts.clone()),
             NsKind::Ipc => NsRef::Plain(self.ipc.clone()),
             NsKind::Mnt => NsRef::Mnt(self.mnt.clone()),
-            NsKind::Pid => NsRef::Plain(self.pid_for_children.clone()),
+            NsKind::Pid => NsRef::Pid(self.pid_for_children.clone()),
             NsKind::Net => NsRef::Plain(self.net.clone()),
             NsKind::Cgroup => NsRef::Plain(self.cgroup.clone()),
             NsKind::Time => NsRef::Time(self.time_for_children.clone()),
@@ -510,10 +517,28 @@ impl Namespaces {
     /// names, as copy_utsname copies them; a new time namespace becomes the
     /// one for children, with the offsets of the current one for children,
     /// as copy_time_ns; a new mount namespace a copy of this one's tree, or
-    /// with CLONE_EMPTY_MNTNS of its root mount only, as copy_mnt_ns). A type
-    /// not yet creatable is EINVAL; CLONE_NEWUSER is the credentials', not
-    /// looked at here. The new namespaces belong to user namespace `owner`.
+    /// with CLONE_EMPTY_MNTNS of its root mount only, as copy_mnt_ns; a new
+    /// PID namespace the one for children, below the current one for
+    /// children, as copy_pid_ns). A type not yet creatable is EINVAL;
+    /// CLONE_NEWUSER is the credentials', not looked at here. The new
+    /// namespaces belong to user namespace `owner`. For a caller in this
+    /// set's PID namespace for children, with kernel uid 0 charged; see
+    /// [`Self::copy_for`].
     pub fn copy_with(&self, flags: u64, owner: &Arc<UserNs>) -> Result<Namespaces, NsError> {
+        self.copy_for(flags, owner, &self.pid_for_children.clone(), 0)
+    }
+
+    /// [`Self::copy_with`] for a caller in PID namespace `active` whose
+    /// effective kernel uid is `creator` (charged for a new PID namespace):
+    /// a new PID namespace while the namespace for children is not
+    /// `active` (after an unshare(CLONE_NEWPID)) is EINVAL.
+    pub fn copy_for(
+        &self,
+        flags: u64,
+        owner: &Arc<UserNs>,
+        active: &Arc<PidNs>,
+        creator: u32,
+    ) -> Result<Namespaces, NsError> {
         let wanted = flags & CLONE_NS_ALL & !CLONE_NEWUSER;
         if wanted & !CREATABLE != 0 {
             return Err(NsError::Unsupported);
@@ -535,6 +560,16 @@ impl Namespaces {
         }
         if flags & CLONE_NEWIPC != 0 {
             new.ipc = plain(NsKind::Ipc);
+        }
+        if flags & CLONE_NEWPID != 0 {
+            if active.ident.id != self.pid_for_children.ident.id {
+                return Err(NsError::PidPending);
+            }
+            new.pid_for_children =
+                PidNs::create(&self.pid_for_children, owner, creator).map_err(|e| match e {
+                    super::pidns::CreateError::NoSpace => NsError::NoSpace,
+                    super::pidns::CreateError::Permission => NsError::Permission,
+                })?;
         }
         if flags & CLONE_NEWCGROUP != 0 {
             new.cgroup = plain(NsKind::Cgroup);
@@ -568,7 +603,7 @@ impl Namespaces {
             (NsKind::Uts, NsRef::Uts(uts)) => new.uts = uts.clone(),
             (NsKind::Ipc, NsRef::Plain(p)) => new.ipc = p.clone(),
             (NsKind::Mnt, NsRef::Mnt(m)) => new.mnt = m.clone(),
-            (NsKind::Pid, NsRef::Plain(p)) => new.pid_for_children = p.clone(),
+            (NsKind::Pid, NsRef::Pid(p)) => new.pid_for_children = p.clone(),
             (NsKind::Net, NsRef::Plain(p)) => new.net = p.clone(),
             (NsKind::Cgroup, NsRef::Plain(p)) => new.cgroup = p.clone(),
             (NsKind::Time, NsRef::Time(t)) => {
@@ -618,8 +653,9 @@ impl Namespaces {
 }
 
 /// Linux's copy_namespaces, for clone: the child's set given the caller's
-/// `current`, the clone `flags`, whether the caller has CAP_SYS_ADMIN, and
-/// the user namespace new namespaces belong to (the child's).
+/// `current`, the clone `flags`, whether the caller has CAP_SYS_ADMIN, the
+/// user namespace new namespaces belong to (the child's), and the caller's
+/// PID namespace and effective kernel uid ([`Namespaces::copy_for`]).
 /// No namespace flag shares the set (unless the child must enter the time
 /// namespace for children); any but CLONE_NEWUSER needs CAP_SYS_ADMIN
 /// (EPERM); CLONE_NEWIPC with CLONE_SYSVSEM is EINVAL (the undo list would
@@ -629,6 +665,8 @@ pub fn for_clone(
     flags: u64,
     admin: bool,
     owner: &Arc<UserNs>,
+    active: &Arc<PidNs>,
+    creator: u32,
 ) -> Result<Arc<Namespaces>, CloneNsError> {
     const CLONE_VM: u64 = 0x100;
     const CLONE_SYSVSEM: u64 = 0x0004_0000;
@@ -646,8 +684,8 @@ pub fn for_clone(
         return Err(CloneNsError::Invalid);
     }
     let new = current
-        .copy_with(flags, owner)
-        .map_err(|_| CloneNsError::Invalid)?;
+        .copy_for(flags, owner, active, creator)
+        .map_err(CloneNsError::from)?;
     Ok(Arc::new(new.for_child(share_vm)))
 }
 
@@ -658,6 +696,18 @@ pub enum CloneNsError {
     Permission,
     /// EINVAL.
     Invalid,
+    /// ENOSPC: a namespace limit.
+    NoSpace,
+}
+
+impl From<NsError> for CloneNsError {
+    fn from(e: NsError) -> Self {
+        match e {
+            NsError::Unsupported | NsError::PidPending => CloneNsError::Invalid,
+            NsError::NoSpace => CloneNsError::NoSpace,
+            NsError::Permission => CloneNsError::Permission,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -693,12 +743,10 @@ mod tests {
     #[test]
     fn types_not_yet_creatable_are_einval() {
         let set = initial();
-        for flag in [CLONE_NEWPID, CLONE_NEWNET] {
-            assert_eq!(
-                set.copy_with(flag, &userns::initial()).err(),
-                Some(NsError::Unsupported)
-            );
-        }
+        assert_eq!(
+            set.copy_with(CLONE_NEWNET, &userns::initial()).err(),
+            Some(NsError::Unsupported)
+        );
         assert!(set
             .copy_with(
                 CLONE_NEWIPC | CLONE_NEWCGROUP | CLONE_NEWTIME,
@@ -743,30 +791,39 @@ mod tests {
         assert!(joined.get(NsKind::Mnt).same(&full.get(NsKind::Mnt)));
     }
 
+    fn for_clone_test(
+        set: &Arc<Namespaces>,
+        flags: u64,
+        admin: bool,
+        owner: &Arc<UserNs>,
+    ) -> Result<Arc<Namespaces>, CloneNsError> {
+        for_clone(set, flags, admin, owner, &set.pid_for_children, 0)
+    }
+
     #[test]
     fn clone_namespace_rules_are_copy_namespaces() {
         let set = initial();
         // No namespace flag: the same set.
-        let same = for_clone(&set, 0x100, false, &userns::initial()).unwrap();
+        let same = for_clone_test(&set, 0x100, false, &userns::initial()).unwrap();
         assert!(Arc::ptr_eq(&same, &set));
         assert_eq!(
-            for_clone(&set, CLONE_NEWUTS, false, &userns::initial()).err(),
+            for_clone_test(&set, CLONE_NEWUTS, false, &userns::initial()).err(),
             Some(CloneNsError::Permission)
         );
         assert_eq!(
-            for_clone(&set, CLONE_NEWIPC | 0x0004_0000, true, &userns::initial()).err(),
+            for_clone_test(&set, CLONE_NEWIPC | 0x0004_0000, true, &userns::initial()).err(),
             Some(CloneNsError::Invalid)
         );
         // EPERM comes before a type that does not exist yet.
         assert_eq!(
-            for_clone(&set, CLONE_NEWPID, false, &userns::initial()).err(),
+            for_clone_test(&set, CLONE_NEWNET, false, &userns::initial()).err(),
             Some(CloneNsError::Permission)
         );
         assert_eq!(
-            for_clone(&set, CLONE_NEWPID, true, &userns::initial()).err(),
+            for_clone_test(&set, CLONE_NEWNET, true, &userns::initial()).err(),
             Some(CloneNsError::Invalid)
         );
-        let new = for_clone(&set, CLONE_NEWUTS, true, &userns::initial()).unwrap();
+        let new = for_clone_test(&set, CLONE_NEWUTS, true, &userns::initial()).unwrap();
         assert!(!new.get(NsKind::Uts).same(&set.get(NsKind::Uts)));
     }
 
@@ -827,6 +884,36 @@ mod tests {
         // The raw and coarse clocks have no timers; others do not move.
         assert_eq!(t.to_host(4, 150), 150);
         assert_eq!(t.to_host(0, 150), 150);
+    }
+
+    /// copy_pid_ns: a new PID namespace goes below the one for children,
+    /// and only while that is the caller's own.
+    #[test]
+    fn a_new_pid_namespace_is_for_children() {
+        let set = initial();
+        let new = set.copy_with(CLONE_NEWPID, &userns::initial()).unwrap();
+        let pid = new.pid_for_children.clone();
+        assert_eq!(pid.level, 1);
+        assert_eq!(
+            pid.parent.as_ref().unwrap().ident.id,
+            set.pid_for_children.ident.id
+        );
+        assert!(!new.get(NsKind::Pid).same(&set.get(NsKind::Pid)));
+        assert!(new.get(NsKind::Uts).same(&set.get(NsKind::Uts)));
+        // After that unshare the caller is still in the initial one: a
+        // second is EINVAL until it has entered.
+        assert_eq!(
+            new.copy_for(CLONE_NEWPID, &userns::initial(), &set.pid_for_children, 0)
+                .err(),
+            Some(NsError::PidPending)
+        );
+        let deeper = new
+            .copy_for(CLONE_NEWPID, &userns::initial(), &pid, 0)
+            .unwrap();
+        assert_eq!(deeper.pid_for_children.level, 2);
+        // setns to it replaces the one for children.
+        let joined = set.with(&NsRef::Pid(pid.clone()));
+        assert_eq!(joined.pid_for_children.ident.id, pid.ident.id);
     }
 
     #[test]

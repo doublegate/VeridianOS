@@ -318,6 +318,18 @@
   over the namespace its memory came from, and `/proc/<pid>` of one is owned by that
   namespace's root. mount, umount2 and pivot_root still need CAP_SYS_ADMIN in the initial
   namespace (ADR 0024).
+- PID namespaces (ADR 0022 H5a): unshare, clone and clone3 can make one, and setns can join
+  one below the caller's. A process has a number at each level, and getpid, getppid, gettid,
+  fork's and clone's results, wait4, waitid, kill, tkill, tgkill, the process group and session
+  calls, set_tid_address, siginfo's si_pid and clone3's set_tid (one entry per level) all use
+  the caller's namespace's numbers. The first process in a namespace is its init: orphans are
+  reparented to it, it takes from inside only the signals it handles, and when it exits the rest
+  of the namespace is killed and no more processes can be made there (ENOMEM). procfs shows the
+  namespace it was mounted in, `/proc/<pid>/status` has the NStgid, NSpid, NSpgid and NSsid
+  lines, NS_GET_PARENT and the NS_GET_*_PIDNS ioctls work for PID namespaces, and
+  `/proc/sys/user/max_pid_namespaces` limits how many each user may make. readlink of a
+  `/proc/<pid>/ns` link with no namespace behind it is now ENOENT (it was EINVAL), and one the
+  caller may not read EACCES. kconfig's CONFIG_PID_NS is now set.
 - rseq stays ENOSYS, as on Linux built without CONFIG_RSEQ: glibc runs without it and musl does
   not use it.
 - A signal from rt_sigqueueinfo, rt_tgsigqueueinfo or pidfd_send_signal that ends a sender

@@ -314,7 +314,9 @@ What remains:
   1 and are never reused, where Linux wraps at `pid_max` and reuses freed ids. A system that
   creates more than 4194303 processes and threads gets ids above `pid_max`, and an id past
   2147483647 no longer fits in `pid_t`. Programs that read `pid_max` to size a table, or that use
-  it as an id no process has (LTP's `tst_get_unused_pid`), work until then.
+  it as an id no process has (LTP's `tst_get_unused_pid`), work until then. A PID namespace
+  below the initial one numbers its processes the same way, and one that has handed out every
+  number below `pid_max` makes no more (EAGAIN).
 - **pidfds have no ioctls and no fdinfo.** pidfd_open, pidfd_send_signal, pidfd_getfd,
   waitid(P_PIDFD) and clone(CLONE_PIDFD) work as on Linux, but PIDFD_GET_INFO and the namespace
   ioctls are not implemented and `/proc/<pid>/fdinfo` (where Linux shows a pidfd's pid) does not exist.
@@ -365,9 +367,21 @@ What remains:
   capability (ADR 0024 will give them one); the private mount call keeps its own rules. The VFS
   finds open files by path, so a descriptor opened in another mount namespace is looked up by
   its path in the caller's (for fstat's mount id, fchdir and the like) once the two trees
-  differ, and sync(2) flushes the filesystems of the initial namespace only. PID and
-  network namespaces exist only as the initial ones: unshare, clone and clone3 refuse new ones
-  with EINVAL, as Linux does when built without them, until their steps (H5, H6). User
+  differ, and sync(2) flushes the filesystems of the initial namespace only. Network namespaces
+  exist only as the initial one: unshare, clone and clone3 refuse new ones with EINVAL, as
+  Linux does when built without them, until their step (H6). PID namespaces can be made and
+  joined, and the main interfaces translate pids through the caller's (ADR 0022 H5a): getpid
+  and its family, fork, clone and clone3 (with set_tid at each level), wait4, waitid, kill,
+  tkill, tgkill, siginfo, the process group and session calls, set_tid_address, the nsfs
+  translations, and procfs, which shows the namespace it was mounted in. Until H5b the
+  scheduling and priority calls, prlimit, ptrace, the pidfd calls and their fdinfo,
+  process_vm_*, kcmp, capget and capset, CPU clock ids, SIGEV_THREAD_ID, the robust-list and PI
+  futex owner words, SO_PEERCRED, F_GETLK, F_SETOWN and F_GETOWN and a terminal's process group
+  still take and return the initial namespace's numbers. In each namespace numbers count up
+  from 1 and are not handed out again, as in the initial one (above); a group's or session's
+  number is kept while a member lives. An init whose exit takes its namespace down waits, as
+  Linux's, for those of its processes whose parents are outside the namespace to be reaped.
+  User
   namespaces can be created, mapped and joined, ids are translated where they cross the
   system-call boundary, and each privilege check asks about the user namespace Linux names (ADR
   0022 H4a to H4c), with these gaps: mount(2), umount2 and pivot_root still need CAP_SYS_ADMIN
@@ -375,22 +389,22 @@ What remains:
   can make a mount namespace and join it but not mount in it; a setns through a pidfd that
   joins a user namespace checks the namespaces after it with the caller's credentials from
   before, where Linux uses the new ones; the priority and scheduling calls lack cap_safe_nice's
-  rule that a caller hold the target's permitted capabilities. Of the ids: si_pid and
-  every other pid are not translated (no PID namespaces until H5); SCM_CREDENTIALS is not
-  modelled; every filesystem belongs to the initial namespace, so Linux's EOVERFLOW for creating
+  rule that a caller hold the target's permitted capabilities. Of the ids: SCM_CREDENTIALS is
+  not modelled; every filesystem belongs to the initial namespace, so Linux's EOVERFLOW for creating
   a file with an fsuid its filesystem's namespace does not map cannot arise; the per-user counts
   (queued signals, inotify watches, epoll watches, POSIX timers) are per kernel uid across all
   namespaces, where Linux counts per user in each namespace; a map file finds its namespace by the pid
   at each write, where Linux binds it at open (the opener's credentials are still the ones
   checked); max_user_namespaces counts each user's namespaces system-wide, where Linux keeps
-  a count per user in each namespace, and `/proc/sys/user` has only that one limit. Creating a user namespace needs
+  a count per user in each namespace, and max_pid_namespaces likewise; `/proc/sys/user` has
+  only those two limits. Creating a user namespace needs
   CAP_SYS_ADMIN unless root sets `/proc/sys/kernel/unprivileged_userns_clone` to 1 (it is 0 by
   default, by the maintainer's choice; Linux allows it to everyone).
   unshare(CLONE_FILES) in a multithreaded process is
   EINVAL, since the descriptor table belongs to the process, not the thread. The nsfs file's
   st_dev is procfs's, not an nsfs device's, and `/proc/sys/kernel/hostname` cannot be written
   (sethostname can). NS_MNT_GET_*, listns, statns and the `/proc/sys/user/max_*_namespaces` limits
-  other than max_user_namespaces do not exist. No vDSO
+  other than max_user_namespaces and max_pid_namespaces do not exist. No vDSO
   reads the offsets, as there is no vDSO at all (below).
 - **personality changes little.** Every value is stored and reported, but only PER_LINUX
   exists, and only STICKY_TIMEOUTS, UNAME26 and READ_IMPLIES_EXEC change anything.

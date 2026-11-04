@@ -107,8 +107,8 @@ pub(crate) fn sys_fork_with(opts: &crate::process::fork::ForkOptions) -> Syscall
                 }
             }
 
-            // In parent process, return child PID
-            Ok(child_pid.0 as usize)
+            // The child's pid as the parent sees it (pid_vnr).
+            Ok(crate::process::pidns::nr_in(child_pid.0, &current.pid_ns()) as usize)
         }
         Err(e) => {
             // Map ResourceExhausted (process table full) to WouldBlock
@@ -529,18 +529,20 @@ pub fn sys_wait4(
     };
 
     // -1 any child, > 0 that child, 0 the caller's process group, < -1 the
-    // group -pid (N-99). pid_t is an int: its low 32 bits (N-212).
+    // group -pid (N-99), each as the caller's PID namespace numbers them
+    // (one it does not name matches nothing). pid_t is an int: its low 32
+    // bits (N-212).
     let pid = pid as u32 as i32;
     let filter = match pid {
         -1 => WaitFilter::Any,
-        p if p > 0 => WaitFilter::Pid(ProcessId(p as u64)),
+        p if p > 0 => WaitFilter::Pid(ProcessId(from_vnr(p as i64))),
         0 => WaitFilter::Group(
             current_process()
                 .ok_or(SyscallError::InvalidState)?
                 .pgid
                 .load(core::sync::atomic::Ordering::Acquire),
         ),
-        p => WaitFilter::Group(p.unsigned_abs() as u64),
+        p => WaitFilter::Group(from_vnr(p.unsigned_abs() as i64)),
     };
 
     // Parse options bitmask into WaitOptions struct
@@ -583,7 +585,7 @@ pub fn sys_wait4(
                 }
                 super::usage::write_rusage(rusage_ptr, waited.usage, waited.maxrss_pages)?;
             }
-            Ok(waited.pid.0 as usize)
+            Ok(vnr(waited.pid.0) as usize)
         }
         Err(e) => Err(wait_error(e)),
     }
@@ -604,23 +606,32 @@ pub(crate) fn wait_error(e: crate::error::KernelError) -> SyscallError {
     }
 }
 
-/// Get the current process ID
+/// A kernel id as the caller's PID namespace numbers it (pid_vnr; 0 when
+/// it has no number there).
+fn vnr(kid: u64) -> u64 {
+    crate::process::pidns::vnr(kid)
+}
+
+/// A pid the caller passed, as a kernel id; 0 (which names nothing) when
+/// its PID namespace has no such number.
+fn from_vnr(nr: i64) -> u64 {
+    crate::process::pidns::from_vnr(nr).unwrap_or(0)
+}
+
+/// Get the current process ID: its number in its own PID namespace.
 pub fn sys_getpid() -> SyscallResult {
     if let Some(process) = current_process() {
-        Ok(process.pid.0 as usize)
+        Ok(vnr(process.pid.0) as usize)
     } else {
         Err(SyscallError::ResourceNotFound)
     }
 }
 
-/// Get the parent process ID
+/// Get the parent process ID: 0 for a parent outside the caller's PID
+/// namespace (a namespace's init), as for one with none.
 pub fn sys_getppid() -> SyscallResult {
     if let Some(process) = current_process() {
-        if let Some(parent_pid) = process.parent() {
-            Ok(parent_pid.0 as usize)
-        } else {
-            Ok(0) // Init process has no parent
-        }
+        Ok(process.parent().map_or(0, |p| vnr(p.0)) as usize)
     } else {
         Err(SyscallError::ResourceNotFound)
     }
@@ -674,7 +685,7 @@ pub fn sys_thread_exit(exit_code: usize) -> SyscallResult {
 
 /// Get the current thread ID
 pub fn sys_gettid() -> SyscallResult {
-    Ok(get_thread_tid().0 as usize)
+    Ok(vnr(get_thread_tid().0) as usize)
 }
 
 /// Join with a thread, waiting for its termination
@@ -1223,10 +1234,16 @@ pub fn sys_setpgid(pid: usize, pgid: usize) -> SyscallResult {
     }
     let target_pid = match pid {
         0 => proc.pid,
-        p if p > 0 => ProcessId(p as u64),
+        p if p > 0 => ProcessId(from_vnr(p as i64)),
         _ => return Err(SyscallError::ProcessNotFound),
     };
-    let new_pgid = if pgid == 0 { target_pid.0 } else { pgid as u64 };
+    // A group the caller's PID namespace does not name is not there (EPERM
+    // below).
+    let new_pgid = if pgid == 0 {
+        target_pid.0
+    } else {
+        from_vnr(pgid as i64)
+    };
     let target =
         crate::process::table::get_process(target_pid).ok_or(SyscallError::ProcessNotFound)?;
     let sid = proc.sid.load(Ordering::Acquire);
@@ -1258,7 +1275,11 @@ pub fn sys_setpgid(pid: usize, pgid: usize) -> SyscallResult {
             return Err(SyscallError::OperationNotPermitted);
         }
     }
-    target.pgid.store(new_pgid, Ordering::Release);
+    let old = target.pgid.swap(new_pgid, Ordering::AcqRel);
+    #[cfg(feature = "alloc")]
+    crate::process::release_if_unused(old);
+    #[cfg(not(feature = "alloc"))]
+    let _ = old;
     Ok(0)
 }
 
@@ -1269,12 +1290,14 @@ pub fn sys_setpgid(pid: usize, pgid: usize) -> SyscallResult {
 pub fn sys_getpgid(pid: usize) -> SyscallResult {
     let target_pid = match pid as u32 as i32 {
         0 => current_process().ok_or(SyscallError::InvalidState)?.pid,
-        p if p > 0 => ProcessId(p as u64),
+        p if p > 0 => ProcessId(from_vnr(p as i64)),
         _ => return Err(SyscallError::ProcessNotFound),
     };
 
+    // As the caller's PID namespace numbers it: 0 for a group led from
+    // outside it.
     if let Some(target) = crate::process::table::get_process(target_pid) {
-        Ok(target.pgid.load(core::sync::atomic::Ordering::Acquire) as usize)
+        Ok(vnr(target.pgid.load(core::sync::atomic::Ordering::Acquire)) as usize)
     } else {
         Err(SyscallError::ProcessNotFound)
     }
@@ -1299,13 +1322,22 @@ pub fn sys_setsid() -> SyscallResult {
         return Err(SyscallError::OperationNotPermitted);
     }
 
-    // Set both pgid and sid to our pid (new session + group leader)
-    proc.pgid
-        .store(proc.pid.0, core::sync::atomic::Ordering::Release);
-    proc.sid
-        .store(proc.pid.0, core::sync::atomic::Ordering::Release);
+    // Set both pgid and sid to our pid (new session + group leader); the
+    // group and session left may have been the last use of their ids.
+    let old_pgid = proc
+        .pgid
+        .swap(proc.pid.0, core::sync::atomic::Ordering::AcqRel);
+    let old_sid = proc
+        .sid
+        .swap(proc.pid.0, core::sync::atomic::Ordering::AcqRel);
+    #[cfg(feature = "alloc")]
+    for old in [old_pgid, old_sid] {
+        crate::process::release_if_unused(old);
+    }
+    #[cfg(not(feature = "alloc"))]
+    let _ = (old_pgid, old_sid);
 
-    Ok(proc.pid.0 as usize)
+    Ok(vnr(proc.pid.0) as usize)
 }
 
 /// Get session ID (SYS_getsid = 124)
@@ -1315,12 +1347,12 @@ pub fn sys_setsid() -> SyscallResult {
 pub fn sys_getsid(pid: usize) -> SyscallResult {
     let target_pid = match pid as u32 as i32 {
         0 => current_process().ok_or(SyscallError::InvalidState)?.pid,
-        p if p > 0 => ProcessId(p as u64),
+        p if p > 0 => ProcessId(from_vnr(p as i64)),
         _ => return Err(SyscallError::ProcessNotFound),
     };
 
     if let Some(target) = crate::process::table::get_process(target_pid) {
-        Ok(target.sid.load(core::sync::atomic::Ordering::Acquire) as usize)
+        Ok(vnr(target.sid.load(core::sync::atomic::Ordering::Acquire)) as usize)
     } else {
         Err(SyscallError::ProcessNotFound)
     }
@@ -1537,8 +1569,9 @@ pub(super) fn process_of_thread(tid: usize) -> Option<ProcessId> {
 /// signal state exists (N-109), so this signals the thread's process; musl
 /// uses it for raise() and abort() (N-103).
 pub fn sys_tkill(tid: usize, signal: usize) -> SyscallResult {
-    // A pid_t: its low 32 bits; not positive is EINVAL (N-212).
-    let tid = positive_id(tid)?;
+    // A pid_t: its low 32 bits; not positive is EINVAL (N-212). As the
+    // caller's PID namespace numbers it (ESRCH if it does not).
+    let tid = from_vnr(positive_id(tid)? as i64) as usize;
     let caller = current_process().ok_or(SyscallError::InvalidState)?;
     let pid = process_of_thread(tid).ok_or(SyscallError::ProcessNotFound)?;
     // An int: its low 32 bits. Signals 1..=64 (0 tests for existence).
@@ -1574,7 +1607,8 @@ pub fn sys_tkill(tid: usize, signal: usize) -> SyscallResult {
 /// tgkill(2): like tkill, but the thread must belong to process `tgid`.
 pub fn sys_tgkill(tgid: usize, tid: usize, signal: usize) -> SyscallResult {
     let (tgid, tid) = (positive_id(tgid)?, positive_id(tid)?);
-    if process_of_thread(tid) != Some(ProcessId(tgid as u64)) {
+    let (kgid, ktid) = (from_vnr(tgid as i64), from_vnr(tid as i64));
+    if ktid == 0 || process_of_thread(ktid as usize) != Some(ProcessId(kgid)) {
         return Err(SyscallError::ProcessNotFound);
     }
     sys_tkill(tid, signal)
@@ -1622,7 +1656,7 @@ pub fn sys_waitid(
     let mut nonblock_pidfd = false;
     let filter = match idtype {
         P_ALL => WaitFilter::Any,
-        P_PID if id > 0 => WaitFilter::Pid(ProcessId(id as u64)),
+        P_PID if id > 0 => WaitFilter::Pid(ProcessId(from_vnr(id as i64))),
         // id 0: the caller's own group.
         P_PGID if id == 0 => WaitFilter::Group(
             current_process()
@@ -1630,7 +1664,7 @@ pub fn sys_waitid(
                 .pgid
                 .load(core::sync::atomic::Ordering::Acquire),
         ),
-        P_PGID if id > 0 => WaitFilter::Group(id as u64),
+        P_PGID if id > 0 => WaitFilter::Group(from_vnr(id as i64)),
         #[cfg(feature = "alloc")]
         P_PIDFD if id >= 0 => {
             let (file, pid, _) = super::pidfd::target(id as usize)?;
@@ -1661,7 +1695,12 @@ pub fn sys_waitid(
         // The child's real uid as the caller's user namespace sees it
         // (wait_task_zombie's from_kuid_munged).
         let uid = crate::process::userns::current().uid_munged(waited.uid);
-        let info = waitid_siginfo(waited.pid.0, uid, waited.status);
+        let pid = if waited.pid.0 == 0 {
+            0
+        } else {
+            vnr(waited.pid.0)
+        };
+        let info = waitid_siginfo(pid, uid, waited.status);
         // SAFETY: copy_to_user validates that infop is writable user memory.
         unsafe { crate::syscall::userspace::copy_to_user(infop, &info) }?;
     }
