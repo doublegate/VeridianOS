@@ -82,6 +82,7 @@ fn mount_error(e: MountError) -> SyscallError {
         MountError::NotDirectory => SyscallError::NotADirectory,
         MountError::Loop => SyscallError::SymlinkLoop,
         MountError::Again => SyscallError::WouldBlock,
+        MountError::NoSpace => SyscallError::NoSpace,
     }
 }
 

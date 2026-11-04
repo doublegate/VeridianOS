@@ -290,7 +290,8 @@
   EINVAL): the new root's mount becomes the caller's root and the old root moves to put_old,
   also at the namespace root; the roots and working directories of the namespace move with
   their mounts. `pivot_root(".", ".")` stacks the old root on the new one, out of reach of any
-  path, until `umount2(".", MNT_DETACH)`. kconfig's CONFIG_MNT_NS now lists it.
+  path, until `umount2(".", MNT_DETACH)`; at most 16 stack (ENOSPC past that, which bounds the
+  kernel's walks over them). kconfig's CONFIG_MNT_NS now lists it.
 - rseq stays ENOSYS, as on Linux built without CONFIG_RSEQ: glibc runs without it and musl does
   not use it.
 - A signal from rt_sigqueueinfo, rt_tgsigqueueinfo or pidfd_send_signal that ends a sender

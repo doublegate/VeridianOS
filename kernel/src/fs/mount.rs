@@ -59,7 +59,17 @@ pub enum MountError {
     Loop,
     /// EAGAIN: MNT_EXPIRE's first call marked the mount.
     Again,
+    /// ENOSPC: pivot_root(".", ".") would park roots deeper than
+    /// [`MAX_PARKED_DEPTH`].
+    NoSpace,
 }
+
+/// How deep pivot_root(".", ".") may stack parked roots, each over the
+/// last. Each one nests the trees parked before it, and the walks over
+/// them (copy, mountinfo, drop) recurse once per level, so the depth is
+/// bounded to keep them off the end of the kernel stack. Linux keeps all
+/// mounts in one flat list and bounds only their number (fs.mount-max).
+pub const MAX_PARKED_DEPTH: usize = 16;
 
 /// A propagation type mount(2) asks for (one of MS_SHARED, MS_PRIVATE,
 /// MS_SLAVE, MS_UNBINDABLE).
@@ -649,6 +659,21 @@ impl Mounts {
             {
                 return Err(MountError::Invalid);
             }
+            // pivot_root(".", ".") parks the root's tree, with the trees
+            // already parked under it, one level deeper.
+            if rebase(old, new, &root) == root {
+                let depth = t
+                    .parked
+                    .iter()
+                    .filter(|(path, _)| path_is_under(path, &root) && !path_is_under(path, new))
+                    .flat_map(|(_, trees)| trees)
+                    .map(MountTable::parked_depth)
+                    .max()
+                    .unwrap_or(0);
+                if depth + 1 > MAX_PARKED_DEPTH {
+                    return Err(MountError::NoSpace);
+                }
+            }
             // Nothing fails from here on.
             let Some(new_top) = t.mounts.remove(new) else {
                 return Err(MountError::Invalid);
@@ -937,6 +962,18 @@ impl MountTable {
                 parent = tree.root.as_ref().map_or(parent, |m| m.ids.id);
             }
         }
+    }
+
+    /// How many parked levels this tree is: 1, and 1 more for the deepest
+    /// tree parked in it.
+    fn parked_depth(&self) -> usize {
+        1 + self
+            .parked
+            .values()
+            .flatten()
+            .map(MountTable::parked_depth)
+            .max()
+            .unwrap_or(0)
     }
 
     /// Move each parked tree to `to(place)`, where that is Some.
@@ -1688,6 +1725,31 @@ mod tests {
             t.snapshot().mounts.keys().collect::<Vec<_>>(),
             ["/old", "/old/proc"]
         );
+    }
+
+    /// Each pivot_root(".", ".") parks the root's tree, with the trees
+    /// parked in it before, one level deeper; past MAX_PARKED_DEPTH it is
+    /// ENOSPC and changes nothing, so the walks over parked trees stay
+    /// bounded.
+    #[test]
+    fn parked_roots_nest_only_so_deep() {
+        let vfs = Vfs::new();
+        vfs.mount_root(Arc::new(RamFs::new())).unwrap();
+        vfs.mount("/c".into(), Arc::new(TmpFs::new(1 << 20)))
+            .unwrap();
+        let t = vfs.mounts();
+        for _ in 0..MAX_PARKED_DEPTH {
+            vfs.mount("/c/n".into(), Arc::new(TmpFs::new(1 << 20)))
+                .unwrap();
+            t.pivot_root("/c", "/c/n", "/c/n").unwrap();
+        }
+        vfs.mount("/c/n".into(), Arc::new(TmpFs::new(1 << 20)))
+            .unwrap();
+        let before = t.render_mountinfo("/");
+        assert_eq!(t.pivot_root("/c", "/c/n", "/c/n"), Err(MountError::NoSpace));
+        assert_eq!(t.render_mountinfo("/"), before);
+        // Every parked root is still there.
+        assert_eq!(before.lines().count(), MAX_PARKED_DEPTH + 3);
     }
 
     #[test]
