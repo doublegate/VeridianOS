@@ -286,6 +286,11 @@
   nothing; on a nosymfollow mount following a symlink is ELOOP. statfs's `f_flags` reports the
   mount's flags as Linux does (ST_RELATIME on most mounts now). rename now reports EXDEV before
   its permission checks, as Linux does.
+- pivot_root (ADR 0022 H3d), with Linux's checks in its order (ENOTDIR, ENOENT, EPERM, EBUSY,
+  EINVAL): the new root's mount becomes the caller's root and the old root moves to put_old,
+  also at the namespace root; the roots and working directories of the namespace move with
+  their mounts. `pivot_root(".", ".")` stacks the old root on the new one, out of reach of any
+  path, until `umount2(".", MNT_DETACH)`. kconfig's CONFIG_MNT_NS now lists it.
 - rseq stays ENOSYS, as on Linux built without CONFIG_RSEQ: glibc runs without it and musl does
   not use it.
 - A signal from rt_sigqueueinfo, rt_tgsigqueueinfo or pidfd_send_signal that ends a sender

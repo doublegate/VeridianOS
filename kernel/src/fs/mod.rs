@@ -1055,6 +1055,13 @@ struct MountTable {
     /// The mounts a mount at the same place covers ("/" too), bottom
     /// first: mounting on a mount point stacks, as in Linux.
     covered: BTreeMap<String, Vec<Arc<mount::Mount>>>,
+    /// Old roots `pivot_root(".", ".")` left on top of the new root at the
+    /// same place. Linux mounts the old root on the new root's root, where
+    /// no path walk crosses into it: these serve no path but are listed in
+    /// /proc, copied with the namespace and taken off by umount2 at that
+    /// place. By place, each a tree of its own (paths relative to its
+    /// root), the last on top.
+    parked: BTreeMap<String, Vec<MountTable>>,
 }
 
 impl MountTable {

@@ -5559,6 +5559,7 @@ static void test_namespaces_time(void);
 static void test_namespaces_mnt(void);
 static void test_mount_calls(void);
 static void test_mount_flags(void);
+static void test_pivot_root(void);
 
 /* Tests `--only NAME` can run alone (for debugging a single test). */
 static const struct {
@@ -5583,6 +5584,7 @@ static const struct {
     {"namespaces_mnt", test_namespaces_mnt},
     {"mount_calls", test_mount_calls},
     {"mount_flags", test_mount_flags},
+    {"pivot_root", test_pivot_root},
     {"threads", test_threads},
     {"cow_race", test_cow_race},
     {"signals", test_signals},
@@ -9257,6 +9259,131 @@ static void test_mount_flags(void)
     report("mount_flags", f == 0, why);
 }
 
+/* How many mounts /proc/self/mountinfo shows at mount point `point`. */
+static int t_mounts_at(const char *point)
+{
+    static char info[8192];
+    char needle[96];
+    int n = 0;
+    snprintf(needle, sizeof(needle), " %s ", point);
+    if (t_slurp("/proc/self/mountinfo", info, sizeof(info)) <= 0) return -1;
+    for (char *line = info; *line;) {
+        char *end = strchr(line, '\n');
+        if (end) *end = 0;
+        /* id parent dev root point ...: the fifth field. */
+        char *f = line;
+        for (int i = 0; i < 4 && f; i++) {
+            f = strchr(f, ' ');
+            if (f) f++;
+        }
+        if (f && strncmp(f - 1, needle, strlen(needle)) == 0) n++;
+        if (!end) break;
+        line = end + 1;
+    }
+    return n;
+}
+
+/* pivot_root (ADR 0022 H3d): LTP pivot_root01's steps, in a mount
+ * namespace of its own chrooted into a tmpfs. The errors (EBUSY when
+ * new_root is on the root's mount, EINVAL when put_old is not under it,
+ * ENOTDIR, ENOENT, EPERM), the pivot (the new root at /, the old one at
+ * put_old with its mounts, the working directory moved), then
+ * pivot_root(".", ".") and umount2(".", MNT_DETACH) as container
+ * runtimes do it. */
+static void test_pivot_root(void)
+{
+    char why[160];
+    mkdir("/tmp", 01777);
+    rmdir("/tmp/pr");
+    if (mkdir("/tmp/pr", 0755) != 0) {
+        report("pivot_root", 0, "setup");
+        return;
+    }
+    pid_t child = fork();
+    if (child == 0) {
+        int g = 0, fd;
+        char cwd[64];
+        if (unshare(CLONE_NEWNS | CLONE_FS) != 0) _exit(0x7f);
+        if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0 ||
+            mount("none", "/tmp/pr", "tmpfs", 0, NULL) != 0 || chroot("/tmp/pr") != 0 ||
+            chdir("/") != 0)
+            _exit(0x7e);
+        /* new_root not a mount point is on the root's mount: EBUSY. */
+        if (mkdir("/new", 0755) != 0 ||
+            !(syscall(SYS_pivot_root, "/new", "/new") == -1 && errno == EBUSY))
+            g |= 1;
+        if (mount("none", "/new", "tmpfs", 0, NULL) != 0 || mkdir("/new/old", 0755) != 0 ||
+            mkdir("/new/proc", 0755) != 0 || mount("proc", "/new/proc", "proc", 0, NULL) != 0 ||
+            (fd = open("/new/marker", O_CREAT | O_WRONLY, 0644)) < 0)
+            g |= 2;
+        else
+            close(fd);
+        /* put_old not under new_root: EINVAL; a file: ENOTDIR; missing:
+         * ENOENT; put_old on the root's mount: EBUSY. */
+        if (mkdir("/other", 0755) != 0 || mount("none", "/other", "tmpfs", 0, NULL) != 0 ||
+            mkdir("/other/old", 0755) != 0 ||
+            !(syscall(SYS_pivot_root, "/new", "/other/old") == -1 && errno == EINVAL) ||
+            !(syscall(SYS_pivot_root, "/new", "/new/marker") == -1 && errno == ENOTDIR) ||
+            !(syscall(SYS_pivot_root, "/new", "/new/none") == -1 && errno == ENOENT) ||
+            !(syscall(SYS_pivot_root, "/new", "/") == -1 && errno == EBUSY))
+            g |= 4;
+        /* Without CAP_SYS_ADMIN: EPERM (after the lookups). */
+        pid_t un = fork();
+        if (un == 0) {
+            if (setgid(65534) != 0 || setuid(65534) != 0) _exit(0);
+            _exit(syscall(SYS_pivot_root, "/new", "/new/old") == -1 && errno == EPERM &&
+                          syscall(SYS_pivot_root, "/new", "/new/marker") == -1 &&
+                          errno == ENOTDIR
+                      ? 0
+                      : 1);
+        }
+        if (t_exit_status(un) != 0) g |= 8;
+        /* The pivot: the new root and its /proc at /, the old root at
+         * /old with /other, the working directory (the old root) at the
+         * new root. */
+        if (syscall(SYS_pivot_root, "/new", "/new/old") != 0 || access("/marker", F_OK) != 0 ||
+            access("/old/new", F_OK) != 0 || access("/old/other/old", F_OK) != 0 ||
+            access("/proc/self/mountinfo", R_OK) != 0)
+            g |= 16;
+        if (!getcwd(cwd, sizeof(cwd)) || strcmp(cwd, "/") != 0 || t_mounts_at("/") != 1 ||
+            t_mounts_at("/old") != 1 || t_mounts_at("/old/other") != 1)
+            g |= 32;
+        /* The old root goes. */
+        if (umount2("/old", MNT_DETACH) != 0 || access("/old/other", F_OK) == 0 ||
+            t_mounts_at("/old") != 0)
+            g |= 64;
+        /* pivot_root(".", "."): the old root over the new one, reached by
+         * no path, until umount2(".") takes it off. */
+        if (mkdir("/n2", 0755) != 0 || mount("none", "/n2", "tmpfs", 0, NULL) != 0 ||
+            mkdir("/n2/proc", 0755) != 0 || mount("proc", "/n2/proc", "proc", 0, NULL) != 0 ||
+            (fd = open("/n2/m2", O_CREAT | O_WRONLY, 0644)) < 0)
+            g |= 128;
+        else
+            close(fd);
+        if (chdir("/n2") != 0 || syscall(SYS_pivot_root, ".", ".") != 0 ||
+            access("/m2", F_OK) != 0 || access("/marker", F_OK) == 0 || t_mounts_at("/") != 2 ||
+            !getcwd(cwd, sizeof(cwd)) || strcmp(cwd, "/") != 0)
+            g |= 256;
+        if (umount2(".", MNT_DETACH) != 0 || t_mounts_at("/") != 1 || access("/m2", F_OK) != 0)
+            g |= 512;
+        if (g != 0) {
+            printf("pivot-root g=%#x\n", g);
+            fflush(stdout);
+        }
+        _exit(g == 0 ? 0 : 1);
+    }
+    int f = 0, code = t_exit_status(child);
+    if (code == 0x7f || code == 0x7e)
+        f |= 1;
+    else if (code != 0)
+        f |= 2;
+    /* The parent's namespace is untouched. */
+    if (t_info_has("/tmp/pr")) f |= 4;
+    rmdir("/tmp/pr");
+    snprintf(why, sizeof(why), "f=%#x code=%d", f, code);
+    report("pivot_root", f == 0, why);
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
@@ -9381,6 +9508,7 @@ int main(int argc, char **argv)
     test_namespaces_mnt();
     test_mount_calls();
     test_mount_flags();
+    test_pivot_root();
 #if defined(__x86_64__)
     test_ustat_sysfs();
 #endif

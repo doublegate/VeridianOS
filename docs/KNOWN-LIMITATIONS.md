@@ -341,7 +341,7 @@ What remains:
   namespaces can be created, emptied and joined, and Linux mount(2) and umount2 work in them
   (ADR 0022 H3b: new tmpfs, ramfs, proc and devtmpfs mounts, bind mounts with or without
   MS_REC, MS_MOVE, remounts, MS_UNBINDABLE; ro, nosuid, nodev, noexec and nosymfollow
-  enforced, H3c), with these gaps: no pivot_root yet (H3d); the atime flags are recorded and
+  enforced, H3c; pivot_root, H3d), with these gaps: the atime flags are recorded and
   reported but change nothing, as atime is not kept; a call on a descriptor checks the mount
   serving the path it was opened at, so one opened before a mount covered that path checks the
   covering mount; making a mount read-only is EBUSY while a process of the namespace has a file
@@ -354,8 +354,13 @@ What remains:
   does not hide the mounts below that place, and moving or detaching it takes them along;
   umount2's EBUSY counts the namespace's working directories, roots and open files but not
   memory mappings, and nothing clears the MNT_EXPIRE mark; each devtmpfs mount is a new
-  instance. mount(2) and umount2 check CAP_SYS_ADMIN only, not an object capability (ADR 0024
-  will give them one); the private mount call keeps its own rules. The VFS
+  instance. pivot_root moves roots and working directories but not the paths of files already
+  open, so they are looked up by their old paths; after `pivot_root(".", ".")` a working
+  directory inside the parked old root resolves in the new root, and a parked tree is EBUSY to
+  umount2 without MNT_DETACH only while mounts are under it; mounts left under put_old's place
+  in the new root stay visible there (the tree is keyed by path); MS_BIND with MS_REC does not
+  copy parked trees. mount(2), umount2 and pivot_root check CAP_SYS_ADMIN only, not an object
+  capability (ADR 0024 will give them one); the private mount call keeps its own rules. The VFS
   finds open files by path, so a descriptor opened in another mount namespace is looked up by
   its path in the caller's (for fstat's mount id, fchdir and the like) once the two trees
   differ, and sync(2) flushes the filesystems of the initial namespace only. User, PID and

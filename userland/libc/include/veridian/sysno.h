@@ -191,6 +191,7 @@
 #define SYS_FS_UNMOUNT                   1095
 #define SYS_mount                        165
 #define SYS_umount2                      166
+#define SYS_pivot_root                   155
 #define SYS_sync                         162
 #define SYS_fsync                        74
 #define SYS_fdatasync                    75
@@ -521,6 +522,7 @@
 #define SYS_FS_UNMOUNT                   1095
 #define SYS_mount                        40
 #define SYS_umount2                      39
+#define SYS_pivot_root                   41
 #define SYS_sync                         81
 #define SYS_fsync                        82
 #define SYS_fdatasync                    83
@@ -841,6 +843,7 @@
 #define SYS_FS_UNMOUNT                   1095
 #define SYS_mount                        40
 #define SYS_umount2                      39
+#define SYS_pivot_root                   41
 #define SYS_sync                         81
 #define SYS_fsync                        82
 #define SYS_fdatasync                    83

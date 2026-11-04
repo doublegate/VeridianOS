@@ -177,6 +177,7 @@ pub mod sysno {
     pub const SYS_FS_UNMOUNT: usize = 1095;
     pub const SYS_mount: usize = 165;
     pub const SYS_umount2: usize = 166;
+    pub const SYS_pivot_root: usize = 155;
     pub const SYS_sync: usize = 162;
     pub const SYS_fsync: usize = 74;
     pub const SYS_fdatasync: usize = 75;
@@ -482,6 +483,7 @@ pub mod sysno {
     pub const SYS_FS_UNMOUNT: usize = 1095;
     pub const SYS_mount: usize = 40;
     pub const SYS_umount2: usize = 39;
+    pub const SYS_pivot_root: usize = 41;
     pub const SYS_sync: usize = 81;
     pub const SYS_fsync: usize = 82;
     pub const SYS_fdatasync: usize = 83;
@@ -777,6 +779,7 @@ pub mod sysno {
     pub const SYS_FS_UNMOUNT: usize = 1095;
     pub const SYS_mount: usize = 40;
     pub const SYS_umount2: usize = 39;
+    pub const SYS_pivot_root: usize = 41;
     pub const SYS_sync: usize = 81;
     pub const SYS_fsync: usize = 82;
     pub const SYS_fdatasync: usize = 83;

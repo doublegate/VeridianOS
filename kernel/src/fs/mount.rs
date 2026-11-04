@@ -447,31 +447,14 @@ impl Mounts {
     /// children's; or with `empty` (CLONE_EMPTY_MNTNS) only the root.
     pub fn copy(&self, empty: bool) -> Mounts {
         let old = self.snapshot();
-        let copy_stack = |point: &str| -> Vec<Arc<Mount>> {
-            old.covered
-                .get(point)
-                .into_iter()
-                .flatten()
-                .map(|m| m.copy())
-                .collect()
-        };
-        let mut table = MountTable::default();
-        if empty {
-            table.root = old.root.as_ref().map(|m| m.copy());
+        let table = if empty {
+            MountTable {
+                root: old.root.as_ref().map(|m| m.copy()),
+                ..MountTable::default()
+            }
         } else {
-            let below = copy_stack("/");
-            if !below.is_empty() {
-                table.covered.insert(String::from("/"), below);
-            }
-            table.root = old.root.as_ref().map(|m| m.copy());
-            for (path, mount) in &old.mounts {
-                let below = copy_stack(path);
-                if !below.is_empty() {
-                    table.covered.insert(path.clone(), below);
-                }
-                table.mounts.insert(path.clone(), mount.copy());
-            }
-        }
+            old.copied()
+        };
         Self::with_table(table, self.pool.clone())
     }
 
@@ -480,48 +463,12 @@ impl Mounts {
     /// first, each place's mounts in the order they cover one another:
     /// Linux's m_start walk with the mounts outside the root left out. The
     /// namespace root's parent is itself, as in Linux; a mount over another
-    /// has that one as its parent.
+    /// has that one as its parent; an old root parked by pivot_root
+    /// follows the mounts at its place, with the top one as its parent.
     fn visible(&self, root: &str) -> Vec<(String, Arc<Mount>, u32)> {
-        let table = self.snapshot();
-        let root = normalize_path(root, "/");
-        let Some(top) = table.root.clone() else {
-            return Vec::new();
-        };
         let mut out = Vec::new();
-        let bottom_id = table
-            .covered
-            .get("/")
-            .and_then(|s| s.first())
-            .map_or(top.ids.id, |m| m.ids.id);
-        let points = core::iter::once(String::from("/")).chain(table.mounts.keys().cloned());
-        for path in points {
-            if !path_is_under(&path, &root) {
-                continue;
-            }
-            let mut parent = if path == "/" {
-                bottom_id
-            } else {
-                let up = match path.rfind('/') {
-                    Some(0) | None => "/",
-                    Some(i) => &path[..i],
-                };
-                table
-                    .mount_at(table.mount_of(up))
-                    .map_or(bottom_id, |m| m.ids.id)
-            };
-            let shown = if root == "/" {
-                path.clone()
-            } else if path == root {
-                String::from("/")
-            } else {
-                String::from(&path[root.len()..])
-            };
-            for mount in table.stack(&path) {
-                let id = mount.ids.id;
-                out.push((shown.clone(), mount, parent));
-                parent = id;
-            }
-        }
+        self.snapshot()
+            .visible_into(&normalize_path(root, "/"), "/", None, &mut out);
         out
     }
 
@@ -673,6 +620,105 @@ impl Mounts {
                     t.push(&path, m);
                 }
             }
+            t.move_parked(|path| path_is_under(path, from).then(|| rebase(path, from, to)));
+            Ok(())
+        })
+    }
+
+    /// pivot_root (Linux's path_pivot_root) for a caller whose root is
+    /// canonical `root`, `new` and `old` canonical directories: the mount
+    /// at `new`, with what is under it, takes the place of the root's
+    /// mount, which goes to `old` (as the new root sees it) with the rest
+    /// of its tree. EBUSY when `new` or `old` is on the root's mount;
+    /// EINVAL unless `root` and `new` are mount points, `old` is under
+    /// `new` and `new` under `root`. With `old` the same as `new` the old
+    /// root is parked on top of the new one (`MountTable::parked`).
+    pub fn pivot_root(&self, root: &str, new: &str, old: &str) -> Result<(), MountError> {
+        let root = normalize_path(root, "/");
+        self.update(|t| {
+            let root_mnt = String::from(t.mount_of(&root));
+            let new_mnt = t.mount_of(new);
+            if new_mnt == root_mnt || t.mount_of(old) == root_mnt {
+                return Err(MountError::Busy);
+            }
+            if root_mnt != root
+                || t.mount_at(&root).is_none()
+                || new_mnt != new
+                || !path_is_under(old, new)
+                || !path_is_under(new, &root)
+            {
+                return Err(MountError::Invalid);
+            }
+            // Nothing fails from here on.
+            let Some(new_top) = t.mounts.remove(new) else {
+                return Err(MountError::Invalid);
+            };
+            // A moved mount does not expire (Linux drops it from the list).
+            new_top.expiry.store(false, Ordering::Release);
+            let covered_new = t.covered.remove(new).unwrap_or_default();
+            let (mut from_new, mut from_old) = (Vec::new(), Vec::new());
+            for path in t.under(&root) {
+                let stack = t.take_stack(&path);
+                if path_is_under(&path, new) {
+                    from_new.push((rebase(&path, new, &root), stack));
+                } else {
+                    from_old.push((path, stack));
+                }
+            }
+            let old_top = if root == "/" {
+                t.root.replace(new_top)
+            } else {
+                t.mounts.insert(root.clone(), new_top)
+            };
+            for (path, stack) in from_new {
+                for m in stack {
+                    t.push(&path, m);
+                }
+            }
+            let to = rebase(old, new, &root);
+            if to == root {
+                // pivot_root(".", "."): the old tree, rooted at "/" of its
+                // own, goes over the new root.
+                let mut group = MountTable {
+                    root: old_top,
+                    ..MountTable::default()
+                };
+                for m in covered_new {
+                    group.push(&rebase(new, &root, "/"), m);
+                }
+                for (path, stack) in from_old {
+                    for m in stack {
+                        group.push(&rebase(&path, &root, "/"), m);
+                    }
+                }
+                let parked = core::mem::take(&mut t.parked);
+                for (path, trees) in parked {
+                    let (table, at) = if path_is_under(&path, new) {
+                        (&mut *t, rebase(&path, new, &root))
+                    } else if path_is_under(&path, &root) {
+                        (&mut group, rebase(&path, &root, "/"))
+                    } else {
+                        (&mut *t, path)
+                    };
+                    table.parked.entry(at).or_default().extend(trees);
+                }
+                t.parked.entry(root.clone()).or_default().push(group);
+            } else {
+                if let Some(old_top) = old_top {
+                    t.push(&to, old_top);
+                }
+                let at = rebase(new, &root, &to);
+                for m in covered_new {
+                    t.push(&at, m);
+                }
+                for (path, stack) in from_old {
+                    let at = rebase(&path, &root, &to);
+                    for m in stack {
+                        t.push(&at, m);
+                    }
+                }
+                t.move_parked(|path| pivot_mount(path, &root, new, &to));
+            }
             Ok(())
         })
     }
@@ -750,9 +796,38 @@ impl Mounts {
         busy: bool,
     ) -> Result<(), MountError> {
         self.update(|t| {
+            if let Some(group) = t.parked.get(point).and_then(|g| g.last()) {
+                // An old root pivot_root parked here is the top mount.
+                let children = !group.mounts.is_empty() || !group.parked.is_empty();
+                if how.expire {
+                    if how.force || how.detach {
+                        return Err(MountError::Invalid);
+                    }
+                    if children {
+                        return Err(MountError::Busy);
+                    }
+                    let first = group
+                        .root
+                        .as_ref()
+                        .is_some_and(|m| !m.expiry.swap(true, Ordering::AcqRel));
+                    if first {
+                        return Err(MountError::Again);
+                    }
+                } else if children && !how.detach {
+                    return Err(MountError::Busy);
+                }
+                if let Some(groups) = t.parked.get_mut(point) {
+                    groups.pop();
+                    if groups.is_empty() {
+                        t.parked.remove(point);
+                    }
+                }
+                return Ok(());
+            }
             let mount = t.mount_at(point).cloned().ok_or(MountError::Invalid)?;
             let holds_root = t.mount_of(&normalize_path(root, "/")) == point;
-            let children = !t.under(point).is_empty();
+            let parked_under = |p: &String| p != point && path_is_under(p, point);
+            let children = !t.under(point).is_empty() || t.parked.keys().any(parked_under);
             if how.expire {
                 if holds_root || how.force || how.detach {
                     return Err(MountError::Invalid);
@@ -775,6 +850,7 @@ impl Mounts {
                 for path in t.under(point) {
                     t.take_stack(&path);
                 }
+                t.parked.retain(|p, _| !parked_under(p));
             } else if children || busy {
                 return Err(MountError::Busy);
             }
@@ -785,6 +861,92 @@ impl Mounts {
 }
 
 impl MountTable {
+    /// A copy with new mounts of the same filesystems (copy_tree): the
+    /// root first, then in path order, so a parent's id comes before its
+    /// children's, then the parked trees.
+    fn copied(&self) -> MountTable {
+        let copy_stack = |point: &str| -> Vec<Arc<Mount>> {
+            self.covered
+                .get(point)
+                .into_iter()
+                .flatten()
+                .map(|m| m.copy())
+                .collect()
+        };
+        let mut table = MountTable::default();
+        let below = copy_stack("/");
+        if !below.is_empty() {
+            table.covered.insert(String::from("/"), below);
+        }
+        table.root = self.root.as_ref().map(|m| m.copy());
+        for (path, mount) in &self.mounts {
+            let below = copy_stack(path);
+            if !below.is_empty() {
+                table.covered.insert(path.clone(), below);
+            }
+            table.mounts.insert(path.clone(), mount.copy());
+        }
+        for (path, trees) in &self.parked {
+            let trees = trees.iter().map(MountTable::copied).collect();
+            table.parked.insert(path.clone(), trees);
+        }
+        table
+    }
+
+    /// [`Mounts::visible`] on this tree: its mounts under `root`, shown
+    /// under `at`; the bottom mount at "/" has `parent` as its parent, or
+    /// itself.
+    fn visible_into(
+        &self,
+        root: &str,
+        at: &str,
+        parent: Option<u32>,
+        out: &mut Vec<(String, Arc<Mount>, u32)>,
+    ) {
+        let Some(top) = self.root.clone() else {
+            return;
+        };
+        let bottom_id = self
+            .covered
+            .get("/")
+            .and_then(|s| s.first())
+            .map_or(top.ids.id, |m| m.ids.id);
+        let points = core::iter::once(String::from("/")).chain(self.mounts.keys().cloned());
+        for path in points {
+            if !path_is_under(&path, root) {
+                continue;
+            }
+            let mut parent = if path == "/" {
+                parent.unwrap_or(bottom_id)
+            } else {
+                let up = match path.rfind('/') {
+                    Some(0) | None => "/",
+                    Some(i) => &path[..i],
+                };
+                self.mount_at(self.mount_of(up))
+                    .map_or(bottom_id, |m| m.ids.id)
+            };
+            let shown = join_root(at, relative(&path, root));
+            for mount in self.stack(&path) {
+                let id = mount.ids.id;
+                out.push((shown.clone(), mount, parent));
+                parent = id;
+            }
+            for tree in self.parked.get(&path).into_iter().flatten() {
+                tree.visible_into("/", &shown, Some(parent), out);
+                parent = tree.root.as_ref().map_or(parent, |m| m.ids.id);
+            }
+        }
+    }
+
+    /// Move each parked tree to `to(place)`, where that is Some.
+    fn move_parked(&mut self, to: impl Fn(&str) -> Option<String>) {
+        for (path, trees) in core::mem::take(&mut self.parked) {
+            let at = to(&path).unwrap_or(path);
+            self.parked.entry(at).or_default().extend(trees);
+        }
+    }
+
     /// The mounts at `point`, the covered ones first and the top last.
     fn stack(&self, point: &str) -> Vec<Arc<Mount>> {
         self.covered
@@ -884,6 +1046,33 @@ fn relative<'a>(path: &'a str, at: &str) -> &'a str {
     } else {
         &path[at.len()..]
     }
+}
+
+/// Where a mount at `path` goes when pivot_root moves the tree at `new` to
+/// `root` and the rest of `root`'s to `to`; None outside `root`.
+fn pivot_mount(path: &str, root: &str, new: &str, to: &str) -> Option<String> {
+    if path_is_under(path, new) {
+        Some(rebase(path, new, root))
+    } else if path_is_under(path, root) {
+        Some(rebase(path, root, to))
+    } else {
+        None
+    }
+}
+
+/// Where canonical `path`, a root or working directory in the namespace,
+/// is after pivot_root(`new`, `old`) by a caller whose root is `root`
+/// (Linux's chroot_fs_refs, and the mounts moving): the old root itself is
+/// the new root; a path under `new` moves with it to `root`; another path
+/// under `root` moves with the old root to `old` as the new root sees it,
+/// unless that is `root` again (`old` the same as `new`), where the old
+/// root is parked and no path reaches it: such a path stays as it is.
+pub fn pivot_ref(path: &str, root: &str, new: &str, old: &str) -> String {
+    let to = rebase(old, new, root);
+    if path == root || (to == root && !path_is_under(path, new)) {
+        return String::from(path);
+    }
+    pivot_mount(path, root, new, &to).unwrap_or_else(|| String::from(path))
 }
 
 /// `rel` ("" or "/a/b") under `root` ("/" or "/x").
@@ -1406,5 +1595,175 @@ mod tests {
         );
         assert_eq!(tmpfs_size("2k"), Ok(2048));
         assert_eq!(tmpfs_size("3G"), Ok(3 << 30));
+    }
+
+    /// A root with /c (the caller's root), /c/new, /c/new/sub, /c/other
+    /// and /proc mounted.
+    fn pivot_tree() -> Vfs {
+        let vfs = Vfs::new();
+        vfs.mount_root(Arc::new(RamFs::new())).unwrap();
+        for at in ["/c", "/c/new", "/c/new/sub", "/c/other"] {
+            vfs.mount(at.into(), Arc::new(TmpFs::new(1 << 20))).unwrap();
+        }
+        vfs.mount("/proc".into(), Arc::new(crate::fs::procfs::ProcFs::new()))
+            .unwrap();
+        vfs
+    }
+
+    fn id_at(t: &Mounts, point: &str) -> u32 {
+        t.snapshot().mount_at(point).unwrap().ids.id
+    }
+
+    #[test]
+    fn pivot_root_checks_in_linux_order() {
+        let vfs = pivot_tree();
+        let t = vfs.mounts();
+        // new_root or put_old on the root's mount: EBUSY, before anything
+        // else (Linux: "loop, on the same file system").
+        assert_eq!(
+            t.pivot_root("/c", "/c/x", "/c/x/old"),
+            Err(MountError::Busy)
+        );
+        assert_eq!(
+            t.pivot_root("/c", "/c/new", "/c/old"),
+            Err(MountError::Busy)
+        );
+        // put_old not under new_root, the root not a mount point, new_root
+        // not a mount point (its directory is on another mount).
+        assert_eq!(
+            t.pivot_root("/c", "/c/new", "/c/other/old"),
+            Err(MountError::Invalid)
+        );
+        assert_eq!(
+            t.pivot_root("/c/d", "/c/new", "/c/new/old"),
+            Err(MountError::Invalid)
+        );
+        assert_eq!(
+            t.pivot_root("/c", "/c/new/d", "/c/new/d/old"),
+            Err(MountError::Invalid)
+        );
+        // A refusal changes nothing.
+        assert_eq!(
+            t.snapshot().mounts.keys().collect::<Vec<_>>(),
+            ["/c", "/c/new", "/c/new/sub", "/c/other", "/proc"]
+        );
+    }
+
+    #[test]
+    fn pivot_root_swaps_the_root_mount_for_the_new_one() {
+        let vfs = pivot_tree();
+        let t = vfs.mounts();
+        let ids = ["/c", "/c/new", "/c/new/sub", "/c/other", "/proc"].map(|p| id_at(t, p));
+        t.pivot_root("/c", "/c/new", "/c/new/old").unwrap();
+        // The new root and what was under it at /c; the old root at
+        // put_old, with the rest of its tree; /proc, outside, unmoved.
+        let now = ["/c", "/c/sub", "/c/old", "/c/old/other", "/proc"].map(|p| id_at(t, p));
+        assert_eq!(now, [ids[1], ids[2], ids[0], ids[3], ids[4]]);
+        assert_eq!(
+            t.snapshot().mounts.keys().collect::<Vec<_>>(),
+            ["/c", "/c/old", "/c/old/other", "/c/sub", "/proc"]
+        );
+        // The new root is the caller's root mount now.
+        assert_eq!(t.umount("/c", Umount::default(), "/c", false), Ok(()));
+        assert!(t.snapshot().mount_at("/c").unwrap().sb_readonly());
+    }
+
+    #[test]
+    fn pivot_root_works_at_the_namespace_root() {
+        // Linux 7.3 mounts nullfs under the first root, so the namespace
+        // root has a parent and can be pivoted.
+        let vfs = Vfs::new();
+        vfs.mount_root(Arc::new(RamFs::new())).unwrap();
+        vfs.mount("/new".into(), Arc::new(TmpFs::new(1 << 20)))
+            .unwrap();
+        vfs.mount("/proc".into(), Arc::new(crate::fs::procfs::ProcFs::new()))
+            .unwrap();
+        let t = vfs.mounts();
+        let (root, new, proc_) = (id_at(t, "/"), id_at(t, "/new"), id_at(t, "/proc"));
+        t.pivot_root("/", "/new", "/new/old").unwrap();
+        assert_eq!(id_at(t, "/"), new);
+        assert_eq!(id_at(t, "/old"), root);
+        assert_eq!(id_at(t, "/old/proc"), proc_);
+        assert_eq!(
+            t.snapshot().mounts.keys().collect::<Vec<_>>(),
+            ["/old", "/old/proc"]
+        );
+    }
+
+    #[test]
+    fn pivot_root_onto_itself_parks_the_old_root() {
+        let vfs = Vfs::new();
+        vfs.mount_root(Arc::new(RamFs::new())).unwrap();
+        vfs.mount("/c".into(), Arc::new(TmpFs::new(1 << 20)))
+            .unwrap();
+        vfs.mount("/c/new".into(), Arc::new(TmpFs::new(1 << 20)))
+            .unwrap();
+        vfs.mount("/c/p".into(), Arc::new(crate::fs::procfs::ProcFs::new()))
+            .unwrap();
+        let t = vfs.mounts();
+        let (c, new, p) = (id_at(t, "/c"), id_at(t, "/c/new"), id_at(t, "/c/p"));
+        // pivot_root(".", ".") from /c/new.
+        t.pivot_root("/c", "/c/new", "/c/new").unwrap();
+        // Paths reach only the new root; the old one, with /p, is over it.
+        assert_eq!(id_at(t, "/c"), new);
+        assert_eq!(t.snapshot().mounts.keys().collect::<Vec<_>>(), ["/c"]);
+        let lines = |t: &Mounts| -> Vec<(u32, u32, String)> {
+            t.render_mountinfo("/c")
+                .lines()
+                .map(|l| {
+                    let f: Vec<&str> = l.split(' ').collect();
+                    (
+                        f[0].parse().unwrap(),
+                        f[1].parse().unwrap(),
+                        String::from(f[4]),
+                    )
+                })
+                .collect()
+        };
+        let ns_root = id_at(t, "/");
+        assert_eq!(
+            lines(t),
+            [
+                (new, ns_root, String::from("/")),
+                (c, new, String::from("/")),
+                (p, c, String::from("/p")),
+            ]
+        );
+        // A copy of the namespace has it too.
+        assert_eq!(lines(&t.copy(false)).len(), 3);
+        // umount2 there takes the old root off: EBUSY with /p under it
+        // unless detached.
+        let detach = Umount {
+            detach: true,
+            ..Umount::default()
+        };
+        assert_eq!(
+            t.umount("/c", Umount::default(), "/c", false),
+            Err(MountError::Busy)
+        );
+        t.umount("/c", detach, "/c", false).unwrap();
+        assert_eq!(lines(t), [(new, ns_root, String::from("/"))]);
+        assert_eq!(id_at(t, "/c"), new);
+    }
+
+    #[test]
+    fn pivot_ref_moves_roots_and_directories_with_their_mounts() {
+        let r = |p| pivot_ref(p, "/c", "/c/new", "/c/new/old");
+        // The old root stays the root (chroot_fs_refs); the new tree moves
+        // to it; the rest of the old one to put_old; outside, nothing.
+        assert_eq!(r("/c"), "/c");
+        assert_eq!(r("/c/new"), "/c");
+        assert_eq!(r("/c/new/a"), "/c/a");
+        assert_eq!(r("/c/home"), "/c/old/home");
+        assert_eq!(r("/tmp"), "/tmp");
+        let at_root = |p| pivot_ref(p, "/", "/new", "/new/old");
+        assert_eq!(at_root("/"), "/");
+        assert_eq!(at_root("/new/x"), "/x");
+        assert_eq!(at_root("/home"), "/old/home");
+        // put_old the same as new_root: the old tree is parked, which no
+        // path reaches, so its paths stay.
+        let parked = |p| pivot_ref(p, "/c", "/c/new", "/c/new");
+        assert_eq!(parked("/c/new/a"), "/c/a");
+        assert_eq!(parked("/c/home"), "/c/home");
     }
 }

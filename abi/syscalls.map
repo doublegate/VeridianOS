@@ -207,6 +207,7 @@ FsMount                 private 1094
 FsUnmount               private 1095
 mount
 umount2
+pivot_root
 sync
 fsync
 fdatasync

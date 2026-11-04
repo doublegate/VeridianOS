@@ -70,7 +70,17 @@ them through an `nsproxy` (all but user, which lives in the credentials); `pid_f
      its filesystem, so it is the same in every namespace. Mount flags are enforced where Linux
      checks them (mnt_want_write and the like), on the mount that serves the path a call
      resolved; for a call on a descriptor, the mount serving the path it was opened at, since
-     the VFS does not keep the mount in the open file.
+     the VFS does not keep the mount in the open file. pivot_root follows Linux's
+     `path_pivot_root` (fs/namespace.c), checks in its order: the new root, then put_old, looked
+     up as directories; EPERM without CAP_SYS_ADMIN; EBUSY when either is the caller's root
+     mount; EINVAL when the root is not a mount point, the new root is not one, put_old is not
+     under the new root or the new root is not under the root. The new root's mount takes the
+     root's place and the old root goes to put_old; the namespace root can be pivoted, as with
+     Linux's nullfs. Linux moves only the roots and working directories that were at the old
+     root (chroot_fs_refs) and the rest go with their mounts; here they are paths, so each one
+     in the namespace moves to where its mount went. `pivot_root(".", ".")` puts the old root
+     on top of the new one where no path reaches it (the table keeps it as a parked tree, shown
+     in mountinfo), until `umount2(".", MNT_DETACH)` takes it off.
    - **H4, user.** uid_map, gid_map and setgroups (Linux's write rules), ids translated at every
      boundary (stat, chown, credentials calls, SO_PEERCRED, siginfo si_uid, `/proc/<pid>/status`),
      and `capable()` asking about the user namespace that owns the object (Linux's ns_capable)

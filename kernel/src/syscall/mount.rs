@@ -1,5 +1,6 @@
-//! mount(2) and umount2, as Linux 7.3 (fs/namespace.c: path_mount and
-//! ksys_umount; ADR 0022 H3b), on the caller's mount namespace.
+//! mount(2), umount2 and pivot_root, as Linux 7.3 (fs/namespace.c:
+//! path_mount, ksys_umount and path_pivot_root; ADR 0022 H3b, H3d), on the
+//! caller's mount namespace.
 //!
 //! The tree operations are `fs::mount`'s; this module copies the arguments
 //! in, resolves the paths in the caller's view, checks privilege and maps
@@ -227,6 +228,85 @@ pub fn sys_umount2(target: usize, flags: usize) -> SyscallResult {
         .map_err(mount_error)
 }
 
+/// pivot_root(new_root, put_old): both looked up as directories
+/// (LOOKUP_DIRECTORY), then CAP_SYS_ADMIN, then the tree
+/// ([`mount::Mounts::pivot_root`]); then the roots and working directories
+/// of the namespace's threads move ([`move_fs_refs`]).
+pub fn sys_pivot_root(new_root: usize, put_old: usize) -> SyscallResult {
+    let view = vfs()?;
+    let new = directory(&view, new_root)?;
+    let old = directory(&view, put_old)?;
+    if !Caller::current().capable(CAP_SYS_ADMIN) {
+        return Err(SyscallError::OperationNotPermitted);
+    }
+    let tree = view.mount_tree().clone();
+    let root = String::from(view.root_path());
+    tree.pivot_root(&root, &new, &old).map_err(mount_error)?;
+    move_fs_refs(&tree, &root, &new, &old);
+    Ok(0)
+}
+
+/// The canonical path of the directory the user path at `ptr` names
+/// (symlinks followed); ENOTDIR for anything else.
+fn directory(view: &crate::fs::CallerView<'_>, ptr: usize) -> Result<String, SyscallError> {
+    let path = read_user_path(ptr)?;
+    let (node, path) = view.locate(&path, true).map_err(super::map_kernel_error)?;
+    if node.node_type() != NodeType::Directory {
+        return Err(SyscallError::NotADirectory);
+    }
+    Ok(path)
+}
+
+/// After pivot_root(`new`, `old`) by a caller whose root is `root`, every
+/// root and working directory in the namespace whose tree is `tree` where
+/// [`mount::pivot_ref`] puts it, each shared state once. Linux moves only
+/// the ones at the old root (chroot_fs_refs) and the others go with their
+/// mount; here they are paths, so all move. A working directory that is
+/// no longer under its root is the root, as after chroot.
+fn move_fs_refs(tree: &Arc<mount::Mounts>, root: &str, new: &str, old: &str) {
+    let mut seen: alloc::vec::Vec<*const process::thread::ThreadFs> = alloc::vec::Vec::new();
+    process::table::PROCESS_TABLE.for_each(|p| {
+        for thread in p.threads.lock().values() {
+            if !Arc::ptr_eq(&thread.namespaces().mnt.mounts, tree) {
+                continue;
+            }
+            let fs = thread.fs();
+            if seen.contains(&Arc::as_ptr(&fs)) {
+                continue;
+            }
+            seen.push(Arc::as_ptr(&fs));
+            let had_root = fs.root.lock().clone();
+            let cwd = crate::fs::normalize_path(&fs.cwd.lock(), "/");
+            let cwd = join(&had_root, &cwd);
+            let new_root = mount::pivot_ref(&had_root, root, new, old);
+            let cwd = mount::pivot_ref(&cwd, root, new, old);
+            let cwd = if new_root == "/" {
+                cwd
+            } else if cwd == new_root {
+                String::from("/")
+            } else {
+                match cwd.strip_prefix(new_root.as_str()) {
+                    Some(rest) if rest.starts_with('/') => String::from(rest),
+                    _ => String::from("/"),
+                }
+            };
+            *fs.root.lock() = new_root;
+            *fs.cwd.lock() = cwd;
+        }
+    });
+}
+
+/// `cwd` (relative to `root`) as a path in the whole tree.
+fn join(root: &str, cwd: &str) -> String {
+    if root == "/" {
+        String::from(cwd)
+    } else if cwd == "/" {
+        String::from(root)
+    } else {
+        alloc::format!("{root}{cwd}")
+    }
+}
+
 /// Whether a process of the namespace whose tree is `tree` has a file
 /// under `point` (canonical) open for writing, which keeps the mount from
 /// becoming read-only. Linux counts the writers of the mount, or for a
@@ -262,14 +342,7 @@ fn scan(point: &str, tree: &Arc<mount::Mounts>, writers: bool) -> bool {
             }
             let fs = thread.fs();
             let root = fs.root.lock().clone();
-            let cwd = crate::fs::normalize_path(&fs.cwd.lock(), "/");
-            let cwd = if root == "/" {
-                cwd
-            } else if cwd == "/" {
-                root.clone()
-            } else {
-                alloc::format!("{root}{cwd}")
-            };
+            let cwd = join(&root, &crate::fs::normalize_path(&fs.cwd.lock(), "/"));
             if under(&root) || under(&cwd) {
                 busy = true;
                 return;

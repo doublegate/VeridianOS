@@ -1535,6 +1535,7 @@ fn handle_syscall(
         Syscall::Mount => mount::sys_mount(arg1, arg2, arg3, arg4, arg5),
         #[cfg(feature = "alloc")]
         Syscall::Umount2 => mount::sys_umount2(arg1, arg2),
+        Syscall::PivotRoot => mount::sys_pivot_root(arg1, arg2),
         #[cfg(feature = "alloc")]
         Syscall::Sethostname => namespaces::sys_sethostname(arg1, arg2),
         #[cfg(feature = "alloc")]
@@ -4949,7 +4950,7 @@ mod tests {
         // Linux numbers with no call yet, and the gap below the private
         // range, are not decoded.
         assert!(Syscall::try_from(26).is_err()); // msync
-        assert!(Syscall::try_from(155).is_err()); // pivot_root
+        assert!(Syscall::try_from(153).is_err()); // vhangup
         assert!(Syscall::try_from(500).is_err());
         assert!(Syscall::try_from(1023).is_err());
     }
