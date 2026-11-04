@@ -43,6 +43,7 @@ pub mod session;
 pub mod signals;
 pub mod table;
 pub mod thread;
+pub mod userns;
 
 // Re-export common types
 pub use lifecycle::{exec_process, fork_process, wait_process as wait_for_child};

@@ -126,7 +126,7 @@ fn wait_for_data(inp: &File, nonblock: bool) -> Result<(), SyscallError> {
 /// Write `data` to the pipe `out` without waiting: the count it took (0 if
 /// another writer filled it first).
 fn into_pipe(out: &File, data: &[u8]) -> Result<usize, KernelError> {
-    match out.node.write(0, data) {
+    match out.write_node(0, data) {
         Err(KernelError::WouldBlock) => Ok(0),
         other => other,
     }
@@ -187,7 +187,7 @@ fn pipe_to_file(
             .node
             .pipe_splice((len - done).min(CHUNK), true, &mut |data| {
                 if !positioned {
-                    return match out.node.write(0, data) {
+                    return match out.write_node(0, data) {
                         Err(KernelError::WouldBlock) => {
                             out_full = true;
                             Ok(0)
@@ -199,7 +199,7 @@ fn pipe_to_file(
                 if count != 0 && core::mem::take(&mut first) {
                     crate::fs::remove_privs(&*out.node)?;
                 }
-                out.node.write(at as usize, &data[..count])
+                out.write_node(at as usize, &data[..count])
             });
         match r {
             Ok(0) if out_full => {
@@ -584,7 +584,7 @@ fn copy_range(
             if done == 0 {
                 crate::fs::remove_privs(&*out.node).map_err(map)?;
             }
-            let w = out.node.write(*pos_out as usize, &buf[..n]).map_err(map)?;
+            let w = out.write_node(*pos_out as usize, &buf[..n]).map_err(map)?;
             Ok((n, w))
         })();
         match step {

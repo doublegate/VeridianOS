@@ -187,6 +187,9 @@ pub struct Process {
     /// because processes are shared through `Arc` and a set*id call
     /// updates several fields at once.
     creds: Mutex<super::creds::Credentials>,
+    /// The user namespace the credentials are in (Linux's cred->user_ns;
+    /// one per process, as Linux requires a thread group to share it).
+    userns: Mutex<alloc::sync::Arc<super::userns::UserNs>>,
 
     /// Process group ID (initialized to pid)
     pub pgid: AtomicU64,
@@ -329,6 +332,18 @@ impl Process {
     /// and `Credentials::gid_for`.
     pub fn credentials(&self) -> super::creds::Credentials {
         *self.creds.lock()
+    }
+
+    /// The user namespace the credentials are in.
+    pub fn user_ns(&self) -> alloc::sync::Arc<super::userns::UserNs> {
+        self.userns.lock().clone()
+    }
+
+    /// Move the credentials into user namespace `ns` (a new one at clone
+    /// or unshare, or one joined with setns); the caller sets the calling
+    /// thread's capabilities to match (Linux's set_cred_user_ns).
+    pub fn set_user_ns(&self, ns: alloc::sync::Arc<super::userns::UserNs>) {
+        *self.userns.lock() = ns;
     }
 
     /// The process's resource limits.
@@ -523,6 +538,7 @@ impl Process {
             memory_stats: MemoryStats::default(),
             created_at: crate::arch::timer::get_ticks(),
             creds: Mutex::new(super::creds::Credentials::new(0, 0)),
+            userns: Mutex::new(super::userns::initial()),
             pgid: AtomicU64::new(pid.0),
             tracer: AtomicU64::new(0),
             tracer_capable: core::sync::atomic::AtomicBool::new(false),

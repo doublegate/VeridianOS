@@ -986,23 +986,36 @@ fn id_arg(arg: usize) -> u32 {
     arg as u32
 }
 
+/// Whether the calling thread, in user namespace `ns`, holds `cap` in the
+/// initial one. The ids these calls take are not translated yet (ADR 0022
+/// H4b), so a capability held only in a namespace of the process's own,
+/// which Linux's ns_capable_setid would accept for ids mapped there, must
+/// not let it set the initial namespace's ids, uid 0 among them.
+fn may_set_ids(
+    me: &crate::process::thread::Thread,
+    ns: &crate::process::userns::UserNs,
+    euid: u32,
+    cap: u32,
+) -> bool {
+    crate::process::userns::initial().capable(ns, euid, me.caps.lock().capable(cap))
+}
+
 /// A change of the user IDs, with the capability fixup on every thread
 /// (`Process::change_uids`). CAP_SETUID is read inside it, under the thread
 /// map that change_uids holds while it fixes every thread's sets: read
 /// before, a concurrent setuid on another thread could clear this thread's
 /// capabilities in between, and the stale answer would let it set uid 0
-/// back (PR #33 review).
+/// back (PR #33 review). It counts only in the initial user namespace
+/// ([`may_set_ids`]).
 fn change_uids<R>(
     fs: bool,
     f: impl FnOnce(&mut crate::process::creds::Credentials, bool) -> R,
 ) -> Result<R, SyscallError> {
     let me = crate::process::current_thread().ok_or(SyscallError::InvalidState)?;
     let proc = current_process().ok_or(SyscallError::InvalidState)?;
+    let ns = proc.user_ns();
     Ok(proc.change_uids(fs, |c| {
-        let may = me
-            .caps
-            .lock()
-            .capable(crate::process::linux_caps::CAP_SETUID);
+        let may = may_set_ids(&me, &ns, c.euid, crate::process::linux_caps::CAP_SETUID);
         f(c, may)
     }))
 }
@@ -1011,18 +1024,17 @@ fn change_uids<R>(
 /// fixup: Linux has none for them). CAP_SETGID is read with the change,
 /// under the thread map, which a user-ID change holds while it clears every
 /// thread's sets, so a concurrent privilege drop cannot leave a stale
-/// answer (as in [`change_uids`]).
+/// answer (as in [`change_uids`]). It counts only in the initial user
+/// namespace ([`may_set_ids`]).
 fn change_gids<R>(
     f: impl FnOnce(&mut crate::process::creds::Credentials, bool) -> R,
 ) -> Result<R, SyscallError> {
     let me = crate::process::current_thread().ok_or(SyscallError::InvalidState)?;
     let proc = current_process().ok_or(SyscallError::InvalidState)?;
+    let ns = proc.user_ns();
     let _threads = proc.threads.lock();
     Ok(proc.update_credentials(|c| {
-        let may = me
-            .caps
-            .lock()
-            .capable(crate::process::linux_caps::CAP_SETGID);
+        let may = may_set_ids(&me, &ns, c.euid, crate::process::linux_caps::CAP_SETGID);
         f(c, may)
     }))
 }

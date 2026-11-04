@@ -387,20 +387,26 @@ fn kernel_clone(mut req: CloneRequest) -> Result<usize, SyscallError> {
     use crate::process::linux_caps::{CAP_CHECKPOINT_RESTORE, CAP_SYS_ADMIN};
     let caller = process::creds::Caller::current();
     request_checks(&mut req, caller.capable(CAP_SYS_ADMIN))?;
-    // copy_creds: user namespaces do not exist yet (ADR 0022 H4), as on
-    // Linux without CONFIG_USER_NS; then copy_namespaces.
-    if req.on(ns::CLONE_NEWUSER) {
+    // copy_process refuses a new user namespace sharing the filesystem
+    // state; then copy_creds makes it (create_user_ns), and copy_namespaces
+    // the others, which belong to it and which its root may make.
+    if req.on(ns::CLONE_NEWUSER) && req.on(CLONE_FS) {
         return Err(SyscallError::InvalidArgument);
     }
+    let user_ns = if req.on(ns::CLONE_NEWUSER) {
+        Some(super::namespaces::new_user_ns(&caller)?)
+    } else {
+        None
+    };
+    let owner = user_ns.clone().unwrap_or_else(|| caller.userns.clone());
     let current_ns = process::current_thread()
         .ok_or(SyscallError::InvalidState)?
         .namespaces();
-    let namespaces = ns::for_clone(&current_ns, req.flags, caller.capable(CAP_SYS_ADMIN)).map_err(
-        |e| match e {
-            ns::CloneNsError::Permission => SyscallError::OperationNotPermitted,
-            ns::CloneNsError::Invalid => SyscallError::InvalidArgument,
-        },
-    )?;
+    let admin = user_ns.is_some() || caller.capable(CAP_SYS_ADMIN);
+    let namespaces = ns::for_clone(&current_ns, req.flags, admin, &owner).map_err(|e| match e {
+        ns::CloneNsError::Permission => SyscallError::OperationNotPermitted,
+        ns::CloneNsError::Invalid => SyscallError::InvalidArgument,
+    })?;
     let claim = match req.set_tid {
         Some(tid) => {
             let may = caller.capable(CAP_CHECKPOINT_RESTORE) || caller.capable(CAP_SYS_ADMIN);
@@ -416,7 +422,7 @@ fn kernel_clone(mut req: CloneRequest) -> Result<usize, SyscallError> {
     if req.on(CLONE_THREAD) {
         thread_clone(&req, id, namespaces)
     } else {
-        process_clone(&req, id, namespaces)
+        process_clone(&req, id, namespaces, user_ns)
     }
 }
 
@@ -429,6 +435,7 @@ fn process_clone(
     req: &CloneRequest,
     id: Option<u64>,
     namespaces: alloc::sync::Arc<ns::Namespaces>,
+    user_ns: Option<alloc::sync::Arc<process::userns::UserNs>>,
 ) -> Result<usize, SyscallError> {
     #[cfg(target_arch = "x86_64")]
     if req.on(CLONE_SETTLS) && !crate::arch::x86_64::trap::is_user_address(req.tls as u64) {
@@ -466,6 +473,7 @@ fn process_clone(
         autoreap: on(CLONE_AUTOREAP),
         namespaces: Some(namespaces),
         fs_at_root: on(CLONE_EMPTY_MNTNS),
+        user_ns,
     })
 }
 
@@ -956,7 +964,12 @@ mod tests {
         let mut alone = request(CLONE_EMPTY_MNTNS);
         assert_eq!(request_checks(&mut alone, false), Ok(()));
         assert!(matches!(
-            ns::for_clone(&ns::initial(), alone.flags, false),
+            ns::for_clone(
+                &ns::initial(),
+                alone.flags,
+                false,
+                &crate::process::userns::initial()
+            ),
             Err(ns::CloneNsError::Permission)
         ));
     }

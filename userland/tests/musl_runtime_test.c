@@ -5560,6 +5560,7 @@ static void test_namespaces_mnt(void);
 static void test_mount_calls(void);
 static void test_mount_flags(void);
 static void test_pivot_root(void);
+static void test_user_ns(void);
 
 /* Tests `--only NAME` can run alone (for debugging a single test). */
 static const struct {
@@ -5585,6 +5586,7 @@ static const struct {
     {"mount_calls", test_mount_calls},
     {"mount_flags", test_mount_flags},
     {"pivot_root", test_pivot_root},
+    {"user_ns", test_user_ns},
     {"threads", test_threads},
     {"cow_race", test_cow_race},
     {"signals", test_signals},
@@ -9384,6 +9386,143 @@ static void test_pivot_root(void)
     report("pivot_root", f == 0, why);
 }
 
+/* Write `text` to `path`; 0 or the errno. */
+static int t_write_text(const char *path, const char *text)
+{
+    int fd = open(path, O_WRONLY);
+    if (fd < 0) return errno;
+    ssize_t n = write(fd, text, strlen(text));
+    int e = n == (ssize_t)strlen(text) ? 0 : (n < 0 ? errno : EIO);
+    close(fd);
+    return e;
+}
+
+/* Read up to `len - 1` bytes of `path` into `buf`; the count, or -1. */
+static ssize_t t_read_text(const char *path, char *buf, size_t len)
+{
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return -1;
+    ssize_t n = read(fd, buf, len - 1);
+    close(fd);
+    buf[n < 0 ? 0 : n] = 0;
+    return n;
+}
+
+#ifndef NS_GET_USERNS
+#define NS_GET_USERNS 0xb701
+#define NS_GET_PARENT 0xb702
+#define NS_GET_OWNER_UID 0xb704
+#endif
+
+/* User namespaces (ADR 0022 H4a): the map files and their write rules, the
+ * unprivileged_userns_clone switch (off by default), the nsfs ioctls, and
+ * that every capability in a new namespace counts for nothing outside it. */
+static void test_user_ns(void)
+{
+    char why[200];
+    const char *sw = "/proc/sys/kernel/unprivileged_userns_clone";
+    pid_t child = fork();
+    if (child == 0) {
+        int g = 0;
+        char buf[128];
+        struct stat st;
+        /* The initial namespace maps every ID to itself. */
+        if (t_read_text("/proc/self/uid_map", buf, sizeof(buf)) < 0 ||
+            strcmp(buf, "         0          0 4294967295\n") != 0)
+            g |= 1;
+        pid_t b = fork();
+        if (b == 0) {
+            int h = 0, fd;
+            unsigned owner = 99;
+            if (unshare(CLONE_NEWUSER) != 0) _exit(0x7f);
+            if (t_read_text("/proc/self/uid_map", buf, sizeof(buf)) != 0) h |= 1;
+            /* One write; the second EPERM. */
+            if (t_write_text("/proc/self/uid_map", "0 0 1") != 0 ||
+                t_write_text("/proc/self/uid_map", "0 0 1") != EPERM)
+                h |= 2;
+            if (t_write_text("/proc/self/setgroups", "deny") != 0 ||
+                t_write_text("/proc/self/gid_map", "0 0 1\n") != 0 ||
+                t_write_text("/proc/self/setgroups", "allow") != EPERM)
+                h |= 4;
+            if (t_read_text("/proc/self/uid_map", buf, sizeof(buf)) < 0 ||
+                strcmp(buf, "         0          0          1\n") != 0)
+                h |= 8;
+            /* Every capability here, none over the initial namespace's
+             * UTS namespace. */
+            if (!(sethostname("x", 1) == -1 && errno == EPERM)) h |= 16;
+            /* Its UTS namespace's owner is above this one: EPERM; so is
+             * this namespace's parent. Its own owner reads as uid 0. */
+            fd = open("/proc/self/ns/uts", O_RDONLY);
+            if (fd < 0 || !(ioctl(fd, NS_GET_USERNS) == -1 && errno == EPERM)) h |= 32;
+            if (fd >= 0) close(fd);
+            fd = open("/proc/self/ns/user", O_RDONLY);
+            if (fd < 0 || !(ioctl(fd, NS_GET_PARENT) == -1 && errno == EPERM) ||
+                ioctl(fd, NS_GET_OWNER_UID, &owner) != 0 || owner != 0)
+                h |= 64;
+            if (fd >= 0) close(fd);
+            _exit(h);
+        }
+        int code = t_exit_status(b);
+        if (code != 0) g |= code == 0x7f ? 2 : code << 8;
+        /* From the initial namespace: NS_GET_USERNS opens it (inode
+         * 4026531837); it has no parent. */
+        int fd = open("/proc/self/ns/uts", O_RDONLY), u = -1;
+        if (fd < 0 || (u = ioctl(fd, NS_GET_USERNS)) < 0 || fstat(u, &st) != 0 ||
+            st.st_ino != 4026531837u || !(ioctl(u, NS_GET_PARENT) == -1 && errno == EPERM))
+            g |= 4;
+        if (fd >= 0) close(fd);
+        if (u >= 0) close(u);
+        /* Unprivileged, while the switch is 0: EPERM. */
+        if (t_read_text(sw, buf, sizeof(buf)) < 0 || strcmp(buf, "0\n") != 0) g |= 8;
+        pid_t c = fork();
+        if (c == 0) {
+            if (setgid(65534) != 0 || setuid(65534) != 0) _exit(1);
+            _exit(unshare(CLONE_NEWUSER) == -1 && errno == EPERM ? 0 : 1);
+        }
+        if (t_exit_status(c) != 0) g |= 16;
+        /* With it 1: an unprivileged user maps itself, the gid only after
+         * denying setgroups, and cannot go back to the parent. */
+        if (t_write_text(sw, "1") != 0) g |= 32;
+        c = fork();
+        if (c == 0) {
+            int k = 0, init_ns = open("/proc/self/ns/user", O_RDONLY);
+            if (setgid(65534) != 0 || setuid(65534) != 0 || init_ns < 0) _exit(0x7f);
+            /* The ID change made the process non-dumpable, which makes
+             * root own its /proc files; an exec would undo that. */
+            if (prctl(PR_SET_DUMPABLE, 1, 0, 0, 0) != 0) _exit(0x7d);
+            if (unshare(CLONE_NEWUSER) != 0) _exit(0x7e);
+            if (t_write_text("/proc/self/uid_map", "0 65533 1") != EPERM ||
+                t_write_text("/proc/self/uid_map", "0 65534 1") != 0)
+                k |= 1;
+            if (t_write_text("/proc/self/gid_map", "0 65534 1") != EPERM ||
+                t_write_text("/proc/self/setgroups", "deny") != 0 ||
+                t_write_text("/proc/self/gid_map", "0 65534 1") != 0)
+                k |= 2;
+            if (!(setns(init_ns, CLONE_NEWUSER) == -1 && errno == EPERM)) k |= 4;
+            /* Its capabilities here set no ids outside: an unmapped id
+             * fails (Linux EINVAL; EPERM until ids are translated). */
+            if (setuid(1) != -1 || setgid(1) != -1) k |= 8;
+            _exit(k);
+        }
+        code = t_exit_status(c);
+        if (code != 0) g |= code << 16;
+        if (t_write_text(sw, "0") != 0) g |= 64;
+        if (t_read_text("/proc/sys/user/max_user_namespaces", buf, sizeof(buf)) <= 0 ||
+            atoi(buf) <= 0)
+            g |= 128;
+        if (g != 0) {
+            printf("user-ns g=%#x\n", g);
+            fflush(stdout);
+        }
+        _exit(g == 0 ? 0 : 1);
+    }
+    int code = t_exit_status(child);
+    /* Never leave the switch on. */
+    t_write_text(sw, "0");
+    snprintf(why, sizeof(why), "code=%d", code);
+    report("user_ns", code == 0, why);
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
@@ -9509,6 +9648,7 @@ int main(int argc, char **argv)
     test_mount_calls();
     test_mount_flags();
     test_pivot_root();
+    test_user_ns();
 #if defined(__x86_64__)
     test_ustat_sysfs();
 #endif

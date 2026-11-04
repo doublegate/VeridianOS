@@ -386,10 +386,18 @@ fn install_exec_credentials(
         (ids.set_uid, ids.set_gid)
     };
     let (new_euid, new_egid) = (set_uid.unwrap_or(old.euid), set_gid.unwrap_or(old.egid));
+    // CAP_SETUID counts in the initial user namespace only: the ids the
+    // program would keep are the initial namespace's (ADR 0022 H4a).
+    let may_setuid = super::userns::initial().capable(
+        &process.user_ns(),
+        old.euid,
+        thread.caps.lock().capable(super::linux_caps::CAP_SETUID),
+    );
     let ctx = super::linux_caps::ExecContext {
         file: ids.file_caps,
         no_new_privs,
         unsafe_exec: traced_unprivileged || fs_shared,
+        may_setuid,
         egid_in_groups: old.in_group(new_egid),
     };
     // A copy: exec runs single-threaded, so nothing else changes this
@@ -682,9 +690,16 @@ fn exec_image(
         } else {
             None
         };
+        // Neither when the caller's user namespace does not map both the
+        // owner and the group (bprm_fill_uid's vfsuid_has_mapping): root
+        // of a namespace of one's own gets nothing from a program it
+        // could not have made set-ID itself.
+        let ns = process.user_ns();
+        let mapped = ns.uid_up(meta.uid).is_some() && ns.gid_up(meta.gid).is_some();
+        let suid_ids = suid && mapped;
         ExecIds {
-            set_uid: (suid && perms.set_uid).then_some(meta.uid),
-            set_gid: (suid && perms.set_gid && perms.group_exec).then_some(meta.gid),
+            set_uid: (suid_ids && perms.set_uid).then_some(meta.uid),
+            set_gid: (suid_ids && perms.set_gid && perms.group_exec).then_some(meta.gid),
             readable: readable(&meta) && interp_readable,
             unprivileged_tracer_at_start: false,
             file_caps,
@@ -1511,10 +1526,11 @@ mod tests {
             process::creds::{Caller, Credentials},
         };
         let file = NodeType::File;
-        let root = Caller::KERNEL;
+        let root = Caller::kernel();
         let user = |uid: u32, gid: u32| Caller {
             creds: Credentials::new(uid, gid),
             caps: crate::process::linux_caps::LinuxCaps::EMPTY,
+            userns: crate::process::userns::initial(),
         };
         // Root: any execute bit, but at least one.
         assert!(!may_execute(&meta(file, 0o644, 0, 0), &root));
@@ -1551,8 +1567,8 @@ mod tests {
         let prog = root.create("prog", Permissions::from_mode(0o755)).unwrap();
         let denied =
             |r: Result<(), KernelError>| matches!(r, Err(KernelError::PermissionDenied { .. }));
-        assert!(denied(check_executable(&*dir, &Caller::KERNEL)));
-        assert!(denied(check_executable(&*plain, &Caller::KERNEL)));
-        assert!(check_executable(&*prog, &Caller::KERNEL).is_ok());
+        assert!(denied(check_executable(&*dir, &Caller::kernel())));
+        assert!(denied(check_executable(&*plain, &Caller::kernel())));
+        assert!(check_executable(&*prog, &Caller::kernel()).is_ok());
     }
 }

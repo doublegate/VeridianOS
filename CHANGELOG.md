@@ -292,6 +292,17 @@
   their mounts. `pivot_root(".", ".")` stacks the old root on the new one, out of reach of any
   path, until `umount2(".", MNT_DETACH)`; at most 16 stack (ENOSPC past that, which bounds the
   kernel's walks over them). kconfig's CONFIG_MNT_NS now lists it.
+- User namespaces (ADR 0022 H4a): clone and unshare with CLONE_NEWUSER, setns into one, and
+  `/proc/<pid>/{uid_map,gid_map,setgroups}` with Linux's write rules; NS_GET_USERNS,
+  NS_GET_PARENT and NS_GET_OWNER_UID answer by their owners. The creator gets every capability
+  in the new namespace and none outside it. Creating one needs CAP_SYS_ADMIN unless root sets
+  the new `/proc/sys/kernel/unprivileged_userns_clone` to 1 (0 by default);
+  `/proc/sys/user/max_user_namespaces` limits how many each user may make (15000 by default).
+  Set-ID bits are ignored unless the caller's user namespace maps both the file's owner and
+  its group, as Linux's bprm_fill_uid. Writes to the map files and to `timens_offsets` check the
+  credentials the descriptor was opened with, as Linux does. `/proc/<pid>` and its files are
+  now owned by the process's effective user and group while it is dumpable, as on Linux. Ids
+  are not translated yet (H4b).
 - rseq stays ENOSYS, as on Linux built without CONFIG_RSEQ: glibc runs without it and musl does
   not use it.
 - A signal from rt_sigqueueinfo, rt_tgsigqueueinfo or pidfd_send_signal that ends a sender

@@ -71,6 +71,10 @@ pub struct ForkOptions {
     /// CLONE_EMPTY_MNTNS: the child's root and working directory are the
     /// root of its new, empty mount namespace.
     pub fs_at_root: bool,
+    /// CLONE_NEWUSER: the child's new user namespace, in which it starts
+    /// with every capability (Linux's set_cred_user_ns); the parent's
+    /// when None.
+    pub user_ns: Option<alloc::sync::Arc<super::userns::UserNs>>,
 }
 
 impl Default for ForkOptions {
@@ -93,6 +97,7 @@ impl Default for ForkOptions {
             autoreap: false,
             namespaces: None,
             fs_at_root: false,
+            user_ns: None,
         }
     }
 }
@@ -144,6 +149,11 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
         .credentials(parent_creds)
         .pid(opts.pid)
         .build();
+    new_process.set_user_ns(
+        opts.user_ns
+            .clone()
+            .unwrap_or_else(|| current_process.user_ns()),
+    );
 
     let new_pid = new_process.pid;
 
@@ -464,12 +474,19 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
             // not). Without namespace flags it cannot fail.
             let current = current_thread.namespaces();
             let flags = if opts.share_vm { 0x100 } else { 0 };
-            super::ns::for_clone(&current, flags, false).unwrap_or(current)
+            super::ns::for_clone(&current, flags, false, &current_process.user_ns())
+                .unwrap_or(current)
         }));
         // The sets read with the credentials (above), not re-read here: a
         // set*id call on another thread in between would pair root IDs
         // with dropped sets, which exec turns back into full privilege.
-        *new_thread.caps.lock() = parent_caps;
+        // In a new user namespace it holds every capability, which count
+        // only there and below (set_cred_user_ns).
+        *new_thread.caps.lock() = if opts.user_ns.is_some() {
+            super::linux_caps::CapSets::ROOT
+        } else {
+            parent_caps
+        };
         new_process.add_thread(new_thread)?;
         Ok(new_tid)
     };

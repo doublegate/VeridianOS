@@ -299,27 +299,44 @@ impl Credentials {
 /// the process's credentials and the calling thread's effective
 /// capabilities. Linux keeps both in the task's `cred`; here the IDs are
 /// per process and the capability sets per thread.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Caller {
     pub creds: Credentials,
     /// The effective set (pE): what the checks consult.
     pub caps: super::linux_caps::LinuxCaps,
+    /// The user namespace the credentials and the set are in.
+    pub userns: alloc::sync::Arc<super::userns::UserNs>,
 }
+
+/// Two callers are the same credentials (Linux compares `struct cred`
+/// pointers; here the values, and the user namespace by identity).
+impl PartialEq for Caller {
+    fn eq(&self, other: &Self) -> bool {
+        self.creds == other.creds
+            && self.caps == other.caps
+            && self.userns.ident.id == other.userns.ident.id
+    }
+}
+
+impl Eq for Caller {}
 
 impl Caller {
     /// The kernel itself (no current process, as the kernel console):
-    /// root with every capability.
-    pub const KERNEL: Self = Self {
-        creds: Credentials::new(0, 0),
-        caps: super::linux_caps::LinuxCaps::FULL,
-    };
+    /// root with every capability in the initial user namespace.
+    pub fn kernel() -> Self {
+        Self {
+            creds: Credentials::new(0, 0),
+            caps: super::linux_caps::LinuxCaps::FULL,
+            userns: super::userns::initial(),
+        }
+    }
 
     /// The calling thread: its process's credentials and its own
     /// effective set. Kernel context, with no process, is [`Self::KERNEL`];
     /// a process without a current thread holds nothing (fails closed).
     pub fn current() -> Self {
         let Some(process) = super::current_process() else {
-            return Self::KERNEL;
+            return Self::kernel();
         };
         let caps = super::current_thread().map_or(super::linux_caps::LinuxCaps::EMPTY, |t| {
             t.caps.lock().effective
@@ -327,18 +344,28 @@ impl Caller {
         Self {
             creds: process.credentials(),
             caps,
+            userns: process.user_ns(),
         }
     }
 
-    /// Whether the caller holds `cap` (Linux's `capable`, and
-    /// `capable_wrt_inode_uidgid`, in the initial user namespace).
-    pub const fn capable(&self, cap: u32) -> bool {
-        self.caps.has(cap)
+    /// Whether the caller holds `cap` in the initial user namespace
+    /// (Linux's `capable`). A process in a user namespace below it holds
+    /// nothing there, whatever its set, unless the namespace's owner
+    /// rules give it ([`super::userns::UserNs::capable`]); the checks Linux
+    /// asks of another namespace use [`Self::ns_capable`] (ADR 0022 H4c).
+    pub fn capable(&self, cap: u32) -> bool {
+        self.ns_capable(&super::userns::initial(), cap)
+    }
+
+    /// Whether the caller holds `cap` over user namespace `ns` (Linux's
+    /// ns_capable).
+    pub fn ns_capable(&self, ns: &super::userns::UserNs, cap: u32) -> bool {
+        ns.capable(&self.userns, self.creds.euid, self.caps.has(cap))
     }
 
     /// Whether the caller owns a file owned by `file_uid` or holds
     /// CAP_FOWNER (Linux's inode_owner_or_capable).
-    pub const fn owner_or_capable(&self, file_uid: u32) -> bool {
+    pub fn owner_or_capable(&self, file_uid: u32) -> bool {
         self.creds.fsuid == file_uid || self.capable(super::linux_caps::CAP_FOWNER)
     }
 }

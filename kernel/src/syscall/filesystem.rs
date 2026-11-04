@@ -2881,7 +2881,7 @@ fn access_path(path: &str, mode: usize, flags: usize) -> SyscallResult {
     // a directory the real user may not search is not searched for it.
     let vfs = try_get_vfs()
         .ok_or(SyscallError::InvalidState)?
-        .as_caller_with(caller);
+        .as_caller_with(caller.clone());
     let (node, canonical) = vfs
         .locate(path, flags & AT_SYMLINK_NOFOLLOW == 0)
         .map_err(map_resolve_err)?;
@@ -4591,7 +4591,7 @@ pub(super) fn pwrite_segs(
     }
     let mut at = offset;
     let written = super::userspace::consume_from_segs(src.truncate(count), true, |kbuf| {
-        let n = file.node.write(at, kbuf).map_err(super::map_kernel_error)?;
+        let n = file.write_node(at, kbuf).map_err(super::map_kernel_error)?;
         at += n;
         Ok(n)
     })?;
@@ -5109,6 +5109,7 @@ mod tests {
         Caller {
             creds: c,
             caps: caps.iter().fold(LinuxCaps::EMPTY, |s, &cap| s.with(cap)),
+            userns: crate::process::userns::initial(),
         }
     }
 
@@ -5131,7 +5132,7 @@ mod tests {
         );
         assert_eq!(chmod_perms(&u, 1000, 20, 0o2755).unwrap().to_mode(), 0o2755);
         assert_eq!(chmod_perms(&u, 1000, 7, 0o6755).unwrap().to_mode(), 0o4755);
-        let root = Caller::KERNEL;
+        let root = Caller::kernel();
         assert_eq!(
             chmod_perms(&root, 1000, 7, 0o2755).unwrap().to_mode(),
             0o2755
@@ -5144,6 +5145,7 @@ mod tests {
         let bare_root = Caller {
             creds: Credentials::new(0, 0),
             caps: LinuxCaps::EMPTY,
+            userns: crate::process::userns::initial(),
         };
         assert_eq!(
             chmod_perms(&bare_root, 1000, 7, 0o644),
@@ -5166,7 +5168,7 @@ mod tests {
         assert!(!may_chown(&u, 1000, 100, None, Some(7)));
         assert!(!may_chown(&u, 1000, 100, Some(1001), None));
         assert!(!may_chown(&u, 1001, 100, None, Some(100)));
-        assert!(may_chown(&Caller::KERNEL, 1001, 7, Some(5), Some(9)));
+        assert!(may_chown(&Caller::kernel(), 1001, 7, Some(5), Some(9)));
         assert!(may_chown(
             &user_with(&[CAP_CHOWN]),
             1001,
@@ -5177,6 +5179,7 @@ mod tests {
         let bare_root = Caller {
             creds: Credentials::new(0, 0),
             caps: LinuxCaps::EMPTY,
+            userns: crate::process::userns::initial(),
         };
         assert!(!may_chown(&bare_root, 1001, 7, Some(5), None));
     }
@@ -5199,9 +5202,10 @@ mod tests {
         let bare_root = Caller {
             creds: Credentials::new(0, 0),
             caps: LinuxCaps::EMPTY,
+            userns: crate::process::userns::initial(),
         };
         assert!(!kill_ok(&bare_root, &target, false, 15, false));
-        assert!(kill_ok(&Caller::KERNEL, &target, false, 15, false));
+        assert!(kill_ok(&Caller::kernel(), &target, false, 15, false));
     }
 
     /// loff_t is signed: a negative offset or length (as a register value)
@@ -5255,6 +5259,7 @@ mod tests {
             let caller = Caller {
                 creds: Credentials::new(uid, gid),
                 caps: crate::process::linux_caps::LinuxCaps::EMPTY,
+                userns: crate::process::userns::initial(),
             };
             crate::fs::permission(&caller, m, mode)
         };
@@ -5263,14 +5268,14 @@ mod tests {
         assert!(granted(2000, 100, &m, 4 | 1));
         assert!(!granted(2000, 100, &m, 2));
         assert!(!granted(2000, 200, &m, 4));
-        assert!(crate::fs::permission(&Caller::KERNEL, &m, 7));
+        assert!(crate::fs::permission(&Caller::kernel(), &m, 7));
         let noexec = meta(0o644, 1000, 100);
-        assert!(!crate::fs::permission(&Caller::KERNEL, &noexec, 1));
+        assert!(!crate::fs::permission(&Caller::kernel(), &noexec, 1));
         let dir = crate::fs::Metadata {
             node_type: crate::fs::NodeType::Directory,
             ..noexec
         };
-        assert!(crate::fs::permission(&Caller::KERNEL, &dir, 1));
+        assert!(crate::fs::permission(&Caller::kernel(), &dir, 1));
     }
 
     /// utimensat times: UTIME_NOW, UTIME_OMIT, a valid time, and EINVAL

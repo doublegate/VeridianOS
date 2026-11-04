@@ -365,16 +365,31 @@ What remains:
   capability (ADR 0024 will give them one); the private mount call keeps its own rules. The VFS
   finds open files by path, so a descriptor opened in another mount namespace is looked up by
   its path in the caller's (for fstat's mount id, fchdir and the like) once the two trees
-  differ, and sync(2) flushes the filesystems of the initial namespace only. User, PID and
+  differ, and sync(2) flushes the filesystems of the initial namespace only. PID and
   network namespaces exist only as the initial ones: unshare, clone and clone3 refuse new ones
-  with EINVAL, as Linux does when built without them, until their steps (H4 to H6).
+  with EINVAL, as Linux does when built without them, until their steps (H5, H6). User
+  namespaces can be created, mapped and joined (ADR 0022 H4a), with these gaps until H4b and
+  H4c: ids are not yet translated at any boundary, so getuid, stat, chown and the rest show
+  and take the ids of the initial namespace; every privilege check outside the namespace calls
+  (sethostname, mount, kill, chown and the rest) still asks about the initial namespace, so a
+  process's capabilities in its own user namespace let it do nothing there yet, and the set*id
+  calls and setgroups accept CAP_SETUID and CAP_SETGID only in the initial namespace (Linux
+  takes them in the caller's own, for ids mapped there), since an id they take is the initial
+  namespace's; ptrace and PTRACE_TRACEME between namespaces need CAP_SYS_PTRACE in the initial
+  namespace, where Linux asks about the target's; a map file finds its namespace by the pid
+  at each write, where Linux binds it at open (the opener's credentials are still the ones
+  checked); max_user_namespaces counts each user's namespaces system-wide, where Linux keeps
+  a count per user in each namespace, and `/proc/sys/user` has only that one limit; a process made
+  non-dumpable has its `/proc/<pid>` files owned by the initial namespace's root, where Linux
+  uses the root of the namespace its memory belongs to. Creating a user namespace needs
+  CAP_SYS_ADMIN unless root sets `/proc/sys/kernel/unprivileged_userns_clone` to 1 (it is 0 by
+  default, by the maintainer's choice; Linux allows it to everyone). kconfig keeps
+  CONFIG_USER_NS off until H4b.
   unshare(CLONE_FILES) in a multithreaded process is
   EINVAL, since the descriptor table belongs to the process, not the thread. The nsfs file's
   st_dev is procfs's, not an nsfs device's, and `/proc/sys/kernel/hostname` cannot be written
-  (sethostname can). NS_MNT_GET_*, listns, statns and `/proc/sys/user/max_*_namespaces` do not
-  exist. A write to `/proc/<pid>/timens_offsets` needs CAP_SYS_TIME in the writer's credentials,
-  where Linux checks the credentials the file was opened with (file_ns_capable), so a descriptor
-  opened by a privileged process and handed to an unprivileged one cannot set offsets. No vDSO
+  (sethostname can). NS_MNT_GET_*, listns, statns and the `/proc/sys/user/max_*_namespaces` limits
+  other than max_user_namespaces do not exist. No vDSO
   reads the offsets, as there is no vDSO at all (below).
 - **personality changes little.** Every value is stored and reported, but only PER_LINUX
   exists, and only STICKY_TIMEOUTS, UNAME26 and READ_IMPLIES_EXEC change anything.

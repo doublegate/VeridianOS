@@ -13,6 +13,8 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use spin::Mutex;
 
+use super::userns::UserNs;
+
 /// CLONE_NEW* flags, as `include/uapi/linux/sched.h`.
 pub const CLONE_NEWTIME: u64 = 0x0000_0080;
 pub const CLONE_NEWNS: u64 = 0x0002_0000;
@@ -155,7 +157,7 @@ static NEXT_INUM: AtomicU32 = AtomicU32::new(0xF000_0000);
 static NEXT_ID: AtomicU64 = AtomicU64::new(9);
 
 impl NsIdent {
-    const fn initial(kind: NsKind) -> Self {
+    pub(super) const fn initial(kind: NsKind) -> Self {
         Self {
             kind,
             inum: kind.init_inum(),
@@ -163,7 +165,7 @@ impl NsIdent {
         }
     }
 
-    fn fresh(kind: NsKind) -> Self {
+    pub(super) fn fresh(kind: NsKind) -> Self {
         Self {
             kind,
             inum: NEXT_INUM.fetch_add(1, Ordering::Relaxed),
@@ -180,6 +182,9 @@ impl NsIdent {
 /// A UTS namespace: the host and domain names uname reports.
 pub struct UtsNs {
     pub ident: NsIdent,
+    /// The user namespace it belongs to (its creator's, or the one made
+    /// with it).
+    pub owner: Arc<UserNs>,
     hostname: Mutex<String>,
     domainname: Mutex<String>,
 }
@@ -221,6 +226,7 @@ pub struct TimeOffsets {
 /// can change until a process enters it.
 pub struct TimeNs {
     pub ident: NsIdent,
+    pub owner: Arc<UserNs>,
     offsets: Mutex<TimeOffsets>,
 }
 
@@ -321,6 +327,7 @@ pub fn clock_to_host(clock_id: i32, t: u64) -> u64 {
 /// mounts, which path lookups in it walk (`fs::Vfs::caller_context`).
 pub struct MntNs {
     pub ident: NsIdent,
+    pub owner: Arc<UserNs>,
     pub mounts: Arc<crate::fs::mount::Mounts>,
 }
 
@@ -329,6 +336,7 @@ pub struct MntNs {
 /// types whose own state comes with their later steps (ADR 0022).
 pub struct PlainNs {
     pub ident: NsIdent,
+    pub owner: Arc<UserNs>,
 }
 
 /// One namespace of any type, as an nsfs file and setns name it.
@@ -338,6 +346,7 @@ pub enum NsRef {
     Time(Arc<TimeNs>),
     Mnt(Arc<MntNs>),
     Plain(Arc<PlainNs>),
+    User(Arc<UserNs>),
 }
 
 impl NsRef {
@@ -347,6 +356,19 @@ impl NsRef {
             NsRef::Time(ns) => ns.ident,
             NsRef::Mnt(ns) => ns.ident,
             NsRef::Plain(ns) => ns.ident,
+            NsRef::User(ns) => ns.ident,
+        }
+    }
+
+    /// The user namespace that owns it (Linux's ns->ops->owner): for a
+    /// user namespace its parent, None for the initial one.
+    pub fn owner(&self) -> Option<Arc<UserNs>> {
+        match self {
+            NsRef::Uts(ns) => Some(ns.owner.clone()),
+            NsRef::Time(ns) => Some(ns.owner.clone()),
+            NsRef::Mnt(ns) => Some(ns.owner.clone()),
+            NsRef::Plain(ns) => Some(ns.owner.clone()),
+            NsRef::User(ns) => ns.parent.clone(),
         }
     }
 
@@ -399,7 +421,6 @@ pub enum NsError {
 
 struct Initial {
     set: Arc<Namespaces>,
-    user: Arc<PlainNs>,
     pid: Arc<PlainNs>,
 }
 
@@ -407,15 +428,18 @@ static INITIAL: spin::Once<Initial> = spin::Once::new();
 
 fn initial_all() -> &'static Initial {
     INITIAL.call_once(|| {
+        let owner = super::userns::initial();
         let plain = |kind| {
             Arc::new(PlainNs {
                 ident: NsIdent::initial(kind),
+                owner: owner.clone(),
             })
         };
         let pid = plain(NsKind::Pid);
         // The initial time namespace's offsets are 0 and fixed.
         let time = Arc::new(TimeNs {
             ident: NsIdent::initial(NsKind::Time),
+            owner: owner.clone(),
             offsets: Mutex::new(TimeOffsets {
                 frozen: true,
                 ..TimeOffsets::default()
@@ -425,12 +449,14 @@ fn initial_all() -> &'static Initial {
             set: Arc::new(Namespaces {
                 uts: Arc::new(UtsNs {
                     ident: NsIdent::initial(NsKind::Uts),
+                    owner: owner.clone(),
                     hostname: Mutex::new(String::from(crate::utils::uname::NODENAME)),
                     domainname: Mutex::new(String::from("(none)")),
                 }),
                 ipc: plain(NsKind::Ipc),
                 mnt: Arc::new(MntNs {
                     ident: NsIdent::initial(NsKind::Mnt),
+                    owner: owner.clone(),
                     mounts: crate::fs::initial_mounts(),
                 }),
                 pid_for_children: pid.clone(),
@@ -439,7 +465,6 @@ fn initial_all() -> &'static Initial {
                 time: time.clone(),
                 time_for_children: time,
             }),
-            user: plain(NsKind::User),
             pid,
         }
     })
@@ -451,10 +476,9 @@ pub fn initial() -> Arc<Namespaces> {
     initial_all().set.clone()
 }
 
-/// The user namespace a process's credentials are in (only the initial one
-/// until ADR 0022's H4).
-pub fn user_of(_process: &super::Process) -> NsRef {
-    NsRef::Plain(initial_all().user.clone())
+/// The user namespace a process's credentials are in.
+pub fn user_of(process: &super::Process) -> NsRef {
+    NsRef::User(process.user_ns())
 }
 
 /// The PID namespace a process is in (only the initial one until ADR
@@ -476,7 +500,8 @@ impl Namespaces {
             NsKind::Net => NsRef::Plain(self.net.clone()),
             NsKind::Cgroup => NsRef::Plain(self.cgroup.clone()),
             NsKind::Time => NsRef::Time(self.time_for_children.clone()),
-            NsKind::User => NsRef::Plain(initial_all().user.clone()),
+            // Not in the set: the credentials' ([`user_of`]).
+            NsKind::User => NsRef::User(super::userns::initial()),
         }
     }
 
@@ -487,8 +512,8 @@ impl Namespaces {
     /// as copy_time_ns; a new mount namespace a copy of this one's tree, or
     /// with CLONE_EMPTY_MNTNS of its root mount only, as copy_mnt_ns). A type
     /// not yet creatable is EINVAL; CLONE_NEWUSER is the credentials', not
-    /// looked at here.
-    pub fn copy_with(&self, flags: u64) -> Result<Namespaces, NsError> {
+    /// looked at here. The new namespaces belong to user namespace `owner`.
+    pub fn copy_with(&self, flags: u64, owner: &Arc<UserNs>) -> Result<Namespaces, NsError> {
         let wanted = flags & CLONE_NS_ALL & !CLONE_NEWUSER;
         if wanted & !CREATABLE != 0 {
             return Err(NsError::Unsupported);
@@ -497,11 +522,13 @@ impl Namespaces {
         let plain = |kind| {
             Arc::new(PlainNs {
                 ident: NsIdent::fresh(kind),
+                owner: owner.clone(),
             })
         };
         if flags & CLONE_NEWUTS != 0 {
             new.uts = Arc::new(UtsNs {
                 ident: NsIdent::fresh(NsKind::Uts),
+                owner: owner.clone(),
                 hostname: Mutex::new(self.uts.hostname()),
                 domainname: Mutex::new(self.uts.domainname()),
             });
@@ -515,6 +542,7 @@ impl Namespaces {
         if flags & CLONE_NEWNS != 0 {
             new.mnt = Arc::new(MntNs {
                 ident: NsIdent::fresh(NsKind::Mnt),
+                owner: owner.clone(),
                 mounts: Arc::new(self.mnt.mounts.copy(flags & CLONE_EMPTY_MNTNS != 0)),
             });
         }
@@ -522,6 +550,7 @@ impl Namespaces {
             let offsets = self.time_for_children.offsets();
             new.time_for_children = Arc::new(TimeNs {
                 ident: NsIdent::fresh(NsKind::Time),
+                owner: owner.clone(),
                 offsets: Mutex::new(TimeOffsets {
                     frozen: false,
                     ..offsets
@@ -589,7 +618,8 @@ impl Namespaces {
 }
 
 /// Linux's copy_namespaces, for clone: the child's set given the caller's
-/// `current`, the clone `flags` and whether the caller has CAP_SYS_ADMIN.
+/// `current`, the clone `flags`, whether the caller has CAP_SYS_ADMIN, and
+/// the user namespace new namespaces belong to (the child's).
 /// No namespace flag shares the set (unless the child must enter the time
 /// namespace for children); any but CLONE_NEWUSER needs CAP_SYS_ADMIN
 /// (EPERM); CLONE_NEWIPC with CLONE_SYSVSEM is EINVAL (the undo list would
@@ -598,6 +628,7 @@ pub fn for_clone(
     current: &Arc<Namespaces>,
     flags: u64,
     admin: bool,
+    owner: &Arc<UserNs>,
 ) -> Result<Arc<Namespaces>, CloneNsError> {
     const CLONE_VM: u64 = 0x100;
     const CLONE_SYSVSEM: u64 = 0x0004_0000;
@@ -615,7 +646,7 @@ pub fn for_clone(
         return Err(CloneNsError::Invalid);
     }
     let new = current
-        .copy_with(flags)
+        .copy_with(flags, owner)
         .map_err(|_| CloneNsError::Invalid)?;
     Ok(Arc::new(new.for_child(share_vm)))
 }
@@ -632,6 +663,7 @@ pub enum CloneNsError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::process::userns;
 
     #[test]
     fn initial_identities_are_linuxs() {
@@ -648,7 +680,7 @@ mod tests {
     #[test]
     fn a_new_uts_namespace_copies_the_names_and_is_its_own() {
         let set = initial();
-        let new = set.copy_with(CLONE_NEWUTS).unwrap();
+        let new = set.copy_with(CLONE_NEWUTS, &userns::initial()).unwrap();
         assert!(!new.get(NsKind::Uts).same(&set.get(NsKind::Uts)));
         assert!(new.get(NsKind::Ipc).same(&set.get(NsKind::Ipc)));
         assert_eq!(new.uts.hostname(), set.uts.hostname());
@@ -662,10 +694,16 @@ mod tests {
     fn types_not_yet_creatable_are_einval() {
         let set = initial();
         for flag in [CLONE_NEWPID, CLONE_NEWNET] {
-            assert_eq!(set.copy_with(flag).err(), Some(NsError::Unsupported));
+            assert_eq!(
+                set.copy_with(flag, &userns::initial()).err(),
+                Some(NsError::Unsupported)
+            );
         }
         assert!(set
-            .copy_with(CLONE_NEWIPC | CLONE_NEWCGROUP | CLONE_NEWTIME)
+            .copy_with(
+                CLONE_NEWIPC | CLONE_NEWCGROUP | CLONE_NEWTIME,
+                &userns::initial()
+            )
             .is_ok());
     }
 
@@ -680,20 +718,25 @@ mod tests {
         set.mnt = Arc::new(MntNs {
             ident: NsIdent::fresh(NsKind::Mnt),
             mounts: vfs.mounts().clone(),
+            owner: userns::initial(),
         });
-        let full = set.copy_with(CLONE_NEWNS).unwrap();
+        let full = set.copy_with(CLONE_NEWNS, &userns::initial()).unwrap();
         assert!(!full.get(NsKind::Mnt).same(&set.get(NsKind::Mnt)));
         assert!(full.get(NsKind::Uts).same(&set.get(NsKind::Uts)));
         assert!(full.mnt.mounts.render_mounts("/").contains(" /tmp "));
         assert!(!Arc::ptr_eq(&full.mnt.mounts, &set.mnt.mounts));
         // The empty one: the root mount only. CLONE_PARENT_SETTID, which
         // UNSHARE_EMPTY_MNTNS aliases, does not ask for it.
-        let empty = set.copy_with(CLONE_NEWNS | CLONE_EMPTY_MNTNS).unwrap();
+        let empty = set
+            .copy_with(CLONE_NEWNS | CLONE_EMPTY_MNTNS, &userns::initial())
+            .unwrap();
         assert_eq!(
             empty.mnt.mounts.render_mounts("/"),
             "ramfs / ramfs rw,relatime 0 0\n"
         );
-        let settid = set.copy_with(CLONE_NEWNS | 0x0010_0000).unwrap();
+        let settid = set
+            .copy_with(CLONE_NEWNS | 0x0010_0000, &userns::initial())
+            .unwrap();
         assert!(settid.mnt.mounts.render_mounts("/").contains(" /tmp "));
         // setns to it replaces the set's mount namespace.
         let joined = set.with(&full.get(NsKind::Mnt));
@@ -704,26 +747,26 @@ mod tests {
     fn clone_namespace_rules_are_copy_namespaces() {
         let set = initial();
         // No namespace flag: the same set.
-        let same = for_clone(&set, 0x100, false).unwrap();
+        let same = for_clone(&set, 0x100, false, &userns::initial()).unwrap();
         assert!(Arc::ptr_eq(&same, &set));
         assert_eq!(
-            for_clone(&set, CLONE_NEWUTS, false).err(),
+            for_clone(&set, CLONE_NEWUTS, false, &userns::initial()).err(),
             Some(CloneNsError::Permission)
         );
         assert_eq!(
-            for_clone(&set, CLONE_NEWIPC | 0x0004_0000, true).err(),
+            for_clone(&set, CLONE_NEWIPC | 0x0004_0000, true, &userns::initial()).err(),
             Some(CloneNsError::Invalid)
         );
         // EPERM comes before a type that does not exist yet.
         assert_eq!(
-            for_clone(&set, CLONE_NEWPID, false).err(),
+            for_clone(&set, CLONE_NEWPID, false, &userns::initial()).err(),
             Some(CloneNsError::Permission)
         );
         assert_eq!(
-            for_clone(&set, CLONE_NEWPID, true).err(),
+            for_clone(&set, CLONE_NEWPID, true, &userns::initial()).err(),
             Some(CloneNsError::Invalid)
         );
-        let new = for_clone(&set, CLONE_NEWUTS, true).unwrap();
+        let new = for_clone(&set, CLONE_NEWUTS, true, &userns::initial()).unwrap();
         assert!(!new.get(NsKind::Uts).same(&set.get(NsKind::Uts)));
     }
 
@@ -734,7 +777,7 @@ mod tests {
             set.time.set_offsets(Some(1), None),
             Err(OffsetError::Frozen)
         );
-        let new = set.copy_with(CLONE_NEWTIME).unwrap();
+        let new = set.copy_with(CLONE_NEWTIME, &userns::initial()).unwrap();
         assert!(new.time_pending());
         assert!(Arc::ptr_eq(&new.time, &set.time));
         // Offsets can change until a process enters.
@@ -762,7 +805,7 @@ mod tests {
         let execed = new.after_exec().unwrap();
         assert!(Arc::ptr_eq(&execed.time, &new.time_for_children));
         // A namespace made from it starts with its offsets, unfrozen.
-        let next = child.copy_with(CLONE_NEWTIME).unwrap();
+        let next = child.copy_with(CLONE_NEWTIME, &userns::initial()).unwrap();
         assert_eq!(
             next.time_for_children.offsets().monotonic,
             1_000_000_000_000
@@ -772,7 +815,9 @@ mod tests {
 
     #[test]
     fn absolute_times_go_back_by_the_offset() {
-        let set = initial().copy_with(CLONE_NEWTIME).unwrap();
+        let set = initial()
+            .copy_with(CLONE_NEWTIME, &userns::initial())
+            .unwrap();
         let t = &set.time_for_children;
         t.set_offsets(Some(100), Some(1_000)).unwrap();
         assert_eq!(t.to_host(CLOCK_MONOTONIC, 150), 50);
@@ -787,7 +832,7 @@ mod tests {
     #[test]
     fn setns_replaces_one_namespace() {
         let set = initial();
-        let other = set.copy_with(CLONE_NEWUTS).unwrap();
+        let other = set.copy_with(CLONE_NEWUTS, &userns::initial()).unwrap();
         let joined = set.with(&other.get(NsKind::Uts));
         assert!(joined.get(NsKind::Uts).same(&other.get(NsKind::Uts)));
         assert!(joined.get(NsKind::Ipc).same(&set.get(NsKind::Ipc)));

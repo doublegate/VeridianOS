@@ -10,8 +10,10 @@ use crate::{
     fs::nsfs::NsFileNode,
     process::{
         self,
-        linux_caps::{CAP_SYS_ADMIN, CAP_SYS_CHROOT},
+        creds::Caller,
+        linux_caps::{CapSets, CAP_SETFCAP, CAP_SYS_ADMIN, CAP_SYS_CHROOT},
         ns::{self, NsKind, NsRef, CLONE_NEWUSER, CLONE_NS_ALL},
+        userns::{self, CreateError, UserNs},
     },
 };
 
@@ -27,6 +29,41 @@ const UNSHARE_EMPTY_MNTNS: u64 = 0x0010_0000;
 
 fn admin() -> bool {
     process::creds::Caller::current().capable(CAP_SYS_ADMIN)
+}
+
+/// A new user namespace below `caller`'s, for clone or unshare with
+/// CLONE_NEWUSER: without CAP_SYS_ADMIN in the initial namespace only while
+/// `/proc/sys/kernel/unprivileged_userns_clone` is 1 (EPERM; ADR 0022),
+/// then Linux's create_user_ns (ENOSPC too deep or too many, EPERM from a
+/// chroot or for a creator the parent does not map).
+pub(super) fn new_user_ns(caller: &Caller) -> Result<Arc<UserNs>, SyscallError> {
+    let allowed = userns::UNPRIVILEGED_CLONE.load(core::sync::atomic::Ordering::Relaxed) != 0;
+    if !allowed && !caller.capable(CAP_SYS_ADMIN) {
+        return Err(SyscallError::OperationNotPermitted);
+    }
+    // current_chrooted: the root is not the mount namespace's.
+    let chrooted = process::current_thread().is_some_and(|t| *t.fs().root.lock() != "/");
+    UserNs::create(
+        &caller.userns,
+        caller.creds.euid,
+        caller.creds.egid,
+        chrooted,
+        caller.caps.has(CAP_SETFCAP),
+    )
+    .map_err(|e| match e {
+        CreateError::NoSpace => SyscallError::NoSpace,
+        CreateError::Permission => SyscallError::OperationNotPermitted,
+    })
+}
+
+/// Put the calling process in user namespace `ns` with every capability
+/// there (Linux's set_cred_user_ns).
+fn enter_user_ns(ns: Arc<UserNs>) -> Result<(), SyscallError> {
+    let process = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
+    process.set_user_ns(ns);
+    *thread.caps.lock() = CapSets::ROOT;
+    Ok(())
 }
 
 /// Whether the calling process has a thread besides the caller still
@@ -112,9 +149,10 @@ fn unshare_checks(flags: u64, others: bool, vm_shared: bool) -> Result<(), Sysca
 /// the thread its own copy of a filesystem state it shares; CLONE_FILES
 /// is a no-op for a single-threaded process and EINVAL otherwise (the
 /// descriptor table is the process's, shared by all its threads, here);
-/// CLONE_NEWUSER is EINVAL until user namespaces exist (ADR 0022 H4); any
-/// other namespace needs CAP_SYS_ADMIN (EPERM), and a type not yet
-/// creatable is EINVAL. Nothing changes unless everything succeeds.
+/// CLONE_NEWUSER makes a user namespace ([`new_user_ns`]), whose root may
+/// then make the others, which belong to it; otherwise any other namespace
+/// needs CAP_SYS_ADMIN (EPERM), and a type not yet creatable is EINVAL.
+/// Nothing changes unless everything succeeds.
 pub fn sys_unshare(flags: usize) -> SyscallResult {
     let flags = unshare_implied(flags as u64);
     unshare_checks(flags, other_threads(), vm_shared())?;
@@ -122,11 +160,15 @@ pub fn sys_unshare(flags: usize) -> SyscallResult {
     if flags & CLONE_FILES != 0 && other_threads() {
         return Err(SyscallError::InvalidArgument);
     }
-    if flags & CLONE_NEWUSER != 0 {
-        return Err(SyscallError::InvalidArgument);
-    }
+    let caller = Caller::current();
+    let user_ns = if flags & CLONE_NEWUSER != 0 {
+        Some(new_user_ns(&caller)?)
+    } else {
+        None
+    };
+    let owner = user_ns.clone().unwrap_or_else(|| caller.userns.clone());
     let new_ns = if flags & CLONE_NS_ALL & !CLONE_NEWUSER != 0 {
-        if !admin() {
+        if user_ns.is_none() && !caller.capable(CAP_SYS_ADMIN) {
             return Err(SyscallError::OperationNotPermitted);
         }
         let current = thread.namespaces();
@@ -139,13 +181,16 @@ pub fn sys_unshare(flags: usize) -> SyscallResult {
         };
         Some(Arc::new(
             current
-                .copy_with(flags)
+                .copy_with(flags, &owner)
                 .map_err(|_| SyscallError::InvalidArgument)?,
         ))
     } else {
         None
     };
     // The point of no return.
+    if let Some(ns) = user_ns {
+        enter_user_ns(ns)?;
+    }
     if flags & CLONE_FS != 0 {
         let fs = thread.fs();
         if fs.users.load(core::sync::atomic::Ordering::Acquire) > 1 {
@@ -180,12 +225,36 @@ fn namespaces_of(target: &process::Process) -> Option<Arc<ns::Namespaces>> {
 /// with no other process (EUSERS, as timens_install); a mount namespace
 /// also CAP_SYS_CHROOT, and a filesystem state no other thread shares
 /// (EINVAL), since joining it moves the root and working directory to its
-/// root; the caller's own user namespace is EINVAL, as Linux refuses
-/// re-entering it.
+/// root; a user namespace (userns_install) not the caller's own (EINVAL:
+/// re-entering it would give back dropped capabilities), from a
+/// single-threaded caller with its own filesystem state (EINVAL), and
+/// CAP_SYS_ADMIN over it (EPERM). The checks after a user namespace in one
+/// pidfd setns use the caller's credentials from before, where Linux's use
+/// those it will have in the new namespace.
 fn install_check(ns: &NsRef) -> Result<(), SyscallError> {
     let caller = process::creds::Caller::current();
     match ns.kind() {
-        NsKind::User => Err(SyscallError::InvalidArgument),
+        NsKind::User => {
+            let NsRef::User(target) = ns else {
+                return Err(SyscallError::InvalidArgument);
+            };
+            if target.ident.id == caller.userns.ident.id || other_threads() {
+                return Err(SyscallError::InvalidArgument);
+            }
+            let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
+            if thread
+                .fs()
+                .users
+                .load(core::sync::atomic::Ordering::Acquire)
+                != 1
+            {
+                return Err(SyscallError::InvalidArgument);
+            }
+            if !caller.ns_capable(target, CAP_SYS_ADMIN) {
+                return Err(SyscallError::OperationNotPermitted);
+            }
+            Ok(())
+        }
         NsKind::Mnt => {
             if !caller.capable(CAP_SYS_ADMIN) || !caller.capable(CAP_SYS_CHROOT) {
                 return Err(SyscallError::OperationNotPermitted);
@@ -253,6 +322,9 @@ pub fn sys_setns(fd: usize, nstype: usize) -> SyscallResult {
             return Err(SyscallError::InvalidArgument);
         }
         install_check(&target)?;
+        if let NsRef::User(user) = target {
+            return enter_user_ns(user).map(|_| 0);
+        }
         return commit(current.with(&target), target.kind() == NsKind::Mnt).map(|_| 0);
     }
     let (_, pid, _) = super::pidfd::target(fd).map_err(|_| SyscallError::InvalidArgument)?;
@@ -280,6 +352,7 @@ pub fn sys_setns(fd: usize, nstype: usize) -> SyscallResult {
         NsKind::Time,
     ];
     let mut new = (*current).clone();
+    let mut user = None;
     for kind in order {
         if flags & kind.clone_flag() == 0 {
             continue;
@@ -292,7 +365,13 @@ pub fn sys_setns(fd: usize, nstype: usize) -> SyscallResult {
             _ => theirs.get(kind),
         };
         install_check(&ns)?;
+        if let NsRef::User(target) = &ns {
+            user = Some(target.clone());
+        }
         new = new.with(&ns);
+    }
+    if let Some(target) = user {
+        enter_user_ns(target)?;
     }
     commit(new, flags & ns::CLONE_NEWNS != 0).map(|_| 0)
 }
@@ -366,13 +445,30 @@ pub(super) fn open_ns(ns: NsRef) -> SyscallResult {
     Ok(fd)
 }
 
+/// The user namespace that owns `ns`, if the caller's is it or one of its
+/// ancestors (Linux's ns_get_owner; EPERM otherwise, and for the initial
+/// user namespace, which has no owner).
+fn owner_for_caller(ns: &NsRef) -> Result<Arc<UserNs>, SyscallError> {
+    let mine = Caller::current().userns;
+    let owner = ns.owner().ok_or(SyscallError::OperationNotPermitted)?;
+    let mut p = Some(owner.clone());
+    while let Some(ns) = p {
+        if ns.ident.id == mine.ident.id {
+            return Ok(owner);
+        }
+        p = ns.parent.clone();
+    }
+    Err(SyscallError::OperationNotPermitted)
+}
+
 /// An nsfs ioctl on `file`, or None if it is not an nsfs file:
 /// NS_GET_NSTYPE gives the type's CLONE_NEW* flag; NS_GET_ID stores the
-/// 64-bit id at `arg`; NS_GET_USERNS opens the owning user namespace (EPERM
-/// for the initial user namespace, which has no owner the caller can
-/// see); NS_GET_PARENT is EINVAL for types without a parent and EPERM for
-/// the initial PID and user namespaces; NS_GET_OWNER_UID stores a user
-/// namespace's creator (EINVAL for other types); the NS_GET_*_PIDNS
+/// 64-bit id at `arg`; NS_GET_USERNS opens the owning user namespace and,
+/// for a user namespace, NS_GET_PARENT its parent ([`owner_for_caller`]);
+/// NS_GET_PARENT is EINVAL for types without a parent and EPERM for the
+/// initial PID namespace; NS_GET_OWNER_UID stores a user namespace's
+/// creator as the caller's namespace sees it (EINVAL for other types);
+/// the NS_GET_*_PIDNS
 /// translations map a pid between a PID namespace and the caller's
 /// (EINVAL for other types, ESRCH for no such task); anything else ENOTTY.
 pub(super) fn nsfs_ioctl(
@@ -386,19 +482,17 @@ pub(super) fn nsfs_ioctl(
     Some(match cmd as u32 {
         NS_GET_NSTYPE => Ok(kind.clone_flag() as usize),
         NS_GET_ID => super::userspace::write_user::<u64>(arg, ns.ident().id).map(|_| 0),
-        NS_GET_USERNS => match kind {
-            // The initial user namespace has no owner.
-            NsKind::User => Err(SyscallError::OperationNotPermitted),
-            _ => process::current_process()
-                .ok_or(SyscallError::InvalidState)
-                .and_then(|p| open_ns(ns::user_of(&p))),
-        },
+        NS_GET_USERNS => owner_for_caller(ns).and_then(|o| open_ns(NsRef::User(o))),
         NS_GET_PARENT => match kind {
-            NsKind::Pid | NsKind::User => Err(SyscallError::OperationNotPermitted),
+            NsKind::User => owner_for_caller(ns).and_then(|o| open_ns(NsRef::User(o))),
+            NsKind::Pid => Err(SyscallError::OperationNotPermitted),
             _ => Err(SyscallError::InvalidArgument),
         },
-        NS_GET_OWNER_UID => match kind {
-            NsKind::User => super::userspace::write_user::<u32>(arg, 0).map(|_| 0),
+        NS_GET_OWNER_UID => match ns {
+            NsRef::User(user) => {
+                let uid = Caller::current().userns.uid_munged(user.owner);
+                super::userspace::write_user::<u32>(arg, uid).map(|_| 0)
+            }
             _ => Err(SyscallError::InvalidArgument),
         },
         NS_GET_PID_FROM_PIDNS

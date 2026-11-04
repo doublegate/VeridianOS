@@ -86,6 +86,7 @@ mod tests {
         let caller = |uid, gid, caps: LinuxCaps| Caller {
             creds: Credentials::new(uid, gid),
             caps,
+            userns: crate::process::userns::initial(),
         };
         let user = caller(1000, 100, LinuxCaps::EMPTY);
         assert!(may_prlimit(&user, &Credentials::new(1000, 100)));
@@ -94,7 +95,7 @@ mod tests {
         let mut setuid_root = Credentials::new(1000, 100);
         setuid_root.euid = 0;
         assert!(!may_prlimit(&user, &setuid_root));
-        assert!(may_prlimit(&Caller::KERNEL, &setuid_root));
+        assert!(may_prlimit(&Caller::kernel(), &setuid_root));
         let resource = caller(1000, 100, LinuxCaps::EMPTY.with(CAP_SYS_RESOURCE));
         assert!(may_prlimit(&resource, &setuid_root));
         assert!(!may_prlimit(&caller(0, 0, LinuxCaps::EMPTY), &setuid_root));

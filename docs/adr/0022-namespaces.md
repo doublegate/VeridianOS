@@ -84,7 +84,25 @@ them through an `nsproxy` (all but user, which lives in the credentials); `pid_f
    - **H4, user.** uid_map, gid_map and setgroups (Linux's write rules), ids translated at every
      boundary (stat, chown, credentials calls, SO_PEERCRED, siginfo si_uid, `/proc/<pid>/status`),
      and `capable()` asking about the user namespace that owns the object (Linux's ns_capable)
-     at each of the 45 call sites.
+     at each of the 45 call sites. Three steps. H4a, the namespace and its creation (Linux 7.3's
+     kernel/user_namespace.c): a `UserNs` per process (threads share it, as their credentials'
+     user_ns), created by clone and unshare with CLONE_NEWUSER as create_user_ns does (deeper
+     than 32 levels or over `/proc/sys/user/max_user_namespaces` ENOSPC, a chrooted caller or
+     an owner or group the parent does not map EPERM), the creator getting every capability in
+     it and none in its parent; the maps written once through `/proc/<pid>/uid_map`, `gid_map`
+     and `setgroups` by map_write's rules (one write under a page at offset 0, at most 340
+     extents, no overlap or wrap, new_idmap_permitted and verify_root_map, the lower ids taken
+     through the parent's map); setns into one by userns_install's rules; the nsfs ioctls
+     NS_GET_USERNS, NS_GET_PARENT and NS_GET_OWNER_UID by ns_get_owner's. Every other namespace
+     records the user namespace that owns it. cap_capable's walk decides ns_capable: in the
+     credentials' own namespace their effective set, over a namespace below it all
+     capabilities when they own it. `capable()` keeps meaning the initial namespace, so a
+     process's capabilities in a namespace of its own count for nothing outside it until a
+     check moves to ns_capable on purpose (H4c). The maintainer's policy (2026-11-03): creating
+     a user namespace needs CAP_SYS_ADMIN in the initial one, unless root sets
+     `/proc/sys/kernel/unprivileged_userns_clone` to 1 (it is 0 by default), because a user
+     namespace hands an ordinary user root-only kernel interfaces. H4b translates ids at the
+     boundaries, H4c moves the checks.
    - **H5, PID.** A process has an id at each level of its PID namespace, from its own up to the
      initial one; every interface that takes or returns a pid or tid translates through the
      caller's namespace (getpid, wait, kill, siginfo, signalfd, sched calls, ptrace, pidfd,

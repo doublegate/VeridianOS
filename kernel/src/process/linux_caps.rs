@@ -303,6 +303,11 @@ pub struct ExecContext {
     /// (cwd, root) is shared with a process that is not exec'ing (Linux's
     /// LSM_UNSAFE_PTRACE without `ptracer_capable`, and LSM_UNSAFE_SHARE).
     pub unsafe_exec: bool,
+    /// The thread holds CAP_SETUID in the initial user namespace, which
+    /// lets an unsafe exec keep its new ids (Linux's
+    /// ns_capable(new->user_ns, CAP_SETUID)); not the thread's own set,
+    /// which may be a namespace's of its own.
+    pub may_setuid: bool,
     /// The new effective gid is the old filesystem gid or a supplementary
     /// group (Linux's `in_group_p(new->egid)`).
     pub egid_in_groups: bool,
@@ -626,7 +631,7 @@ impl CapSets {
         // Traced by an unprivileged tracer, sharing filesystem state, or
         // under no_new_privs: nothing more than before, maybe less.
         if (id_changed || gained) && (ctx.unsafe_exec || ctx.no_new_privs) {
-            if !old.capable(CAP_SETUID) || ctx.no_new_privs {
+            if !ctx.may_setuid || ctx.no_new_privs {
                 euid = ruid;
                 egid = old_rgid;
             }
@@ -1213,6 +1218,35 @@ mod tests {
         // Root under no_new_privs keeps what it had.
         let out = CapSets::ROOT.after_exec(0, 0, 0, 0, 0, nnp).unwrap();
         assert_eq!(out.caps.permitted, LinuxCaps::FULL);
+    }
+
+    /// An unsafe exec keeps a set-user-ID program's uid only with CAP_SETUID
+    /// in the initial user namespace (`may_setuid`), not with a full set
+    /// held in a namespace of the thread's own: root there, traced by
+    /// itself, running a set-uid-root program, must stay uid 1000.
+    #[test]
+    fn an_unsafe_exec_needs_cap_setuid_outside_ones_own_namespace() {
+        let own_ns_root = ExecContext {
+            unsafe_exec: true,
+            may_setuid: false,
+            ..plain()
+        };
+        let out = CapSets::ROOT
+            .after_exec(1000, 1000, 1000, 0, 1000, own_ns_root)
+            .unwrap();
+        assert_eq!(
+            out.euid, 1000,
+            "CAP_SETUID of its own namespace does not count"
+        );
+        let privileged = ExecContext {
+            unsafe_exec: true,
+            may_setuid: true,
+            ..plain()
+        };
+        let out = CapSets::ROOT
+            .after_exec(1000, 1000, 1000, 0, 1000, privileged)
+            .unwrap();
+        assert_eq!(out.euid, 0);
     }
 
     #[test]

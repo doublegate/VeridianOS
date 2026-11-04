@@ -475,6 +475,20 @@ pub trait VfsNode: Send + Sync {
     /// Write data to the node
     fn write(&self, offset: usize, data: &[u8]) -> Result<usize, KernelError>;
 
+    /// [`Self::write`] through a descriptor opened with `opener`'s
+    /// credentials (Linux's file->f_cred; None if the file does not record
+    /// them), for the files whose checks are the opener's: procfs's ID
+    /// maps and timens_offsets.
+    fn write_as(
+        &self,
+        offset: usize,
+        data: &[u8],
+        opener: Option<&crate::process::creds::Caller>,
+    ) -> Result<usize, KernelError> {
+        let _ = opener;
+        self.write(offset, data)
+    }
+
     /// Get metadata for the node
     fn metadata(&self) -> Result<Metadata, KernelError>;
 
@@ -1874,7 +1888,7 @@ impl Vfs {
             &ctx.root,
             follow_last,
             0,
-            ctx.creds,
+            ctx.creds.clone(),
             ctx.resolve,
         )
     }
@@ -3028,6 +3042,7 @@ pub(crate) mod tests {
         let who = |uid, caps: &[u32]| Caller {
             creds: Credentials::new(uid, uid),
             caps: caps.iter().fold(LinuxCaps::EMPTY, |s, &c| s.with(c)),
+            userns: crate::process::userns::initial(),
         };
         let file = NodeType::File;
         let dir = NodeType::Directory;
@@ -3045,7 +3060,7 @@ pub(crate) mod tests {
             MAY_READ
         ));
         assert!(permission(
-            &Caller::KERNEL,
+            &Caller::kernel(),
             &meta(file, 0o600, 1000, 1000),
             MAY_READ
         ));
@@ -3318,6 +3333,7 @@ pub(crate) mod tests {
         let user = crate::process::creds::Caller {
             creds: crate::process::creds::Credentials::new(1000, 1000),
             caps: crate::process::linux_caps::LinuxCaps::EMPTY,
+            userns: crate::process::userns::initial(),
         };
         let m = memfd::MemfdNode::new(Permissions::from_mode(0o4755), 1000, 1000, true, 0);
         m.truncate(8192).unwrap();
@@ -3540,24 +3556,31 @@ pub(crate) mod tests {
         let other = Some(crate::process::creds::Caller {
             creds: crate::process::creds::Credentials::new(1000, 1000),
             caps: crate::process::linux_caps::LinuxCaps::EMPTY,
+            userns: crate::process::userns::initial(),
         });
         // Root-owned 0700: another user cannot pass through it, even to a
         // world-readable file, and not by ".." either.
         assert!(matches!(
-            table.resolve("/private/open/f", "/", true, 0, other),
+            table.resolve("/private/open/f", "/", true, 0, other.clone()),
             Err(KernelError::FsError(
                 crate::error::FsError::PermissionDenied
             ))
         ));
-        assert!(table.resolve("/private/..", "/", true, 0, other).is_err());
+        assert!(table
+            .resolve("/private/..", "/", true, 0, other.clone())
+            .is_err());
         // The directory itself can still be named (its parent is searchable).
-        assert!(table.resolve("/private", "/", true, 0, other).is_ok());
+        assert!(table
+            .resolve("/private", "/", true, 0, other.clone())
+            .is_ok());
         // Kernel context and root are unaffected.
         assert!(table.resolve("/private/open/f", "/", true, 0, None).is_ok());
         // Execute without read is enough to pass through a directory.
         let x_only = root.mkdir("xonly", Permissions::from_mode(0o711)).unwrap();
         x_only.create("g", Permissions::from_mode(0o644)).unwrap();
-        assert!(table.resolve("/xonly/g", "/", true, 0, other).is_ok());
+        assert!(table
+            .resolve("/xonly/g", "/", true, 0, other.clone())
+            .is_ok());
     }
 
     #[test]

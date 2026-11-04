@@ -406,6 +406,7 @@ mod tests {
         Caller {
             creds: Credentials::new(1000, 1000),
             caps: caps.iter().fold(LinuxCaps::EMPTY, |s, &c| s.with(c)),
+            userns: crate::process::userns::initial(),
         }
     }
 

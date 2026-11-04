@@ -357,7 +357,7 @@ impl File {
         }
 
         if self.is_stream() {
-            return self.node.write(0, data);
+            return self.write_node(0, data);
         }
         let mut pos = self.position.write();
 
@@ -371,9 +371,17 @@ impl File {
         if len != 0 && first {
             super::remove_privs(&*self.node)?;
         }
-        let bytes_written = self.node.write(*pos, &data[..len])?;
+        let bytes_written = self.write_node(*pos, &data[..len])?;
         *pos += bytes_written;
         Ok(bytes_written)
+    }
+
+    /// Write to the node at `offset` with this descriptor's opener
+    /// ([`VfsNode::write_as`]).
+    ///
+    /// [`VfsNode::write_as`]: super::VfsNode::write_as
+    pub fn write_node(&self, offset: usize, data: &[u8]) -> Result<usize, KernelError> {
+        self.node.write_as(offset, data, self.opener.as_deref())
     }
 
     /// How many of `count` bytes written now RLIMIT_FSIZE allows

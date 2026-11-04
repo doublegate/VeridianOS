@@ -128,10 +128,15 @@ fn parse_offset_line(line: &str) -> Option<(i32, i64, i64)> {
 /// A write to `/proc/<pid>/timens_offsets`, as Linux's
 /// timens_offsets_write and proc_timens_set_offset: at the start of the
 /// file and under a page (EINVAL), up to two well-formed lines (EINVAL),
-/// the process there (ESRCH), CAP_SYS_TIME (EPERM; the writer's, where
-/// Linux asks the opener's), each offset and the clock it moves within
-/// range (ERANGE), and a namespace no process has entered (EACCES).
-fn write_timens_offsets(pid: u64, offset: usize, data: &[u8]) -> Result<usize, KernelError> {
+/// the process there (ESRCH), the `opener`'s CAP_SYS_TIME (EPERM), each
+/// offset and the clock it moves within range (ERANGE), and a namespace no
+/// process has entered (EACCES).
+fn write_timens_offsets(
+    pid: u64,
+    opener: &crate::process::creds::Caller,
+    offset: usize,
+    data: &[u8],
+) -> Result<usize, KernelError> {
     use crate::process::ns::CLOCK_MONOTONIC;
     let invalid = || KernelError::InvalidArgument {
         name: "timens_offsets",
@@ -163,7 +168,7 @@ fn write_timens_offsets(pid: u64, offset: usize, data: &[u8]) -> Result<usize, K
         }
     }
     let ns = time_for_children(pid).ok_or(KernelError::FsError(FsError::NoProcess))?;
-    if !crate::process::creds::Caller::current().capable(crate::process::linux_caps::CAP_SYS_TIME) {
+    if !opener.capable(crate::process::linux_caps::CAP_SYS_TIME) {
         return Err(KernelError::FsError(FsError::OperationNotPermitted));
     }
     // There is no suspend: the boot-time clock reads the monotonic one.
@@ -231,18 +236,151 @@ struct ProcNode {
     node_type: ProcNodeType,
 }
 
-/// The inotify limit the system file `name` (`sys/fs/inotify/...`) is.
-fn inotify_limit(name: &str) -> Option<crate::fs::inotify::Limit> {
-    crate::fs::inotify::Limit::from_name(name.strip_prefix("sys/fs/inotify/")?)
+/// A writable sysctl.
+#[derive(Clone, Copy)]
+enum Sysctl {
+    /// `fs/inotify/*`.
+    Inotify(crate::fs::inotify::Limit),
+    /// `kernel/unprivileged_userns_clone` (ADR 0022 H4a): whether a user
+    /// without CAP_SYS_ADMIN may create a user namespace, 0 (the default)
+    /// or 1, as Debian's sysctl of that name.
+    UnprivilegedUsernsClone,
+    /// `user/max_user_namespaces`: how many user namespaces may exist
+    /// below the initial one.
+    MaxUserNamespaces,
+}
+
+impl Sysctl {
+    /// The sysctl the system file `name` (`sys/...`) is.
+    fn from_name(name: &str) -> Option<Self> {
+        if let Some(limit) = name
+            .strip_prefix("sys/fs/inotify/")
+            .and_then(crate::fs::inotify::Limit::from_name)
+        {
+            return Some(Self::Inotify(limit));
+        }
+        match name {
+            "sys/kernel/unprivileged_userns_clone" => Some(Self::UnprivilegedUsernsClone),
+            "sys/user/max_user_namespaces" => Some(Self::MaxUserNamespaces),
+            _ => None,
+        }
+    }
+
+    fn get(self) -> usize {
+        use core::sync::atomic::Ordering;
+
+        use crate::process::userns;
+        match self {
+            Self::Inotify(limit) => limit.get(),
+            Self::UnprivilegedUsernsClone => {
+                userns::UNPRIVILEGED_CLONE.load(Ordering::Acquire) as usize
+            }
+            Self::MaxUserNamespaces => userns::MAX_USER_NAMESPACES.load(Ordering::Acquire) as usize,
+        }
+    }
+
+    /// Set it from what was written to its file: a decimal integer in its
+    /// range, surrounding white space allowed (EINVAL otherwise). The
+    /// switch also needs CAP_SYS_ADMIN (EPERM), so root of a user namespace
+    /// cannot turn it on.
+    fn write(self, text: &[u8]) -> Result<(), KernelError> {
+        use core::sync::atomic::Ordering;
+
+        use crate::process::userns;
+        let (store, max) = match self {
+            Self::Inotify(limit) => return limit.write(text),
+            Self::UnprivilegedUsernsClone => (&userns::UNPRIVILEGED_CLONE, 1),
+            Self::MaxUserNamespaces => (&userns::MAX_USER_NAMESPACES, i32::MAX as u32),
+        };
+        let value = core::str::from_utf8(text)
+            .ok()
+            .and_then(|t| t.trim().parse::<u32>().ok())
+            .filter(|v| *v <= max)
+            .ok_or(KernelError::InvalidArgument {
+                name: "value",
+                value: "out of the sysctl's range",
+            })?;
+        if matches!(self, Self::UnprivilegedUsernsClone)
+            && !crate::process::creds::Caller::current()
+                .capable(crate::process::linux_caps::CAP_SYS_ADMIN)
+        {
+            return Err(KernelError::FsError(FsError::OperationNotPermitted));
+        }
+        store.store(value, Ordering::Release);
+        Ok(())
+    }
+}
+
+/// The files of `/proc/<pid>` that name its user namespace's ID maps.
+const ID_MAP_FILES: [&str; 3] = ["uid_map", "gid_map", "setgroups"];
+
+/// The user namespace of process `pid`.
+fn user_ns_of(pid: u64) -> Option<Arc<crate::process::userns::UserNs>> {
+    crate::process::get_process(crate::process::ProcessId(pid)).map(|p| p.user_ns())
+}
+
+/// A write to `/proc/<pid>/uid_map`, `gid_map` or `setgroups` (ADR 0022
+/// H4a) through a descriptor `opener` opened, by `writer`, by the rules of
+/// [`UserNs::write_map`] and [`UserNs::write_setgroups`]; setgroups also
+/// needs the opener's CAP_SYS_ADMIN over the namespace (EPERM), which
+/// Linux's proc_setgroups_open checks.
+///
+/// [`UserNs::write_map`]: crate::process::userns::UserNs::write_map
+/// [`UserNs::write_setgroups`]: crate::process::userns::UserNs::write_setgroups
+fn write_id_map(
+    pid: u64,
+    name: &str,
+    opener: &crate::process::creds::Caller,
+    writer: &crate::process::creds::Caller,
+    offset: usize,
+    data: &[u8],
+) -> Result<usize, KernelError> {
+    use crate::process::userns::MapError;
+    let ns = user_ns_of(pid).ok_or(KernelError::FsError(FsError::NoProcess))?;
+    let done = if name == "setgroups" {
+        if !opener.ns_capable(&ns, crate::process::linux_caps::CAP_SYS_ADMIN) {
+            return Err(KernelError::FsError(FsError::OperationNotPermitted));
+        }
+        ns.write_setgroups(offset, data)
+    } else {
+        ns.write_map(name == "gid_map", opener, writer, offset, data)
+    };
+    done.map_err(|e| match e {
+        MapError::Invalid => KernelError::InvalidArgument {
+            name: "id map",
+            value: "malformed",
+        },
+        MapError::Permission => KernelError::FsError(FsError::OperationNotPermitted),
+    })
+}
+
+/// The owner of `/proc/<pid>` and what is in it (Linux's task_dump_owner):
+/// the process's effective user and group while it is dumpable, root
+/// otherwise (Linux's root of the user namespace the memory belongs to,
+/// which here is always the initial one).
+fn dump_owner(pid: u64) -> (u32, u32) {
+    crate::process::get_process(crate::process::ProcessId(pid))
+        .filter(|p| p.dumpable.load(core::sync::atomic::Ordering::Acquire))
+        .map(|p| {
+            let creds = p.credentials();
+            (creds.euid, creds.egid)
+        })
+        .unwrap_or((0, 0))
 }
 
 impl ProcNode {
     /// The writable sysctl this node is, if it is one.
-    fn sysctl(&self) -> Option<crate::fs::inotify::Limit> {
+    fn sysctl(&self) -> Option<Sysctl> {
         match &self.node_type {
-            ProcNodeType::SystemFile(name) => inotify_limit(name),
+            ProcNodeType::SystemFile(name) => Sysctl::from_name(name),
             _ => None,
         }
+    }
+
+    /// Whether this is a writable file of a process directory.
+    fn writable_process_file(&self) -> bool {
+        matches!(&self.node_type, ProcNodeType::ProcessFile(_, n)
+            if n == "timens_offsets" || ID_MAP_FILES.contains(&n.as_str()))
     }
 }
 
@@ -484,8 +622,8 @@ impl VfsNode for ProcNode {
                         format!("{}\n", crate::process::linux_caps::CAP_LAST_CAP)
                     }
                     "boot_id" => String::from("00000000-0000-0000-0000-000000000001\n"),
-                    name if inotify_limit(name).is_some() => {
-                        format!("{}\n", inotify_limit(name).map_or(0, |l| l.get()))
+                    name if Sysctl::from_name(name).is_some() => {
+                        format!("{}\n", Sysctl::from_name(name).map_or(0, |l| l.get()))
                     }
                     "self/maps" => crate::process::current_process()
                         .map(|p| generate_maps(p.pid.0))
@@ -539,6 +677,16 @@ impl VfsNode for ProcNode {
                         }
                     }
                     "timens_offsets" => timens_offsets_text(*pid).unwrap_or_default(),
+                    // In the reader's terms (proc_id_map_open's seq_ns).
+                    "uid_map" | "gid_map" => user_ns_of(*pid)
+                        .map(|ns| {
+                            let reader = crate::process::creds::Caller::current().userns;
+                            ns.map_text(name == "gid_map", &reader)
+                        })
+                        .unwrap_or_default(),
+                    "setgroups" => user_ns_of(*pid)
+                        .map(|ns| String::from(ns.setgroups_text()))
+                        .unwrap_or_default(),
                     #[cfg(feature = "alloc")]
                     "mounts" => mounts_text(*pid, false).unwrap_or_default(),
                     #[cfg(feature = "alloc")]
@@ -574,9 +722,25 @@ impl VfsNode for ProcNode {
     }
 
     fn write(&self, offset: usize, data: &[u8]) -> Result<usize, KernelError> {
+        self.write_as(offset, data, None)
+    }
+
+    /// The process files check the descriptor's opener where Linux does
+    /// (file_ns_capable, f_cred), the writer when no opener is recorded.
+    fn write_as(
+        &self,
+        offset: usize,
+        data: &[u8],
+        opener: Option<&crate::process::creds::Caller>,
+    ) -> Result<usize, KernelError> {
         if let ProcNodeType::ProcessFile(pid, name) = &self.node_type {
+            let writer = crate::process::creds::Caller::current();
+            let opener = opener.cloned().unwrap_or_else(|| writer.clone());
             if name == "timens_offsets" {
-                return write_timens_offsets(*pid, offset, data);
+                return write_timens_offsets(*pid, &opener, offset, data);
+            }
+            if ID_MAP_FILES.contains(&name.as_str()) {
+                return write_id_map(*pid, name, &opener, &writer, offset, data);
             }
         }
         // The inotify limits are sysctls root may set (the mode decides who
@@ -610,18 +774,24 @@ impl VfsNode for ProcNode {
             NodeType::Directory => 0o555,
             NodeType::Symlink => 0o777,
             _ if self.sysctl().is_some() => 0o644,
-            // rw-r--r--, as Linux's (its owner is root here).
-            _ if matches!(&self.node_type, ProcNodeType::ProcessFile(_, n) if n == "timens_offsets") => {
-                0o644
-            }
+            // rw-r--r--, as Linux's.
+            _ if self.writable_process_file() => 0o644,
             _ => 0o444,
         });
+        let owner = match &self.node_type {
+            ProcNodeType::ProcessDir(pid) | ProcNodeType::ProcessFile(pid, _) => Some(*pid),
+            ProcNodeType::NsDir(pid) | ProcNodeType::NsLink(pid, _) => {
+                pid.or_else(|| crate::process::current_process().map(|p| p.pid.0))
+            }
+            _ => None,
+        };
+        let (uid, gid) = owner.map_or((0, 0), dump_owner);
         Ok(Metadata {
             node_type,
             size: 0,
             permissions,
-            uid: 0,
-            gid: 0,
+            uid,
+            gid,
             created: 0,
             modified: 0,
             accessed: 0,
@@ -738,7 +908,7 @@ impl VfsNode for ProcNode {
                     inode: 0,
                 });
 
-                for name in ["mounts", "mountinfo"] {
+                for name in ["mounts", "mountinfo"].into_iter().chain(ID_MAP_FILES) {
                     entries.push(DirEntry {
                         name: String::from(name),
                         node_type: NodeType::File,
@@ -758,7 +928,11 @@ impl VfsNode for ProcNode {
             // What lookup finds in /proc/sys and below.
             ProcNodeType::SubDir(dir) if dir.starts_with("sys") => {
                 let listed: &[(&str, NodeType)] = match dir.as_str() {
-                    "sys" => &[("fs", NodeType::Directory), ("kernel", NodeType::Directory)],
+                    "sys" => &[
+                        ("fs", NodeType::Directory),
+                        ("kernel", NodeType::Directory),
+                        ("user", NodeType::Directory),
+                    ],
                     "sys/fs" => &[("inotify", NodeType::Directory)],
                     "sys/fs/inotify" => &[
                         ("max_queued_events", NodeType::File),
@@ -775,9 +949,11 @@ impl VfsNode for ProcNode {
                         ("pid_max", NodeType::File),
                         ("random", NodeType::Directory),
                         ("tainted", NodeType::File),
+                        ("unprivileged_userns_clone", NodeType::File),
                         ("version", NodeType::File),
                     ],
                     "sys/kernel/random" => &[("boot_id", NodeType::File)],
+                    "sys/user" => &[("max_user_namespaces", NodeType::File)],
                     _ => return Err(KernelError::FsError(FsError::NotADirectory)),
                 };
                 for (name, node_type) in listed {
@@ -845,10 +1021,11 @@ impl VfsNode for ProcNode {
                 }
             }
             ProcNodeType::ProcessDir(pid) => match name {
-                "status" | "cmdline" | "timens_offsets" | "mounts" | "mountinfo" => Ok(Arc::new(
-                    ProcNode::new_process_file(*pid, String::from(name)),
-                )
-                    as Arc<dyn VfsNode>),
+                "status" | "cmdline" | "timens_offsets" | "mounts" | "mountinfo" | "uid_map"
+                | "gid_map" | "setgroups" => Ok(Arc::new(ProcNode::new_process_file(
+                    *pid,
+                    String::from(name),
+                )) as Arc<dyn VfsNode>),
                 "ns" => Ok(Arc::new(ProcNode {
                     node_type: ProcNodeType::NsDir(Some(*pid)),
                 }) as Arc<dyn VfsNode>),
@@ -858,9 +1035,10 @@ impl VfsNode for ProcNode {
                 // Handle /proc/sys/*, /proc/self/*
                 match dir_name.as_str() {
                     "sys" => match name {
-                        "fs" | "kernel" => Ok(Arc::new(ProcNode {
+                        "fs" | "kernel" | "user" => Ok(Arc::new(ProcNode {
                             node_type: ProcNodeType::SubDir(format!("sys/{}", name)),
-                        }) as Arc<dyn VfsNode>),
+                        })
+                            as Arc<dyn VfsNode>),
                         _ => Err(KernelError::FsError(FsError::NotFound)),
                     },
                     "sys/fs" => match name {
@@ -894,6 +1072,16 @@ impl VfsNode for ProcNode {
                         "random" => Ok(Arc::new(ProcNode {
                             node_type: ProcNodeType::SubDir(String::from("sys/kernel/random")),
                         }) as Arc<dyn VfsNode>),
+                        "unprivileged_userns_clone" => Ok(Arc::new(ProcNode::new_system_file(
+                            String::from("sys/kernel/unprivileged_userns_clone"),
+                        ))
+                            as Arc<dyn VfsNode>),
+                        _ => Err(KernelError::FsError(FsError::NotFound)),
+                    },
+                    "sys/user" => match name {
+                        "max_user_namespaces" => Ok(Arc::new(ProcNode::new_system_file(
+                            String::from("sys/user/max_user_namespaces"),
+                        )) as Arc<dyn VfsNode>),
                         _ => Err(KernelError::FsError(FsError::NotFound)),
                     },
                     "sys/kernel/random" => match name {
@@ -912,16 +1100,13 @@ impl VfsNode for ProcNode {
                         }) as Arc<dyn VfsNode>),
                         // The caller's own files, as /proc/<its pid>/...
                         // (Linux's /proc/self is a link to that directory).
-                        "status" | "cmdline" | "timens_offsets" | "mounts" | "mountinfo" => {
-                            crate::process::current_process()
-                                .map(|p| {
-                                    Arc::new(ProcNode::new_process_file(
-                                        p.pid.0,
-                                        String::from(name),
-                                    )) as Arc<dyn VfsNode>
-                                })
-                                .ok_or(KernelError::FsError(FsError::NotFound))
-                        }
+                        "status" | "cmdline" | "timens_offsets" | "mounts" | "mountinfo"
+                        | "uid_map" | "gid_map" | "setgroups" => crate::process::current_process()
+                            .map(|p| {
+                                Arc::new(ProcNode::new_process_file(p.pid.0, String::from(name)))
+                                    as Arc<dyn VfsNode>
+                            })
+                            .ok_or(KernelError::FsError(FsError::NotFound)),
                         "maps" => Ok(
                             Arc::new(ProcNode::new_system_file(format!("self/{}", name)))
                                 as Arc<dyn VfsNode>,
@@ -969,11 +1154,9 @@ impl VfsNode for ProcNode {
     fn truncate(&self, _size: usize) -> Result<(), KernelError> {
         // The writable files ignore O_TRUNC, as Linux's: fopen("w") on
         // them must succeed.
-        let timens =
-            matches!(&self.node_type, ProcNodeType::ProcessFile(_, n) if n == "timens_offsets");
         match self.sysctl() {
             Some(_) => Ok(()),
-            None if timens => Ok(()),
+            None if self.writable_process_file() => Ok(()),
             None => Err(KernelError::FsError(FsError::PermissionDenied)),
         }
     }
@@ -1476,6 +1659,26 @@ mod tests {
     /// so a program reading the directory (getdents64) sees the files; it
     /// was ENOTDIR (PR #34 review). /proc lists sys.
     #[test]
+    /// The user namespace sysctls (ADR 0022 H4a) are found by their paths
+    /// and refuse values outside their ranges without storing them.
+    fn user_namespace_sysctls_check_their_ranges() {
+        let switch = Sysctl::from_name("sys/kernel/unprivileged_userns_clone").unwrap();
+        let max = Sysctl::from_name("sys/user/max_user_namespaces").unwrap();
+        assert!(Sysctl::from_name("sys/kernel/unprivileged_userns").is_none());
+        assert_eq!(switch.get(), 0, "off by default");
+        for bad in [&b"2"[..], b"-1", b"on", b""] {
+            assert!(switch.write(bad).is_err(), "{:?}", bad);
+        }
+        assert!(max.write(b"2147483648").is_err());
+        assert!(max.write(b"x").is_err());
+        assert_eq!(switch.get(), 0);
+        assert_eq!(
+            max.get(),
+            crate::process::userns::DEFAULT_MAX_USER_NAMESPACES as usize
+        );
+    }
+
+    #[test]
     fn sys_directories_list_their_entries() {
         let names = |n: &ProcNode| -> Vec<String> {
             n.readdir()
@@ -1487,7 +1690,7 @@ mod tests {
         };
         assert!(names(&ProcNode::new_root()).iter().any(|n| n == "sys"));
         for (dir, want) in [
-            ("sys", &["fs", "kernel"][..]),
+            ("sys", &["fs", "kernel", "user"][..]),
             ("sys/fs", &["inotify"][..]),
             (
                 "sys/fs/inotify",
@@ -1509,10 +1712,12 @@ mod tests {
                     "pid_max",
                     "random",
                     "tainted",
+                    "unprivileged_userns_clone",
                     "version",
                 ][..],
             ),
             ("sys/kernel/random", &["boot_id"][..]),
+            ("sys/user", &["max_user_namespaces"][..]),
         ] {
             let node = ProcNode {
                 node_type: ProcNodeType::SubDir(String::from(dir)),
