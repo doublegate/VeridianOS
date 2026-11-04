@@ -333,6 +333,11 @@ struct ExecIds {
     set_gid: Option<u32>,
     /// The caller may read the program (and its loader).
     readable: bool,
+    /// The user namespace the new image's memory belongs to: the
+    /// process's, or for a program or loader it may not read the nearest
+    /// one above that maps that file's owner and group (would_dump), so a
+    /// namespace that could not read the file cannot trace the image.
+    mm_userns: alloc::sync::Arc<super::userns::UserNs>,
     /// The process was traced, by a tracer without CAP_SYS_PTRACE, when
     /// the exec started.
     unprivileged_tracer_at_start: bool,
@@ -340,12 +345,18 @@ struct ExecIds {
     file_caps: Option<super::linux_caps::FileCaps>,
 }
 
-/// Whether `process` is traced by a tracer that lacked CAP_SYS_PTRACE when
-/// it attached. Read under `cred_guard`, which attach holds.
+/// Whether `process` is traced by a tracer whose credentials when it
+/// attached lack CAP_SYS_PTRACE over the process's user namespace (Linux's
+/// ptracer_capable). Read under `cred_guard`, which attach holds.
 #[cfg(feature = "alloc")]
 fn unprivileged_tracer(process: &super::Process) -> bool {
     use core::sync::atomic::Ordering;
-    process.tracer.load(Ordering::Acquire) != 0 && !process.tracer_capable.load(Ordering::Acquire)
+    process.tracer.load(Ordering::Acquire) != 0
+        && !process
+            .tracer_cred
+            .lock()
+            .as_ref()
+            .is_some_and(|t| t.capable_over(&process.user_ns()))
 }
 
 /// Install the credentials and capability sets a program runs with
@@ -419,6 +430,9 @@ fn install_exec_credentials(
     *thread.caps.lock() = outcome.caps;
     let dumpable = ids.readable && old.exec_keeps_dumpable(&creds) && !grew;
     process.dumpable.store(dumpable, Ordering::Release);
+    // The new memory belongs to the namespace exec ran in (mm_alloc), or
+    // one above it that maps a file the caller could not read (would_dump).
+    process.set_mm_user_ns(ids.mm_userns.clone());
     Ok(outcome.secure)
 }
 
@@ -675,10 +689,17 @@ fn exec_image(
             |meta: &crate::fs::Metadata| crate::fs::permission(&caller, meta, crate::fs::MAY_READ);
         let meta = file_node.metadata()?;
         let perms = meta.permissions;
-        let interp_readable = match &interp {
-            Some((node, ..)) => readable(&node.metadata()?),
-            None => true,
+        let interp_meta = match &interp {
+            Some((node, ..)) => Some(node.metadata()?),
+            None => None,
         };
+        let interp_readable = interp_meta.as_ref().is_none_or(readable);
+        let mut mm_userns = process.user_ns();
+        for m in core::iter::once(&meta).chain(interp_meta.as_ref()) {
+            if !readable(m) {
+                mm_userns = mm_userns.ancestor_mapping(m.uid, m.gid);
+            }
+        }
         // A nosuid mount offers neither (Linux's mnt_may_suid, in
         // bprm_fill_uid and get_file_caps).
         let suid = mnt_flags & crate::fs::mount::flags::NOSUID == 0;
@@ -698,6 +719,7 @@ fn exec_image(
             set_uid: (suid_ids && perms.set_uid).then_some(meta.uid),
             set_gid: (suid_ids && perms.set_gid && perms.group_exec).then_some(meta.gid),
             readable: readable(&meta) && interp_readable,
+            mm_userns,
             unprivileged_tracer_at_start: false,
             file_caps,
         }

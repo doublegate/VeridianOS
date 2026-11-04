@@ -9483,6 +9483,11 @@ static void test_user_ns(void)
         /* With it 1: an unprivileged user maps itself, the gid only after
          * denying setgroups, and cannot go back to the parent. */
         if (t_write_text(sw, "1") != 0) g |= 32;
+        /* A directory the namespace's root may write: it holds no
+         * capability over root's /tmp, whose owner it does not map. */
+        unlink("/tmp/userns-d/f");
+        mkdir("/tmp/userns-d", 0777);
+        chmod("/tmp/userns-d", 0777);
         c = fork();
         if (c == 0) {
             int k = 0, init_ns = open("/proc/self/ns/user", O_RDONLY);
@@ -9530,6 +9535,40 @@ static void test_user_ns(void)
             waitpid(e, NULL, 0);
             const char *eff = strstr(text, "CapEff:\t");
             if (!eff || strncmp(eff + 8, "0000000000000000", 16) == 0) k |= 128;
+            /* What its root may do over what the namespace owns (ADR 0022
+             * H4c): make a UTS namespace and name it, and give its own file
+             * a capability, stored as v3 naming it (checked outside). */
+            pid_t h = fork();
+            if (h == 0) {
+                int m = 0;
+                struct utsname un;
+                static const unsigned char v2[20] = {1, 0, 0, 2, 0, 4};
+                unsigned char back[32];
+                if (unshare(CLONE_NEWUTS) != 0 || sethostname("inner", 5) != 0 ||
+                    uname(&un) != 0 || strcmp(un.nodename, "inner") != 0)
+                    m |= 1;
+                int fd = open("/tmp/userns-d/f", O_CREAT | O_WRONLY | O_EXCL, 0755);
+                if (fd < 0)
+                    m |= 8;
+                else if (setxattr("/tmp/userns-d/f", "security.capability", v2, sizeof(v2),
+                                  0) != 0)
+                    m |= 2;
+                if (m & 10) {
+                    printf("user-ns fcap errno=%d\n", errno);
+                    fflush(stdout);
+                }
+                if (fd >= 0) close(fd);
+                if (getxattr("/tmp/userns-d/f", "security.capability", back,
+                             sizeof(back)) != 20 || memcmp(back, v2, 20) != 0)
+                    m |= 4;
+                _exit(m);
+            }
+            int hcode = t_exit_status(h);
+            if (hcode != 0) {
+                printf("user-ns h4c=%#x\n", hcode);
+                fflush(stdout);
+                k |= 4;
+            }
             if (!(setns(init_ns, CLONE_NEWUSER) == -1 && errno == EPERM)) k |= 4;
             /* Its capabilities here set no ids outside: an unmapped id
              * fails (Linux EINVAL; EPERM until ids are translated). */
@@ -9538,6 +9577,14 @@ static void test_user_ns(void)
         }
         code = t_exit_status(c);
         if (code != 0) g |= code << 16;
+        /* Outside, the capability the namespace's root set is v3, naming
+         * that root (kernel uid 65534): it is no capability of ours. */
+        unsigned char fcap[32];
+        if (getxattr("/tmp/userns-d/f", "security.capability", fcap, sizeof(fcap)) != 24 ||
+            memcmp(fcap, "\x01\0\0\x03", 4) != 0 || memcmp(fcap + 20, "\xfe\xff\0\0", 4) != 0)
+            g |= 512;
+        unlink("/tmp/userns-d/f");
+        rmdir("/tmp/userns-d");
         if (t_write_text(sw, "0") != 0) g |= 64;
         if (t_read_text("/proc/sys/user/max_user_namespaces", buf, sizeof(buf)) <= 0 ||
             atoi(buf) <= 0)

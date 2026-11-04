@@ -190,7 +190,10 @@ fn truncate_removing_privs_as(
 
 /// The set-user-ID and set-group-ID bits a write or truncate by `caller`
 /// removes ([`Permissions::after_write`]). The kernel itself (no process)
-/// holds CAP_FSETID.
+/// holds CAP_FSETID. Keeping either bit takes CAP_FSETID in the initial
+/// user namespace; a set-group-ID bit without group execute also stays
+/// for a caller in the file's group or holding CAP_FSETID over the file
+/// (setattr_should_drop_sgid).
 fn drop_set_id(
     node: &dyn VfsNode,
     caller: &crate::process::creds::Caller,
@@ -199,7 +202,7 @@ fn drop_set_id(
     let fsetid = caller.capable(crate::process::linux_caps::CAP_FSETID);
     if let Some(kept) = meta
         .permissions
-        .after_write(fsetid, caller.creds.in_group(meta.gid))
+        .after_write(fsetid, caller.in_group_or_capable(meta.uid, meta.gid))
     {
         node.chmod(kept)?;
     }
@@ -414,7 +417,9 @@ pub const MAY_READ: u32 = 4;
 /// a directory CAP_DAC_READ_SEARCH grants anything but writing and
 /// CAP_DAC_OVERRIDE everything; on anything else CAP_DAC_READ_SEARCH grants
 /// reading alone, and CAP_DAC_OVERRIDE reading and writing, and executing
-/// only where some execute bit is set.
+/// only where some execute bit is set. The capabilities count in the
+/// caller's own user namespace, for a node whose owner and group it maps
+/// (capable_wrt_inode_uidgid).
 pub fn permission(caller: &crate::process::creds::Caller, meta: &Metadata, mask: u32) -> bool {
     use crate::process::linux_caps::{CAP_DAC_OVERRIDE, CAP_DAC_READ_SEARCH};
     let c = &caller.creds;
@@ -424,14 +429,15 @@ pub fn permission(caller: &crate::process::creds::Caller, meta: &Metadata, mask:
     if mask & !granted == 0 {
         return true;
     }
+    let capable = |cap| caller.capable_wrt_inode(meta.uid, meta.gid, cap);
     if meta.node_type == NodeType::Directory {
-        return (mask & MAY_WRITE == 0 && caller.capable(CAP_DAC_READ_SEARCH))
-            || caller.capable(CAP_DAC_OVERRIDE);
+        return (mask & MAY_WRITE == 0 && capable(CAP_DAC_READ_SEARCH))
+            || capable(CAP_DAC_OVERRIDE);
     }
-    if mask == MAY_READ && caller.capable(CAP_DAC_READ_SEARCH) {
+    if mask == MAY_READ && capable(CAP_DAC_READ_SEARCH) {
         return true;
     }
-    (mask & MAY_EXEC == 0 || p.any_exec()) && caller.capable(CAP_DAC_OVERRIDE)
+    (mask & MAY_EXEC == 0 || p.any_exec()) && capable(CAP_DAC_OVERRIDE)
 }
 
 /// Directory entry
@@ -3100,6 +3106,21 @@ pub(crate) mod tests {
             MAY_READ | MAY_EXEC
         ));
         assert!(!permission(&rs, &meta(dir, 0o000, 0, 0), MAY_WRITE));
+        // In a user namespace they count for nodes whose owner and group it
+        // maps (capable_wrt_inode_uidgid; ADR 0022 H4c).
+        let ns = crate::process::userns::test_child(b"0 1000 1\n1 2000 1", b"0 1000 1");
+        let ns_root = Caller {
+            creds: Credentials::new(1000, 1000),
+            caps: LinuxCaps::FULL,
+            userns: ns,
+        };
+        assert!(permission(
+            &ns_root,
+            &meta(file, 0o000, 2000, 1000),
+            MAY_READ | MAY_WRITE
+        ));
+        assert!(!permission(&ns_root, &meta(file, 0o600, 0, 0), MAY_READ));
+        assert!(!permission(&ns_root, &meta(dir, 0o700, 0, 1000), MAY_EXEC));
     }
 
     /// A write, as a truncate or chown, removes a file's capabilities

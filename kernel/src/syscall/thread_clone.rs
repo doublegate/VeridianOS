@@ -280,8 +280,8 @@ pub fn sys_clone3(uargs: usize, size: usize) -> Result<usize, SyscallError> {
 /// CLONE_PARENT or with an exit signal, CLONE_NNP for a thread, and
 /// CLONE_PIDFD_AUTOKILL without CLONE_PIDFD or CLONE_AUTOREAP or for a
 /// thread are EINVAL; CLONE_PIDFD_AUTOKILL without CLONE_NNP needs
-/// CAP_SYS_ADMIN (`admin`; EPERM), since the child could gain privilege
-/// after it starts.
+/// CAP_SYS_ADMIN in the caller's own user namespace (`admin`; EPERM),
+/// since the child could gain privilege after it starts.
 fn copy_process_checks(req: &CloneRequest, admin: bool) -> Result<(), SyscallError> {
     let on = |flag| req.on(flag);
     let invalid = (on(CLONE_NEWNS) && on(CLONE_FS))
@@ -367,8 +367,9 @@ fn request_checks(req: &mut CloneRequest, admin: bool) -> Result<(), SyscallErro
 
 /// set_tid's own rules (Linux's alloc_pid): more IDs than PID namespace
 /// levels (one here), or an ID below 1 or not below pid_max, are EINVAL;
-/// choosing one needs CAP_CHECKPOINT_RESTORE or CAP_SYS_ADMIN
-/// (`may_choose`; EPERM).
+/// choosing one needs CAP_CHECKPOINT_RESTORE or CAP_SYS_ADMIN over the
+/// user namespace that owns the child's PID namespace
+/// (checkpoint_restore_ns_capable; `may_choose`; EPERM).
 fn set_tid_checks(tid: i32, levels: u64, may_choose: bool) -> Result<u64, SyscallError> {
     if levels > 1 || tid < 1 || tid as u64 >= crate::process::PID_MAX {
         return Err(SyscallError::InvalidArgument);
@@ -386,7 +387,7 @@ fn set_tid_checks(tid: i32, levels: u64, may_choose: bool) -> Result<u64, Syscal
 fn kernel_clone(mut req: CloneRequest) -> Result<usize, SyscallError> {
     use crate::process::linux_caps::{CAP_CHECKPOINT_RESTORE, CAP_SYS_ADMIN};
     let caller = process::creds::Caller::current();
-    request_checks(&mut req, caller.capable(CAP_SYS_ADMIN))?;
+    request_checks(&mut req, caller.ns_capable(&caller.userns, CAP_SYS_ADMIN))?;
     // copy_process refuses a new user namespace sharing the filesystem
     // state; then copy_creds makes it (create_user_ns), and copy_namespaces
     // the others, which belong to it and which its root may make.
@@ -402,14 +403,18 @@ fn kernel_clone(mut req: CloneRequest) -> Result<usize, SyscallError> {
     let current_ns = process::current_thread()
         .ok_or(SyscallError::InvalidState)?
         .namespaces();
-    let admin = user_ns.is_some() || caller.capable(CAP_SYS_ADMIN);
+    // copy_namespaces: over the user namespace the child's credentials
+    // are in, whose root a new one's creator is.
+    let admin = caller.ns_capable(&owner, CAP_SYS_ADMIN);
     let namespaces = ns::for_clone(&current_ns, req.flags, admin, &owner).map_err(|e| match e {
         ns::CloneNsError::Permission => SyscallError::OperationNotPermitted,
         ns::CloneNsError::Invalid => SyscallError::InvalidArgument,
     })?;
     let claim = match req.set_tid {
         Some(tid) => {
-            let may = caller.capable(CAP_CHECKPOINT_RESTORE) || caller.capable(CAP_SYS_ADMIN);
+            let pid_owner = &namespaces.pid_for_children.owner;
+            let may = caller.ns_capable(pid_owner, CAP_CHECKPOINT_RESTORE)
+                || caller.ns_capable(pid_owner, CAP_SYS_ADMIN);
             let id = set_tid_checks(tid, req.set_tid_levels, may)?;
             Some(process::IdClaim::new(id).ok_or(SyscallError::FileExists)?)
         }

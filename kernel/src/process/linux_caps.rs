@@ -281,6 +281,36 @@ impl FileCaps {
             || (value.len() == XATTR_CAPS_SZ_3 && rev(VFS_CAP_REVISION_3))
     }
 
+    /// The `security.capability` value stored for one a writer in user
+    /// namespace `ns` passes ([`Self::valid_to_write`] already checked;
+    /// Linux's cap_convert_nscap): a v2 value as it is from a writer
+    /// holding CAP_SETFCAP in the initial namespace (`privileged`), the
+    /// filesystems' namespace; otherwise a v3 value whose root id is the
+    /// kernel uid of the given one (a v3's, or 0 for v2) in `ns`, EINVAL
+    /// when `ns` does not map it. So a namespace's root can only set
+    /// capabilities for itself or a root below it, never for the initial
+    /// namespace's root.
+    pub fn convert_for_write(
+        value: &[u8],
+        ns: &super::userns::UserNs,
+        privileged: bool,
+    ) -> Result<Vec<u8>, SyscallError> {
+        if value.len() == XATTR_CAPS_SZ_2 && privileged {
+            return Ok(Vec::from(value));
+        }
+        let given = if value.len() == XATTR_CAPS_SZ_3 {
+            le32(value, 20)
+        } else {
+            0
+        };
+        let root = ns.uid_down(given).ok_or(SyscallError::InvalidArgument)?;
+        let effective = le32(value, 0) & VFS_CAP_FLAGS_EFFECTIVE;
+        let mut out = Vec::from(&value[..XATTR_CAPS_SZ_2]);
+        out[0..4].copy_from_slice(&(VFS_CAP_REVISION_3 | effective).to_le_bytes());
+        out.extend_from_slice(&root.to_le_bytes());
+        Ok(out)
+    }
+
     /// The `security.capability` value getxattr returns to a reader in
     /// user namespace `reader` for a stored one (Linux's
     /// cap_inode_getsecurity). Its root id (a v3's, or 0 for v2) as the
@@ -1407,6 +1437,48 @@ mod tests {
         assert_eq!(
             FileCaps::xattr_for_reader(&v3(2000), &ns),
             Err(SyscallError::Overflow)
+        );
+    }
+
+    /// security.capability as a write stores it (cap_convert_nscap): a v2
+    /// value unchanged with CAP_SETFCAP in the initial namespace; from a
+    /// namespace a v3 value naming its root, which the initial namespace
+    /// then does not honour; a root id the namespace does not map EINVAL.
+    #[test]
+    fn written_file_capabilities_name_the_writers_root() {
+        let ns = crate::process::userns::test_child(b"0 1000 1\n1 2000 1", b"0 1000 1");
+        let init = crate::process::userns::initial();
+        let nbs = (1u32 << CAP_NET_BIND_SERVICE).to_le_bytes();
+        let v3 = |root: u32| {
+            let mut v = Vec::from(0x0300_0001u32.to_le_bytes());
+            v.extend_from_slice(&nbs);
+            v.extend_from_slice(&[0; 12]);
+            v.extend_from_slice(&root.to_le_bytes());
+            v
+        };
+        let mut v2 = Vec::from(0x0200_0001u32.to_le_bytes());
+        v2.extend_from_slice(&nbs);
+        v2.extend_from_slice(&[0; 12]);
+        assert_eq!(FileCaps::convert_for_write(&v2, &init, true).unwrap(), v2);
+        assert_eq!(
+            FileCaps::convert_for_write(&v2, &init, false).unwrap(),
+            v3(0)
+        );
+        assert_eq!(
+            FileCaps::convert_for_write(&v3(1000), &init, true).unwrap(),
+            v3(1000)
+        );
+        let from_ns = FileCaps::convert_for_write(&v2, &ns, false).unwrap();
+        assert_eq!(from_ns, v3(1000));
+        assert_eq!(FileCaps::from_xattr(&from_ns, &init), Ok(None));
+        assert!(FileCaps::from_xattr(&from_ns, &ns).unwrap().is_some());
+        assert_eq!(
+            FileCaps::convert_for_write(&v3(1), &ns, false).unwrap(),
+            v3(2000)
+        );
+        assert_eq!(
+            FileCaps::convert_for_write(&v3(5), &ns, false),
+            Err(SyscallError::InvalidArgument)
         );
     }
 }

@@ -469,8 +469,8 @@ fn open_status(flags: usize) -> u32 {
 fn check_open_status(node: &dyn crate::fs::VfsNode, flags: usize) -> Result<(), SyscallError> {
     use crate::fs::file::status;
     if flags as u32 & status::NOATIME != 0 {
-        let uid = node.metadata().map_err(super::map_kernel_error)?.uid;
-        if !Caller::current().owner_or_capable(uid) {
+        let meta = node.metadata().map_err(super::map_kernel_error)?;
+        if !Caller::current().owner_or_capable(meta.uid, meta.gid) {
             return Err(SyscallError::OperationNotPermitted);
         }
     }
@@ -1837,7 +1837,7 @@ fn do_utimes(
     let only_now = specs.is_none_or(|[a, m]| a[1] == UTIME_NOW && m[1] == UTIME_NOW);
     let caller = Caller::current();
     let meta = node.metadata().map_err(super::map_kernel_error)?;
-    if !caller.owner_or_capable(meta.uid) {
+    if !caller.owner_or_capable(meta.uid, meta.gid) {
         if !only_now {
             return Err(SyscallError::OperationNotPermitted);
         }
@@ -1925,13 +1925,15 @@ pub fn sys_fchdir(fd: usize) -> SyscallResult {
 
 /// chroot (N-250): make `path` the root for every later lookup of this
 /// process's threads that share its filesystem state (and of children,
-/// which inherit it). CAP_SYS_CHROOT only (EPERM), as on Linux. The
+/// which inherit it). CAP_SYS_CHROOT in the caller's own user namespace
+/// only (EPERM), as on Linux. The
 /// working directory stays where it is if it is under the new
 /// root; otherwise it becomes the new root, where Linux would leave it
 /// outside (the classic way out of a chroot).
 pub fn sys_chroot(path_ptr: usize) -> SyscallResult {
     let path = read_user_path(path_ptr)?;
-    if !Caller::current().capable(crate::process::linux_caps::CAP_SYS_CHROOT) {
+    let caller = Caller::current();
+    if !caller.ns_capable(&caller.userns, crate::process::linux_caps::CAP_SYS_CHROOT) {
         return Err(SyscallError::OperationNotPermitted);
     }
     let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
@@ -2261,6 +2263,7 @@ fn may_signal(
     kill_ok(
         &Caller::current(),
         &target.credentials(),
+        &target.user_ns(),
         caller.pid == target.pid,
         sig,
         same_session,
@@ -2269,11 +2272,13 @@ fn may_signal(
 
 /// Linux's kill rule: a process may always signal itself; otherwise the
 /// sender's real or effective uid must be the target's real or saved uid,
-/// or the sender must hold CAP_KILL -- except that SIGCONT may go to any
+/// or the sender must hold CAP_KILL over the target's user namespace
+/// `target_ns` (kill_ok_by_cred) -- except that SIGCONT may go to any
 /// process in the sender's session.
 fn kill_ok(
     caller: &Caller,
     target: &crate::process::creds::Credentials,
+    target_ns: &crate::process::userns::UserNs,
     same_process: bool,
     sig: i32,
     same_session: bool,
@@ -2283,7 +2288,7 @@ fn kill_ok(
         || [c.ruid, c.euid]
             .iter()
             .any(|&id| id == target.ruid || id == target.suid)
-        || caller.capable(crate::process::linux_caps::CAP_KILL)
+        || caller.ns_capable(target_ns, crate::process::linux_caps::CAP_KILL)
         || (sig == crate::process::exit::signals::SIGCONT && same_session)
 }
 
@@ -2505,20 +2510,21 @@ pub(crate) fn chmod_node(
 }
 
 /// The mode a chmod by `caller` stores on a file owned by `uid`:`gid`.
-/// EPERM unless the caller owns the file or holds CAP_FOWNER; and as
-/// Linux's setattr_copy, a caller outside the file's group without
-/// CAP_FSETID cannot set the set-group-ID bit (it is dropped, not refused).
+/// EPERM unless the caller owns the file or holds CAP_FOWNER over it; and
+/// as Linux's setattr_copy, a caller outside the file's group without
+/// CAP_FSETID over it cannot set the set-group-ID bit (it is dropped, not
+/// refused).
 pub(crate) fn chmod_perms(
     caller: &Caller,
     uid: u32,
     gid: u32,
     mode: usize,
 ) -> Result<Permissions, SyscallError> {
-    if !caller.owner_or_capable(uid) {
+    if !caller.owner_or_capable(uid, gid) {
         return Err(SyscallError::OperationNotPermitted);
     }
     let mut perms = Permissions::from_mode(mode as u32 & 0o7777);
-    if !caller.creds.in_group(gid) && !caller.capable(crate::process::linux_caps::CAP_FSETID) {
+    if !caller.in_group_or_capable(uid, gid) {
         perms.set_gid = false;
     }
     Ok(perms)
@@ -2702,7 +2708,7 @@ pub(crate) fn check_may_remove(
         .map_err(map_resolve_err)?
         .metadata()
         .map_err(super::map_kernel_error)?;
-    if caller.owner_or_capable(entry_meta.uid) {
+    if caller.owner_or_capable(entry_meta.uid, entry_meta.gid) {
         Ok(())
     } else {
         Err(SyscallError::PermissionDenied)
@@ -3180,15 +3186,15 @@ fn file_status_flags(file: &crate::fs::file::File) -> u32 {
 fn set_file_status_flags(
     file: &crate::fs::file::File,
     arg: u32,
-    owner_ok: impl FnOnce(u32) -> bool,
+    owner_ok: impl FnOnce(u32, u32) -> bool,
 ) -> Result<(), SyscallError> {
     use core::sync::atomic::Ordering;
 
     use crate::fs::file::status;
     let old = file.status.load(Ordering::Acquire);
     if arg & status::NOATIME != 0 && old & status::NOATIME == 0 {
-        let uid = file.node.metadata().map_err(super::map_kernel_error)?.uid;
-        if !owner_ok(uid) {
+        let meta = file.node.metadata().map_err(super::map_kernel_error)?;
+        if !owner_ok(meta.uid, meta.gid) {
             return Err(SyscallError::OperationNotPermitted);
         }
     }
@@ -3261,8 +3267,8 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
         F_GETFL => Ok(file_status_flags(&file) as usize),
         F_SETFL => {
             drop(file_table);
-            set_file_status_flags(&file, arg as u32, |uid| {
-                Caller::current().owner_or_capable(uid)
+            set_file_status_flags(&file, arg as u32, |uid, gid| {
+                Caller::current().owner_or_capable(uid, gid)
             })
             .map(|()| 0)
         }
@@ -3696,9 +3702,15 @@ pub(crate) fn link_at(
                 .lock()
                 .get_path(olddirfd as u32 as usize)
                 .ok_or(SyscallError::BadFileDescriptor)?;
+            // Another's descriptor needs CAP_DAC_READ_SEARCH over the
+            // opener's user namespace (filename_lookup's LINKAT_EMPTY).
             let caller = Caller::current();
-            if !caller.capable(crate::process::linux_caps::CAP_DAC_READ_SEARCH)
-                && file.opener.as_deref() != Some(&caller)
+            let opener_ns = file
+                .opener
+                .as_deref()
+                .map_or_else(crate::process::userns::initial, |o| o.userns.clone());
+            if file.opener.as_deref() != Some(&caller)
+                && !caller.ns_capable(&opener_ns, crate::process::linux_caps::CAP_DAC_READ_SEARCH)
             {
                 return Err(SyscallError::ResourceNotFound);
             }
@@ -4644,8 +4656,10 @@ fn chown_id(id: usize) -> Option<u32> {
 
 /// Whether `creds` may give a file owned by `file_uid`:`file_gid` the
 /// owner `uid` and group `gid` (`None`: unchanged), as Linux's chown_ok and
-/// chgrp_ok with _POSIX_CHOWN_RESTRICTED: CAP_CHOWN may do anything; the
-/// owner may keep the owner and set the group to one it belongs to.
+/// chgrp_ok with _POSIX_CHOWN_RESTRICTED: CAP_CHOWN over the file
+/// (capable_wrt_inode_uidgid), or in the initial user namespace, may do
+/// anything; the owner may keep the owner and set the group to one it
+/// belongs to.
 pub(crate) fn may_chown(
     caller: &Caller,
     file_uid: u32,
@@ -4653,7 +4667,8 @@ pub(crate) fn may_chown(
     uid: Option<u32>,
     gid: Option<u32>,
 ) -> bool {
-    if caller.capable(crate::process::linux_caps::CAP_CHOWN) {
+    use crate::process::linux_caps::CAP_CHOWN;
+    if caller.capable_wrt_inode(file_uid, file_gid, CAP_CHOWN) || caller.capable(CAP_CHOWN) {
         return true;
     }
     let creds = &caller.creds;
@@ -4909,23 +4924,23 @@ mod tests {
         assert_eq!(get(&file), 2 | O_LARGEFILE);
         assert!(!file.is_append());
         // Access mode, O_CREAT and O_TRUNC bits are ignored.
-        set(&file, status::APPEND | O_NONBLOCK_FL | 0x241, |_| true).unwrap();
+        set(&file, status::APPEND | O_NONBLOCK_FL | 0x241, |_, _| true).unwrap();
         assert!(file.is_append());
         assert_eq!(get(&file), 2 | O_LARGEFILE | status::APPEND | O_NONBLOCK_FL);
-        set(&file, status::ASYNC | status::DIRECT, |_| true).unwrap();
+        set(&file, status::ASYNC | status::DIRECT, |_, _| true).unwrap();
         assert!(!file.is_append());
         assert_eq!(get(&file), 2 | O_LARGEFILE | status::ASYNC | status::DIRECT);
         // O_NOATIME needs the owner; keeping it once set asks no one.
         assert_eq!(
-            set(&file, status::NOATIME, |_| false),
+            set(&file, status::NOATIME, |_, _| false),
             Err(SyscallError::OperationNotPermitted)
         );
-        set(&file, status::NOATIME, |uid| uid == 0).unwrap();
-        set(&file, status::NOATIME | status::APPEND, |_| false).unwrap();
+        set(&file, status::NOATIME, |uid, _| uid == 0).unwrap();
+        set(&file, status::NOATIME | status::APPEND, |_, _| false).unwrap();
         // O_DIRECT only on a regular file.
         let dir = File::new(root, OpenFlags::read_only());
         assert_eq!(
-            set(&dir, status::DIRECT, |_| true),
+            set(&dir, status::DIRECT, |_, _| true),
             Err(SyscallError::InvalidArgument)
         );
         // An O_APPEND open starts with it.
@@ -5204,19 +5219,40 @@ mod tests {
         let mut saved = Credentials::new(3000, 3000);
         saved.suid = 1000;
         let u = user();
-        assert!(!kill_ok(&u, &target, false, 15, false));
-        assert!(kill_ok(&u, &saved, false, 15, false), "target's saved uid");
-        assert!(kill_ok(&u, &target, true, 15, false), "itself");
-        assert!(kill_ok(&user_with(&[CAP_KILL]), &target, false, 15, false));
-        assert!(kill_ok(&u, &target, false, SIGCONT, true));
-        assert!(!kill_ok(&u, &target, false, SIGCONT, false));
+        let init = crate::process::userns::initial();
+        assert!(!kill_ok(&u, &target, &init, false, 15, false));
+        assert!(
+            kill_ok(&u, &saved, &init, false, 15, false),
+            "target's saved uid"
+        );
+        assert!(kill_ok(&u, &target, &init, true, 15, false), "itself");
+        assert!(kill_ok(
+            &user_with(&[CAP_KILL]),
+            &target,
+            &init,
+            false,
+            15,
+            false
+        ));
+        assert!(kill_ok(&u, &target, &init, false, SIGCONT, true));
+        assert!(!kill_ok(&u, &target, &init, false, SIGCONT, false));
         let bare_root = Caller {
             creds: Credentials::new(0, 0),
             caps: LinuxCaps::EMPTY,
             userns: crate::process::userns::initial(),
         };
-        assert!(!kill_ok(&bare_root, &target, false, 15, false));
-        assert!(kill_ok(&Caller::kernel(), &target, false, 15, false));
+        assert!(!kill_ok(&bare_root, &target, &init, false, 15, false));
+        assert!(kill_ok(&Caller::kernel(), &target, &init, false, 15, false));
+        // A namespace's root holds CAP_KILL over the processes in it, and
+        // over nothing outside (ADR 0022 H4c).
+        let ns = crate::process::userns::test_child(b"0 1000 1\n1 2000 1", b"0 1000 1");
+        let ns_root = Caller {
+            creds: Credentials::new(1000, 1000),
+            caps: LinuxCaps::FULL,
+            userns: ns.clone(),
+        };
+        assert!(kill_ok(&ns_root, &target, &ns, false, 15, false));
+        assert!(!kill_ok(&ns_root, &target, &init, false, 15, false));
     }
 
     /// loff_t is signed: a negative offset or length (as a register value)

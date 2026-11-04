@@ -173,6 +173,12 @@ fn set(
     // before its CAP_SETFCAP check).
     xattr::check_value(&name, &bytes).map_err(|_| SyscallError::InvalidArgument)?;
     check(&node, &name, true)?;
+    // Stored naming the writer's namespace's root (cap_convert_nscap).
+    if name == xattr::XATTR_NAME_CAPS {
+        let caller = Caller::current();
+        let privileged = caller.capable(crate::process::linux_caps::CAP_SETFCAP);
+        bytes = FileCaps::convert_for_write(&bytes, &caller.userns, privileged)?;
+    }
     node.update_xattrs(&mut |a| a.set(&name, &bytes, flags))
         .map_err(super::map_kernel_error)?;
     crate::fs::inotify::on_target(at.as_deref(), &node, crate::fs::inotify::IN_ATTRIB);

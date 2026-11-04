@@ -105,15 +105,20 @@ pub fn check_access(
 ) -> Result<(), KernelError> {
     match namespace(name)? {
         Namespace::System => Err(KernelError::FsError(FsError::NotSupported)),
-        // No check from the VFS; writing needs CAP_SYS_ADMIN, except the
-        // file capability attribute, which CAP_SETFCAP sets and removes.
+        // No check from the VFS; writing needs CAP_SYS_ADMIN in the
+        // initial user namespace (the filesystems'), except the file
+        // capability attribute, which CAP_SETFCAP over the file sets and
+        // removes (capable_wrt_inode_uidgid; cap_convert_nscap and
+        // cap_inode_removexattr), a namespace's root included -- the
+        // value it sets is converted to name that root
+        // (`FileCaps::convert_for_write`).
         Namespace::Security => {
-            let cap = if name == XATTR_NAME_CAPS {
-                CAP_SETFCAP
+            let may = if name == XATTR_NAME_CAPS {
+                caller.capable_wrt_inode(meta.uid, meta.gid, CAP_SETFCAP)
             } else {
-                CAP_SYS_ADMIN
+                caller.capable(CAP_SYS_ADMIN)
             };
-            if write && !caller.capable(cap) {
+            if write && !may {
                 return Err(KernelError::FsError(FsError::OperationNotPermitted));
             }
             Ok(())
@@ -132,7 +137,10 @@ pub fn check_access(
             match meta.node_type {
                 NodeType::File | NodeType::Socket => {}
                 NodeType::Directory => {
-                    if write && meta.permissions.sticky && !caller.owner_or_capable(meta.uid) {
+                    if write
+                        && meta.permissions.sticky
+                        && !caller.owner_or_capable(meta.uid, meta.gid)
+                    {
                         return Err(KernelError::FsError(FsError::OperationNotPermitted));
                     }
                 }
@@ -603,5 +611,32 @@ mod tests {
         };
         assert!(update_in_memory(&mut s, &mut fails).is_err());
         assert_eq!(s.get("user.keep"), Some(&b"1"[..]));
+    }
+
+    /// security.capability needs CAP_SETFCAP over the file, which a
+    /// namespace's root holds for files whose IDs it maps; the other
+    /// security.* attributes CAP_SYS_ADMIN in the initial namespace (ADR
+    /// 0022 H4c).
+    #[test]
+    fn file_capabilities_need_setfcap_over_the_file() {
+        use crate::process::linux_caps::CAP_SETFCAP;
+        let ns = crate::process::userns::test_child(b"0 1000 1\n1 2000 1", b"0 1000 1\n1 2000 1");
+        let ns_root = Caller {
+            creds: Credentials::new(1000, 1000),
+            caps: LinuxCaps::FULL,
+            userns: ns,
+        };
+        let mapped = meta(NodeType::File, 0o755, 2000);
+        let roots = meta(NodeType::File, 0o755, 0);
+        assert!(check_access(&ns_root, &mapped, XATTR_NAME_CAPS, true).is_ok());
+        assert_eq!(
+            fs_err(check_access(&ns_root, &roots, XATTR_NAME_CAPS, true).unwrap_err()),
+            FsError::OperationNotPermitted
+        );
+        assert_eq!(
+            fs_err(check_access(&ns_root, &mapped, "security.selinux", true).unwrap_err()),
+            FsError::OperationNotPermitted
+        );
+        assert!(check_access(&user(&[CAP_SETFCAP]), &roots, XATTR_NAME_CAPS, true).is_ok());
     }
 }

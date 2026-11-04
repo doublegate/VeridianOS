@@ -301,6 +301,20 @@ impl UserNs {
         }
     }
 
+    /// `self`, or the nearest namespace above it that maps both owner
+    /// `uid` and group `gid` of a file, or the initial one (the walk of
+    /// Linux's would_dump, with privileged_wrt_inode_uidgid).
+    pub fn ancestor_mapping(self: &Arc<Self>, uid: u32, gid: u32) -> Arc<UserNs> {
+        let mut ns = self.clone();
+        while ns.uid_up(uid).is_none() || ns.gid_up(gid).is_none() {
+            match ns.parent.clone() {
+                Some(parent) => ns = parent,
+                None => break,
+            }
+        }
+        ns
+    }
+
     /// Whether `self` is `ancestor` or below it (in_userns).
     pub fn is_in(&self, ancestor: &UserNs) -> bool {
         let mut ns = self;
@@ -872,5 +886,17 @@ mod tests {
         assert!(ns.root_owns(0), "the initial namespace's root");
         assert!(!ns.root_owns(2000));
         assert!(!initial().root_owns(1000));
+    }
+
+    /// would_dump's walk: up from a namespace to the first that maps both
+    /// a file's owner and group, at worst the initial one.
+    #[test]
+    fn an_unreadable_file_moves_memory_to_a_namespace_that_maps_it() {
+        let ns = test_child(b"0 1000 1", b"0 1000 1");
+        let init = initial();
+        assert_eq!(ns.ancestor_mapping(1000, 1000).ident.id, ns.ident.id);
+        assert_eq!(ns.ancestor_mapping(0, 1000).ident.id, init.ident.id);
+        assert_eq!(ns.ancestor_mapping(1000, 0).ident.id, init.ident.id);
+        assert_eq!(init.ancestor_mapping(0, 0).ident.id, init.ident.id);
     }
 }

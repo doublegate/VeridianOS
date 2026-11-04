@@ -154,6 +154,8 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
             .clone()
             .unwrap_or_else(|| current_process.user_ns()),
     );
+    // The memory is the parent's copy, with its namespace (dup_mm).
+    new_process.set_mm_user_ns(current_process.mm_user_ns());
 
     let new_pid = new_process.pid;
 

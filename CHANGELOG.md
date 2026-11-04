@@ -309,6 +309,15 @@
   when it does not map them). Root of a user namespace keeps its capabilities across exec and
   loses them on leaving uid 0, as on Linux, and a file capability applies by its root id.
   waitid now fills in si_uid, which it left 0. kconfig's CONFIG_USER_NS is now set.
+- Privilege checks ask about the user namespace Linux names (ADR 0022 H4c): root of a user
+  namespace may now make the other namespace types and join those its namespace owns, name its
+  UTS namespace, set its time namespace's offsets, chroot, and signal, trace, renice and change
+  the limits of processes in its namespace; over files it holds its capabilities when its
+  namespace maps the file's owner and group. A file capability it sets is stored as a v3 value
+  naming it, so it grants nothing outside. ptrace of a non-dumpable process needs privilege
+  over the namespace its memory came from, and `/proc/<pid>` of one is owned by that
+  namespace's root. mount, umount2 and pivot_root still need CAP_SYS_ADMIN in the initial
+  namespace (ADR 0024).
 - rseq stays ENOSYS, as on Linux built without CONFIG_RSEQ: glibc runs without it and musl does
   not use it.
 - A signal from rt_sigqueueinfo, rt_tgsigqueueinfo or pidfd_send_signal that ends a sender

@@ -115,7 +115,29 @@ them through an `nsproxy` (all but user, which lives in the credentials); `pid_f
      (userns_may_setgroups). Root, for the capability rules (the setuid fixup, exec's root
      emulation, access), is the namespace's uid 0, not kernel uid 0; a file capability counts,
      and reads back, by its root id as rootid_owns_currentns and cap_inode_getsecurity decide.
-     H4c moves the checks.
+     H4c moves each privilege check to the namespace Linux names: CAP_SYS_ADMIN over the user
+     namespace that will own a new namespace (clone, unshare: the new one's creator is its
+     root), over a target's owner and in the caller's own for setns (CAP_SYS_CHROOT too for a
+     mount namespace), over the UTS namespace's owner for sethostname and setdomainname, over
+     the time namespace's owner, as the opener holds it, for `timens_offsets`; in the caller's
+     own namespace for chroot and CLONE_PIDFD_AUTOKILL; over the target's for kill
+     (CAP_KILL), prlimit (CAP_SYS_RESOURCE), setpriority and sched_setaffinity
+     (CAP_SYS_NICE) and ptrace (CAP_SYS_PTRACE, and for a non-dumpable target over the
+     namespace its memory belongs to, mm->user_ns, the credentials' at its last exec; exec's
+     ptracer_capable asks it of the tracer's credentials from the attach); over the opener's
+     for linkat(AT_EMPTY_PATH); over the child's PID namespace's owner for set_tid; and for
+     files capable_wrt_inode_uidgid, the capability in the caller's own namespace when it
+     maps the file's owner and group: the DAC overrides, CAP_FOWNER (chmod, utimes,
+     O_NOATIME, the sticky bit, a sticky directory's user attributes), CAP_FSETID for keeping
+     a set-group-ID bit, CAP_CHOWN and CAP_SETFCAP. A file capability written in a namespace
+     is stored as v3 naming that namespace's root (cap_convert_nscap; v2 as given only from
+     CAP_SETFCAP in the initial namespace, the filesystems'), so it never counts for the
+     initial root. `capable()` stays where Linux keeps it: `trusted.*` and the other
+     `security.*` attributes, raising a hard limit, RLIMIT_NPROC, setting the clock,
+     CAP_WAKE_ALARM, real-time priority and nice, mknod, open_by_handle_at, keeping a
+     set-user-ID bit, the userns sysctl; and mount, umount2 and pivot_root until ADR 0024
+     gives them object capabilities (MNT_LOCKED has to come with that move, so mounts a less
+     privileged namespace inherits cannot be undone to uncover what they hide).
    - **H5, PID.** A process has an id at each level of its PID namespace, from its own up to the
      initial one; every interface that takes or returns a pid or tid translates through the
      caller's namespace (getpid, wait, kill, siginfo, signalfd, sched calls, ptrace, pidfd,

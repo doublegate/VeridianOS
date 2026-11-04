@@ -47,7 +47,7 @@ pub mod userns;
 
 // Re-export common types
 pub use lifecycle::{exec_process, fork_process, wait_process as wait_for_child};
-pub use pcb::{Process, ProcessId, ProcessPriority, ProcessState};
+pub use pcb::{Process, ProcessId, ProcessPriority, ProcessState, TracerCred};
 pub use table::get_process;
 pub use thread::{Thread, ThreadId, ThreadState};
 

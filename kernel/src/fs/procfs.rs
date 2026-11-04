@@ -128,7 +128,8 @@ fn parse_offset_line(line: &str) -> Option<(i32, i64, i64)> {
 /// A write to `/proc/<pid>/timens_offsets`, as Linux's
 /// timens_offsets_write and proc_timens_set_offset: at the start of the
 /// file and under a page (EINVAL), up to two well-formed lines (EINVAL),
-/// the process there (ESRCH), the `opener`'s CAP_SYS_TIME (EPERM), each
+/// the process there (ESRCH), the `opener`'s CAP_SYS_TIME over the user
+/// namespace owning the time namespace (EPERM), each
 /// offset and the clock it moves within range (ERANGE), and a namespace no
 /// process has entered (EACCES).
 fn write_timens_offsets(
@@ -168,7 +169,9 @@ fn write_timens_offsets(
         }
     }
     let ns = time_for_children(pid).ok_or(KernelError::FsError(FsError::NoProcess))?;
-    if !opener.capable(crate::process::linux_caps::CAP_SYS_TIME) {
+    // file_ns_capable: the opener's CAP_SYS_TIME over the user namespace
+    // that owns the time namespace.
+    if !opener.ns_capable(&ns.owner, crate::process::linux_caps::CAP_SYS_TIME) {
         return Err(KernelError::FsError(FsError::OperationNotPermitted));
     }
     // There is no suspend: the boot-time clock reads the monotonic one.
@@ -355,17 +358,19 @@ fn write_id_map(
 }
 
 /// The owner of `/proc/<pid>` and what is in it (Linux's task_dump_owner):
-/// the process's effective user and group while it is dumpable, root
-/// otherwise (Linux's root of the user namespace the memory belongs to,
-/// which here is always the initial one).
+/// the process's effective user and group while it is dumpable, otherwise
+/// the root of the user namespace its memory belongs to, or the initial
+/// root where that namespace maps no uid 0 (or gid 0).
 fn dump_owner(pid: u64) -> (u32, u32) {
-    crate::process::get_process(crate::process::ProcessId(pid))
-        .filter(|p| p.dumpable.load(core::sync::atomic::Ordering::Acquire))
-        .map(|p| {
-            let creds = p.credentials();
-            (creds.euid, creds.egid)
-        })
-        .unwrap_or((0, 0))
+    let Some(p) = crate::process::get_process(crate::process::ProcessId(pid)) else {
+        return (0, 0);
+    };
+    if p.dumpable.load(core::sync::atomic::Ordering::Acquire) {
+        let creds = p.credentials();
+        return (creds.euid, creds.egid);
+    }
+    let ns = p.mm_user_ns();
+    (ns.uid_down(0).unwrap_or(0), ns.gid_down(0).unwrap_or(0))
 }
 
 impl ProcNode {

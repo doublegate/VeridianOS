@@ -368,15 +368,14 @@ What remains:
   differ, and sync(2) flushes the filesystems of the initial namespace only. PID and
   network namespaces exist only as the initial ones: unshare, clone and clone3 refuse new ones
   with EINVAL, as Linux does when built without them, until their steps (H5, H6). User
-  namespaces can be created, mapped and joined, and ids are translated where they cross the
-  system-call boundary (ADR 0022 H4a, H4b), with these gaps until H4c: every privilege check
-  outside the namespace calls (sethostname, mount, kill, chown and the rest) still asks about
-  the initial namespace, so a process's capabilities in its own user namespace act only on its
-  own credentials (the set*id calls, setgroups, capset) and its own namespaces' maps yet;
-  ptrace and PTRACE_TRACEME between namespaces need CAP_SYS_PTRACE in the initial namespace,
-  where Linux asks about the target's; writing `security.capability` needs CAP_SETFCAP in the
-  initial namespace, so no namespace ever stores a v3 value of its own (cap_convert_nscap), though
-  exec and getxattr honour v3 values by their root id as Linux does. Of the ids: si_pid and
+  namespaces can be created, mapped and joined, ids are translated where they cross the
+  system-call boundary, and each privilege check asks about the user namespace Linux names (ADR
+  0022 H4a to H4c), with these gaps: mount(2), umount2 and pivot_root still need CAP_SYS_ADMIN
+  in the initial namespace (ADR 0024 will give them object capabilities), so a namespace's root
+  can make a mount namespace and join it but not mount in it; a setns through a pidfd that
+  joins a user namespace checks the namespaces after it with the caller's credentials from
+  before, where Linux uses the new ones; the priority and scheduling calls lack cap_safe_nice's
+  rule that a caller hold the target's permitted capabilities. Of the ids: si_pid and
   every other pid are not translated (no PID namespaces until H5); SCM_CREDENTIALS is not
   modelled; every filesystem belongs to the initial namespace, so Linux's EOVERFLOW for creating
   a file with an fsuid its filesystem's namespace does not map cannot arise; the per-user counts
@@ -384,9 +383,7 @@ What remains:
   namespaces, where Linux counts per user in each namespace; a map file finds its namespace by the pid
   at each write, where Linux binds it at open (the opener's credentials are still the ones
   checked); max_user_namespaces counts each user's namespaces system-wide, where Linux keeps
-  a count per user in each namespace, and `/proc/sys/user` has only that one limit; a process made
-  non-dumpable has its `/proc/<pid>` files owned by the initial namespace's root, where Linux
-  uses the root of the namespace its memory belongs to. Creating a user namespace needs
+  a count per user in each namespace, and `/proc/sys/user` has only that one limit. Creating a user namespace needs
   CAP_SYS_ADMIN unless root sets `/proc/sys/kernel/unprivileged_userns_clone` to 1 (it is 0 by
   default, by the maintainer's choice; Linux allows it to everyone).
   unshare(CLONE_FILES) in a multithreaded process is

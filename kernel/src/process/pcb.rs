@@ -71,6 +71,22 @@ pub enum ProcessPriority {
 }
 
 /// Process Control Block
+/// What ptracer_capable needs of a tracer's credentials: its user
+/// namespace, effective uid and whether it held CAP_SYS_PTRACE.
+#[derive(Clone)]
+pub struct TracerCred {
+    pub userns: alloc::sync::Arc<super::userns::UserNs>,
+    pub euid: u32,
+    pub has_ptrace: bool,
+}
+
+impl TracerCred {
+    /// Whether it holds CAP_SYS_PTRACE over user namespace `ns`.
+    pub fn capable_over(&self, ns: &super::userns::UserNs) -> bool {
+        ns.capable(&self.userns, self.euid, self.has_ptrace)
+    }
+}
+
 pub struct Process {
     /// Process ID
     pub pid: ProcessId,
@@ -190,6 +206,11 @@ pub struct Process {
     /// The user namespace the credentials are in (Linux's cred->user_ns;
     /// one per process, as Linux requires a thread group to share it).
     userns: Mutex<alloc::sync::Arc<super::userns::UserNs>>,
+    /// The user namespace its memory belongs to (Linux's mm->user_ns): the
+    /// credentials' at its last exec, its parent's after fork. Joining or
+    /// making another user namespace leaves it, so what the process held
+    /// before stays guarded by the privilege of the namespace it was in.
+    mm_userns: Mutex<alloc::sync::Arc<super::userns::UserNs>>,
 
     /// Process group ID (initialized to pid)
     pub pgid: AtomicU64,
@@ -198,10 +219,10 @@ pub struct Process {
     /// inherited on fork, as on Linux.
     pub tracer: AtomicU64,
 
-    /// Whether the tracer held CAP_SYS_PTRACE when it attached (Linux's
-    /// ptracer_cred, which ptracer_capable checks at exec); meaningful only
-    /// while `tracer` is set. Changed with `tracer`, under `cred_guard`.
-    pub tracer_capable: core::sync::atomic::AtomicBool,
+    /// The tracer's credentials when it attached (Linux's ptracer_cred,
+    /// which ptracer_capable checks at exec); meaningful only while
+    /// `tracer` is set. Changed with `tracer`, under `cred_guard`.
+    pub tracer_cred: Mutex<Option<TracerCred>>,
 
     /// Linux's cred_guard_mutex: exec decides and installs set-ID
     /// credentials under it, and ptrace attaches under it, so a tracer
@@ -344,6 +365,16 @@ impl Process {
     /// thread's capabilities to match (Linux's set_cred_user_ns).
     pub fn set_user_ns(&self, ns: alloc::sync::Arc<super::userns::UserNs>) {
         *self.userns.lock() = ns;
+    }
+
+    /// The user namespace its memory belongs to (`mm_userns`).
+    pub fn mm_user_ns(&self) -> alloc::sync::Arc<super::userns::UserNs> {
+        self.mm_userns.lock().clone()
+    }
+
+    /// Set the user namespace its memory belongs to (exec and fork).
+    pub fn set_mm_user_ns(&self, ns: alloc::sync::Arc<super::userns::UserNs>) {
+        *self.mm_userns.lock() = ns;
     }
 
     /// The process's resource limits.
@@ -543,9 +574,10 @@ impl Process {
             created_at: crate::arch::timer::get_ticks(),
             creds: Mutex::new(super::creds::Credentials::new(0, 0)),
             userns: Mutex::new(super::userns::initial()),
+            mm_userns: Mutex::new(super::userns::initial()),
             pgid: AtomicU64::new(pid.0),
             tracer: AtomicU64::new(0),
-            tracer_capable: core::sync::atomic::AtomicBool::new(false),
+            tracer_cred: Mutex::new(None),
             cred_guard: Mutex::new(()),
             exec_in_progress: core::sync::atomic::AtomicBool::new(false),
             dumpable: core::sync::atomic::AtomicBool::new(true),

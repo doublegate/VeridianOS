@@ -27,10 +27,6 @@ const CLONE_SYSVSEM: u64 = 0x0004_0000;
 /// CLONE_PARENT_SETTID, which unshare has no use for).
 const UNSHARE_EMPTY_MNTNS: u64 = 0x0010_0000;
 
-fn admin() -> bool {
-    process::creds::Caller::current().capable(CAP_SYS_ADMIN)
-}
-
 /// A new user namespace below `caller`'s, for clone or unshare with
 /// CLONE_NEWUSER: without CAP_SYS_ADMIN in the initial namespace only while
 /// `/proc/sys/kernel/unprivileged_userns_clone` is 1 (EPERM; ADR 0022),
@@ -56,11 +52,27 @@ pub(super) fn new_user_ns(caller: &Caller) -> Result<Arc<UserNs>, SyscallError> 
     })
 }
 
+/// Whether credentials in user namespace `new` hold no more than those in
+/// `old` with effective uid `euid` did (Linux's cred_cap_issubset, for two
+/// namespaces): only when `new` is below `old` and `euid` owns it or one
+/// of its ancestors below `old`.
+fn ns_change_is_subset(old: &UserNs, euid: u32, new: &UserNs) -> bool {
+    old.ident.id == new.ident.id || new.capable(old, euid, false)
+}
+
 /// Put the calling process in user namespace `ns` with every capability
-/// there (Linux's set_cred_user_ns).
+/// there (Linux's set_cred_user_ns). Joining one the old credentials had
+/// no power over makes the process non-dumpable, as commit_creds does when
+/// the new credentials are not a subset of the old: the namespace's root
+/// must not trace memory a more privileged process filled.
 fn enter_user_ns(ns: Arc<UserNs>) -> Result<(), SyscallError> {
     let process = process::current_process().ok_or(SyscallError::InvalidState)?;
     let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
+    if !ns_change_is_subset(&process.user_ns(), process.credentials().euid, &ns) {
+        process
+            .dumpable
+            .store(false, core::sync::atomic::Ordering::Release);
+    }
     process.set_user_ns(ns);
     *thread.caps.lock() = CapSets::ROOT;
     Ok(())
@@ -150,8 +162,10 @@ fn unshare_checks(flags: u64, others: bool, vm_shared: bool) -> Result<(), Sysca
 /// is a no-op for a single-threaded process and EINVAL otherwise (the
 /// descriptor table is the process's, shared by all its threads, here);
 /// CLONE_NEWUSER makes a user namespace ([`new_user_ns`]), whose root may
-/// then make the others, which belong to it; otherwise any other namespace
-/// needs CAP_SYS_ADMIN (EPERM), and a type not yet creatable is EINVAL.
+/// then make the others, which belong to it; any other namespace needs
+/// CAP_SYS_ADMIN over the user namespace that will own it, the new one or
+/// the caller's (EPERM; unshare_nsproxy_namespaces), and a type not yet
+/// creatable is EINVAL.
 /// Nothing changes unless everything succeeds.
 pub fn sys_unshare(flags: usize) -> SyscallResult {
     let flags = unshare_implied(flags as u64);
@@ -168,7 +182,8 @@ pub fn sys_unshare(flags: usize) -> SyscallResult {
     };
     let owner = user_ns.clone().unwrap_or_else(|| caller.userns.clone());
     let new_ns = if flags & CLONE_NS_ALL & !CLONE_NEWUSER != 0 {
-        if user_ns.is_none() && !caller.capable(CAP_SYS_ADMIN) {
+        // The root of a new user namespace holds it there.
+        if !caller.ns_capable(&owner, CAP_SYS_ADMIN) {
             return Err(SyscallError::OperationNotPermitted);
         }
         let current = thread.namespaces();
@@ -219,13 +234,14 @@ fn namespaces_of(target: &process::Process) -> Option<Arc<ns::Namespaces>> {
 
 /// One namespace's install rule (each type's `install` operation in
 /// Linux), checked before anything changes. UTS, IPC, cgroup, PID,
-/// network and time namespaces need CAP_SYS_ADMIN (there is one user
-/// namespace, so in both the namespace's owner and the caller's); a time
-/// namespace first a single-threaded caller, sharing its address space
-/// with no other process (EUSERS, as timens_install); a mount namespace
-/// also CAP_SYS_CHROOT, and a filesystem state no other thread shares
-/// (EINVAL), since joining it moves the root and working directory to its
-/// root; a user namespace (userns_install) not the caller's own (EINVAL:
+/// network and time namespaces need CAP_SYS_ADMIN over both the user
+/// namespace that owns the target and the caller's own; a time namespace
+/// first a single-threaded caller, sharing its address space with no
+/// other process (EUSERS, as timens_install); a mount namespace
+/// CAP_SYS_ADMIN over its owner and CAP_SYS_CHROOT and CAP_SYS_ADMIN in
+/// the caller's own (mntns_install), and a filesystem state no other thread
+/// shares (EINVAL), since joining it moves the root and working directory to
+/// its root; a user namespace (userns_install) not the caller's own (EINVAL:
 /// re-entering it would give back dropped capabilities), from a
 /// single-threaded caller with its own filesystem state (EINVAL), and
 /// CAP_SYS_ADMIN over it (EPERM). The checks after a user namespace in one
@@ -233,6 +249,12 @@ fn namespaces_of(target: &process::Process) -> Option<Arc<ns::Namespaces>> {
 /// those it will have in the new namespace.
 fn install_check(ns: &NsRef) -> Result<(), SyscallError> {
     let caller = process::creds::Caller::current();
+    // CAP_SYS_ADMIN over the namespace's owner and in the caller's own.
+    let admin_over = |caller: &Caller| {
+        ns.owner()
+            .is_some_and(|owner| caller.ns_capable(&owner, CAP_SYS_ADMIN))
+            && caller.ns_capable(&caller.userns, CAP_SYS_ADMIN)
+    };
     match ns.kind() {
         NsKind::User => {
             let NsRef::User(target) = ns else {
@@ -256,7 +278,7 @@ fn install_check(ns: &NsRef) -> Result<(), SyscallError> {
             Ok(())
         }
         NsKind::Mnt => {
-            if !caller.capable(CAP_SYS_ADMIN) || !caller.capable(CAP_SYS_CHROOT) {
+            if !admin_over(&caller) || !caller.ns_capable(&caller.userns, CAP_SYS_CHROOT) {
                 return Err(SyscallError::OperationNotPermitted);
             }
             let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
@@ -274,12 +296,12 @@ fn install_check(ns: &NsRef) -> Result<(), SyscallError> {
             if other_threads() || vm_shared() {
                 return Err(SyscallError::TooManyUsers);
             }
-            if !caller.capable(CAP_SYS_ADMIN) {
+            if !admin_over(&caller) {
                 return Err(SyscallError::OperationNotPermitted);
             }
             Ok(())
         }
-        _ if caller.capable(CAP_SYS_ADMIN) => Ok(()),
+        _ if admin_over(&caller) => Ok(()),
         _ => Err(SyscallError::OperationNotPermitted),
     }
 }
@@ -377,11 +399,14 @@ pub fn sys_setns(fd: usize, nstype: usize) -> SyscallResult {
 }
 
 /// sethostname(name, len) and setdomainname(name, len), as Linux's
-/// kernel/sys.c: CAP_SYS_ADMIN (EPERM), a length past 64 (or negative, as
-/// an int) EINVAL, an unreadable name EFAULT; the name is the caller's UTS
+/// kernel/sys.c: CAP_SYS_ADMIN over the user namespace that owns the
+/// caller's UTS namespace (EPERM), a length past 64 (or negative, as an
+/// int) EINVAL, an unreadable name EFAULT; the name is the caller's UTS
 /// namespace's.
 fn set_uts_name(name: usize, len: usize, host: bool) -> SyscallResult {
-    if !admin() {
+    let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
+    let uts = thread.namespaces().uts.clone();
+    if !Caller::current().ns_capable(&uts.owner, CAP_SYS_ADMIN) {
         return Err(SyscallError::OperationNotPermitted);
     }
     let len = len as u32 as i32;
@@ -397,8 +422,6 @@ fn set_uts_name(name: usize, len: usize, host: bool) -> SyscallResult {
         .position(|&b| b == 0)
         .unwrap_or(len as usize);
     let text = alloc::string::String::from_utf8_lossy(&buf[..end]);
-    let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
-    let uts = thread.namespaces().uts.clone();
     if host {
         uts.set_hostname(&text);
     } else {
@@ -565,5 +588,18 @@ mod tests {
         assert_eq!(NS_GET_NSTYPE, 0xb703);
         assert_eq!(NS_GET_PID_FROM_PIDNS, 0x8004_b706);
         assert_eq!(NS_GET_ID, 0x8008_b70d);
+    }
+
+    /// commit_creds' cred_cap_issubset across namespaces: entering one's
+    /// own namespace (or one below it) gives nothing new; root entering a
+    /// namespace another user owns does, so it stops being dumpable.
+    #[test]
+    fn joining_anothers_user_namespace_is_not_a_subset() {
+        let ns = crate::process::userns::test_child(b"0 1000 1", b"0 1000 1");
+        let init = crate::process::userns::initial();
+        assert!(ns_change_is_subset(&init, 1000, &ns), "its owner");
+        assert!(!ns_change_is_subset(&init, 0, &ns), "root, not its owner");
+        assert!(ns_change_is_subset(&init, 0, &init));
+        assert!(!ns_change_is_subset(&ns, 0, &init), "an ancestor");
     }
 }
