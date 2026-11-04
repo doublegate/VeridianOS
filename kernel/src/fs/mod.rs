@@ -1076,6 +1076,11 @@ impl MountTable {
         }
     }
 
+    /// The mount serving canonical `path` (normalized here).
+    fn serving(&self, path: &str) -> Option<&Arc<mount::Mount>> {
+        self.mount_at(self.mount_of(&normalize_path(path, "/")))
+    }
+
     /// The filesystem mounted at mount point `point`.
     fn fs_at(&self, point: &str) -> Option<Arc<dyn Filesystem>> {
         self.mount_at(point).map(|m| m.fs().clone())
@@ -1309,6 +1314,14 @@ impl MountTable {
             if node.node_type() == NodeType::Symlink && (!is_last || follow_last) {
                 links += 1;
                 if links > SYMLINK_MAX_DEPTH || resolve & resolve_flags::NO_SYMLINKS != 0 {
+                    return Err(symlink_loop());
+                }
+                // A link on a nosymfollow mount is not followed (Linux's
+                // pick_link, magic links too; ADR 0022 H3c).
+                if self
+                    .serving(&canon_path)
+                    .is_some_and(|m| m.has(mount::flags::NOSYMFOLLOW))
+                {
                     return Err(symlink_loop());
                 }
                 // A link to an object: the walk goes on from the object
@@ -1579,6 +1592,13 @@ impl<'a> CallerView<'a> {
     /// [`Vfs::mount_ids_of`] in the caller's mount namespace.
     pub fn mount_ids_of(&self, path: &str) -> (MountIds, bool) {
         self.ctx.mounts.snapshot().ids_of(path)
+    }
+
+    /// The mount serving canonical `path` in the caller's mount namespace,
+    /// whose flags say what may be done there (ADR 0022 H3c); `None`
+    /// before a root is mounted.
+    pub fn mount_serving(&self, path: &str) -> Option<Arc<mount::Mount>> {
+        self.ctx.mounts.snapshot().serving(path).cloned()
     }
 
     /// [`Vfs::filesystem_of`] in the caller's mount namespace.
@@ -2173,6 +2193,21 @@ impl Vfs {
         } else {
             format!("{}/{}", canonical_parent, name)
         };
+
+        // A read-only mount makes nothing: EEXIST for a name that exists,
+        // else EROFS, before any permission check (Linux's filename_create
+        // and lookup_open).
+        let snapshot = ctx.mounts.snapshot();
+        if snapshot
+            .serving(&canonical_parent)
+            .is_some_and(|m| m.is_readonly())
+        {
+            if parent.lookup(name).is_ok() {
+                return Err(KernelError::FsError(crate::error::FsError::AlreadyExists));
+            }
+            return Err(KernelError::FsError(crate::error::FsError::ReadOnly));
+        }
+        drop(snapshot);
 
         // MAC check: creating an entry requires Write access
         crate::security::mac::check_file_access(

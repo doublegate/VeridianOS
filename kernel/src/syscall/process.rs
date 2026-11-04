@@ -174,6 +174,7 @@ pub fn sys_execveat(
         return Err(SyscallError::InvalidArgument);
     }
     let file = super::filesystem::exec_file_at(dirfd, &path, flags & AT_SYMLINK_NOFOLLOW != 0)?;
+    file.check_mount().map_err(super::map_kernel_error)?;
     crate::process::creation::check_executable(
         &*file.node,
         &crate::process::creds::Caller::current(),

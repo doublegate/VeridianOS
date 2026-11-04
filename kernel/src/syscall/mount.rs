@@ -160,11 +160,12 @@ pub fn sys_mount(
         let old = tree.flags_at(&point).unwrap_or(0);
         mnt_flags = (mnt_flags & !mnt::ATIME) | (old & mnt::ATIME);
     }
+    let writers = || writing_under(&point, &tree);
     let result = if flags & (ms::REMOUNT | ms::BIND) == ms::REMOUNT | ms::BIND {
-        tree.reconfigure(&point, mnt_flags, None)
+        tree.reconfigure(&point, mnt_flags, None, writers)
     } else if flags & ms::REMOUNT != 0 {
         // Options a remount names are not applied (KNOWN-LIMITATIONS).
-        tree.reconfigure(&point, mnt_flags, Some(flags & ms::RDONLY != 0))
+        tree.reconfigure(&point, mnt_flags, Some(flags & ms::RDONLY != 0), writers)
     } else if flags & ms::BIND != 0 {
         let from = source
             .filter(|s| !s.is_empty())
@@ -226,10 +227,24 @@ pub fn sys_umount2(target: usize, flags: usize) -> SyscallResult {
         .map_err(mount_error)
 }
 
+/// Whether a process of the namespace whose tree is `tree` has a file
+/// under `point` (canonical) open for writing, which keeps the mount from
+/// becoming read-only. Linux counts the writers of the mount, or for a
+/// read-only superblock of every mount of it; here files are found by the
+/// path they were opened at.
+fn writing_under(point: &str, tree: &Arc<mount::Mounts>) -> bool {
+    scan(point, tree, true)
+}
+
 /// Whether a process of the namespace whose tree is `tree` has a working
 /// directory, root or open file under `point` (canonical): what pins a
 /// mount in Linux, except memory mappings, which are not counted here.
 fn in_use(point: &str, tree: &Arc<mount::Mounts>) -> bool {
+    scan(point, tree, false)
+}
+
+/// [`in_use`], or with `writers` [`writing_under`].
+fn scan(point: &str, tree: &Arc<mount::Mounts>, writers: bool) -> bool {
     let under = |path: &str| crate::fs::path_is_under(path, point);
     let mut busy = false;
     process::table::PROCESS_TABLE.for_each(|p| {
@@ -242,6 +257,9 @@ fn in_use(point: &str, tree: &Arc<mount::Mounts>) -> bool {
                 continue;
             }
             member = true;
+            if writers {
+                break;
+            }
             let fs = thread.fs();
             let root = fs.root.lock().clone();
             let cwd = crate::fs::normalize_path(&fs.cwd.lock(), "/");
@@ -257,8 +275,14 @@ fn in_use(point: &str, tree: &Arc<mount::Mounts>) -> bool {
                 return;
             }
         }
-        if member && p.file_table.lock().open_paths().iter().any(|f| under(f)) {
-            busy = true;
+        if member {
+            let table = p.file_table.lock();
+            let paths = if writers {
+                table.writable_paths()
+            } else {
+                table.open_paths()
+            };
+            busy = paths.iter().any(|f| under(f));
         }
     });
     busy

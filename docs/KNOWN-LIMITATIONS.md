@@ -340,9 +340,13 @@ What remains:
   queue or cgroup hierarchy. Time namespaces are complete but for the two points below. Mount
   namespaces can be created, emptied and joined, and Linux mount(2) and umount2 work in them
   (ADR 0022 H3b: new tmpfs, ramfs, proc and devtmpfs mounts, bind mounts with or without
-  MS_REC, MS_MOVE, remounts, MS_UNBINDABLE), with these gaps: no pivot_root yet (H3d); the
-  mount flags (ro, nosuid, nodev, noexec, the atime ones) and a read-only superblock are
-  recorded and shown in `/proc` but not enforced yet (H3c); mounts never propagate, so
+  MS_REC, MS_MOVE, remounts, MS_UNBINDABLE; ro, nosuid, nodev, noexec and nosymfollow
+  enforced, H3c), with these gaps: no pivot_root yet (H3d); the atime flags are recorded and
+  reported but change nothing, as atime is not kept; a call on a descriptor checks the mount
+  serving the path it was opened at, so one opened before a mount covered that path checks the
+  covering mount; making a mount read-only is EBUSY while a process of the namespace has a file
+  open for writing under its mount point (Linux counts the writers of the mount itself, or of
+  every mount of a superblock made read-only); mounts never propagate, so
   MS_SHARED is EINVAL and MS_SLAVE is the same as MS_PRIVATE; there are no filesystems on block
   devices to mount; tmpfs takes only `size`, `mode`, `uid` and `gid`, proc and devtmpfs no
   options, a remount applies none of the options in its data (a new tmpfs `size` is ignored),

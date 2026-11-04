@@ -244,8 +244,15 @@ impl Mount {
         self.flags() & flags::READONLY != 0 || self.sb_readonly()
     }
 
-    fn sb_readonly(&self) -> bool {
+    /// Whether its superblock is read-only (Linux's sb_rdonly), which
+    /// refuses writes before the permission check does.
+    pub fn sb_readonly(&self) -> bool {
         self.sb.readonly.load(Ordering::Acquire)
+    }
+
+    /// Whether mount flag `flag` ([`flags`]) is set.
+    pub fn has(&self, flag: u32) -> bool {
+        self.flags() & flag != 0
     }
 
     /// The mount-point flags become `mnt` (Linux's set_mount_attributes),
@@ -673,14 +680,23 @@ impl Mounts {
     /// The mount at `point` gets the mount flags `mnt` and, unless only
     /// the mount changes (`sb_readonly` None: MS_REMOUNT|MS_BIND, Linux's
     /// do_reconfigure_mnt), a read-only or writable superblock (do_remount).
+    /// Making the mount or its superblock read-only while `writers()` says
+    /// files under it are open for writing is EBUSY (Linux's
+    /// mnt_make_readonly and sb_prepare_remount_readonly).
     pub fn reconfigure(
         &self,
         point: &str,
         mnt: u32,
         sb_readonly: Option<bool>,
+        writers: impl FnOnce() -> bool,
     ) -> Result<(), MountError> {
         let table = self.snapshot();
         let mount = table.mount_at(point).ok_or(MountError::Invalid)?;
+        let mount_to_ro = mnt & flags::READONLY != 0 && !mount.has(flags::READONLY);
+        let sb_to_ro = sb_readonly == Some(true) && !mount.sb_readonly();
+        if (mount_to_ro || sb_to_ro) && writers() {
+            return Err(MountError::Busy);
+        }
         if let Some(ro) = sb_readonly {
             mount
                 .sb
@@ -1232,8 +1248,21 @@ mod tests {
                 .find(|l| l.contains(" /a/sub/m "))
                 .unwrap()
         };
+        // Not read-only while a file under it is open for writing.
+        assert_eq!(
+            t.reconfigure("/a/sub/m", flags::READONLY, None, || true),
+            Err(MountError::Busy)
+        );
+        assert_eq!(
+            t.reconfigure("/a/sub/m", flags::RELATIME, Some(true), || true),
+            Err(MountError::Busy)
+        );
+        assert_eq!(t.flags_at("/a/sub/m"), Some(flags::RELATIME));
         // MS_REMOUNT|MS_BIND: the mount only.
-        t.reconfigure("/a/sub/m", flags::READONLY | flags::NOSUID, None)
+        t.reconfigure("/a/sub/m", flags::READONLY | flags::NOSUID, None, || false)
+            .unwrap();
+        // Already read-only: writers do not matter.
+        t.reconfigure("/a/sub/m", flags::READONLY | flags::NOSUID, None, || true)
             .unwrap();
         assert!(
             info(&vfs).contains(" ro,nosuid - tmpfs tmpfs rw"),
@@ -1244,15 +1273,68 @@ mod tests {
             .render_mounts("/")
             .contains(" /a/sub/m tmpfs ro,nosuid 0 0"));
         // MS_REMOUNT: the superblock too.
-        t.reconfigure("/a/sub/m", flags::RELATIME, Some(true))
+        t.reconfigure("/a/sub/m", flags::RELATIME, Some(true), || false)
             .unwrap();
         assert!(info(&vfs).contains(" rw,relatime - tmpfs tmpfs ro"));
         // A read-only superblock makes /proc/mounts say ro.
         assert!(t
             .render_mounts("/")
             .contains(" /a/sub/m tmpfs ro,relatime 0 0"));
-        assert_eq!(t.reconfigure("/a", 0, None), Err(MountError::Invalid));
+        assert_eq!(
+            t.reconfigure("/a", 0, None, || false),
+            Err(MountError::Invalid)
+        );
         assert_eq!(t.flags_at("/a/sub/m"), Some(flags::RELATIME));
+    }
+
+    #[test]
+    fn a_read_only_mount_makes_nothing_and_nosymfollow_follows_nothing() {
+        use crate::error::{FsError, KernelError};
+        let vfs = work_tree();
+        let t = vfs.mounts();
+        let p = crate::fs::Permissions::default();
+        vfs.mkdir("/a/sub/m/d", p).unwrap();
+        vfs.resolve_path("/a/sub/m")
+            .unwrap()
+            .symlink("l", "d")
+            .unwrap();
+        let fs_err = |e| Err::<(), _>(KernelError::FsError(e));
+        // Read-only: an existing name is EEXIST, a new one EROFS; the
+        // directory above the mount is unaffected.
+        t.reconfigure("/a/sub/m", flags::READONLY, None, || false)
+            .unwrap();
+        assert_eq!(
+            vfs.mkdir("/a/sub/m/d", p).map(|_| ()),
+            fs_err(FsError::AlreadyExists)
+        );
+        assert_eq!(
+            vfs.mkdir("/a/sub/m/e", p).map(|_| ()),
+            fs_err(FsError::ReadOnly)
+        );
+        assert!(vfs.mkdir("/a/sub/e", p).is_ok());
+        // A read-only superblock refuses as well.
+        t.reconfigure("/a/sub/m", flags::RELATIME, Some(true), || false)
+            .unwrap();
+        assert_eq!(
+            vfs.mkdir("/a/sub/m/e", p).map(|_| ()),
+            fs_err(FsError::ReadOnly)
+        );
+        t.reconfigure("/a/sub/m", flags::RELATIME, Some(false), || false)
+            .unwrap();
+        assert!(vfs.mkdir("/a/sub/m/e", p).is_ok());
+        // nosymfollow: the link is not followed, last or in the middle, but
+        // is found itself.
+        assert!(vfs.resolve_path("/a/sub/m/l").is_ok());
+        t.reconfigure("/a/sub/m", flags::NOSYMFOLLOW, None, || false)
+            .unwrap();
+        for path in ["/a/sub/m/l", "/a/sub/m/l/x"] {
+            assert_eq!(
+                vfs.resolve_path(path).map(|_| ()),
+                fs_err(FsError::SymlinkLoop),
+                "{path}"
+            );
+        }
+        assert!(vfs.resolve_path_no_follow("/a/sub/m/l").is_ok());
     }
 
     #[test]

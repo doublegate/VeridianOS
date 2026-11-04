@@ -67,7 +67,10 @@ them through an `nsproxy` (all but user, which lives in the credentials); `pid_f
      accepted and silently not propagated. Linux mount(2), umount2 and pivot_root come
      with it, and `/proc/<pid>/mounts` and `mountinfo`. As on Linux, the copy's mounts get new
      ids from the pool the original's came from (one IDA), and a file's device number belongs to
-     its filesystem, so it is the same in every namespace.
+     its filesystem, so it is the same in every namespace. Mount flags are enforced where Linux
+     checks them (mnt_want_write and the like), on the mount that serves the path a call
+     resolved; for a call on a descriptor, the mount serving the path it was opened at, since
+     the VFS does not keep the mount in the open file.
    - **H4, user.** uid_map, gid_map and setgroups (Linux's write rules), ids translated at every
      boundary (stat, chown, credentials calls, SO_PEERCRED, siginfo si_uid, `/proc/<pid>/status`),
      and `capable()` asking about the user namespace that owns the object (Linux's ns_capable)

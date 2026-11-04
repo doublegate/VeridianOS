@@ -88,7 +88,7 @@ Each group lands with its LTP cases. The counts are "missing" entries in the cov
   - pidfd_*, clone3, kcmp, process_vm_*, ptrace (the pidfd calls, clone3, kcmp and process_vm_*
     are done; no pidfd ioctls, one PID namespace level, KNOWN-LIMITATIONS)
   - unshare/setns (ADR 0022: H1 the framework, UTS, IPC and cgroup, H2 time and the mount
-    namespaces of H3, mount(2) and umount2 are done; per-mount flags and pivot_root with the
+    namespaces of H3, mount(2), umount2 and the per-mount flags are done; pivot_root with the
     rest of H3, and H4-H6 the others)
   - real prctl, rseq (personality is done; rseq stays ENOSYS, as without CONFIG_RSEQ)
 - **signals (11)**

@@ -9,7 +9,7 @@ use alloc::{string::String, sync::Arc, vec::Vec};
 
 use super::{
     filesystem::{
-        map_resolve_err, read_user_path, read_user_path_or_empty, resolve_at_path, vfs,
+        map_resolve_err, read_user_path, read_user_path_or_empty, resolve_at_path, vfs, want_write,
         AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW,
     },
     userspace, SyscallError, SyscallResult,
@@ -41,7 +41,7 @@ pub(super) fn target(
     at_flags: usize,
     cwd_ok: bool,
 ) -> Result<Arc<dyn VfsNode>, SyscallError> {
-    target_in(dfd, path_ptr, at_flags, cwd_ok, false).map(|(node, _)| node)
+    target_in(dfd, path_ptr, at_flags, cwd_ok, false, false).map(|(node, _)| node)
 }
 
 /// [`target`] for the calls that act on what an empty path's descriptor
@@ -52,25 +52,30 @@ pub(super) fn path_target(
     path_ptr: usize,
     at_flags: usize,
 ) -> Result<Arc<dyn VfsNode>, SyscallError> {
-    path_target_located(dfd, path_ptr, at_flags).map(|(node, _)| node)
+    target_in(dfd, path_ptr, at_flags, true, true, false).map(|(node, _)| node)
 }
 
-/// [`path_target`] with the node's absolute path where it has one (a
-/// descriptor's, as it was opened): where inotify reports the change.
+/// [`path_target`] for a change to the node (fchmodat2, fchownat): EROFS
+/// on a read-only mount (Linux's mnt_want_write), and the node's absolute
+/// path where it has one (a descriptor's, as it was opened), where inotify
+/// reports the change.
 pub(super) fn path_target_located(
     dfd: usize,
     path_ptr: usize,
     at_flags: usize,
 ) -> Result<(Arc<dyn VfsNode>, Option<String>), SyscallError> {
-    target_in(dfd, path_ptr, at_flags, true, true)
+    target_in(dfd, path_ptr, at_flags, true, true, true)
 }
 
+/// The node and its absolute path, as the callers above describe; with
+/// `write` a read-only mount is EROFS once the node is found.
 fn target_in(
     dfd: usize,
     path_ptr: usize,
     at_flags: usize,
     cwd_ok: bool,
     path_fds: bool,
+    write: bool,
 ) -> Result<(Arc<dyn VfsNode>, Option<String>), SyscallError> {
     if at_flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
         return Err(SyscallError::InvalidArgument);
@@ -87,7 +92,10 @@ fn target_in(
     let vfs = vfs()?;
     if path.is_empty() {
         if cwd_ok && dfd as u32 as i32 as usize == AT_FDCWD {
-            let node = vfs.resolve_path(&vfs.get_cwd()).map_err(map_resolve_err)?;
+            let (node, canonical) = vfs.locate(&vfs.get_cwd(), true).map_err(map_resolve_err)?;
+            if write {
+                want_write(&vfs, &canonical)?;
+            }
             return Ok((node, None));
         }
         let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
@@ -98,6 +106,11 @@ fn target_in(
             table.get(dfd as u32 as usize)
         };
         let file = file.ok_or(SyscallError::BadFileDescriptor)?;
+        if write {
+            if let Some(path) = file.path.as_deref() {
+                want_write(&vfs, path)?;
+            }
+        }
         // The recorded path is in the whole tree; the caller's is inside
         // its root.
         let root = vfs.get_root();
@@ -108,12 +121,12 @@ fn target_in(
         return Ok((file.node.clone(), at));
     }
     let abs = resolve_at_path(dfd, &path)?;
-    let node = if at_flags & AT_SYMLINK_NOFOLLOW != 0 {
-        vfs.resolve_path_no_follow(&abs)
-    } else {
-        vfs.resolve_path(&abs)
+    let (node, canonical) = vfs
+        .locate(&abs, at_flags & AT_SYMLINK_NOFOLLOW == 0)
+        .map_err(map_resolve_err)?;
+    if write {
+        want_write(&vfs, &canonical)?;
     }
-    .map_err(map_resolve_err)?;
     Ok((node, Some(abs)))
 }
 
@@ -155,7 +168,7 @@ fn set(
     }
     let mut bytes = alloc::vec![0u8; size];
     userspace::read_user_bytes(value, &mut bytes)?;
-    let (node, at) = target_in(dfd, path, at_flags, true, false)?;
+    let (node, at) = target_in(dfd, path, at_flags, true, false, true)?;
     // A file capability must be a v2 or v3 value (cap_convert_nscap,
     // before its CAP_SETFCAP check).
     xattr::check_value(&name, &bytes).map_err(|_| SyscallError::InvalidArgument)?;
@@ -223,7 +236,7 @@ fn list(dfd: usize, path: usize, at_flags: usize, out: usize, size: usize) -> Sy
 
 fn remove(dfd: usize, path: usize, at_flags: usize, name: usize) -> SyscallResult {
     let name = read_name(name)?;
-    let (node, at) = target_in(dfd, path, at_flags, false, false)?;
+    let (node, at) = target_in(dfd, path, at_flags, false, false, true)?;
     check(&node, &name, true)?;
     node.update_xattrs(&mut |a| a.remove(&name))
         .map_err(super::map_kernel_error)?;

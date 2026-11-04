@@ -276,6 +276,10 @@ pub struct ExecFile {
     /// exec happens, so a script cannot be run from it (ENOENT, Linux's
     /// BINPRM_FLAGS_PATH_INACCESSIBLE).
     pub path_inaccessible: bool,
+    /// The flags of the mount it is on (`fs::mount::flags`): noexec
+    /// refuses it, nosuid ignores its set-ID bits and capabilities (ADR
+    /// 0022 H3c).
+    pub mnt_flags: u32,
 }
 
 #[cfg(feature = "alloc")]
@@ -292,8 +296,31 @@ impl ExecFile {
             comm: String::from(basename(path)),
             filename: String::from(path),
             path_inaccessible: false,
+            mnt_flags: mount_flags(&vfs, &canonical),
         })
     }
+
+    /// EACCES for a file on a noexec mount, before the permission check
+    /// (Linux's may_open, MAY_EXEC on a regular file).
+    pub fn check_mount(&self) -> Result<(), KernelError> {
+        refuse_noexec(self.mnt_flags)
+    }
+}
+
+/// The flags of the mount serving canonical `path` in `vfs` (0 where no
+/// mount serves it).
+#[cfg(feature = "alloc")]
+pub(crate) fn mount_flags(vfs: &crate::fs::CallerView<'_>, path: &str) -> u32 {
+    vfs.mount_serving(path).map_or(0, |m| m.flags())
+}
+
+/// EACCES when mount flags `mnt` include noexec.
+#[cfg(feature = "alloc")]
+fn refuse_noexec(mnt: u32) -> Result<(), KernelError> {
+    if mnt & crate::fs::mount::flags::NOEXEC != 0 {
+        return Err(KernelError::PermissionDenied { operation: "exec" });
+    }
+    Ok(())
 }
 
 /// What exec learned from the program file about the credentials and
@@ -405,7 +432,9 @@ pub(crate) fn read_executable(
     path: &str,
     caller: &super::creds::Caller,
 ) -> Result<(alloc::sync::Arc<dyn crate::fs::VfsNode>, ExecRead), KernelError> {
-    let node = crate::fs::get_vfs().as_caller().resolve_path(path)?;
+    let vfs = crate::fs::get_vfs().as_caller();
+    let (node, canonical) = vfs.resolve_path_canonical(path)?;
+    refuse_noexec(mount_flags(&vfs, &canonical))?;
     let read = read_exec_node(&node, caller)?;
     Ok((node, read))
 }
@@ -504,6 +533,7 @@ fn exec_at_depth(
     // Step 1: read the program, checking execute permission on the node
     // that is read (N-101). A script's denial lasts while its interpreter
     // is set up, the program's is the process's once the exec commits.
+    file.check_mount()?;
     let (file_data, denial) = read_exec_node(&file.node, &super::creds::Caller::current())?;
 
     // Step 1b: a script runs its interpreter with [interpreter, opt_arg?,
@@ -578,6 +608,7 @@ fn exec_image(
         filename,
         exe_path,
         comm,
+        mnt_flags,
         ..
     } = file;
 
@@ -643,10 +674,17 @@ fn exec_image(
             Some((node, ..)) => readable(&node.metadata()?),
             None => true,
         };
-        let file_caps = exec_file_caps(&*file_node)?;
+        // A nosuid mount offers neither (Linux's mnt_may_suid, in
+        // bprm_fill_uid and get_file_caps).
+        let suid = mnt_flags & crate::fs::mount::flags::NOSUID == 0;
+        let file_caps = if suid {
+            exec_file_caps(&*file_node)?
+        } else {
+            None
+        };
         ExecIds {
-            set_uid: perms.set_uid.then_some(meta.uid),
-            set_gid: (perms.set_gid && perms.group_exec).then_some(meta.gid),
+            set_uid: (suid && perms.set_uid).then_some(meta.uid),
+            set_gid: (suid && perms.set_gid && perms.group_exec).then_some(meta.gid),
             readable: readable(&meta) && interp_readable,
             unprivileged_tracer_at_start: false,
             file_caps,

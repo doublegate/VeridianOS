@@ -5558,6 +5558,7 @@ static void test_namespaces_uts(void);
 static void test_namespaces_time(void);
 static void test_namespaces_mnt(void);
 static void test_mount_calls(void);
+static void test_mount_flags(void);
 
 /* Tests `--only NAME` can run alone (for debugging a single test). */
 static const struct {
@@ -5581,6 +5582,7 @@ static const struct {
     {"namespaces_time", test_namespaces_time},
     {"namespaces_mnt", test_namespaces_mnt},
     {"mount_calls", test_mount_calls},
+    {"mount_flags", test_mount_flags},
     {"threads", test_threads},
     {"cow_race", test_cow_race},
     {"signals", test_signals},
@@ -5798,15 +5800,18 @@ static void test_posix_timers(void)
     int taken = sigtimedwait(&set1, &si, &wait) == sig;
     /* Taking the signal re-arms the timer, so on a slow machine its next
      * expiry can be queued before the second wait (seen on RISC-V): a
-     * second signal is a duplicate only if it came before that expiry. */
+     * second signal is a duplicate only if it came before that expiry.
+     * The gap is measured from before timer_gettime, so a stall between
+     * the two (seen on AArch64 with four emulated CPUs) is counted. */
     struct itimerspec next;
     struct timespec zero = {0, 0}, w0, w1;
-    long next_ns = timer_gettime(t, &next) == 0 ? next.it_value.tv_nsec : 0;
     clock_gettime(CLOCK_MONOTONIC, &w0);
+    long next_ns = timer_gettime(t, &next) == 0 ? next.it_value.tv_nsec : 0;
     int overrun = si.si_overrun, getover = timer_getoverrun(t);
     errno = 0;
     int again = sigtimedwait(&set1, &si, &zero);
-    int eagain = again == -1 && errno == EAGAIN;
+    int again_errno = errno;
+    int eagain = again == -1 && again_errno == EAGAIN;
     clock_gettime(CLOCK_MONOTONIC, &w1);
     long gap = (w1.tv_sec - w0.tv_sec) * 1000000000L + (w1.tv_nsec - w0.tv_nsec);
     int once = eagain || (again == sig && gap + 1000000 >= next_ns);
@@ -5824,9 +5829,10 @@ static void test_posix_timers(void)
     int oldok = timer_settime(t, 0, &off, &old) == 0 && old.it_interval.tv_nsec == 5000000;
     timer_delete(t);
     snprintf(why, sizeof(why),
-             "made=%d set=%d taken=%d overrun=%d getoverrun=%d once=%d sfd=%d(%d,%u,%u) old=%d",
-             made, set, taken, overrun, getover, once, sfd, ssi.ssi_code, ssi.ssi_tid,
-             ssi.ssi_overrun, oldok);
+             "made=%d set=%d taken=%d overrun=%d getoverrun=%d once=%d(%d,%d,%ld,%ld) "
+             "sfd=%d(%d,%u,%u) old=%d",
+             made, set, taken, overrun, getover, once, again, again_errno, gap, next_ns, sfd,
+             ssi.ssi_code, ssi.ssi_tid, ssi.ssi_overrun, oldok);
     report("posix_timer_overrun_when_blocked",
            made && set && taken && overrun >= 5 && getover == overrun && once && sfd && oldok,
            why);
@@ -9089,6 +9095,168 @@ static void test_mount_calls(void)
     report("mount_calls", f == 0, why);
 }
 
+/* Copy `from` to a new file `to` with mode `mode` (chmod'ed, so the
+ * umask does not apply); 0 on success. */
+static int t_copy(const char *from, const char *to, mode_t mode)
+{
+    int in = open(from, O_RDONLY), out = open(to, O_WRONLY | O_CREAT | O_TRUNC, 0700);
+    int ok = in >= 0 && out >= 0;
+    char buf[4096];
+    ssize_t n;
+    while (ok && (n = read(in, buf, sizeof(buf))) > 0)
+        ok = write(out, buf, (size_t)n) == n;
+    if (in >= 0)
+        close(in);
+    if (out >= 0)
+        close(out);
+    return ok && chmod(to, mode) == 0 ? 0 : -1;
+}
+
+/* What a mount's flags refuse (ADR 0022 H3c), on a tmpfs mounted in a
+ * mount namespace of its own: ro (EROFS at every change, EEXIST first,
+ * devices still written; EBUSY to make it ro while a file is open for
+ * writing), noexec (exec and access X_OK EACCES, mmap PROT_EXEC EPERM,
+ * mprotect to executable EACCES), nodev (opening a device EACCES),
+ * nosymfollow (ELOOP) and nosuid (a set-user-ID program gains nothing),
+ * each reported in statfs's f_flags. */
+static void test_mount_flags(void)
+{
+#ifndef MS_NOSYMFOLLOW
+#define MS_NOSYMFOLLOW 256
+#endif
+    enum { RDONLY = 1, NOSUID = 2, NODEV = 4, NOEXEC = 8, NOSYMFOLLOW = 0x2000 };
+    char why[160];
+    int f = 0;
+    mkdir("/tmp", 01777);
+    rmdir("/tmp/mf");
+    if (mkdir("/tmp/mf", 0755) != 0) {
+        report("mount_flags", 0, "setup");
+        return;
+    }
+    pid_t child = fork();
+    if (child == 0) {
+        int g = 0, fd;
+        struct statfs sfs;
+        if (unshare(CLONE_NEWNS) != 0)
+            _exit(0x7f);
+        if (mount("none", "/tmp/mf", "tmpfs", 0, "size=4m,mode=755") != 0)
+            _exit(0x7e);
+        fd = open("/tmp/mf/f", O_CREAT | O_WRONLY, 0644);
+        if (fd < 0 || write(fd, "x", 1) != 1)
+            g |= 1;
+        if (fd >= 0)
+            close(fd);
+        if (mkdir("/tmp/mf/d", 0755) != 0 || symlink("f", "/tmp/mf/l") != 0 ||
+            mknod("/tmp/mf/null", S_IFCHR | 0666, makedev(1, 3)) != 0 ||
+            t_copy("/bin/musl_runtime_test", "/tmp/mf/prog", 04755) != 0)
+            g |= 1;
+        /* Read-only: not while a file is open for writing. */
+        fd = open("/tmp/mf/f", O_WRONLY);
+        if (fd < 0 || !(mount(NULL, "/tmp/mf", NULL, MS_REMOUNT | MS_RDONLY, NULL) == -1 &&
+                        errno == EBUSY))
+            g |= 2;
+        if (fd >= 0)
+            close(fd);
+        if (mount(NULL, "/tmp/mf", NULL, MS_REMOUNT | MS_RDONLY, NULL) != 0)
+            g |= 2;
+#define T_EROFS(call) (!((call) == -1 && errno == EROFS))
+        if (T_EROFS(open("/tmp/mf/f", O_WRONLY)) ||
+            T_EROFS(open("/tmp/mf/f", O_RDONLY | O_TRUNC)) ||
+            T_EROFS(open("/tmp/mf/new", O_CREAT | O_WRONLY, 0644)) ||
+            T_EROFS(mkdir("/tmp/mf/e", 0755)) || T_EROFS(unlink("/tmp/mf/f")) ||
+            T_EROFS(unlink("/tmp/mf/none")) || T_EROFS(rmdir("/tmp/mf/d")) ||
+            T_EROFS(rename("/tmp/mf/f", "/tmp/mf/g")))
+            g |= 4;
+        if (T_EROFS(chmod("/tmp/mf/f", 0600)) || T_EROFS(chown("/tmp/mf/f", 1, 1)) ||
+            T_EROFS(truncate("/tmp/mf/f", 0)) || T_EROFS(utimes("/tmp/mf/f", NULL)) ||
+            T_EROFS(symlink("f", "/tmp/mf/m")) || T_EROFS(link("/tmp/mf/f", "/tmp/mf/h")) ||
+            T_EROFS(access("/tmp/mf/f", W_OK)) ||
+            T_EROFS(setxattr("/tmp/mf/f", "user.a", "1", 1, 0)) ||
+            T_EROFS(mknod("/tmp/mf/p", S_IFIFO | 0644, 0)))
+            g |= 8;
+#undef T_EROFS
+        /* EEXIST before EROFS; reading, and writing a device, still work. */
+        if (!(mkdir("/tmp/mf/d", 0755) == -1 && errno == EEXIST))
+            g |= 16;
+        if ((fd = open("/tmp/mf/f", O_RDONLY)) < 0)
+            g |= 16;
+        else
+            close(fd);
+        if ((fd = open("/tmp/mf/null", O_WRONLY)) < 0 || write(fd, "x", 1) != 1)
+            g |= 16;
+        if (fd >= 0)
+            close(fd);
+        if (statfs("/tmp/mf", &sfs) != 0 || !(sfs.f_flags & RDONLY))
+            g |= 32;
+        /* Writable again. */
+        if (mount(NULL, "/tmp/mf", NULL, MS_REMOUNT, NULL) != 0 ||
+            (fd = open("/tmp/mf/f", O_WRONLY)) < 0)
+            g |= 64;
+        else
+            close(fd);
+        /* noexec, nodev, nosymfollow. */
+        if (mount(NULL, "/tmp/mf", NULL, MS_REMOUNT | MS_NOEXEC | MS_NODEV | MS_NOSYMFOLLOW,
+                  NULL) != 0) {
+            g |= 128;
+        } else {
+            pid_t e = fork();
+            if (e == 0) {
+                execl("/tmp/mf/prog", "prog", "--ids", (char *)0);
+                _exit(errno == EACCES ? 0 : 1);
+            }
+            if (t_exit_status(e) != 0 || !(access("/tmp/mf/prog", X_OK) == -1 && errno == EACCES))
+                g |= 128;
+            fd = open("/tmp/mf/prog", O_RDONLY);
+            void *m = fd >= 0 ? mmap(NULL, 4096, PROT_READ | PROT_EXEC, MAP_PRIVATE, fd, 0)
+                              : MAP_FAILED;
+            if (!(m == MAP_FAILED && errno == EPERM))
+                g |= 256;
+            m = fd >= 0 ? mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, fd, 0) : MAP_FAILED;
+            if (m == MAP_FAILED ||
+                !(mprotect(m, 4096, PROT_READ | PROT_EXEC) == -1 && errno == EACCES))
+                g |= 256;
+            if (m != MAP_FAILED)
+                munmap(m, 4096);
+            if (fd >= 0)
+                close(fd);
+            if (!(open("/tmp/mf/null", O_WRONLY) == -1 && errno == EACCES))
+                g |= 512;
+            if (!(open("/tmp/mf/l", O_RDONLY) == -1 && errno == ELOOP))
+                g |= 1024;
+            if (statfs("/tmp/mf", &sfs) != 0 ||
+                (sfs.f_flags & (RDONLY | NOEXEC | NODEV | NOSYMFOLLOW)) !=
+                    (NOEXEC | NODEV | NOSYMFOLLOW))
+                g |= 2048;
+        }
+        /* nosuid: the set-user-ID program gains root without it, not
+         * with it. */
+        static char ids[64], nosuid_ids[64];
+        int st = -1, nosuid_st = -1;
+        if (mount(NULL, "/tmp/mf", NULL, MS_REMOUNT, NULL) != 0 ||
+            (st = run_ids_as_user("/tmp/mf/prog", IDS_PLAIN, ids, sizeof(ids))) != 0 ||
+            strcmp(ids, "1000 0 0 1 0 prog") != 0)
+            g |= 4096;
+        if (mount(NULL, "/tmp/mf", NULL, MS_REMOUNT | MS_NOSUID, NULL) != 0 ||
+            (nosuid_st = run_ids_as_user("/tmp/mf/prog", IDS_PLAIN, nosuid_ids,
+                                         sizeof(nosuid_ids))) != 0 ||
+            strcmp(nosuid_ids, "1000 1000 1000 0 1 prog") != 0 ||
+            statfs("/tmp/mf", &sfs) != 0 || !(sfs.f_flags & NOSUID))
+            g |= 8192;
+        printf("mount-flags g=%#x ids='%s'/%d nosuid='%s'/%d\n", g, ids, st, nosuid_ids,
+               nosuid_st);
+        fflush(stdout);
+        _exit(g == 0 ? 0 : 1);
+    }
+    int code = t_exit_status(child);
+    if (code == 0x7f || code == 0x7e)
+        f |= 1;
+    else if (code != 0)
+        f |= 2;
+    rmdir("/tmp/mf");
+    snprintf(why, sizeof(why), "f=%#x code=%d", f, code);
+    report("mount_flags", f == 0, why);
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
@@ -9212,6 +9380,7 @@ int main(int argc, char **argv)
     test_namespaces_time();
     test_namespaces_mnt();
     test_mount_calls();
+    test_mount_flags();
 #if defined(__x86_64__)
     test_ustat_sysfs();
 #endif

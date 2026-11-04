@@ -353,8 +353,31 @@ pub(super) fn open_node(
     if open_flags.write && node_type == NodeType::Directory {
         return Err(SyscallError::IsADirectory);
     }
+    // The mount's flags (ADR 0022 H3c), in the order of Linux's do_open,
+    // may_open and do_dentry_open: a device on a nodev mount is EACCES;
+    // truncating a regular file, or writing to anything but a device, FIFO
+    // or socket, on a read-only filesystem is EROFS before the permission
+    // check, and on a read-only mount after it. A file this open created
+    // is on a writable mount.
+    use crate::fs::mount::flags as mnt;
+    let mount = vfs()?.mount_serving(&canonical);
+    let device = matches!(node_type, NodeType::CharDevice | NodeType::BlockDevice);
+    let special = device || matches!(node_type, NodeType::Pipe | NodeType::Socket);
+    if device && mount.as_ref().is_some_and(|m| m.has(mnt::NODEV)) {
+        return Err(SyscallError::PermissionDenied);
+    }
+    let writes = !created && !special && open_flags.write;
+    let truncates = !created && open_flags.truncate && node_type == NodeType::File;
+    let mount_ro = mount.as_ref().is_some_and(|m| m.is_readonly());
+    let sb_ro = mount.as_ref().is_some_and(|m| m.sb_readonly());
+    if (truncates && mount_ro) || (writes && sb_ro) {
+        return Err(SyscallError::ReadOnlyFilesystem);
+    }
     if !created {
         require_open_access(&node, &open_flags)?;
+    }
+    if writes && mount_ro {
+        return Err(SyscallError::ReadOnlyFilesystem);
     }
     check_open_status(&*node, flags)?;
     // A writable open of a running program is ETXTBSY, before O_TRUNC
@@ -475,6 +498,8 @@ fn open_tmpfile(
     if dir.node_type() != crate::fs::NodeType::Directory {
         return Err(SyscallError::NotADirectory);
     }
+    // Linux's do_o_tmpfile: EROFS before the permission check.
+    want_write(&vfs()?, canonical)?;
     check_dir_write(&*dir)?;
     let node = dir
         .tmpfile(creation_perms(mode), flags & O_EXCL == 0)
@@ -1791,14 +1816,16 @@ fn do_utimes(
     } else {
         let path = resolve_at_path(dirfd, &read_user_path(path_ptr)?)?;
         let vfs = vfs()?;
-        let node = if flags & AT_SYMLINK_NOFOLLOW != 0 {
-            vfs.resolve_path_no_follow(&path)
-        } else {
-            vfs.resolve_path(&path)
-        }
-        .map_err(map_resolve_err)?;
+        let (node, canonical) = vfs
+            .locate(&path, flags & AT_SYMLINK_NOFOLLOW == 0)
+            .map_err(map_resolve_err)?;
+        want_write(&vfs, &canonical)?;
         (node, None, Some(path))
     };
+    // Linux's utimes_common: EROFS before the permission checks.
+    if let Some(file) = &file {
+        want_write_file(file)?;
+    }
     let now = crate::arch::timer::get_timestamp_secs();
     let (atime, mtime) = match specs {
         None => (Some(now), Some(now)),
@@ -2530,22 +2557,24 @@ fn rename_entry(old: &str, new: &str) -> SyscallResult {
     // use these nodes (N-51).
     let (old_parent, old_name, old_parent_canon) = parent_dir_canonical(old)?;
     let (new_parent, new_name, new_parent_canon) = parent_dir_canonical(new)?;
-    check_may_remove(&*old_parent, &old_name)?;
-    check_dir_write(&*new_parent)?;
-    // Replacing an existing `new` removes it, so the sticky rule applies.
-    if new_parent.lookup(&new_name).is_ok() {
-        check_may_remove(&*new_parent, &new_name)?;
-    }
 
     let vfs = vfs()?;
     // Compared on the canonical parents of the resolution that produced the
     // nodes above: a string comparison let a symlink into another mount
     // through (review of PR #11), and resolving the paths again let them
-    // describe other directories than the nodes (N-51).
+    // describe other directories than the nodes (N-51). EXDEV, then EROFS,
+    // come before the permission checks, as in Linux's do_renameat2.
     let old_mount = vfs.canonical_entry_mount_point(&old_parent_canon, &old_name);
     let new_mount = vfs.canonical_entry_mount_point(&new_parent_canon, &new_name);
     if old_mount != new_mount {
         return Err(SyscallError::CrossDevice);
+    }
+    want_write(&vfs, &old_parent_canon)?;
+    check_may_remove(&*old_parent, &old_name)?;
+    check_dir_write(&*new_parent)?;
+    // Replacing an existing `new` removes it, so the sticky rule applies.
+    if new_parent.lookup(&new_name).is_ok() {
+        check_may_remove(&*new_parent, &new_name)?;
     }
     let src = old_parent.lookup(&old_name).map_err(map_resolve_err)?;
     // What `new` names now, which the rename replaces (for inotify).
@@ -2676,6 +2705,34 @@ pub(crate) fn check_may_remove(
     } else {
         Err(SyscallError::PermissionDenied)
     }
+}
+
+/// Linux's mnt_want_write: EROFS when the mount serving canonical `path`
+/// (in the whole tree) is read-only, by its own flag or its filesystem's
+/// (ADR 0022 H3c).
+pub(crate) fn want_write(
+    view: &crate::fs::CallerView<'_>,
+    canonical: &str,
+) -> Result<(), SyscallError> {
+    match view.mount_serving(canonical) {
+        Some(mount) if mount.is_readonly() => Err(SyscallError::ReadOnlyFilesystem),
+        _ => Ok(()),
+    }
+}
+
+/// mnt_want_write_file: [`want_write`] for an open file, at the canonical
+/// path it was opened at (pipes and sockets have none, and no mount).
+pub(crate) fn want_write_file(file: &crate::fs::file::File) -> Result<(), SyscallError> {
+    match file.path.as_deref() {
+        Some(path) => want_write(&vfs()?, path),
+        None => Ok(()),
+    }
+}
+
+/// Whether the mount serving canonical `path` has mount flag `flag`
+/// (`fs::mount::flags`).
+pub(crate) fn mount_has(view: &crate::fs::CallerView<'_>, canonical: &str, flag: u32) -> bool {
+    view.mount_serving(canonical).is_some_and(|m| m.has(flag))
 }
 
 /// Stat a file by path (syscall 150).
@@ -2825,21 +2882,38 @@ fn access_path(path: &str, mode: usize, flags: usize) -> SyscallResult {
     let vfs = try_get_vfs()
         .ok_or(SyscallError::InvalidState)?
         .as_caller_with(caller);
-    let node = if flags & AT_SYMLINK_NOFOLLOW != 0 {
-        vfs.resolve_path_no_follow(path)
-    } else {
-        vfs.resolve_path(path)
-    }
-    .map_err(map_resolve_err)?;
+    let (node, canonical) = vfs
+        .locate(path, flags & AT_SYMLINK_NOFOLLOW == 0)
+        .map_err(map_resolve_err)?;
     if mode == 0 {
         return Ok(0); // F_OK: it exists
     }
     let meta = node.metadata().map_err(super::map_kernel_error)?;
-    if crate::fs::permission(&caller, &meta, mode as u32) {
-        Ok(0)
-    } else {
-        Err(SyscallError::PermissionDenied)
+    // The mount's flags, as Linux's do_faccessat: X_OK on a regular file
+    // of a noexec mount is EACCES; W_OK on anything but a device, FIFO or
+    // socket is EROFS on a read-only filesystem before the permission
+    // check (sb_permission), on a read-only mount after it.
+    use crate::fs::{mount::flags as mnt, NodeType};
+    let mount = vfs.mount_serving(&canonical);
+    let regular = meta.node_type == NodeType::File;
+    if mode & 1 != 0 && regular && mount.as_ref().is_some_and(|m| m.has(mnt::NOEXEC)) {
+        return Err(SyscallError::PermissionDenied);
     }
+    let writes = mode & 2 != 0
+        && matches!(
+            meta.node_type,
+            NodeType::File | NodeType::Directory | NodeType::Symlink
+        );
+    if writes && mount.as_ref().is_some_and(|m| m.sb_readonly()) {
+        return Err(SyscallError::ReadOnlyFilesystem);
+    }
+    if !crate::fs::permission(&caller, &meta, mode as u32) {
+        return Err(SyscallError::PermissionDenied);
+    }
+    if writes && mount.as_ref().is_some_and(|m| m.is_readonly()) {
+        return Err(SyscallError::ReadOnlyFilesystem);
+    }
+    Ok(0)
 }
 
 /// Rename a file or directory (syscall 154).
@@ -3704,7 +3778,8 @@ fn new_entry(
     if name.len() != abs.len() {
         return Err(SyscallError::ResourceNotFound);
     }
-    let (parent, name) = parent_dir(name)?;
+    let (parent, name, canonical) = parent_dir_canonical(name)?;
+    want_write(&vfs()?, &canonical)?;
     check_dir_write(&*parent)?;
     Ok((parent, name))
 }
@@ -3712,7 +3787,9 @@ fn new_entry(
 /// Change file permissions by path (syscall 185).
 pub fn sys_chmod(path_ptr: usize, mode: usize) -> SyscallResult {
     let path = resolve_at_path(AT_FDCWD, &read_user_path(path_ptr)?)?;
-    let node = vfs()?.resolve_path(&path).map_err(map_resolve_err)?;
+    let vfs = vfs()?;
+    let (node, canonical) = vfs.locate(&path, true).map_err(map_resolve_err)?;
+    want_write(&vfs, &canonical)?;
     chmod_node(&node, mode)?;
     crate::fs::inotify::on_path(&path, &node, crate::fs::inotify::IN_ATTRIB);
     Ok(0)
@@ -3727,6 +3804,7 @@ pub fn sys_fchmod(fd: usize, mode: usize) -> SyscallResult {
         .lock()
         .get(fd)
         .ok_or(SyscallError::BadFileDescriptor)?;
+    want_write_file(&file)?;
     chmod_node(&file.node, mode)?;
     crate::fs::inotify::on_file(&file, crate::fs::inotify::IN_ATTRIB);
     Ok(0)
@@ -3758,12 +3836,15 @@ pub fn sys_umask(mask: usize) -> SyscallResult {
 pub fn sys_truncate(path_ptr: usize, length: usize) -> SyscallResult {
     let length = file_offset(length)?;
     let path = resolve_at_path(AT_FDCWD, &read_user_path(path_ptr)?)?;
-    let node = vfs()?.resolve_path(&path).map_err(map_resolve_err)?;
+    let vfs = vfs()?;
+    let (node, canonical) = vfs.locate(&path, true).map_err(map_resolve_err)?;
     match node.node_type() {
         crate::fs::NodeType::File => {}
         crate::fs::NodeType::Directory => return Err(SyscallError::IsADirectory),
         _ => return Err(SyscallError::InvalidArgument),
     }
+    // Linux's vfs_truncate: EROFS before the permission check.
+    want_write(&vfs, &canonical)?;
     // As opening it for writing would need (N-191).
     require_open_access(&node, &OpenFlags::write_only())?;
     // Write access for the truncate: a running program is ETXTBSY (Linux's
@@ -3807,12 +3888,17 @@ pub(crate) fn exec_file_at(
             .as_deref()
             .map(|p| crate::fs::root_relative(p, &root))
             .unwrap_or_default();
+        let mnt_flags = file
+            .path
+            .as_deref()
+            .map_or(0, |p| crate::process::creation::mount_flags(&vfs, p));
         return Ok(crate::process::creation::ExecFile {
             node: file.node.clone(),
             filename: format!("/dev/fd/{}", dfd),
             comm: base(&exe_path),
             exe_path,
             path_inaccessible: cloexec,
+            mnt_flags,
         });
     }
     let lookup = if name.is_empty() {
@@ -3841,6 +3927,7 @@ pub(crate) fn exec_file_at(
         exe_path: crate::fs::root_relative(&canonical, &root),
         filename,
         path_inaccessible: from_fd && entry().is_ok_and(|(_, cloexec)| cloexec),
+        mnt_flags: crate::process::creation::mount_flags(&vfs, &canonical),
     })
 }
 
@@ -4232,11 +4319,16 @@ pub fn sys_statx(
 /// Copy what statfs reports about `node`'s filesystem to `buf` (`struct
 /// statfs`, `fs::statfs::LINUX_STATFS_SIZE` bytes). A filesystem that
 /// cannot say is ENOSYS, as on Linux.
-fn write_statfs(node: &dyn crate::fs::VfsNode, buf: usize) -> SyscallResult {
-    let stats = node.statfs().map_err(|e| match e {
+fn write_statfs(node: &dyn crate::fs::VfsNode, at: Option<&str>, buf: usize) -> SyscallResult {
+    let mut stats = node.statfs().map_err(|e| match e {
         crate::error::KernelError::NotImplemented { .. } => SyscallError::NotImplemented,
         e => super::map_kernel_error(e),
     })?;
+    // The flags of the mount `at` (a canonical path) is on, and its
+    // superblock's read-only state, as Linux's calculate_f_flags.
+    if let Some(mount) = at.and_then(|path| vfs().ok()?.mount_serving(path)) {
+        stats.flags |= crate::fs::statfs::mount_flags(mount.flags(), mount.sb_readonly());
+    }
     super::userspace::write_user_bytes(buf, &stats.to_linux())?;
     Ok(0)
 }
@@ -4247,11 +4339,11 @@ fn write_statfs(node: &dyn crate::fs::VfsNode, buf: usize) -> SyscallResult {
 pub fn sys_statfs(path_ptr: usize, buf: usize) -> SyscallResult {
     let rel_path = read_user_path(path_ptr)?;
     let abs_path = resolve_at_path(AT_FDCWD, &rel_path)?;
-    let node = vfs()?.resolve_path(&abs_path).map_err(map_resolve_err)?;
+    let (node, canonical) = vfs()?.locate(&abs_path, true).map_err(map_resolve_err)?;
     if rel_path.ends_with('/') && node.node_type() != crate::fs::NodeType::Directory {
         return Err(SyscallError::NotADirectory);
     }
-    write_statfs(&*node, buf)
+    write_statfs(&*node, Some(&canonical), buf)
 }
 
 /// fstatfs(fd, buf): the filesystem holding the open file `fd`; for a
@@ -4264,7 +4356,7 @@ pub fn sys_fstatfs(fd: usize, buf: usize) -> SyscallResult {
         .lock()
         .get_path(fd as u32 as usize)
         .ok_or(SyscallError::BadFileDescriptor)?;
-    write_statfs(&*file.node, buf)
+    write_statfs(&*file.node, file.path.as_deref(), buf)
 }
 
 /// unlinkat(dirfd, path, flags) (N-195), and unlink and rmdir through it,
@@ -4299,7 +4391,12 @@ pub fn sys_unlinkat(dirfd: usize, path_ptr: usize, flags: usize) -> SyscallResul
         _ => {}
     }
     let abs_path = resolve_at_path(dirfd, trimmed)?;
-    let node = vfs()?
+    // The directory first: a read-only mount is EROFS whether or not the
+    // name exists (Linux's do_unlinkat and do_rmdir).
+    let (dir, name, dir_canonical) = parent_dir_canonical(&abs_path)?;
+    let vfs = vfs()?;
+    want_write(&vfs, &dir_canonical)?;
+    let node = vfs
         .resolve_path_no_follow(&abs_path)
         .map_err(map_resolve_err)?;
     let is_dir = node.node_type() == crate::fs::NodeType::Directory;
@@ -4309,7 +4406,6 @@ pub fn sys_unlinkat(dirfd: usize, path_ptr: usize, flags: usize) -> SyscallResul
         (false, false) if trailing_slash => return Err(SyscallError::NotADirectory),
         _ => {}
     }
-    let (dir, name) = parent_dir(&abs_path)?;
     check_may_remove(&*dir, &name)?;
     let victim = crate::fs::inotify::active()
         .then(|| dir.lookup(&name).ok())
@@ -4600,7 +4696,9 @@ pub(crate) fn chown_node(
 /// Change ownership of a file by path (syscall 197).
 pub fn sys_chown(path_ptr: usize, uid: usize, gid: usize) -> SyscallResult {
     let path = resolve_at_path(AT_FDCWD, &read_user_path(path_ptr)?)?;
-    let node = vfs()?.resolve_path(&path).map_err(map_resolve_err)?;
+    let vfs = vfs()?;
+    let (node, canonical) = vfs.locate(&path, true).map_err(map_resolve_err)?;
+    want_write(&vfs, &canonical)?;
     chown_node(&node, uid, gid)?;
     crate::fs::inotify::on_path(&path, &node, crate::fs::inotify::IN_ATTRIB);
     Ok(0)
@@ -4614,6 +4712,7 @@ pub fn sys_fchown(fd: usize, uid: usize, gid: usize) -> SyscallResult {
         .lock()
         .get(fd)
         .ok_or(SyscallError::BadFileDescriptor)?;
+    want_write_file(&file)?;
     chown_node(&file.node, uid, gid)?;
     crate::fs::inotify::on_file(&file, crate::fs::inotify::IN_ATTRIB);
     Ok(0)

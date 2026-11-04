@@ -283,6 +283,7 @@ pub fn sys_mmap(
         .memory_space
         .lock()
         .wx_policy();
+    let asked = prot;
     let prot = policy.read_implies_exec(prot, current_personality());
     if policy.refuses_map(prot) {
         return Err(SyscallError::PermissionDenied);
@@ -359,6 +360,28 @@ pub fn sys_mmap(
     if is_drm_mmap && !crate::graphics::drm_ioctl::may_mmap(caller_pid, fd as i32, offset, length) {
         return Err(SyscallError::PermissionDenied);
     }
+    // A file on a noexec mount (ADR 0022 H3c), as Linux's do_mmap:
+    // READ_IMPLIES_EXEC does not make it executable, PROT_EXEC is EPERM
+    // (below), and mprotect may never make the mapping executable
+    // (VM_MAYEXEC).
+    #[cfg(feature = "alloc")]
+    let noexec = !is_drm_mmap
+        && mapped_file
+            .as_ref()
+            .and_then(|file| file.path.as_deref())
+            .is_some_and(|path| {
+                super::filesystem::vfs().is_ok_and(|view| {
+                    super::filesystem::mount_has(&view, path, crate::fs::mount::flags::NOEXEC)
+                })
+            });
+    #[cfg(feature = "alloc")]
+    let prot = if noexec && asked & PROT_EXEC == 0 {
+        prot & !PROT_EXEC
+    } else {
+        prot
+    };
+    #[cfg(not(feature = "alloc"))]
+    let _ = asked;
 
     let mapping_type = prot_to_mapping_type(prot, shared);
     // The page flags follow `prot`: no-execute unless PROT_EXEC, read-only
@@ -381,6 +404,9 @@ pub fn sys_mmap(
         let file = mapped_file.clone().ok_or(SyscallError::BadFileDescriptor)?;
         if !file.flags.read || (shared && prot & PROT_WRITE != 0 && !file.flags.write) {
             return Err(SyscallError::PermissionDenied);
+        }
+        if noexec && prot & PROT_EXEC != 0 {
+            return Err(SyscallError::OperationNotPermitted);
         }
         if file.node.node_type() == crate::fs::NodeType::Directory || file.node.is_stream() {
             return Err(SyscallError::NoDevice);
@@ -441,6 +467,7 @@ pub fn sys_mmap(
                 let start = vas
                     .map_shared_frames(at, &frames, page_flags, may_write)
                     .map_err(|_| SyscallError::OutOfMemory)?;
+                vas.set_may_exec(start, !noexec);
                 // The memfd's pages may hold code written through another
                 // mapping or write(): sync them as any executable file
                 // mapping (PR #19 review).
@@ -626,6 +653,7 @@ pub fn sys_mmap(
             if shared {
                 memory_space.set_may_write(start, writable);
             }
+            memory_space.set_may_exec(start, !noexec);
         }
     }
 
@@ -1160,6 +1188,7 @@ fn remap_locked(
         let start = vas
             .map_shared_frames(at, &frames, m.flags, m.may_write)
             .map_err(|_| nomem)?;
+        vas.set_may_exec(start, m.may_exec);
         if let Some(b) = &m.backing {
             vas.set_backing(start, b.node.clone(), b.offset + first * PAGE_SIZE);
         }
@@ -1300,6 +1329,7 @@ fn extend(
         }
         vas.map_shared_frames(Some(start), &frames, m.flags, m.may_write)
             .map_err(|_| nomem)?;
+        vas.set_may_exec(start, m.may_exec);
     } else {
         if let Err(e) = vas.map_region_fixed(start, len, m.mapping_type, Some(m.flags)) {
             if let Some(growth) = growth {
@@ -1311,6 +1341,7 @@ fn extend(
             growth.install(vas, at)?;
         }
         vas.set_may_write(start, m.may_write);
+        vas.set_may_exec(start, m.may_exec);
     }
     if let (Some(b), Some(offset)) = (&m.backing, r.grow_offset) {
         vas.set_backing(start, b.node.clone(), offset);

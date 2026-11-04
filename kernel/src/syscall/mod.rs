@@ -2094,9 +2094,10 @@ fn sys_fchmodat(dirfd: usize, path_ptr: usize, mode: usize) -> SyscallResult {
     let abs_path = filesystem::resolve_at_path(dirfd, &rel_path)?;
 
     let vfs = filesystem::vfs()?;
-    let node = vfs
-        .resolve_path(&abs_path)
+    let (node, canonical) = vfs
+        .locate(&abs_path, true)
         .map_err(filesystem::map_resolve_err)?;
+    filesystem::want_write(&vfs, &canonical)?;
     filesystem::chmod_node(&node, mode)?;
     crate::fs::inotify::on_path(&abs_path, &node, crate::fs::inotify::IN_ATTRIB);
     Ok(0)

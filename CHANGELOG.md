@@ -273,8 +273,19 @@
   UMOUNT_NOFOLLOW, and is EBUSY while a mount has mounts under it or a process of the namespace
   works, is rooted or has a file open in it. `/proc/<pid>/mounts` and `mountinfo` show the
   mount flags (`relatime` by default, as Linux), the root of a bind mount, `unbindable` and a
-  read-only superblock; `/proc/filesystems` lists the types mount(2) makes. The flags are not
-  enforced yet (H3c). clone3 now accepts CLONE_EMPTY_MNTNS, which it refused with EINVAL.
+  read-only superblock; `/proc/filesystems` lists the types mount(2) makes. clone3 now accepts
+  CLONE_EMPTY_MNTNS, which it refused with EINVAL.
+- Mount flags are enforced (ADR 0022 H3c), where and in the order Linux checks them. On a
+  read-only mount or superblock every change is EROFS: opening for writing or with O_TRUNC,
+  creating (EEXIST still first), O_TMPFILE, removing (whether the name exists or not), renaming,
+  linking, chmod, chown, utimes, truncate, setxattr and removexattr, and access(W_OK); a device,
+  FIFO or socket can still be written. Making a mount read-only is EBUSY while a file under it
+  is open for writing. On a noexec mount exec and access(X_OK) are EACCES, mmap with PROT_EXEC
+  is EPERM and mprotect cannot make such a mapping executable (EACCES); on a nodev mount opening
+  a device is EACCES; on a nosuid mount a program's set-ID bits and file capabilities give
+  nothing; on a nosymfollow mount following a symlink is ELOOP. statfs's `f_flags` reports the
+  mount's flags as Linux does (ST_RELATIME on most mounts now). rename now reports EXDEV before
+  its permission checks, as Linux does.
 - rseq stays ENOSYS, as on Linux built without CONFIG_RSEQ: glibc runs without it and musl does
   not use it.
 - A signal from rt_sigqueueinfo, rt_tgsigqueueinfo or pidfd_send_signal that ends a sender

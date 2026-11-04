@@ -461,6 +461,10 @@ pub struct VirtualMapping {
     /// write -- opened read-only, or a memfd sealed against writes -- so a
     /// read-only mapping cannot be upgraded past the seal.
     pub may_write: bool,
+    /// Whether mprotect may make this mapping executable (Linux's
+    /// VM_MAYEXEC). False for a mapping of a file on a noexec mount (ADR
+    /// 0022 H3c).
+    pub may_exec: bool,
     /// The file this mapping shows, if it is a file mapping: what mremap
     /// grows it with and MADV_DONTNEED restores it from.
     #[cfg(feature = "alloc")]
@@ -521,6 +525,7 @@ impl VirtualMapping {
             #[cfg(feature = "alloc")]
             physical_frames: Vec::new(),
             may_write: true,
+            may_exec: true,
             #[cfg(feature = "alloc")]
             backing: None,
             dont_fork: false,
@@ -529,7 +534,8 @@ impl VirtualMapping {
     }
 
     /// Pages `[from, to)` of this mapping as a mapping of their own, with
-    /// everything else -- type, flags, may_write, file and offset -- kept.
+    /// everything else -- type, flags, may_write, may_exec, file and
+    /// offset -- kept.
     /// (Splitting rebuilt pieces from the type alone, so a partly unmapped
     /// read-only or write-sealed shared mapping came back writable-capable.)
     #[cfg(feature = "alloc")]
@@ -1840,6 +1846,7 @@ impl VirtualAddressSpace {
             physical_frames,
             // Borrowed: protect_region keeps it to its grant.
             may_write: true,
+            may_exec: true,
             backing: None,
             dont_fork: false,
             wipe_on_fork: false,
@@ -1926,6 +1933,7 @@ impl VirtualAddressSpace {
                 physical_frames: frames.to_vec(),
                 // Borrowed: protect_region keeps it to its grant.
                 may_write: true,
+                may_exec: true,
                 backing: None,
                 dont_fork: false,
                 wipe_on_fork: false,
@@ -2264,6 +2272,7 @@ impl VirtualAddressSpace {
             && left.mapping_type == right.mapping_type
             && left.flags == right.flags
             && left.may_write == right.may_write
+            && left.may_exec == right.may_exec
             && left.dont_fork == right.dont_fork
             && left.wipe_on_fork == right.wipe_on_fork
             && !left.flags.contains(PageFlags::HUGE)
@@ -2526,6 +2535,15 @@ impl VirtualAddressSpace {
     pub fn set_may_write(&self, start: VirtualAddress, may_write: bool) {
         if let Some(m) = self.mappings.lock().get_mut(&start) {
             m.may_write = may_write;
+        }
+    }
+
+    /// Whether mprotect may make the mapping starting at `start` executable
+    /// (its VM_MAYEXEC).
+    #[cfg(feature = "alloc")]
+    pub fn set_may_exec(&self, start: VirtualAddress, may_exec: bool) {
+        if let Some(m) = self.mappings.lock().get_mut(&start) {
+            m.may_exec = may_exec;
         }
     }
 
@@ -3242,6 +3260,12 @@ impl VirtualAddressSpace {
                     operation: "mprotect: mapping may not be written",
                 });
             }
+            // A file on a noexec mount never runs (VM_MAYEXEC, EACCES).
+            if !m.may_exec && !new_flags.contains(PageFlags::NO_EXECUTE) {
+                return Err(KernelError::PermissionDenied {
+                    operation: "mprotect: mapping may not be executed",
+                });
+            }
             // W^X, and under MDWE no memory becoming executable (ADR 0017).
             if self
                 .wx_policy()
@@ -3930,12 +3954,13 @@ mod tests {
     fn pieces_keep_all_attributes() {
         let mut m = record(0x10_0000, 4, MappingType::Shared);
         m.may_write = false;
+        m.may_exec = false;
         m.dont_fork = true;
         m.flags = user_prot_flags(0x1);
         let p = m.piece(1, 3);
         assert_eq!((p.start.0, p.size), (0x10_1000, 0x2000));
         assert_eq!(p.physical_frames, m.physical_frames[1..3].to_vec());
-        assert!(!p.may_write && p.dont_fork && p.flags == m.flags);
+        assert!(!p.may_write && !p.may_exec && p.dont_fork && p.flags == m.flags);
         assert_eq!(p.mapping_type, MappingType::Shared);
 
         let mut maps = BTreeMap::new();
