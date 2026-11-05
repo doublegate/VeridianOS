@@ -313,7 +313,7 @@ mod package;
 use self::package::*;
 
 // Import time syscalls module
-mod time;
+pub(crate) mod time;
 use self::time::*;
 
 // Import signal syscalls module

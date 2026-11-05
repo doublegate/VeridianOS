@@ -34,6 +34,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 pub mod ktimerd;
 pub mod ntp;
 pub mod realtime;
+pub mod steer;
 
 use spin::Mutex;
 
@@ -459,16 +460,14 @@ pub(crate) fn get_uptime_ms() -> u64 {
 }
 
 /// Monotonic time in nanoseconds (CLOCK_MONOTONIC), at the clock source's
-/// resolution.
+/// resolution: the clock source as adjtimex steers it ([`steer`]).
 pub(crate) fn monotonic_ns() -> u64 {
-    #[cfg(target_os = "none")]
-    {
-        crate::arch::timer::monotonic_ns()
-    }
-    #[cfg(not(target_os = "none"))]
-    {
-        UPTIME_MS.load(Ordering::Relaxed) * 1_000_000
-    }
+    steer::now_ns()
+}
+
+/// The clock source unsteered (CLOCK_MONOTONIC_RAW), in nanoseconds.
+pub(crate) fn monotonic_raw_ns() -> u64 {
+    steer::raw_ns()
 }
 
 /// Return the number of currently pending (active) timers.

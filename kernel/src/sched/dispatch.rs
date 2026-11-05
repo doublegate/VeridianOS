@@ -434,8 +434,9 @@ pub fn started() -> bool {
     STARTED.load(Ordering::Acquire)
 }
 
+/// CLOCK_MONOTONIC, which sleeps and timeouts count on.
 fn now() -> u64 {
-    crate::arch::timer::monotonic_ns()
+    crate::timer::monotonic_ns()
 }
 
 /// The dispatching CPU's slot, if this CPU dispatches.

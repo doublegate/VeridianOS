@@ -5806,19 +5806,22 @@ static void test_posix_timers(void)
     made = ptimer_make(CLOCK_MONOTONIC, SIGEV_SIGNAL, sig, 7, &t) == 0;
     set = made && timer_settime(t, 0, &five_ms, NULL) == 0;
     usleep(60000);
-    struct timespec wait = {1, 0};
-    siginfo_t si;
-    memset(&si, 0, sizeof(si));
-    int taken = sigtimedwait(&set1, &si, &wait) == sig;
     /* Taking the signal re-arms the timer, so on a slow machine its next
-     * expiry can be queued before the second wait (seen on RISC-V): a
-     * second signal is a duplicate only if it came before that expiry.
-     * The gap is measured from before timer_gettime, so a stall between
-     * the two (seen on AArch64 with four emulated CPUs) is counted. */
+     * expiry can be queued before the second wait (seen on RISC-V and
+     * AArch64): a second signal is a duplicate only if it came before
+     * that expiry. A timer_gettime after the take cannot say when it is:
+     * with that signal already pending it reports the expiry after it,
+     * as Linux's common_timer_get does. One before the take can: the
+     * signal is pending then, so it reports the first expiry after now,
+     * and the take re-arms the timer at that expiry or a later one. */
     struct itimerspec next;
     struct timespec zero = {0, 0}, w0, w1;
     clock_gettime(CLOCK_MONOTONIC, &w0);
     long next_ns = timer_gettime(t, &next) == 0 ? next.it_value.tv_nsec : 0;
+    struct timespec wait = {1, 0};
+    siginfo_t si;
+    memset(&si, 0, sizeof(si));
+    int taken = sigtimedwait(&set1, &si, &wait) == sig;
     int overrun = si.si_overrun, getover = timer_getoverrun(t);
     errno = 0;
     int again = sigtimedwait(&set1, &si, &zero);
@@ -6069,18 +6072,19 @@ static void test_adjtimex(void)
     report("adjtimex_read_and_permission", state == TIME_ERROR && raw == TIME_ERROR && defaults &&
                                                badtick && user, why);
 
-    /* adjtime's slew is swapped and read back; ADJ_SETOFFSET steps the
-     * wall clock; ADJ_TAI moves CLOCK_TAI. Each is put back. */
+    /* adjtime's slew is swapped and read back (less what a second that
+     * started meanwhile delivered, at most 500 us each); ADJ_SETOFFSET
+     * steps the wall clock; ADJ_TAI moves CLOCK_TAI. Each is put back. */
     memset(&tx, 0, sizeof(tx));
     tx.modes = ADJ_OFFSET_SINGLESHOT;
     tx.offset = 250000;
     int set1 = adjtimex(&tx) >= 0;
     memset(&tx, 0, sizeof(tx));
     tx.modes = ADJ_OFFSET_SS_READ;
-    int slew = adjtimex(&tx) >= 0 && tx.offset == 250000;
+    int slew = adjtimex(&tx) >= 0 && tx.offset <= 250000 && tx.offset >= 249000;
     memset(&tx, 0, sizeof(tx));
     tx.modes = ADJ_OFFSET_SINGLESHOT;
-    slew = slew && set1 && adjtimex(&tx) >= 0 && tx.offset == 250000;
+    slew = slew && set1 && adjtimex(&tx) >= 0 && tx.offset <= 250000 && tx.offset >= 249000;
 
     struct timespec a, b, rt, tai;
     clock_gettime(CLOCK_REALTIME, &a);
@@ -6130,6 +6134,140 @@ static void test_adjtimex(void)
     snprintf(why, sizeof(why), "real=%d mono=%d cpu=%d none=%d fault=%d", real, mono, cpu, none,
              fault);
     report("clock_adjtime_clocks", real && mono && cpu && none && fault, why);
+}
+
+/* Put the NTP state back as at boot: unsynchronized, nothing to deliver. */
+static void ntp_reset(void)
+{
+    struct timex tx;
+    memset(&tx, 0, sizeof(tx));
+    tx.modes = ADJ_STATUS;
+    tx.status = STA_PLL;
+    adjtimex(&tx);
+    memset(&tx, 0, sizeof(tx));
+    tx.modes = ADJ_STATUS | ADJ_MAXERROR | ADJ_ESTERROR | ADJ_FREQUENCY | ADJ_TAI;
+    tx.status = STA_UNSYNC;
+    tx.maxerror = 16000000;
+    tx.esterror = 16000000;
+    adjtimex(&tx);
+    memset(&tx, 0, sizeof(tx));
+    tx.modes = ADJ_OFFSET_SINGLESHOT;
+    adjtimex(&tx);
+}
+
+/* CLOCK_MONOTONIC minus CLOCK_MONOTONIC_RAW, from the narrowest of 16
+ * RAW, MONOTONIC, RAW reads, MONOTONIC set against the RAW midpoint: an
+ * interrupt between two reads (a millisecond under emulation) widens only
+ * the samples it lands in, which are not used. */
+static long long mono_minus_raw(void)
+{
+    long long best = -1, off = 0;
+    for (int i = 0; i < 16; i++) {
+        struct timespec a, m, b;
+        clock_gettime(CLOCK_MONOTONIC_RAW, &a);
+        clock_gettime(CLOCK_MONOTONIC, &m);
+        clock_gettime(CLOCK_MONOTONIC_RAW, &b);
+        long long width = ts_ns(b) - ts_ns(a);
+        if (best < 0 || width < best) {
+            best = width;
+            off = ts_ns(m) - (ts_ns(a) + width / 2);
+        }
+    }
+    return off;
+}
+
+/* Spin until CLOCK_MONOTONIC_RAW has advanced `ns`. */
+static void spin_raw(long long ns)
+{
+    struct timespec r0, r1;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &r0);
+    do
+        clock_gettime(CLOCK_MONOTONIC_RAW, &r1);
+    while (ts_ns(r1) - ts_ns(r0) < ns);
+}
+
+/* adjtimex steers the clocks: ADJ_FREQUENCY makes CLOCK_MONOTONIC (and
+ * CLOCK_REALTIME) run that much faster than CLOCK_MONOTONIC_RAW, and
+ * STA_INS inserts a leap second at midnight UTC: CLOCK_REALTIME reads
+ * 23:59:59 for two seconds and adjtimex says TIME_OOP in the second one. */
+static void test_adjtimex_steering(void)
+{
+    char why[200];
+    struct timex tx;
+
+    /* +500 ppm: half a millisecond more a second. The offsets are taken
+     * from sandwiched reads (mono_minus_raw): reading the two clocks once
+     * each at the end of a spin picks the read pair an interrupt split,
+     * since that is the one whose RAW read crosses the threshold, so the
+     * error was a millisecond and one-sided under emulation. */
+    memset(&tx, 0, sizeof(tx));
+    tx.modes = ADJ_FREQUENCY;
+    tx.freq = 500L << 16;
+    int set = adjtimex(&tx) >= 0;
+    long long o0 = mono_minus_raw();
+    spin_raw(500000000LL);
+    long long extra = mono_minus_raw() - o0;
+    ntp_reset();
+    o0 = mono_minus_raw();
+    spin_raw(200000000LL);
+    long long back = mono_minus_raw() - o0;
+    snprintf(why, sizeof(why), "set=%d extra=%lldns back=%lldns", set, extra, back);
+    /* 250 us over half a second, nothing once the frequency is 0 again;
+     * within 100 us, the width of the narrowest sandwich under emulation. */
+    report("adjtimex_frequency_steers", set && extra >= 150000 && extra <= 350000 &&
+                                            back >= -100000 && back <= 100000, why);
+
+    /* The leap second, from two seconds before midnight. */
+    struct timespec saved_rt, saved_mono, now;
+    clock_gettime(CLOCK_REALTIME, &saved_rt);
+    clock_gettime(CLOCK_MONOTONIC, &saved_mono);
+    time_t midnight = saved_rt.tv_sec - saved_rt.tv_sec % 86400 + 86400;
+    struct timespec start = {midnight - 2, 0};
+    int setok = clock_settime(CLOCK_REALTIME, &start) == 0;
+    memset(&tx, 0, sizeof(tx));
+    tx.modes = ADJ_STATUS | ADJ_MAXERROR;
+    tx.status = STA_INS;
+    tx.maxerror = 0;
+    setok = setok && adjtimex(&tx) >= 0;
+    long long first59 = -1, last59 = -1;
+    int backwards = 0, oop = 0, tai = -1;
+    time_t prev = 0;
+    for (;;) {
+        struct timespec mono;
+        clock_gettime(CLOCK_REALTIME, &now);
+        clock_gettime(CLOCK_MONOTONIC, &mono);
+        if (prev && now.tv_sec < prev)
+            backwards++;
+        prev = now.tv_sec;
+        if (now.tv_sec == midnight - 1) {
+            if (first59 < 0)
+                first59 = ts_ns(mono);
+            last59 = ts_ns(mono);
+        }
+        memset(&tx, 0, sizeof(tx));
+        if (adjtimex(&tx) == TIME_OOP) {
+            oop = 1;
+            tai = tx.tai;
+        }
+        if (now.tv_sec >= midnight + 1 || ts_ns(mono) - ts_ns(saved_mono) > 8000000000LL)
+            break;
+        struct timespec q = {0, 50000000};
+        nanosleep(&q, NULL);
+    }
+    ntp_reset();
+    /* Put the wall clock back where it would have been. */
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    long long back_ns = ts_ns(saved_rt) + (ts_ns(now) - ts_ns(saved_mono));
+    struct timespec restore = {back_ns / 1000000000LL, back_ns % 1000000000LL};
+    clock_settime(CLOCK_REALTIME, &restore);
+    long long span_ms = (last59 - first59) / 1000000;
+    snprintf(why, sizeof(why), "set=%d 23:59:59 for %lldms backwards=%d oop=%d tai=%d", setok,
+             span_ms, backwards, oop, tai);
+    /* Two seconds of 23:59:59 (sampled every 50 ms). The step back is
+     * seen only if a sample fell between midnight and the leap, which
+     * takes a scheduling delay at most: at most one. */
+    report("adjtimex_leap_second_inserted", setok && span_ms >= 1800 && span_ms <= 2100 &&
+                                                backwards <= 1 && oop && tai == 1, why);
 }
 
 static volatile int restart_alrm;
@@ -10354,6 +10492,7 @@ int main(int argc, char **argv)
     test_posix_timers();
     test_restart_syscall();
     test_adjtimex();
+    test_adjtimex_steering();
     test_preadv_pwritev();
     test_creat_lchown_fchmodat2();
     test_close_range_and_advice();

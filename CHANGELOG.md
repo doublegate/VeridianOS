@@ -405,9 +405,15 @@
   error estimates, tick, frequency, the PLL/FLL phase offset and the adjtime() slew are stored and
   read back with Linux's scaling and clamps, and the call returns TIME_ERROR while
   unsynchronized. ADJ_SETOFFSET steps CLOCK_REALTIME (timers on it follow; EINVAL before boot)
-  and ADJ_TAI sets the offset CLOCK_TAI now reads; the rest does not steer the clock
-  (KNOWN-LIMITATIONS). clock_adjtime adjusts CLOCK_REALTIME and answers EOPNOTSUPP for every other
-  clock, EINVAL for an ID that names none.
+  and ADJ_TAI sets the offset CLOCK_TAI now reads. The state steers the clocks (`timer::steer`):
+  the tick and frequency set how fast CLOCK_MONOTONIC and CLOCK_REALTIME run against
+  CLOCK_MONOTONIC_RAW (now the clock source unsteered), and once a second `ktimerd` delivers a
+  chunk of the phase offset and up to 500 us of the adjtime() slew, grows maxerror, and inserts or
+  deletes a leap second at midnight UTC for STA_INS/STA_DEL (CLOCK_REALTIME reads 23:59:59 twice,
+  adjtimex reports TIME_OOP, TAI moves a second, timers on the wall clock follow). Clock reads take
+  the rate from a two-slot snapshot, never waiting for a writer, and nothing runs each second
+  while there is nothing to deliver. clock_adjtime adjusts CLOCK_REALTIME and answers EOPNOTSUPP
+  for every other clock, EINVAL for an ID that names none.
 - restart_syscall (`syscall::restart`; it was ENOSYS). A relative nanosleep or clock_nanosleep,
   or a poll with a timeout, that a stop interrupts now carries on to its first deadline once the
   process continues; it started the whole duration again. As in Linux, the interrupted call
