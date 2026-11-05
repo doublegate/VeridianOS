@@ -375,8 +375,9 @@ What remains:
   differ, and sync(2) flushes the filesystems of the initial namespace only. The mount flags are
   checked the same way, by the path in the caller's namespace: a descriptor passed into another
   mount namespace (SCM_RIGHTS, pidfd_getfd) where that path is on a writable or executable mount
-  can be reopened for writing through O_EMPTYPATH, fchmod'ed, run by execveat with
-  AT_EMPTY_PATH or mapped executable, although its own mount is read-only or noexec. Mounts are
+  can be reopened for writing through O_EMPTYPATH, fchmod'ed, linked by linkat with
+  AT_EMPTY_PATH into that mount, run by execveat with AT_EMPTY_PATH or mapped executable,
+  although its own mount is read-only or noexec. Mounts are
   kept by path, so a directory with a mount under it cannot be renamed (EBUSY; Linux moves the
   mounts with it), but only the caller's namespace is looked at: renaming a directory under which
   another mount namespace has a mount leaves that mount at the old path there, uncovering what

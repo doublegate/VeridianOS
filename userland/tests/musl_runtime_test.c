@@ -9455,11 +9455,12 @@ static void test_mount_flags(void)
     report("mount_flags", f == 0, why);
 }
 
-/* How many mounts /proc/self/mountinfo shows at mount point `point`. */
 /* A file does not leave a read-only bind mount by another name: a hard
  * link to another mount of the same filesystem is EXDEV, and a directory
  * with a mount under it cannot be renamed (mounts stay where they are, so
- * the moved tree would lose the mount's flags: EBUSY). PR #35 review. */
+ * the moved tree would lose the mount's flags: EBUSY). A descriptor with no
+ * name on any mount (a pipe) gets none: EXDEV, as Linux's pipefs. PR #35
+ * review. */
 static void test_mount_no_escape(void)
 {
     char why[96];
@@ -9490,6 +9491,17 @@ static void test_mount_no_escape(void)
         if (!(open("/tmp/me/top/ro/f", O_WRONLY) == -1 && errno == EROFS)) g |= 8;
         if (umount("/tmp/me/top/ro") != 0 || rename("/tmp/me/top", "/tmp/me/moved") != 0)
             g |= 16;
+        int p[2];
+        if (pipe(p) != 0) {
+            g |= 32;
+        } else {
+            errno = 0;
+            if (!(linkat(p[0], "", AT_FDCWD, "/tmp/me/pipe", AT_EMPTY_PATH) == -1 &&
+                  errno == EXDEV))
+                g |= 32;
+            close(p[0]);
+            close(p[1]);
+        }
         _exit(g);
     }
     int code = t_exit_status(child);
@@ -9498,6 +9510,7 @@ static void test_mount_no_escape(void)
     report("mount_no_escape", code == 0, why);
 }
 
+/* How many mounts /proc/self/mountinfo shows at mount point `point`. */
 static int t_mounts_at(const char *point)
 {
     static char info[8192];

@@ -590,7 +590,9 @@
   - A file no longer leaves a read-only, noexec or nosuid bind mount by another name: linkat
     across two mounts (two bind mounts of one filesystem included) is EXDEV, as Linux's
     do_linkat, and renaming a directory with a mount under it is EBUSY. The rename used to leave
-    the mount at the old path and the moved tree without its flags.
+    the mount at the old path and the moved tree without its flags. linkat with AT_EMPTY_PATH
+    on a descriptor with no name (a pipe, a socket) is EXDEV too, as Linux, rather than
+    skipping the check.
   - A shared mapping keeps the write access of the file it was made from after the descriptor
     is closed (Linux's vm_file), so the file cannot be executed meanwhile (ETXTBSY).
   - wait4, waitpid and waitid in a PID namespace below the initial one report the reaped
