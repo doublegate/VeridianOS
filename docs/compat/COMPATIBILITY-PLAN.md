@@ -86,7 +86,8 @@ Each group lands with its LTP cases. The counts are "missing" entries in the cov
   - capget/capset, times, personality, getcpu
   - priority and rlimit calls
   - pidfd_*, clone3, kcmp, process_vm_*, ptrace (the pidfd calls, clone3, kcmp and process_vm_*
-    are done; no pidfd ioctls or fdinfo, KNOWN-LIMITATIONS)
+    are done; no pidfd ioctls or fdinfo, KNOWN-LIMITATIONS); process clones with CLONE_FILES,
+    CLONE_SIGHAND and CLONE_PARENT (G2b) are done
   - unshare/setns (ADR 0022: H1 the framework, UTS, IPC and cgroup, H2 time and the mount
     namespaces of H3, mount(2), umount2, the per-mount flags and pivot_root are done; of H4 the
     user namespace object, creation, maps and setns (H4a), ids at the boundaries (H4b) and the

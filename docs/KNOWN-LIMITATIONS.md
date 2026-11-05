@@ -41,9 +41,13 @@ exposed were fixed (N-182 to N-189); the rest are listed, with their targets, in
   their pages (N-230); the rest needs the v0.29 page cache.
 - **clone across processes.** A `clone` without CLONE_THREAD makes a process (fork, vfork,
   `posix_spawn`); with CLONE_VM it shares the parent's memory page by page as it is at the
-  clone, so a mapping either side adds or removes afterwards is its own (enough for vfork and
-  `posix_spawn`, whose child only execs or exits). CLONE_FILES and CLONE_SIGHAND between
-  processes (a shared fd or signal-handler table) are refused (N-210).
+  clone, so a mapping either side adds or removes afterwards is its own, and so is a page that
+  had no frame yet: whichever side touches it first gets a frame the other does not see (enough
+  for vfork and `posix_spawn`, whose child only execs or exits; LTP clone08's
+  CLONE_PARENT_SETTID case reads 0 from such a page). CLONE_FILES shares the descriptor
+  table and CLONE_SIGHAND the signal actions with the new process (G2b); the descriptor limit
+  belongs to the table, so two processes sharing one share their RLIMIT_NOFILE too, where Linux
+  checks each one's own.
 - **Time.** Every Linux clock exists and CLOCK_REALTIME counts from 1970 (N-218, N-219), with
   these differences: a sleep or futex wait until an absolute CLOCK_REALTIME time does not move
   when the clock is set afterwards (timerfds do); sleeping on a process CPU clock is ENOTSUP;
@@ -325,14 +329,15 @@ What remains:
   another process signals that process.
 - **clone3 has one PID namespace level and no cgroups.** set_tid takes one ID (more are EINVAL,
   as on Linux without nested PID namespaces), and CLONE_INTO_CGROUP is EBADF, since no
-  descriptor can name a cgroup. The namespace flags, CLONE_PARENT, CLONE_PTRACE, and CLONE_FILES
-  or CLONE_SIGHAND across processes are EINVAL from clone and clone3 alike. An ID that a fork or
+  descriptor can name a cgroup. CLONE_PTRACE and CLONE_UNTRACED are EINVAL from clone and
+  clone3 alike (there is no ptrace auto-attach). An ID that a fork or
   clone still under way has just been given can be chosen again through set_tid before that
   child is in the process table; the table then refuses the second process, but a second thread
   with the ID is not refused. Only a caller with CAP_CHECKPOINT_RESTORE or CAP_SYS_ADMIN can
   choose an ID.
-- **kcmp sees no file or handler table shared between processes**, since CLONE_FILES and
-  CLONE_SIGHAND across processes are refused. A CLONE_VM child counts as sharing its parent's
+- **kcmp.** KCMP_FILES and KCMP_SIGHAND see the tables a CLONE_FILES or CLONE_SIGHAND clone
+  shares, and a table's identity can be reused once its last user is gone, as on Linux. A
+  CLONE_VM child counts as sharing its parent's
   address space until either execs, though each maps the memory through an address space of its
   own (a mapping one makes later the other does not see). No task has an I/O context or a System V
   semaphore undo list, so KCMP_IO and KCMP_SYSVSEM always answer 0, as Linux does for two tasks

@@ -133,12 +133,23 @@ fn unshare_implied(mut flags: u64) -> u64 {
     flags
 }
 
+/// What the caller shares with another task, as check_unshare_flags asks.
+#[derive(Clone, Copy, Default)]
+struct Sharing {
+    /// Another thread in its process.
+    threads: bool,
+    /// Its address space with another process.
+    vm: bool,
+    /// Its signal actions with another process (CLONE_SIGHAND).
+    sighand: bool,
+}
+
 /// check_unshare_flags: unknown flags are EINVAL, and so is unsharing the
 /// thread group, handlers or address space of a process that has other
-/// threads (`others`), or the address space while another process shares
-/// it (`vm_shared`) -- Linux pretends those work only when there is
-/// nothing to unshare.
-fn unshare_checks(flags: u64, others: bool, vm_shared: bool) -> Result<(), SyscallError> {
+/// threads, the handlers or address space while another process shares
+/// the handlers, or the address space while another process shares it --
+/// Linux pretends those work only when there is nothing to unshare.
+fn unshare_checks(flags: u64, shared: Sharing) -> Result<(), SyscallError> {
     let known = CLONE_THREAD
         | CLONE_FS
         | CLONE_SIGHAND
@@ -148,8 +159,9 @@ fn unshare_checks(flags: u64, others: bool, vm_shared: bool) -> Result<(), Sysca
         | CLONE_NS_ALL
         | UNSHARE_EMPTY_MNTNS;
     if flags & !known != 0
-        || (flags & (CLONE_THREAD | CLONE_SIGHAND | CLONE_VM) != 0 && others)
-        || (flags & CLONE_VM != 0 && vm_shared)
+        || (flags & (CLONE_THREAD | CLONE_SIGHAND | CLONE_VM) != 0 && shared.threads)
+        || (flags & (CLONE_SIGHAND | CLONE_VM) != 0 && shared.sighand)
+        || (flags & CLONE_VM != 0 && shared.vm)
     {
         return Err(SyscallError::InvalidArgument);
     }
@@ -159,8 +171,9 @@ fn unshare_checks(flags: u64, others: bool, vm_shared: bool) -> Result<(), Sysca
 /// unshare(flags), as Linux's ksys_unshare: the flags widened
 /// ([`unshare_implied`]) and checked ([`unshare_checks`]); CLONE_FS gives
 /// the thread its own copy of a filesystem state it shares; CLONE_FILES
-/// is a no-op for a single-threaded process and EINVAL otherwise (the
-/// descriptor table is the process's, shared by all its threads, here);
+/// gives a single-threaded process its own copy of a descriptor table it
+/// shares with another (CLONE_FILES clone) and is EINVAL with other
+/// threads (the table is the process's, shared by all its threads, here);
 /// CLONE_NEWUSER makes a user namespace ([`new_user_ns`]), whose root may
 /// then make the others, which belong to it; any other namespace needs
 /// CAP_SYS_ADMIN over the user namespace that will own it, the new one or
@@ -168,9 +181,15 @@ fn unshare_checks(flags: u64, others: bool, vm_shared: bool) -> Result<(), Sysca
 /// Nothing changes unless everything succeeds.
 pub fn sys_unshare(flags: usize) -> SyscallResult {
     let flags = unshare_implied(flags as u64);
-    unshare_checks(flags, other_threads(), vm_shared())?;
+    let current = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let shared = Sharing {
+        threads: other_threads(),
+        vm: vm_shared(),
+        sighand: current.sighand_shared(),
+    };
+    unshare_checks(flags, shared)?;
     let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
-    if flags & CLONE_FILES != 0 && other_threads() {
+    if flags & CLONE_FILES != 0 && shared.threads {
         return Err(SyscallError::InvalidArgument);
     }
     let caller = Caller::current();
@@ -205,6 +224,9 @@ pub fn sys_unshare(flags: usize) -> SyscallResult {
     // The point of no return.
     if let Some(ns) = user_ns {
         enter_user_ns(ns)?;
+    }
+    if flags & CLONE_FILES != 0 {
+        current.unshare_files();
     }
     if flags & CLONE_FS != 0 {
         let fs = thread.fs();
@@ -628,16 +650,30 @@ mod tests {
 
     #[test]
     fn unshare_refuses_what_check_unshare_flags_refuses() {
-        assert!(unshare_checks(ns::CLONE_NEWUTS | CLONE_FILES, false, false).is_ok());
+        let none = Sharing::default();
+        let threads = Sharing {
+            threads: true,
+            ..none
+        };
+        let vm = Sharing { vm: true, ..none };
+        let sighand = Sharing {
+            sighand: true,
+            ..none
+        };
+        assert!(unshare_checks(ns::CLONE_NEWUTS | CLONE_FILES, none).is_ok());
         assert_eq!(
-            unshare_checks(0x8000 /* CLONE_PARENT */, false, false),
+            unshare_checks(0x8000 /* CLONE_PARENT */, none),
             Err(SyscallError::InvalidArgument)
         );
         // Only with nothing to unshare.
-        assert!(unshare_checks(CLONE_THREAD, false, false).is_ok());
-        assert!(unshare_checks(CLONE_THREAD, true, false).is_err());
-        assert!(unshare_checks(CLONE_VM | CLONE_SIGHAND | CLONE_THREAD, false, true).is_err());
-        assert!(unshare_checks(CLONE_SIGHAND | CLONE_THREAD, false, true).is_ok());
+        assert!(unshare_checks(CLONE_THREAD, none).is_ok());
+        assert!(unshare_checks(CLONE_THREAD, threads).is_err());
+        assert!(unshare_checks(CLONE_VM | CLONE_SIGHAND | CLONE_THREAD, vm).is_err());
+        assert!(unshare_checks(CLONE_SIGHAND | CLONE_THREAD, vm).is_ok());
+        // Handlers another process shares (a CLONE_SIGHAND clone's).
+        assert!(unshare_checks(CLONE_SIGHAND | CLONE_THREAD, sighand).is_err());
+        assert!(unshare_checks(CLONE_VM | CLONE_SIGHAND | CLONE_THREAD, sighand).is_err());
+        assert!(unshare_checks(CLONE_FILES | CLONE_FS, sighand).is_ok());
     }
 
     #[test]

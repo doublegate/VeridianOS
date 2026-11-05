@@ -396,6 +396,53 @@ struct Queued {
     infos: alloc::collections::VecDeque<(SigInfo, Option<u32>)>,
 }
 
+/// A process's signal actions, Linux's sighand_struct. Everything that
+/// needs both tables locks them in this order, handlers then the rest, so
+/// no reader sees one action's handler with another's flags.
+pub struct SigHand {
+    /// Handler per signal: 0 = default, 1 = ignore, other = its address.
+    pub handlers: spin::Mutex<[u64; NSIG + 1]>,
+    /// The rest of each action: (sa_flags, sa_restorer, sa_mask), kept so
+    /// sigaction returns what was set (N-95) and for delivery.
+    pub extra: spin::Mutex<[(u64, u64, u64); NSIG + 1]>,
+}
+
+impl Default for SigHand {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SigHand {
+    /// Every action the default.
+    pub const fn new() -> Self {
+        Self {
+            handlers: spin::Mutex::new([0; NSIG + 1]),
+            extra: spin::Mutex::new([(0, 0, 0); NSIG + 1]),
+        }
+    }
+
+    /// A copy of these actions. With `clear` (CLONE_CLEAR_SIGHAND), handlers
+    /// other than SIG_IGN start as SIG_DFL and every action's flags and
+    /// mask are cleared (Linux's flush_signal_handlers).
+    pub fn copy(&self, clear: bool) -> Self {
+        const SIG_IGN: u64 = 1;
+        let handlers = self.handlers.lock();
+        let extra = self.extra.lock();
+        let (mut new_handlers, mut new_extra) = (*handlers, *extra);
+        if clear {
+            for handler in new_handlers.iter_mut().filter(|h| **h != SIG_IGN) {
+                *handler = 0;
+            }
+            new_extra = [(0, 0, 0); NSIG + 1];
+        }
+        Self {
+            handlers: spin::Mutex::new(new_handlers),
+            extra: spin::Mutex::new(new_extra),
+        }
+    }
+}
+
 /// Pending signal instances with their siginfo, beside the pending set's
 /// bits: a bit stays set while any instance of its signal is queued.
 /// Changed under its lock together with the bits, so a send cannot be lost
@@ -877,7 +924,7 @@ fn job_control_on_send(process: &Process, sig: usize) {
 #[cfg(feature = "alloc")]
 fn notify_parent_job(process: &Process, code: i32, status: i32) {
     if let Some(parent) = process.parent().and_then(super::table::get_process) {
-        let nocldstop = parent.signal_action_extra.lock()[SIGCHLD].0 & SA_NOCLDSTOP != 0;
+        let nocldstop = parent.sigchld_flags() & SA_NOCLDSTOP != 0;
         if !nocldstop {
             notify_info(&parent, SigInfo::child(SIGCHLD, code, process, status));
         }

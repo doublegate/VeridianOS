@@ -945,12 +945,12 @@ fn exec_image(
         .did_exec
         .store(true, core::sync::atomic::Ordering::Release);
 
-    // Step 5: Close file descriptors marked close-on-exec
-    {
-        let file_table = process.file_table.lock();
-
-        file_table.close_on_exec();
-    }
+    // Step 5: Close file descriptors marked close-on-exec, in a table of
+    // the process's own: one it shares with another process (CLONE_FILES)
+    // is copied first, so the other keeps its descriptors (Linux's
+    // unshare_files in begin_new_exec).
+    process.unshare_files();
+    process.file_table.lock().close_on_exec();
 
     // Step 5b: Only capabilities marked PRESERVE_EXEC survive exec (N-30).
     // The filtered space used to be built in sys_exec and then dropped, so
@@ -972,6 +972,9 @@ fn exec_image(
     // stack (it was in the old image), as Linux does. POSIX timers are
     // deleted and their pending signals dropped (exit_itimers and
     // flush_itimer_signals); the interval timers stay.
+    // Shared actions (CLONE_SIGHAND) are copied first, as de_thread's
+    // unshare_sighand.
+    process.unshare_sighand();
     process.reset_signal_handlers();
     super::posix_timer::delete_all(&process);
     process.rt_queue.clear_timers(&process.pending_signals);

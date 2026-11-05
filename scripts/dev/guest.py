@@ -14,7 +14,9 @@ the output after the shell has echoed the whole command. A command that itself
 prints a root prompt ends its wait early.
 
 Environment: SMP (CPU count, default 1), RISCV_CPU (QEMU -cpu for RISC-V),
-PROMPT_TIMEOUT (seconds to wait for each prompt, default 600).
+PROMPT_TIMEOUT (seconds to wait for each prompt, default 600), IMAGE (another
+root filesystem image, such as target/rootfs-compat-ARCH.img from
+scripts/build-compat-rootfs.sh, to run single conformance tests).
 """
 
 import os
@@ -57,7 +59,7 @@ def qemu_command(arch: str) -> list[str]:
     kernel = Path(cmd[cmd.index("-kernel") + 1])
     if not kernel.exists():
         sys.exit(f"{kernel} not found; build it with ./build-kernel.sh {arch} dev")
-    image = ROOT / f"target/rootfs-musl-{arch}.img"
+    image = Path(os.environ.get("IMAGE") or ROOT / f"target/rootfs-musl-{arch}.img")
     if not image.exists():
         sys.exit(
             f"{image} not found; build it with scripts/build-musl-rootfs.sh {arch}"

@@ -5553,6 +5553,7 @@ static void test_text_busy(void);
 static void test_inotify_events(void);
 static void test_pidfd(void);
 static void test_clone3(void);
+static void test_clone_share(void);
 static void test_kcmp_process_vm(void);
 static void test_personality(void);
 static void test_namespaces_uts(void);
@@ -5581,6 +5582,7 @@ static const struct {
     {"inotify_events", test_inotify_events},
     {"pidfd", test_pidfd},
     {"clone3", test_clone3},
+    {"clone_share", test_clone_share},
     {"kcmp_process_vm", test_kcmp_process_vm},
     {"personality", test_personality},
     {"namespaces_uts", test_namespaces_uts},
@@ -8380,6 +8382,140 @@ static long t_kcmp(pid_t a, pid_t b, int type, unsigned long i1, unsigned long i
 }
 static char t_pvm_buf[8192];
 
+/* G2b: a process clone may share the file table (CLONE_FILES) and, with
+ * the memory, the signal actions (CLONE_SIGHAND), and may be its caller's
+ * sibling (CLONE_PARENT). musl's clone() runs a CLONE_VM child on the given
+ * stack as vfork would (it refuses only the thread flags: LTP clone10's
+ * EINVAL is musl's); CLONE_VFORK keeps the caller stopped until the child
+ * exits or execs. */
+static char t_share_stack[65536] __attribute__((aligned(16)));
+static volatile long t_share_out[3];
+static int t_share_fd;
+static void t_share_handler(int sig) { (void)sig; }
+
+/* Report whether kcmp finds the file table and the signal actions shared
+ * with the caller, then close the descriptor and catch SIGUSR1. */
+static int t_share_child(void *arg)
+{
+    (void)arg;
+    pid_t me = (pid_t)syscall(SYS_getpid), parent = (pid_t)syscall(SYS_getppid);
+    t_share_out[0] = t_kcmp(me, parent, 2 /* KCMP_FILES */, 0, 0);
+    t_share_out[1] = t_kcmp(me, parent, 4 /* KCMP_SIGHAND */, 0, 0);
+    syscall(SYS_close, t_share_fd);
+    struct sigaction sa = {.sa_handler = t_share_handler};
+    sigaction(SIGUSR1, &sa, 0);
+    return 0;
+}
+
+static int t_share_exec(void *arg)
+{
+    (void)arg;
+    char *argv[] = {"true", 0};
+    execve("/bin/true", argv, 0);
+    return 127;
+}
+
+static int t_share_sibling(void *arg)
+{
+    (void)arg;
+    t_share_out[2] = syscall(SYS_getppid);
+    return 7;
+}
+
+/* Run `fn` in a clone with `flags`; its exit code, or -1. */
+static int t_share_run(int (*fn)(void *), int flags)
+{
+    pid_t pid = clone(fn, t_share_stack + sizeof(t_share_stack), flags, 0);
+    int st = 0;
+    if (pid < 0 || waitpid(pid, &st, 0) != pid || !WIFEXITED(st))
+        return -1;
+    return WEXITSTATUS(st);
+}
+
+static void test_clone_share(void)
+{
+    char why[96];
+    int f = 0;
+    struct sigaction dfl = {.sa_handler = SIG_DFL}, old;
+    sigaction(SIGUSR1, &dfl, 0);
+
+    /* Shared: the child's close and handler are the caller's. */
+    t_share_fd = open("/dev/null", O_RDONLY);
+    t_share_out[0] = t_share_out[1] = -1;
+    if (t_share_run(t_share_child, CLONE_VM | CLONE_FILES | CLONE_SIGHAND | CLONE_VFORK | SIGCHLD) != 0)
+        f |= 1;
+    if (t_share_out[0] != 0 || t_share_out[1] != 0)
+        f |= 2;
+    if (!(fcntl(t_share_fd, F_GETFD) == -1 && errno == EBADF))
+        f |= 4;
+    if (sigaction(SIGUSR1, 0, &old) != 0 || old.sa_handler != t_share_handler)
+        f |= 8;
+    sigaction(SIGUSR1, &dfl, 0);
+
+    /* Copies: the caller keeps its own. */
+    t_share_fd = open("/dev/null", O_RDONLY);
+    if (t_share_run(t_share_child, CLONE_VM | CLONE_VFORK | SIGCHLD) != 0)
+        f |= 16;
+    if (t_share_out[0] <= 0 || t_share_out[1] <= 0)
+        f |= 32;
+    if (fcntl(t_share_fd, F_GETFD) != 0)
+        f |= 64;
+    if (sigaction(SIGUSR1, 0, &old) != 0 || old.sa_handler != SIG_DFL)
+        f |= 128;
+    close(t_share_fd);
+
+    /* exec in a sharer copies both first: the caller's close-on-exec
+     * descriptor and its handler stay. */
+    int cloexec = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    struct sigaction sa = {.sa_handler = t_share_handler};
+    sigaction(SIGUSR1, &sa, 0);
+    if (t_share_run(t_share_exec, CLONE_VM | CLONE_FILES | CLONE_SIGHAND | CLONE_VFORK | SIGCHLD) != 0)
+        f |= 256;
+    if (fcntl(cloexec, F_GETFD) != FD_CLOEXEC)
+        f |= 512;
+    if (sigaction(SIGUSR1, 0, &old) != 0 || old.sa_handler != t_share_handler)
+        f |= 1024;
+    close(cloexec);
+    sigaction(SIGUSR1, &dfl, 0);
+
+    /* CLONE_PARENT: a middle process's clone is this process's child, with
+     * the middle one's exit signal, and the middle one has no child. */
+    pid_t me = getpid();
+    int pfd[2];
+    if (pipe(pfd) != 0)
+        f |= 2048;
+    pid_t mid = fork();
+    if (mid == 0) {
+        close(pfd[0]);
+        t_share_out[2] = 0;
+        pid_t sib = clone(t_share_sibling, t_share_stack + sizeof(t_share_stack),
+                          CLONE_VM | CLONE_PARENT | CLONE_VFORK | SIGCHLD, 0);
+        int code = 0;
+        if (sib < 0)
+            code |= 1;
+        if (t_share_out[2] != me)
+            code |= 2;
+        errno = 0;
+        if (!(waitpid(-1, 0, WNOHANG) == -1 && errno == ECHILD))
+            code |= 4;
+        if (write(pfd[1], &sib, sizeof(sib)) != (ssize_t)sizeof(sib))
+            code |= 8;
+        _exit(code);
+    }
+    close(pfd[1]);
+    pid_t sib = -1;
+    int st = 0, sst = 0;
+    if (mid < 0 || waitpid(mid, &st, 0) != mid || !WIFEXITED(st) || WEXITSTATUS(st) != 0)
+        f |= 4096;
+    if (read(pfd[0], &sib, sizeof(sib)) != (ssize_t)sizeof(sib) || sib <= 0 ||
+        waitpid(sib, &sst, 0) != sib || !WIFEXITED(sst) || WEXITSTATUS(sst) != 7)
+        f |= 8192;
+    close(pfd[0]);
+
+    snprintf(why, sizeof(why), "f=%#x kcmp=%ld/%ld mid=%#x", f, t_share_out[0], t_share_out[1], st);
+    report("clone_share", f == 0, why);
+}
+
 static void test_kcmp_process_vm(void)
 {
     char why[160];
@@ -10130,6 +10266,7 @@ int main(int argc, char **argv)
     test_pidfd();
     test_clone3();
     test_kcmp_process_vm();
+    test_clone_share();
     test_personality();
     test_namespaces_uts();
     test_namespaces_time();

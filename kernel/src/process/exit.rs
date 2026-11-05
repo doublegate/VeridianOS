@@ -906,16 +906,23 @@ pub fn cleanup_process(process: &Process) {
     // Log a warning if the process has more than 3 fds open (stdin/stdout/stderr).
     // This helps identify fd leaks during heavy workloads like BusyBox compilation
     // where 213+ sequential processes must not leak fds.
+    // A table another process shares (CLONE_FILES) stays open for it: the
+    // last of them closes it (Linux's put_files_struct).
     {
-        let file_table = process.file_table.lock();
-        let open_fds = file_table.count_open();
-        if open_fds > 3 {
-            println!(
-                "[PROCESS] Warning: process {} exiting with {} open fds (expected <= 3)",
-                process.pid.0, open_fds
-            );
+        let file_table = core::mem::replace(
+            &mut *process.file_table.lock(),
+            alloc::sync::Arc::new(crate::fs::file::FileTable::new()),
+        );
+        if let Some(file_table) = alloc::sync::Arc::into_inner(file_table) {
+            let open_fds = file_table.count_open();
+            if open_fds > 3 {
+                println!(
+                    "[PROCESS] Warning: process {} exiting with {} open fds (expected <= 3)",
+                    process.pid.0, open_fds
+                );
+            }
+            file_table.close_all();
         }
-        file_table.close_all();
         // flock/fcntl locks die with their owner (N-120).
         crate::fs::flock::cleanup_process_locks(process.pid.0);
     }
@@ -937,15 +944,19 @@ pub fn cleanup_process(process: &Process) {
     // exiting has reaped its own already (`zap_pid_ns`).
     #[cfg(feature = "alloc")]
     {
-        let children: Vec<ProcessId> = process.children.lock().clone();
-        if !children.is_empty() && process.get_state() != ProcessState::Zombie {
-            let reaper = process
-                .pid_ns()
-                .reaper()
-                .filter(|&r| r != process.pid.0)
-                .and_then(|r| table::get_process(ProcessId(r)))
-                .or_else(|| table::get_process(ProcessId(1)));
-            if let Some(reaper) = reaper {
+        let children: Vec<ProcessId> = {
+            let mut list = process.children.lock();
+            process
+                .children_closed
+                .store(true, core::sync::atomic::Ordering::Release);
+            if process.get_state() != ProcessState::Zombie {
+                core::mem::take(&mut *list)
+            } else {
+                Vec::new()
+            }
+        };
+        if !children.is_empty() {
+            if let Some(reaper) = child_reaper(process) {
                 for child_pid in children {
                     if let Some(child) = table::get_process(child_pid) {
                         child.set_parent(Some(reaper.pid));
@@ -957,7 +968,6 @@ pub fn cleanup_process(process: &Process) {
                     }
                 }
             }
-            process.children.lock().clear();
         }
     }
 
@@ -995,6 +1005,18 @@ fn forget_shared_regions(process: &Process) {
 /// (N-46). Its mappings, frames, page tables, kernel stacks, capabilities
 /// and files are released, and it leaves its parent's children and the
 /// process table. Nothing may be running in it.
+/// Where `process`'s children go when it exits: the init of its PID
+/// namespace (Linux's find_child_reaper), 1 in the initial one.
+#[cfg(feature = "alloc")]
+pub(crate) fn child_reaper(process: &Process) -> Option<alloc::sync::Arc<Process>> {
+    process
+        .pid_ns()
+        .reaper()
+        .filter(|&r| r != process.pid.0)
+        .and_then(|r| table::get_process(ProcessId(r)))
+        .or_else(|| table::get_process(ProcessId(1)))
+}
+
 #[cfg(feature = "alloc")]
 pub(crate) fn discard_unstarted(process: &Process) {
     cleanup_process(process);

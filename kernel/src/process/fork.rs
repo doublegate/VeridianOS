@@ -32,6 +32,13 @@ pub struct ForkOptions {
     pub share_vm: bool,
     /// CLONE_FS: the child shares the working directory, root and umask.
     pub share_fs: bool,
+    /// CLONE_FILES: the child shares the file table (Linux's files_struct).
+    pub share_files: bool,
+    /// CLONE_SIGHAND: the child shares the signal actions.
+    pub share_sighand: bool,
+    /// CLONE_PARENT: the child's parent is the caller's, and its exit
+    /// signal the caller's own.
+    pub clone_parent: bool,
     /// CLONE_VFORK: the parent waits until the child execs or exits
     /// (`Process::vfork_pending`; the caller waits).
     pub vfork: bool,
@@ -86,6 +93,9 @@ impl Default for ForkOptions {
         Self {
             share_vm: false,
             share_fs: false,
+            share_files: false,
+            share_sighand: false,
+            clone_parent: false,
             vfork: false,
             stack: None,
             tls: None,
@@ -166,8 +176,20 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
     // IDs and the calling thread's capability sets are read as one
     // snapshot, as a concurrent set*id call changes them together.
     let (parent_creds, parent_caps) = current_process.creds_and_caps(&current_thread);
+    // CLONE_PARENT: a sibling of the caller (copy_process's real_parent).
+    let parent = if opts.clone_parent {
+        current_process
+            .parent()
+            .and_then(table::get_process)
+            .ok_or(KernelError::InvalidArgument {
+                name: "flags",
+                value: "CLONE_PARENT without a parent",
+            })?
+    } else {
+        current_process.clone()
+    };
     let new_process = ProcessBuilder::new(format!("{}-fork", current_process.name))
-        .parent(current_process.pid)
+        .parent(parent.pid)
         .priority(*current_process.priority.lock())
         .credentials(parent_creds)
         .pid(opts.pid)
@@ -217,10 +239,15 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
             new_caps.clone_from(&current_caps)?;
         }
 
-        // Clone file table so child inherits stdin/stdout/stderr and pipes
+        // The file table: the parent's, shared (CLONE_FILES), or a copy, so
+        // the child inherits stdin/stdout/stderr and pipes (copy_files).
         {
             let parent_ft = current_process.file_table.lock();
-            let child_ft = parent_ft.clone_for_fork();
+            let child_ft = if opts.share_files {
+                parent_ft.clone()
+            } else {
+                alloc::sync::Arc::new(parent_ft.clone_for_fork())
+            };
             *new_process.file_table.lock() = child_ft;
         }
 
@@ -270,23 +297,9 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
         }
 
         // Signal dispositions and the blocked mask are inherited (POSIX fork);
-        // pending signals are not.
-        {
-            // Both tables together, in their lock order (handler, then the
-            // rest), so no action is copied half old and half new.
-            let handlers = current_process.signal_handlers.lock();
-            let extra = current_process.signal_action_extra.lock();
-            let (mut child_handlers, mut child_extra) = (*handlers, *extra);
-            if opts.clear_sighand {
-                const SIG_IGN: u64 = 1;
-                for handler in child_handlers.iter_mut().filter(|h| **h != SIG_IGN) {
-                    *handler = 0;
-                }
-                child_extra = [(0, 0, 0); super::signals::NSIG + 1];
-            }
-            *new_process.signal_handlers.lock() = child_handlers;
-            *new_process.signal_action_extra.lock() = child_extra;
-        }
+        // pending signals are not. CLONE_SIGHAND shares the actions.
+        new_process
+            .set_sighand(current_process.sighand_for_child(opts.share_sighand, opts.clear_sighand));
         new_process.signal_mask.store(
             current_process
                 .signal_mask
@@ -433,9 +446,16 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
         };
 
         let new_tid = new_thread.tid;
+        let exit_signal = if opts.clone_parent {
+            current_process
+                .exit_signal
+                .load(core::sync::atomic::Ordering::Acquire)
+        } else {
+            opts.exit_signal
+        };
         new_process
             .exit_signal
-            .store(opts.exit_signal, core::sync::atomic::Ordering::Release);
+            .store(exit_signal, core::sync::atomic::Ordering::Release);
         new_process
             .vfork_pending
             .store(opts.vfork, core::sync::atomic::Ordering::Release);
@@ -540,10 +560,23 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
         }
     };
 
-    // Add to parent's children list
+    // Add to the parent's children list; once its exit has taken them, to
+    // its reaper's, as that exit would have moved it.
     #[cfg(feature = "alloc")]
     {
-        current_process.children.lock().push(new_pid);
+        let mut list = parent.children.lock();
+        if !parent
+            .children_closed
+            .load(core::sync::atomic::Ordering::Acquire)
+        {
+            list.push(new_pid);
+        } else {
+            drop(list);
+            if let Some(reaper) = super::exit::child_reaper(&parent) {
+                new_process.set_parent(Some(reaper.pid));
+                reaper.children.lock().push(new_pid);
+            }
+        }
     }
 
     // Inherit container membership from parent so forked children

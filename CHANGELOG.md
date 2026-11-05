@@ -345,6 +345,17 @@
   `/proc/net/dev` lists the reader's namespace's interfaces with their counters, and
   `/proc/sys/user/max_net_namespaces` limits how many each user may make. kconfig's
   CONFIG_NET_NS stays unset until an interface can be configured.
+- A clone that makes a process can share the descriptor table (CLONE_FILES) and, with CLONE_VM,
+  the signal actions (CLONE_SIGHAND), and can make the caller's sibling (CLONE_PARENT): all three
+  were EINVAL (LTP clone02 passes, and clone08's CLONE_PARENT case). The last process to exit
+  closes a shared table; exec, unshare(CLONE_FILES) and close_range(CLOSE_RANGE_UNSHARE) give
+  the caller its own copy first, exec a copy of shared signal actions too, and
+  unshare(CLONE_SIGHAND) with shared actions is EINVAL. A CLONE_PARENT child goes to the
+  caller's parent with the caller's exit signal, and an init (or a process with no parent)
+  cannot make one (EINVAL). kcmp's KCMP_FILES and KCMP_SIGHAND compare the shared tables. A
+  child added to a process whose exit has already moved its children goes to the reaper, as
+  that exit would have moved it. LTP clone10's EINVAL is musl's: its `clone()` refuses
+  CLONE_THREAD, CLONE_SETTLS and CLONE_CHILD_CLEARTID before any system call.
 - bind and connect on an AF_INET socket read a `struct sockaddr_in` (N-64): they decoded a
   private 6-byte format, so every address from a C program was garbled. Shorter than a
   sockaddr_in is EINVAL, another family EAFNOSUPPORT (sendto too, which was EINVAL), and a port

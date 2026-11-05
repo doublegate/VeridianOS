@@ -128,8 +128,8 @@ const _: () = assert!(core::mem::size_of::<SigAction>() == 24);
 
 /// Install or query a signal handler (syscall 120).
 ///
-/// Reads/writes the signal handler from/to the PCB's signal_handlers table.
-/// The handler address is stored as a u64 in the PCB's `[u64; 32]` array.
+/// Reads/writes the signal handler in the process's signal actions
+/// (`signals::SigHand`, shared by a CLONE_SIGHAND clone).
 ///
 /// # Arguments
 /// - `signum`: Signal number (1-31).

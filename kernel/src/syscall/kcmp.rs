@@ -66,17 +66,17 @@ fn task(id: usize) -> Result<(Arc<Process>, Arc<Thread>), SyscallError> {
 /// The value that stands for each task's object of `kind` (not
 /// KCMP_FILE or KCMP_EPOLL_TFD, which take descriptors): the address space
 /// is the process's `vm_id` (a CLONE_VM child shares it until either
-/// execs), the file table and signal handlers the process's (shared by its
-/// threads and by no other process here), the filesystem state the
-/// thread's (CLONE_FS shares it). No task has an I/O context or a System V
-/// semaphore undo list, so KCMP_IO and KCMP_SYSVSEM always find them equal,
-/// as Linux does for two tasks with none.
+/// execs), the file table and signal actions the process's (shared by its
+/// threads, and with another process by CLONE_FILES and CLONE_SIGHAND),
+/// the filesystem state the thread's (CLONE_FS shares it). No task has an I/O
+/// context or a System V semaphore undo list, so KCMP_IO and KCMP_SYSVSEM
+/// always find them equal, as Linux does for two tasks with none.
 fn object(kind: usize, process: &Process, thread: &Thread) -> usize {
     match kind {
         KCMP_VM => process.vm_id.load(core::sync::atomic::Ordering::Acquire) as usize,
-        KCMP_FILES => &process.file_table as *const _ as usize,
+        KCMP_FILES => Arc::as_ptr(&process.file_table.lock()) as usize,
         KCMP_FS => Arc::as_ptr(&thread.fs()) as usize,
-        KCMP_SIGHAND => &process.signal_handlers as *const _ as usize,
+        KCMP_SIGHAND => process.sighand_id(),
         _ => 0,
     }
 }

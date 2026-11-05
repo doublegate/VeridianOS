@@ -306,11 +306,13 @@ fn copy_process_checks(req: &CloneRequest, admin: bool) -> Result<(), SyscallErr
     Ok(())
 }
 
-/// The flags each kind of clone supports here; anything else (the
-/// namespace flags, CLONE_PARENT, CLONE_PTRACE, and CLONE_FILES or
-/// CLONE_SIGHAND across processes) is EINVAL.
+/// The flags each kind of clone supports here; anything else
+/// (CLONE_PTRACE, CLONE_UNTRACED) is EINVAL.
 const PROCESS_FLAGS: u64 = CLONE_VM
     | CLONE_FS
+    | CLONE_FILES
+    | CLONE_SIGHAND
+    | CLONE_PARENT
     | CLONE_VFORK
     | CLONE_SYSVSEM
     | CLONE_SETTLS
@@ -332,6 +334,7 @@ const THREAD_FLAGS: u64 = CLONE_VM
     | CLONE_FILES
     | CLONE_SIGHAND
     | CLONE_THREAD
+    | CLONE_PARENT
     | CLONE_SYSVSEM
     | CLONE_SETTLS
     | CLONE_PARENT_SETTID
@@ -395,6 +398,14 @@ fn kernel_clone(mut req: CloneRequest) -> Result<usize, SyscallError> {
     use crate::process::linux_caps::{CAP_CHECKPOINT_RESTORE, CAP_SYS_ADMIN};
     let caller = process::creds::Caller::current();
     request_checks(&mut req, caller.ns_capable(&caller.userns, CAP_SYS_ADMIN))?;
+    // copy_process: an init (SIGNAL_UNKILLABLE), or a process with no
+    // parent, makes no siblings, which nothing would reap.
+    if req.on(CLONE_PARENT) {
+        let current = process::current_process().ok_or(SyscallError::InvalidState)?;
+        if current.is_ns_init() || current.parent().is_none() {
+            return Err(SyscallError::InvalidArgument);
+        }
+    }
     // copy_process refuses a new user namespace sharing the filesystem
     // state; then copy_creds makes it (create_user_ns), and copy_namespaces
     // the others, which belong to it and which its root may make.
@@ -515,6 +526,9 @@ fn process_clone(
     super::process::sys_fork_with(&process::fork::ForkOptions {
         share_vm: on(CLONE_VM),
         share_fs: on(CLONE_FS),
+        share_files: on(CLONE_FILES),
+        share_sighand: on(CLONE_SIGHAND),
+        clone_parent: on(CLONE_PARENT),
         vfork: on(CLONE_VFORK),
         stack: (req.stack != 0).then_some(req.stack),
         tls: on(CLONE_SETTLS).then_some(req.tls),
@@ -1051,8 +1065,7 @@ mod tests {
     #[test]
     fn kernel_clone_refuses_what_it_does_not_support() {
         let check = |flags| request_checks(&mut request(flags), true);
-        // CLONE_PARENT and sharing a table across processes; namespace
-        // flags pass here and meet copy_namespaces' rules later.
+        // Namespace flags pass here and meet copy_namespaces' rules later.
         assert_eq!(check(CLONE_NEWNS), Ok(()));
         assert_eq!(
             check(CLONE_THREAD | CLONE_SIGHAND | CLONE_VM | CLONE_FILES | ns::CLONE_NEWPID),
@@ -1064,9 +1077,17 @@ mod tests {
             check(CLONE_THREAD | CLONE_SIGHAND | CLONE_VM | ns::CLONE_NEWUSER),
             EINVAL
         );
-        assert_eq!(check(CLONE_PARENT), EINVAL);
-        assert_eq!(check(CLONE_VM | CLONE_SIGHAND), EINVAL);
-        assert_eq!(check(CLONE_FILES), EINVAL);
+        // A process may share the file table and signal actions, and be
+        // its caller's sibling (G2b); the actions only with the memory.
+        assert_eq!(check(CLONE_PARENT), Ok(()));
+        assert_eq!(check(CLONE_VM | CLONE_SIGHAND | CLONE_FILES), Ok(()));
+        assert_eq!(check(CLONE_FILES), Ok(()));
+        assert_eq!(check(CLONE_SIGHAND | CLONE_FILES), EINVAL);
+        assert_eq!(
+            check(CLONE_THREAD | CLONE_SIGHAND | CLONE_VM | CLONE_PARENT),
+            Ok(())
+        );
+        assert_eq!(check(0x2000 /* CLONE_PTRACE */), EINVAL);
         assert_eq!(check(CLONE_VM | CLONE_VFORK | CLONE_CLEAR_SIGHAND), Ok(()));
         assert_eq!(
             check(CLONE_THREAD | CLONE_SIGHAND | CLONE_VM | CLONE_FILES | CLONE_SETTLS),

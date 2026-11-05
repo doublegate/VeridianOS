@@ -114,8 +114,10 @@ pub struct Process {
     /// Capability space
     pub capability_space: Mutex<CapabilitySpace>,
 
-    /// File descriptor table
-    pub file_table: Mutex<FileTable>,
+    /// File descriptor table, Linux's files_struct: shared with the
+    /// processes a CLONE_FILES clone made or was made by, and closed by the
+    /// last of them to exit (`exit::cleanup_process`).
+    pub file_table: Mutex<Arc<FileTable>>,
 
     /// Threads in this process
     #[cfg(feature = "alloc")]
@@ -130,6 +132,12 @@ pub struct Process {
     /// Child processes
     #[cfg(feature = "alloc")]
     pub children: Mutex<Vec<ProcessId>>,
+
+    /// Set, under `children`'s lock, once the exit has taken the children
+    /// to reparent them: a child added after that goes to the reaper
+    /// instead (`fork`; a CLONE_PARENT clone adds to its caller's parent,
+    /// which may be exiting).
+    pub children_closed: core::sync::atomic::AtomicBool,
 
     /// Exit code (set when process exits)
     pub exit_code: AtomicU32,
@@ -291,13 +299,11 @@ pub struct Process {
     #[cfg(feature = "alloc")]
     pub exe_denial: Mutex<Option<crate::fs::write_access::WriteDenial>>,
 
-    /// Signal handlers (signal number -> handler action)
-    /// 0 = default, 1 = ignore, other values = handler address
-    pub signal_handlers: Mutex<[u64; super::signals::NSIG + 1]>,
-
-    /// The rest of each signal's action: (sa_flags, sa_restorer, sa_mask),
-    /// kept so sigaction returns what was set (N-95) and for delivery.
-    pub signal_action_extra: Mutex<[(u64, u64, u64); super::signals::NSIG + 1]>,
+    /// Signal actions, Linux's sighand_struct: shared with the processes a
+    /// CLONE_SIGHAND clone made or was made by. Reached only through the
+    /// methods below, which hold this lock while they use the tables, so
+    /// `Arc::strong_count` is the number of processes sharing them.
+    sighand: Mutex<Arc<super::signals::SigHand>>,
 
     /// Pending signals bitmap
     pub pending_signals: AtomicU64,
@@ -572,10 +578,11 @@ impl Process {
             priority: Mutex::new(priority),
             memory_space: crate::sync::sleep_mutex::SleepMutex::new(VirtualAddressSpace::new()),
             capability_space: Mutex::new(CapabilitySpace::new()),
-            file_table: Mutex::new(FileTable::new()),
+            file_table: Mutex::new(Arc::new(FileTable::new())),
             threads: Mutex::new(BTreeMap::new()),
             ipc_endpoints: Mutex::new(BTreeMap::new()),
             children: Mutex::new(Vec::new()),
+            children_closed: core::sync::atomic::AtomicBool::new(false),
             exit_code: AtomicU32::new(0),
             term_signal: AtomicU32::new(0),
             dispatched: core::sync::atomic::AtomicBool::new(false),
@@ -624,8 +631,7 @@ impl Process {
             exe_path: Mutex::new(String::new()),
             #[cfg(feature = "alloc")]
             exe_denial: Mutex::new(None),
-            signal_handlers: Mutex::new([0u64; super::signals::NSIG + 1]),
-            signal_action_extra: Mutex::new([(0, 0, 0); super::signals::NSIG + 1]),
+            sighand: Mutex::new(Arc::new(super::signals::SigHand::new())),
             pending_signals: AtomicU64::new(0),
             rt_queue: super::signals::RtQueue::new(),
             signal_mask: AtomicU64::new(0),
@@ -885,7 +891,8 @@ impl Process {
     pub fn reset_signal_handlers(&self) {
         // Caught signals revert to their default action; ignored ones stay
         // ignored (POSIX exec), so a parent's SIG_IGN still applies.
-        let mut handlers = self.signal_handlers.lock();
+        let sighand = self.sighand.lock();
+        let mut handlers = sighand.handlers.lock();
         let mut ignored = 0u64;
         for (sig, handler) in handlers.iter_mut().enumerate() {
             if *handler == 1 {
@@ -894,7 +901,9 @@ impl Process {
                 *handler = 0; // 0 = default action
             }
         }
-        *self.signal_action_extra.lock() = [(0, 0, 0); super::signals::NSIG + 1];
+        *sighand.extra.lock() = [(0, 0, 0); super::signals::NSIG + 1];
+        drop(handlers);
+        drop(sighand);
         // Pending signals survive exec (POSIX), except the ignored ones.
         self.rt_queue.clear(&self.pending_signals, ignored);
     }
@@ -914,7 +923,8 @@ impl Process {
                 operation: "change handler for SIGKILL or SIGSTOP",
             });
         }
-        let mut handlers = self.signal_handlers.lock();
+        let sighand = self.sighand.lock();
+        let mut handlers = sighand.handlers.lock();
         let old = handlers[signum];
         handlers[signum] = handler;
         Ok(old)
@@ -929,8 +939,9 @@ impl Process {
         if signum > super::signals::NSIG {
             return None;
         }
-        let handlers = self.signal_handlers.lock();
-        let extra = self.signal_action_extra.lock();
+        let sighand = self.sighand.lock();
+        let handlers = sighand.handlers.lock();
+        let extra = sighand.extra.lock();
         Some((handlers[signum], extra[signum]))
     }
 
@@ -952,8 +963,9 @@ impl Process {
                 operation: "change handler for SIGKILL or SIGSTOP",
             });
         }
-        let mut handlers = self.signal_handlers.lock();
-        let mut extra = self.signal_action_extra.lock();
+        let sighand = self.sighand.lock();
+        let mut handlers = sighand.handlers.lock();
+        let mut extra = sighand.extra.lock();
         let old = (handlers[signum], extra[signum]);
         if let Some((handler, rest)) = new {
             handlers[signum] = handler;
@@ -968,8 +980,9 @@ impl Process {
         if signum > super::signals::NSIG {
             return;
         }
-        let mut handlers = self.signal_handlers.lock();
-        let mut extra = self.signal_action_extra.lock();
+        let sighand = self.sighand.lock();
+        let mut handlers = sighand.handlers.lock();
+        let mut extra = sighand.extra.lock();
         if handlers[signum] == handler {
             handlers[signum] = 0;
             extra[signum] = (0, 0, 0);
@@ -981,7 +994,64 @@ impl Process {
         if signum > super::signals::NSIG {
             return None;
         }
-        Some(self.signal_handlers.lock()[signum])
+        Some(self.sighand.lock().handlers.lock()[signum])
+    }
+
+    /// The signal actions for a child: these, shared (CLONE_SIGHAND), or a
+    /// copy, with CLONE_CLEAR_SIGHAND's reset when `clear` (Linux's
+    /// copy_sighand).
+    #[cfg(feature = "alloc")]
+    pub fn sighand_for_child(&self, share: bool, clear: bool) -> Arc<super::signals::SigHand> {
+        let sighand = self.sighand.lock();
+        if share {
+            return sighand.clone();
+        }
+        Arc::new(sighand.copy(clear))
+    }
+
+    /// Use `sighand` as this process's signal actions (a new child's).
+    #[cfg(feature = "alloc")]
+    pub fn set_sighand(&self, sighand: Arc<super::signals::SigHand>) {
+        *self.sighand.lock() = sighand;
+    }
+
+    /// Whether another process shares these signal actions
+    /// (unshare(CLONE_SIGHAND) is EINVAL then).
+    #[cfg(feature = "alloc")]
+    pub fn sighand_shared(&self) -> bool {
+        Arc::strong_count(&self.sighand.lock()) > 1
+    }
+
+    /// Give this process its own copy of shared signal actions (exec,
+    /// Linux's de_thread unshare_sighand). The copy is made under the lock,
+    /// so a sharer's change is in it or comes after it.
+    #[cfg(feature = "alloc")]
+    pub fn unshare_sighand(&self) {
+        let mut sighand = self.sighand.lock();
+        if Arc::strong_count(&sighand) > 1 {
+            *sighand = Arc::new(sighand.copy(false));
+        }
+    }
+
+    /// The signal actions' identity, for kcmp(KCMP_SIGHAND).
+    #[cfg(feature = "alloc")]
+    pub fn sighand_id(&self) -> usize {
+        Arc::as_ptr(&self.sighand.lock()) as usize
+    }
+
+    /// SIGCHLD's sa_flags (SA_NOCLDSTOP, SA_NOCLDWAIT).
+    pub fn sigchld_flags(&self) -> u64 {
+        self.sighand.lock().extra.lock()[super::signals::SIGCHLD].0
+    }
+
+    /// Give this process its own copy of a shared file table (exec, Linux's
+    /// unshare_files; unshare(CLONE_FILES)).
+    #[cfg(feature = "alloc")]
+    pub fn unshare_files(&self) {
+        let mut table = self.file_table.lock();
+        if Arc::strong_count(&table) > 1 {
+            *table = Arc::new(table.clone_for_fork());
+        }
     }
 
     /// A CLONE_VFORK child has exec'd or exited: its parent may resume.
@@ -1625,6 +1695,60 @@ mod tests {
         assert_eq!(proc.get_signal_handler(15), Some(0));
         // A pending signal survives exec (POSIX execve).
         assert!(proc.is_signal_pending(5));
+    }
+
+    /// CLONE_SIGHAND shares the actions: a change in one process is the
+    /// other's, until exec copies them (unshare_sighand); a copy, as fork's,
+    /// keeps the actions apart, and CLONE_CLEAR_SIGHAND's copy keeps only
+    /// SIG_IGN.
+    #[test]
+    fn signal_actions_are_shared_or_copied_as_clone_asks() {
+        let parent = make_process(33, "sighand_parent");
+        parent.set_signal_handler(10, 0x1000).unwrap();
+        parent.set_signal_handler(12, 1).unwrap();
+        let sharer = make_process(34, "sighand_sharer");
+        sharer.set_sighand(parent.sighand_for_child(true, false));
+        assert!(parent.sighand_shared() && sharer.sighand_shared());
+        assert_eq!(parent.sighand_id(), sharer.sighand_id());
+        sharer.set_signal_handler(14, 0x3000).unwrap();
+        assert_eq!(parent.get_signal_handler(14), Some(0x3000));
+
+        let copy = make_process(35, "sighand_copy");
+        copy.set_sighand(parent.sighand_for_child(false, false));
+        assert_ne!(copy.sighand_id(), parent.sighand_id());
+        assert_eq!(copy.get_signal_handler(10), Some(0x1000));
+        copy.set_signal_handler(10, 0x4000).unwrap();
+        assert_eq!(parent.get_signal_handler(10), Some(0x1000));
+
+        let cleared = make_process(36, "sighand_cleared");
+        cleared.set_sighand(parent.sighand_for_child(false, true));
+        assert_eq!(cleared.get_signal_handler(10), Some(0));
+        assert_eq!(cleared.get_signal_handler(12), Some(1));
+
+        // exec in the sharer: its own copy, reset; the parent keeps its own.
+        sharer.unshare_sighand();
+        sharer.reset_signal_handlers();
+        assert_ne!(sharer.sighand_id(), parent.sighand_id());
+        assert!(!parent.sighand_shared());
+        assert_eq!(sharer.get_signal_handler(10), Some(0));
+        assert_eq!(parent.get_signal_handler(10), Some(0x1000));
+    }
+
+    /// CLONE_FILES shares the table; unshare_files (exec, unshare,
+    /// close_range) gives a sharer its own copy, and does nothing to a
+    /// table no one else has.
+    #[test]
+    fn a_shared_file_table_is_copied_when_unshared() {
+        let parent = make_process(37, "files_parent");
+        let sharer = make_process(38, "files_sharer");
+        *sharer.file_table.lock() = parent.file_table.lock().clone();
+        let id = |p: &Process| Arc::as_ptr(&p.file_table.lock()) as usize;
+        assert_eq!(id(&parent), id(&sharer));
+        sharer.unshare_files();
+        assert_ne!(id(&parent), id(&sharer));
+        let before = id(&parent);
+        parent.unshare_files();
+        assert_eq!(id(&parent), before);
     }
 
     // --- Process identity tests ---

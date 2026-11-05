@@ -304,11 +304,11 @@ const CLOSE_RANGE_CLOEXEC: u32 = 1 << 2;
 /// close_range(fd, max_fd, flags): close the open descriptors from `fd`
 /// to `max_fd`, or with CLOSE_RANGE_CLOEXEC mark them close-on-exec.
 /// Unknown flags, or `fd` past `max_fd`, are EINVAL. CLOSE_RANGE_UNSHARE
-/// first gives the caller a table of its own if it shares one; the threads
-/// of a process share one table here, so a process with more than one
-/// thread is refused (EINVAL; see KNOWN-LIMITATIONS), and a process with
-/// one has nothing to unshare. Errors closing a descriptor are ignored,
-/// as on Linux.
+/// first gives the caller a table of its own if it shares one with another
+/// process (a CLONE_FILES clone's); the threads of a process share one
+/// table here, so a process with more than one thread is refused (EINVAL;
+/// see KNOWN-LIMITATIONS). Errors closing a descriptor are ignored, as on
+/// Linux.
 pub fn sys_close_range(fd: usize, max_fd: usize, flags: usize) -> SyscallResult {
     let (first, last, flags) = (fd as u32, max_fd as u32, flags as u32);
     if flags & !(CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC) != 0 || first > last {
@@ -316,8 +316,11 @@ pub fn sys_close_range(fd: usize, max_fd: usize, flags: usize) -> SyscallResult 
     }
     let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
     #[cfg(feature = "alloc")]
-    if flags & CLOSE_RANGE_UNSHARE != 0 && proc.thread_count() > 1 {
-        return Err(SyscallError::InvalidArgument);
+    if flags & CLOSE_RANGE_UNSHARE != 0 {
+        if proc.thread_count() > 1 {
+            return Err(SyscallError::InvalidArgument);
+        }
+        proc.unshare_files();
     }
     let fds = proc
         .file_table
