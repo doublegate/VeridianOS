@@ -585,7 +585,7 @@ pub fn sys_wait4(
                 }
                 super::usage::write_rusage(rusage_ptr, waited.usage, waited.maxrss_pages)?;
             }
-            Ok(vnr(waited.pid.0) as usize)
+            Ok(waited.nr as usize)
         }
         Err(e) => Err(wait_error(e)),
     }
@@ -1699,12 +1699,7 @@ pub fn sys_waitid(
         // The child's real uid as the caller's user namespace sees it
         // (wait_task_zombie's from_kuid_munged).
         let uid = crate::process::userns::current().uid_munged(waited.uid);
-        let pid = if waited.pid.0 == 0 {
-            0
-        } else {
-            vnr(waited.pid.0)
-        };
-        let info = waitid_siginfo(pid, uid, waited.status);
+        let info = waitid_siginfo(waited.nr, uid, waited.status);
         // SAFETY: copy_to_user validates that infop is writable user memory.
         unsafe { crate::syscall::userspace::copy_to_user(infop, &info) }?;
     }

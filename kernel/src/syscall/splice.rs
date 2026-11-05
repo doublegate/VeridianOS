@@ -514,15 +514,17 @@ fn copy_checks(
 }
 
 /// Offsets that wrap are EOVERFLOW; the count stops at the end of the input
-/// (`size_in` bytes).
+/// (`size_in` bytes), counted signed as Linux's loff_t: a negative offset
+/// gets through here and is EINVAL from `verify_area` after.
 fn shorten(pos_in: i64, pos_out: i64, len: u64, size_in: u64) -> Result<u64, SyscallError> {
     if (pos_in as u64).checked_add(len).is_none() || (pos_out as u64).checked_add(len).is_none() {
         return Err(SyscallError::Overflow);
     }
-    Ok(if pos_in >= size_in as i64 {
+    let left = size_in as i128 - pos_in as i128;
+    Ok(if left <= 0 {
         0
     } else {
-        len.min(size_in - pos_in as u64)
+        len.min(left.min(u64::MAX as i128) as u64)
     })
 }
 
@@ -764,9 +766,13 @@ fn vmsplice_to_pipe(
     let want = total.min(room);
     let mut buf: Vec<u8> = Vec::with_capacity(want);
     for &(base, len) in iovs {
+        if buf.len() == want {
+            break;
+        }
+        // An empty entry is skipped, as Linux's iov_iter (PR #35 review).
         let take = len.min(want - buf.len());
         if take == 0 {
-            break;
+            continue;
         }
         let start = buf.len();
         buf.resize(start + take, 0);
@@ -843,6 +849,10 @@ mod tests {
         assert_eq!(shorten(0, 0, 100, 10), Ok(10));
         assert_eq!(shorten(4, 0, 100, 10), Ok(6));
         assert_eq!(shorten(10, 0, 100, 10), Ok(0));
+        // A negative offset does not wrap here (it panicked the dev
+        // kernel, PR #35 review); verify_area refuses it after.
+        assert_eq!(shorten(-2, 0, 1, 10), Ok(1));
+        assert_eq!(verify_area(-2, 1), Err(SyscallError::InvalidArgument));
         // The largest file: at it EFBIG, short of it cut.
         assert_eq!(max_bytes(i64::MAX, 1), Err(SyscallError::FileTooLarge));
         assert_eq!(max_bytes(i64::MAX - 4, 10), Ok(4));

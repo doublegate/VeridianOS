@@ -81,14 +81,46 @@ pub const PID_MAX: u64 = 4_194_304;
 
 /// Allocate a new process ID
 pub fn alloc_pid() -> ProcessId {
-    ProcessId(NEXT_ID.fetch_add(1, Ordering::Relaxed))
+    ProcessId(alloc_id())
 }
 
 /// Allocate a new thread ID for a thread other than a process's first
 /// (from the same space as process IDs).
 pub fn alloc_tid() -> ThreadId {
-    ThreadId(NEXT_ID.fetch_add(1, Ordering::Relaxed))
+    ThreadId(alloc_id())
 }
+
+/// The next ID, marked pending until its process or thread is visible
+/// ([`published`]), so that clone3's set_tid cannot claim it meanwhile.
+fn alloc_id() -> u64 {
+    #[cfg(feature = "alloc")]
+    {
+        let mut pending = PENDING_IDS.lock();
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        pending.insert(id);
+        id
+    }
+    #[cfg(not(feature = "alloc"))]
+    NEXT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// `id`'s process is in the table, or its thread in its (listed) process,
+/// so [`id_in_use`] sees it from now on; or the process or thread of a
+/// fork or clone that failed is dropped. Either way it is not pending.
+#[cfg(feature = "alloc")]
+pub(crate) fn published(id: u64) {
+    PENDING_IDS.lock().remove(&id);
+}
+
+/// IDs allocated whose process or thread is not yet visible: a claim
+/// refuses them, so an allocation and a claim never hand out one ID twice
+/// (PR #35 review). A claim looks here before it looks at the table, and a
+/// publication puts the process or thread there before it leaves here.
+/// Its own lock, which nothing holds while a process is dropped (whose
+/// drop takes it).
+#[cfg(feature = "alloc")]
+static PENDING_IDS: spin::Mutex<alloc::collections::BTreeSet<u64>> =
+    spin::Mutex::new(alloc::collections::BTreeSet::new());
 
 /// IDs clone3's set_tid has claimed for a process or thread not yet in the
 /// process table.
@@ -103,16 +135,14 @@ pub struct IdClaim(u64);
 #[cfg(feature = "alloc")]
 impl IdClaim {
     /// Claim `id` unless a process, a zombie awaiting its reap, a thread, an
-    /// open pidfd or another clone has it (None: Linux's EEXIST). `NEXT_ID`
-    /// moves past it first, so no later allocation hands it out. An ID
-    /// allocated before that by a fork or clone still under way is not yet
-    /// in the table and is not seen: the table then refuses the second
-    /// process (and nothing refuses a second thread), a window only a
-    /// caller holding CAP_CHECKPOINT_RESTORE or CAP_SYS_ADMIN can reach.
+    /// open pidfd, another clone, or a fork or clone still under way has it
+    /// (None: Linux's EEXIST). `NEXT_ID` moves past it first, so no later
+    /// allocation hands it out.
     pub fn new(id: u64) -> Option<Self> {
         let mut claimed = CLAIMED_IDS.lock();
         let before = NEXT_ID.fetch_max(id + 1, Ordering::AcqRel);
-        if claimed.contains(&id) || (id < before && id_in_use(id)) {
+        let pending = PENDING_IDS.lock().contains(&id);
+        if claimed.contains(&id) || pending || (id < before && id_in_use(id)) {
             return None;
         }
         claimed.push(id);
@@ -888,3 +918,24 @@ pub fn get_process_list() -> Option<alloc::vec::Vec<u64>> {
 }
 
 // get_process is already re-exported at the top of the module
+
+#[cfg(all(test, feature = "alloc"))]
+mod id_tests {
+    use super::*;
+
+    /// An ID a fork or clone has allocated but not yet made visible cannot
+    /// be claimed by clone3's set_tid: two processes or threads never get
+    /// one ID (PR #35 review). Once it is published, or its process or
+    /// thread dropped, only the table decides.
+    #[test]
+    fn allocated_ids_are_not_claimable_until_published() {
+        let id = alloc_tid().0;
+        assert!(IdClaim::new(id).is_none(), "pending: refused");
+        published(id);
+        // Not in any table (this test made nothing), so free to claim.
+        let claim = IdClaim::new(id).expect("published and unused");
+        assert!(IdClaim::new(id).is_none(), "claimed once");
+        drop(claim);
+        assert!(IdClaim::new(id).is_some());
+    }
+}

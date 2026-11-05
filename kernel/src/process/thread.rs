@@ -549,6 +549,9 @@ pub struct ThreadParams {
 impl Drop for Thread {
     fn drop(&mut self) {
         self.release_fs();
+        // A clone that failed never published its ID.
+        #[cfg(feature = "alloc")]
+        super::published(self.tid.0);
     }
 }
 

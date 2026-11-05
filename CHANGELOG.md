@@ -586,6 +586,27 @@
 
 ### Fixed
 
+- From the PR #35 review:
+  - A file no longer leaves a read-only, noexec or nosuid bind mount by another name: linkat
+    across two mounts (two bind mounts of one filesystem included) is EXDEV, as Linux's
+    do_linkat, and renaming a directory with a mount under it is EBUSY. The rename used to leave
+    the mount at the old path and the moved tree without its flags.
+  - A shared mapping keeps the write access of the file it was made from after the descriptor
+    is closed (Linux's vm_file), so the file cannot be executed meanwhile (ETXTBSY).
+  - wait4, waitpid and waitid in a PID namespace below the initial one report the reaped
+    child's number, not 0. The reap freed the number before it was read.
+  - copy_file_range with a negative input offset is EINVAL. The length clamp used to wrap and
+    panic a dev kernel first.
+  - vmsplice into a pipe skips empty iovec entries instead of stopping at the first one.
+  - An ID a fork or clone has allocated but not yet published can no longer be taken by
+    clone3's set_tid, so two threads never share one ID.
+  - FIONREAD on the console in canonical mode counts every complete line, with erases applied,
+    as Linux's inq_canon.
+  - chmod and the other owner checks in a user namespace need only the file's owner mapped,
+    not its group (Linux's inode_owner_or_capable).
+  - setxattr through a symlink reports IN_ATTRIB at the target.
+  - Timers on the wall clock, in ktimerd and in timerfd, follow a clock set exactly once,
+    however the set races with their arming.
 - pwrite64 on a file opened with O_APPEND appends, whatever the offset, as Linux's does (it
   wrote at the offset); musl's pwrite asks for the offset through pwritev2 instead.
 - fchownat refuses flags other than AT_SYMLINK_NOFOLLOW and AT_EMPTY_PATH with EINVAL (they were

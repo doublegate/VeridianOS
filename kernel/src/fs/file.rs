@@ -222,8 +222,10 @@ pub struct File {
     /// The write access a file opened for writing holds until its last
     /// close (Linux's get_write_access in do_dentry_open): a program that
     /// is running cannot be opened for writing, nor this file executed
-    /// (ETXTBSY, `fs::write_access`). `None` for other files.
-    pub write_access: Option<crate::fs::write_access::WriteAccess>,
+    /// (ETXTBSY, `fs::write_access`). `None` for other files. Shared with
+    /// the file's mappings, which keep it after the close (Linux's
+    /// vm_file).
+    pub write_access: Option<alloc::sync::Arc<crate::fs::write_access::WriteAccess>>,
 }
 
 impl Drop for File {

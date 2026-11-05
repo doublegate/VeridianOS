@@ -372,7 +372,19 @@ What remains:
   capability (ADR 0024 will give them one); the private mount call keeps its own rules. The VFS
   finds open files by path, so a descriptor opened in another mount namespace is looked up by
   its path in the caller's (for fstat's mount id, fchdir and the like) once the two trees
-  differ, and sync(2) flushes the filesystems of the initial namespace only. Network namespaces
+  differ, and sync(2) flushes the filesystems of the initial namespace only. The mount flags are
+  checked the same way, by the path in the caller's namespace: a descriptor passed into another
+  mount namespace (SCM_RIGHTS, pidfd_getfd) where that path is on a writable or executable mount
+  can be reopened for writing through O_EMPTYPATH, fchmod'ed, run by execveat with
+  AT_EMPTY_PATH or mapped executable, although its own mount is read-only or noexec. Mounts are
+  kept by path, so a directory with a mount under it cannot be renamed (EBUSY; Linux moves the
+  mounts with it), but only the caller's namespace is looked at: renaming a directory under which
+  another mount namespace has a mount leaves that mount at the old path there, uncovering what
+  it covered. A remount read-only counts the files open for writing under the mount point in the
+  caller's namespace only: writers through another bind mount of the same filesystem, in another
+  namespace, in flight in an SCM_RIGHTS message or kept by a writable shared mapping keep
+  writing after it succeeds (Linux refuses with EBUSY). All four end when files and mappings
+  keep the mount they were reached through (to-dos/MASTER_TODO.md, item 6). Network namespaces
   can be made and joined (ADR 0022 H6), but only the initial one has devices, routes and a
   working stack: a new one has a loopback interface that is down, and nothing (netlink, the
   SIOCSIF* ioctls) can bring it up or add an interface, so every send and connect from it is

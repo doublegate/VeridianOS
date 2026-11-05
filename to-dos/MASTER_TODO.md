@@ -435,7 +435,11 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
        io_uring (io_uring_setup, io_uring_enter, io_uring_register) move to v0.29: they need an
        asynchronous completion path in the kernel.
   6. [ ] ABI-review items N-190 to N-193, N-207, N-209 to N-211, N-217, N-221, N-222, N-225, N-231,
-     N-235 to N-238.
+     N-235 to N-238. With them, before the release (found reviewing PR #35, 2026-11-05): open
+     files and mappings keep the `Mount` they were reached through and the mount flags are checked
+     on it, not on a path looked up again in the caller's namespace; mounts follow a renamed
+     directory in every namespace; a remount read-only sees every writer of the superblock
+     (KNOWN-LIMITATIONS "Namespaces are partial").
   7. [ ] D leftovers: N-115, N-260, N-52/N-261, N-282; the native thread call (private 1064),
      whose thread is never started and keeps its process from finishing its exit: start it as
      `clone` does, with a runtime test that the process exits, or retire it (found in PR #33).

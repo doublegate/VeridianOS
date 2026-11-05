@@ -474,7 +474,7 @@ pub fn sys_mmap(
                 if prot & PROT_EXEC != 0 {
                     vas.sync_code_pages(start.0, bytes);
                 }
-                vas.set_backing(start, file.node.clone(), offset);
+                vas.set_backing(start, file.node.clone(), offset, file.write_access.clone());
                 return Ok(start.as_usize());
             }
         }
@@ -515,7 +515,14 @@ pub fn sys_mmap(
         } else {
             FileData::copy(&*file.node, offset, len)?
         };
-        (Some(data), Some((file.node.clone(), file.flags.write)))
+        (
+            Some(data),
+            Some((
+                file.node.clone(),
+                file.flags.write,
+                file.write_access.clone(),
+            )),
+        )
     } else {
         (None, None)
     };
@@ -645,9 +652,9 @@ pub fn sys_mmap(
         }
 
         // The mapping records its file, for mremap and MADV_DONTNEED.
-        if let Some((node, writable)) = file_node {
+        if let Some((node, writable, write)) = file_node {
             let start = VirtualAddress(mapped_addr as u64);
-            memory_space.set_backing(start, node, offset);
+            memory_space.set_backing(start, node, offset, write);
             // A shared mapping of a file opened read-only may never be
             // made writable (Linux clears VM_MAYWRITE: mprotect EACCES).
             if shared {
@@ -1190,7 +1197,12 @@ fn remap_locked(
             .map_err(|_| nomem)?;
         vas.set_may_exec(start, m.may_exec);
         if let Some(b) = &m.backing {
-            vas.set_backing(start, b.node.clone(), b.offset + first * PAGE_SIZE);
+            vas.set_backing(
+                start,
+                b.node.clone(),
+                b.offset + first * PAGE_SIZE,
+                b.write.clone(),
+            );
         }
         return Ok(start.as_usize());
     }
@@ -1344,7 +1356,7 @@ fn extend(
         vas.set_may_exec(start, m.may_exec);
     }
     if let (Some(b), Some(offset)) = (&m.backing, r.grow_offset) {
-        vas.set_backing(start, b.node.clone(), offset);
+        vas.set_backing(start, b.node.clone(), offset, b.write.clone());
     }
     vas.merge_with_next(m.start);
     Ok(())

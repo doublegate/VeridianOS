@@ -482,6 +482,11 @@ pub struct VirtualMapping {
 pub struct FileBacking {
     pub node: alloc::sync::Arc<dyn crate::fs::VfsNode>,
     pub offset: usize,
+    /// The write access of the open file the mapping was made from, if it
+    /// was opened for writing: kept while any piece of the mapping lasts,
+    /// as Linux's vm_file keeps the file's, so the file cannot be executed
+    /// meanwhile (ETXTBSY).
+    pub write: Option<alloc::sync::Arc<crate::fs::write_access::WriteAccess>>,
 }
 
 #[cfg(feature = "alloc")]
@@ -2548,16 +2553,22 @@ impl VirtualAddressSpace {
     }
 
     /// Record the file a mapping starting at `start` shows (mmap of a
-    /// file), from file offset `offset`.
+    /// file), from file offset `offset`, and the write access of the open
+    /// file it was made from.
     #[cfg(feature = "alloc")]
     pub fn set_backing(
         &self,
         start: VirtualAddress,
         node: alloc::sync::Arc<dyn crate::fs::VfsNode>,
         offset: usize,
+        write: Option<alloc::sync::Arc<crate::fs::write_access::WriteAccess>>,
     ) {
         if let Some(m) = self.mappings.lock().get_mut(&start) {
-            m.backing = Some(FileBacking { node, offset });
+            m.backing = Some(FileBacking {
+                node,
+                offset,
+                write,
+            });
         }
     }
 

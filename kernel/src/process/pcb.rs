@@ -691,6 +691,11 @@ impl Process {
 
         let thread = Arc::new(thread);
         threads.insert(tid, thread.clone());
+        // Another thread's ID is visible now; the first thread's, the
+        // process's own, once the process is in the table.
+        if tid.0 != self.pid.0 {
+            super::published(tid.0);
+        }
         Ok(thread)
     }
 
@@ -1138,6 +1143,9 @@ impl Process {
 impl Drop for Process {
     fn drop(&mut self) {
         println!("[PROCESS] Dropping process {}", self.pid.0);
+        // A fork that failed never published its ID.
+        #[cfg(feature = "alloc")]
+        super::published(self.pid.0);
         // Cleanup will be handled by the process lifecycle manager
     }
 }

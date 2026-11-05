@@ -1620,6 +1620,17 @@ impl<'a> CallerView<'a> {
         self.mount_point_of(&entry)
     }
 
+    /// Whether something is mounted strictly under canonical `path` in the
+    /// caller's mount namespace (a mount, or an old root pivot_root parked
+    /// there): renaming `path` would leave those mounts at the old place,
+    /// as mounts are kept by path (PR #35 review).
+    pub fn mounts_under(&self, path: &str) -> bool {
+        let path = normalize_path(path, "/");
+        let table = self.ctx.mounts.snapshot();
+        let under = |m: &String| m.as_str() != path && path_is_under(m, &path);
+        table.mounts.keys().any(under) || table.parked.keys().any(|p| path_is_under(p, &path))
+    }
+
     /// [`Vfs::mount_point_of`] in the caller's mount namespace.
     pub fn mount_point_of(&self, path: &str) -> String {
         String::from(

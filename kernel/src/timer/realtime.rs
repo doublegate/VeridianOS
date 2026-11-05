@@ -35,6 +35,12 @@ pub fn now_ns() -> i64 {
     wall_ns_at(super::monotonic_ns())
 }
 
+/// Wall time minus monotonic time now, in nanoseconds: what a wall time is
+/// converted with ([`monotonic_at`] is `wall_ns - offset_ns()`, from 0).
+pub fn offset_ns() -> i64 {
+    OFFSET_NS.load(Ordering::Acquire)
+}
+
 /// The monotonic time at which the wall clock will read `wall_ns`, for
 /// absolute sleeps and timers on CLOCK_REALTIME (0 if it has passed or is
 /// before boot).

@@ -8,8 +8,11 @@
 //! entry, named by its [`Key`]: arming replaces it and cancelling removes
 //! it. An owner checks an expiry against its own state when it comes, so
 //! one taken off just before the timer was set again does nothing. An entry
-//! for a time on the wall clock moves when the clock is set
-//! ([`clock_was_set`]).
+//! for a time on the wall clock keeps that wall time and is converted to
+//! the monotonic clock each time the thread looks, so a clock set
+//! ([`clock_was_set`]) moves it however it races with the arming (PR #35
+//! review: converting at arming and shifting at the set could miss the set,
+//! or apply it twice).
 //!
 //! Lock order: an owner's timer lock, then [`ENTRIES`]; the thread never
 //! holds [`ENTRIES`] while it calls an owner.
@@ -38,11 +41,20 @@ impl Key {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Entry {
-    /// The expiry (`monotonic_ns`).
+    /// The expiry (`monotonic_ns`), for a timer on the monotonic clock.
     at: u64,
     key: Key,
-    /// For a time on the wall clock: `at` follows the clock when it is set.
-    wall: bool,
+    /// For a timer on the wall clock: the expiry as the wall clock reads it
+    /// (ns since 1970); `at` is then unused.
+    wall: Option<i64>,
+}
+
+impl Entry {
+    /// The monotonic expiry, a wall time converted by `to_mono`
+    /// (`timer::realtime::monotonic_at`).
+    fn due(&self, to_mono: &impl Fn(i64) -> u64) -> u64 {
+        self.wall.map_or(self.at, to_mono)
+    }
 }
 
 /// The armed timers.
@@ -56,36 +68,28 @@ static WAKE: crate::sched::dispatch::WaitQueue = crate::sched::dispatch::WaitQue
 static STATE: AtomicU8 = AtomicU8::new(0);
 
 /// Put `key`'s entry, replacing any it has.
-fn put(entries: &mut Vec<Entry>, key: Key, at: u64, wall: bool) {
+fn put(entries: &mut Vec<Entry>, key: Key, at: u64, wall: Option<i64>) {
     match entries.iter_mut().find(|e| e.key == key) {
         Some(e) => (e.at, e.wall) = (at, wall),
         None => entries.push(Entry { at, key, wall }),
     }
 }
 
-/// The wall clock moved by `delta_ns`: wall-clock entries keep their wall
-/// time, so their monotonic expiry moves the other way.
-fn shift_wall(entries: &mut [Entry], delta_ns: i64) {
-    for e in entries.iter_mut().filter(|e| e.wall) {
-        e.at = if delta_ns >= 0 {
-            e.at.saturating_sub(delta_ns as u64)
-        } else {
-            e.at.saturating_add(delta_ns.unsigned_abs())
-        };
-    }
-}
-
 /// Take the entries due at `now`, earliest first.
-fn take_due(entries: &mut Vec<Entry>, now: u64) -> Vec<Key> {
-    let mut due: Vec<Entry> = entries.iter().copied().filter(|e| e.at <= now).collect();
-    entries.retain(|e| e.at > now);
-    due.sort_by_key(|e| e.at);
-    due.into_iter().map(|e| e.key).collect()
+fn take_due(entries: &mut Vec<Entry>, now: u64, to_mono: &impl Fn(i64) -> u64) -> Vec<Key> {
+    let mut due: Vec<(u64, Key)> = entries
+        .iter()
+        .map(|e| (e.due(to_mono), e.key))
+        .filter(|&(at, _)| at <= now)
+        .collect();
+    entries.retain(|e| e.due(to_mono) > now);
+    due.sort_by_key(|&(at, _)| at);
+    due.into_iter().map(|(_, key)| key).collect()
 }
 
 /// The earliest expiry.
-fn earliest(entries: &[Entry]) -> Option<u64> {
-    entries.iter().map(|e| e.at).min()
+fn earliest(entries: &[Entry], to_mono: &impl Fn(i64) -> u64) -> Option<u64> {
+    entries.iter().map(|e| e.due(to_mono)).min()
 }
 
 fn changed() {
@@ -96,20 +100,20 @@ fn changed() {
 
 /// Arm `key` to expire at `at` (`monotonic_ns`), replacing its entry.
 pub fn arm(key: Key, at: u64) {
-    put(&mut ENTRIES.lock(), key, at, false);
+    put(&mut ENTRIES.lock(), key, at, None);
     changed();
 }
 
-/// Arm `key` for a time on the wall clock, which reads it at `at`
-/// (`monotonic_ns`, `timer::realtime::monotonic_at`).
-pub fn arm_wall(key: Key, at: u64) {
-    put(&mut ENTRIES.lock(), key, at, true);
+/// Arm `key` to expire when the wall clock reads `wall_ns` (ns since
+/// 1970).
+pub fn arm_wall(key: Key, wall_ns: i64) {
+    put(&mut ENTRIES.lock(), key, 0, Some(wall_ns));
     changed();
 }
 
-/// The wall clock was set, moving by `delta_ns`.
-pub fn clock_was_set(delta_ns: i64) {
-    shift_wall(&mut ENTRIES.lock(), delta_ns);
+/// The wall clock was set: the thread looks again at when its wall-clock
+/// entries are due.
+pub fn clock_was_set(_delta_ns: i64) {
     changed();
 }
 
@@ -144,12 +148,13 @@ pub fn start() -> Result<(), crate::error::KernelError> {
 #[cfg(feature = "alloc")]
 extern "C" fn ktimerd(_: usize) {
     loop {
-        let next = earliest(&ENTRIES.lock());
+        let to_mono = |wall| crate::timer::realtime::monotonic_at(wall);
+        let next = earliest(&ENTRIES.lock(), &to_mono);
         let _ = crate::sched::dispatch::wait_event(&WAKE, next, || {
             CHANGED.swap(false, Ordering::AcqRel)
         });
         let now = crate::timer::monotonic_ns();
-        let due = take_due(&mut ENTRIES.lock(), now);
+        let due = take_due(&mut ENTRIES.lock(), now, &to_mono);
         for key in due {
             match key {
                 Key::Real(pid) => crate::process::itimer::real_expired(pid, now),
@@ -163,39 +168,53 @@ extern "C" fn ktimerd(_: usize) {
 mod tests {
     use super::*;
 
+    /// Monotonic clock only (no wall entries in these).
+    fn mono(_: i64) -> u64 {
+        unreachable!()
+    }
+
     /// One entry per timer, the due ones taken earliest first, the rest
     /// left with the earliest of them next.
     #[test]
     fn entries_are_one_per_timer_and_taken_when_due() {
         let mut e = Vec::new();
-        put(&mut e, Key::Real(1), 50, false);
-        put(&mut e, Key::Real(2), 30, false);
-        put(&mut e, Key::Real(3), 90, false);
-        put(&mut e, Key::Real(1), 20, false);
+        put(&mut e, Key::Real(1), 50, None);
+        put(&mut e, Key::Real(2), 30, None);
+        put(&mut e, Key::Real(3), 90, None);
+        put(&mut e, Key::Real(1), 20, None);
         assert_eq!(e.len(), 3);
-        assert_eq!(earliest(&e), Some(20));
-        assert_eq!(take_due(&mut e, 40), [Key::Real(1), Key::Real(2)]);
-        assert_eq!(earliest(&e), Some(90));
-        assert!(take_due(&mut e, 89).is_empty());
-        assert_eq!(take_due(&mut e, 90), [Key::Real(3)]);
-        assert_eq!(earliest(&e), None);
+        assert_eq!(earliest(&e, &mono), Some(20));
+        assert_eq!(take_due(&mut e, 40, &mono), [Key::Real(1), Key::Real(2)]);
+        assert_eq!(earliest(&e, &mono), Some(90));
+        assert!(take_due(&mut e, 89, &mono).is_empty());
+        assert_eq!(take_due(&mut e, 90, &mono), [Key::Real(3)]);
+        assert_eq!(earliest(&e, &mono), None);
     }
 
-    /// Setting the wall clock moves only wall-clock entries, keeping their
-    /// wall time; a timer re-armed off the wall clock stops moving.
+    /// A wall-clock entry is due when the wall clock reads its time,
+    /// whatever the clock was set to between arming and now: it is
+    /// converted when looked at, never shifted, so a set racing with the
+    /// arming can be neither missed nor applied twice (PR #35 review). A
+    /// timer re-armed off the wall clock stops following it.
     #[test]
     fn wall_entries_follow_the_clock() {
+        let offset = core::cell::Cell::new(1_000i64); // wall = mono + offset
+        let to_mono = |wall: i64| (wall - offset.get()).max(0) as u64;
         let mut e = Vec::new();
-        put(&mut e, Key::Posix(1, 0), 100, true);
-        put(&mut e, Key::Posix(1, 1), 100, false);
-        shift_wall(&mut e, 30);
-        assert_eq!(take_due(&mut e, 70), [Key::Posix(1, 0)]);
-        put(&mut e, Key::Posix(1, 0), 100, true);
-        shift_wall(&mut e, -50);
-        assert_eq!(earliest(&e), Some(100));
-        put(&mut e, Key::Posix(1, 0), 120, false);
-        shift_wall(&mut e, 500);
-        assert_eq!(take_due(&mut e, 110), [Key::Posix(1, 1)]);
-        assert_eq!(earliest(&e), Some(120));
+        put(&mut e, Key::Posix(1, 0), 0, Some(1_100));
+        put(&mut e, Key::Posix(1, 1), 100, None);
+        assert_eq!(earliest(&e, &to_mono), Some(100));
+        // The wall clock goes ahead 30: the wall entry is due 30 sooner.
+        offset.set(1_030);
+        assert_eq!(take_due(&mut e, 70, &to_mono), [Key::Posix(1, 0)]);
+        put(&mut e, Key::Posix(1, 0), 0, Some(1_130));
+        // Back 50: later.
+        offset.set(980);
+        assert_eq!(earliest(&e, &to_mono), Some(100));
+        assert_eq!(take_due(&mut e, 100, &to_mono), [Key::Posix(1, 1)]);
+        assert_eq!(earliest(&e, &to_mono), Some(150));
+        put(&mut e, Key::Posix(1, 0), 120, None);
+        offset.set(10_000);
+        assert_eq!(earliest(&e, &to_mono), Some(120));
     }
 }

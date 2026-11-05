@@ -373,10 +373,14 @@ impl Caller {
             && self.ns_capable(&self.userns, cap)
     }
 
-    /// Whether the caller owns a file owned by `uid` and `gid` or holds
-    /// CAP_FOWNER over it (Linux's inode_owner_or_capable).
-    pub fn owner_or_capable(&self, uid: u32, gid: u32) -> bool {
-        self.creds.fsuid == uid || self.capable_wrt_inode(uid, gid, super::linux_caps::CAP_FOWNER)
+    /// Whether the caller owns a file owned by `uid` or holds CAP_FOWNER in
+    /// its user namespace, which maps `uid` (Linux's
+    /// inode_owner_or_capable: unlike capable_wrt_inode_uidgid, the file's
+    /// group need not be mapped; PR #35 review).
+    pub fn owner_or_capable(&self, uid: u32) -> bool {
+        self.creds.fsuid == uid
+            || (self.userns.uid_up(uid).is_some()
+                && self.ns_capable(&self.userns, super::linux_caps::CAP_FOWNER))
     }
 
     /// Whether the caller is in group `gid` or holds CAP_FSETID over an
@@ -609,7 +613,7 @@ mod tests {
     /// capable_wrt_inode_uidgid; ADR 0022 H4c).
     #[test]
     fn privilege_over_a_file_needs_its_ids_mapped() {
-        use super::super::linux_caps::{LinuxCaps, CAP_CHOWN};
+        use super::super::linux_caps::{LinuxCaps, CAP_CHOWN, CAP_FOWNER};
         let ns = super::super::userns::test_child(b"0 1000 1\n1 2000 1", b"0 1000 1");
         let root = Caller {
             creds: Credentials::new(1000, 1000),
@@ -626,14 +630,18 @@ mod tests {
             "group unmapped"
         );
         assert!(!root.capable(CAP_CHOWN), "nothing in the initial namespace");
-        assert!(root.owner_or_capable(2000, 1000));
-        assert!(root.owner_or_capable(1000, 0), "its own file");
-        assert!(!root.owner_or_capable(0, 0));
+        assert!(root.owner_or_capable(2000));
+        assert!(root.owner_or_capable(1000), "its own file");
+        assert!(!root.owner_or_capable(0), "owner unmapped");
+        // A file whose group the namespace cannot name is still its
+        // owner's to chmod (only the uid must be mapped).
+        assert!(root.capable_wrt_inode(2000, 1000, CAP_FOWNER));
+        assert!(!root.capable_wrt_inode(2000, 0, CAP_FOWNER));
         let bare = Caller {
             caps: LinuxCaps::EMPTY,
             ..root.clone()
         };
-        assert!(!bare.owner_or_capable(2000, 1000));
+        assert!(!bare.owner_or_capable(2000));
         assert!(bare.in_group_or_capable(0, 1000), "its own group");
         assert!(!bare.in_group_or_capable(2000, 2000));
     }

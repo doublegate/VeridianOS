@@ -391,10 +391,7 @@ fn key(process: &Process, id: i32) -> crate::timer::ktimerd::Key {
 /// timers are checked on the way back to user mode).
 fn wait_for(process: &Process, id: i32, clock: TimerClock, expires: i64) {
     match clock {
-        TimerClock::Wall => crate::timer::ktimerd::arm_wall(
-            key(process, id),
-            crate::timer::realtime::monotonic_at(expires),
-        ),
+        TimerClock::Wall => crate::timer::ktimerd::arm_wall(key(process, id), expires),
         TimerClock::Mono | TimerClock::Boot => {
             crate::timer::ktimerd::arm(key(process, id), expires.max(0) as u64)
         }

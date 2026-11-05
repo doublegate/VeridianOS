@@ -137,10 +137,7 @@ pub fn check_access(
             match meta.node_type {
                 NodeType::File | NodeType::Socket => {}
                 NodeType::Directory => {
-                    if write
-                        && meta.permissions.sticky
-                        && !caller.owner_or_capable(meta.uid, meta.gid)
-                    {
+                    if write && meta.permissions.sticky && !caller.owner_or_capable(meta.uid) {
                         return Err(KernelError::FsError(FsError::OperationNotPermitted));
                     }
                 }

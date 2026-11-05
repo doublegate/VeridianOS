@@ -127,7 +127,10 @@ fn target_in(
     if write {
         want_write(&vfs, &canonical)?;
     }
-    Ok((node, Some(abs)))
+    // The entry actually reached, a followed symlink resolved, inside the
+    // caller's root: events go to its directory (PR #35 review).
+    let root = vfs.get_root();
+    Ok((node, Some(crate::fs::root_relative(&canonical, &root))))
 }
 
 /// An attribute name from user memory (Linux's import_xattr_name): empty,

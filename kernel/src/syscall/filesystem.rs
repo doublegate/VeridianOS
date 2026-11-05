@@ -383,7 +383,9 @@ pub(super) fn open_node(
     // A writable open of a running program is ETXTBSY, before O_TRUNC
     // truncates it (Linux's do_dentry_open, then handle_truncate).
     let write_access = if open_flags.write {
-        Some(crate::fs::write_access::WriteAccess::get(&node).map_err(super::map_kernel_error)?)
+        Some(alloc::sync::Arc::new(
+            crate::fs::write_access::WriteAccess::get(&node).map_err(super::map_kernel_error)?,
+        ))
     } else {
         None
     };
@@ -470,7 +472,7 @@ fn check_open_status(node: &dyn crate::fs::VfsNode, flags: usize) -> Result<(), 
     use crate::fs::file::status;
     if flags as u32 & status::NOATIME != 0 {
         let meta = node.metadata().map_err(super::map_kernel_error)?;
-        if !Caller::current().owner_or_capable(meta.uid, meta.gid) {
+        if !Caller::current().owner_or_capable(meta.uid) {
             return Err(SyscallError::OperationNotPermitted);
         }
     }
@@ -1837,7 +1839,7 @@ fn do_utimes(
     let only_now = specs.is_none_or(|[a, m]| a[1] == UTIME_NOW && m[1] == UTIME_NOW);
     let caller = Caller::current();
     let meta = node.metadata().map_err(super::map_kernel_error)?;
-    if !caller.owner_or_capable(meta.uid, meta.gid) {
+    if !caller.owner_or_capable(meta.uid) {
         if !only_now {
             return Err(SyscallError::OperationNotPermitted);
         }
@@ -2528,7 +2530,7 @@ pub(crate) fn chmod_perms(
     gid: u32,
     mode: usize,
 ) -> Result<Permissions, SyscallError> {
-    if !caller.owner_or_capable(uid, gid) {
+    if !caller.owner_or_capable(uid) {
         return Err(SyscallError::OperationNotPermitted);
     }
     let mut perms = Permissions::from_mode(mode as u32 & 0o7777);
@@ -2610,6 +2612,14 @@ fn rename_entry(old: &str, new: &str) -> SyscallResult {
         };
         if crate::fs::path_is_under(&new_parent_canon, &src_canon) {
             return Err(SyscallError::InvalidArgument);
+        }
+        // Mounts are kept by path: moving a directory with mounts under it
+        // would leave them at the old place, uncovering what they covered
+        // and dropping their flags (read-only, noexec) from the moved tree.
+        // Linux moves them with it; this refuses (EBUSY, as Linux does for
+        // a mount point; docs/KNOWN-LIMITATIONS.md).
+        if vfs.mounts_under(&src_canon) {
+            return Err(SyscallError::Busy);
         }
         // Moving it to another parent rewrites its "..", which needs write
         // permission on the directory itself.
@@ -2716,7 +2726,7 @@ pub(crate) fn check_may_remove(
         .map_err(map_resolve_err)?
         .metadata()
         .map_err(super::map_kernel_error)?;
-    if caller.owner_or_capable(entry_meta.uid, entry_meta.gid) {
+    if caller.owner_or_capable(entry_meta.uid) {
         Ok(())
     } else {
         Err(SyscallError::PermissionDenied)
@@ -3214,7 +3224,7 @@ fn file_status_flags(file: &crate::fs::file::File) -> u32 {
 fn set_file_status_flags(
     file: &crate::fs::file::File,
     arg: u32,
-    owner_ok: impl FnOnce(u32, u32) -> bool,
+    owner_ok: impl FnOnce(u32) -> bool,
 ) -> Result<(), SyscallError> {
     use core::sync::atomic::Ordering;
 
@@ -3222,7 +3232,7 @@ fn set_file_status_flags(
     let old = file.status.load(Ordering::Acquire);
     if arg & status::NOATIME != 0 && old & status::NOATIME == 0 {
         let meta = file.node.metadata().map_err(super::map_kernel_error)?;
-        if !owner_ok(meta.uid, meta.gid) {
+        if !owner_ok(meta.uid) {
             return Err(SyscallError::OperationNotPermitted);
         }
     }
@@ -3295,8 +3305,8 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
         F_GETFL => Ok(file_status_flags(&file) as usize),
         F_SETFL => {
             drop(file_table);
-            set_file_status_flags(&file, arg as u32, |uid, gid| {
-                Caller::current().owner_or_capable(uid, gid)
+            set_file_status_flags(&file, arg as u32, |uid| {
+                Caller::current().owner_or_capable(uid)
             })
             .map(|()| 0)
         }
@@ -3720,9 +3730,16 @@ pub(crate) fn link_at(
     };
     let new = read_user_path(new_ptr)?;
     let vfs = vfs()?;
+    // Where the old name is (canonical), for the mount check below; `None`
+    // for a descriptor without a path.
+    let mut old_canonical: Option<alloc::string::String> = None;
     let target = if old.is_empty() {
         if olddirfd as u32 as i32 == AT_FDCWD as u32 as i32 {
-            vfs.resolve_path(&vfs.get_cwd()).map_err(map_resolve_err)?
+            let (node, canonical) = vfs
+                .resolve_canonical(&vfs.get_cwd(), "/", true)
+                .map_err(map_resolve_err)?;
+            old_canonical = Some(canonical);
+            node
         } else {
             let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
             let file = proc
@@ -3742,18 +3759,27 @@ pub(crate) fn link_at(
             {
                 return Err(SyscallError::ResourceNotFound);
             }
+            old_canonical = file.path.clone();
             file.node.clone()
         }
     } else {
         let abs = resolve_at_path(olddirfd, &old)?;
-        if flags & AT_SYMLINK_FOLLOW != 0 {
-            vfs.resolve_path(&abs)
-        } else {
-            vfs.resolve_path_no_follow(&abs)
-        }
-        .map_err(map_resolve_err)?
+        let (node, canonical) = vfs
+            .resolve_canonical(&abs, "/", flags & AT_SYMLINK_FOLLOW != 0)
+            .map_err(map_resolve_err)?;
+        old_canonical = Some(canonical);
+        node
     };
-    let (parent, name) = new_entry(newdirfd, &new)?;
+    let (parent, name, parent_canonical) = new_entry_in(newdirfd, &new)?;
+    // Both names on one mount, as Linux's do_linkat (old_path.mnt !=
+    // new_path.mnt): two bind mounts of one filesystem are two mounts, and
+    // a link across them would carry a file out of a read-only, noexec or
+    // nosuid mount (PR #35 review). After the new name's checks, as there.
+    if let Some(old_canonical) = &old_canonical {
+        if vfs.mount_point_of(old_canonical) != vfs.mount_point_of(&parent_canonical) {
+            return Err(SyscallError::CrossDevice);
+        }
+    }
     // A file whose last name is gone (open, through AT_EMPTY_PATH) gets
     // no new one, as Linux's vfs_link, unless it is an O_TMPFILE file made
     // to be named.
@@ -3807,6 +3833,21 @@ fn new_entry(
     ),
     SyscallError,
 > {
+    new_entry_in(dirfd, rel).map(|(parent, name, _)| (parent, name))
+}
+
+/// [`new_entry`], also returning the parent directory's canonical path.
+fn new_entry_in(
+    dirfd: usize,
+    rel: &str,
+) -> Result<
+    (
+        alloc::sync::Arc<dyn crate::fs::VfsNode>,
+        alloc::string::String,
+        alloc::string::String,
+    ),
+    SyscallError,
+> {
     let abs = resolve_at_path(dirfd, rel)?;
     let name = abs.trim_end_matches('/');
     if name.is_empty() {
@@ -3824,7 +3865,7 @@ fn new_entry(
     let (parent, name, canonical) = parent_dir_canonical(name)?;
     want_write(&vfs()?, &canonical)?;
     check_dir_write(&*parent)?;
-    Ok((parent, name))
+    Ok((parent, name, canonical))
 }
 
 /// Change file permissions by path (syscall 185).
@@ -4952,23 +4993,23 @@ mod tests {
         assert_eq!(get(&file), 2 | O_LARGEFILE);
         assert!(!file.is_append());
         // Access mode, O_CREAT and O_TRUNC bits are ignored.
-        set(&file, status::APPEND | O_NONBLOCK_FL | 0x241, |_, _| true).unwrap();
+        set(&file, status::APPEND | O_NONBLOCK_FL | 0x241, |_| true).unwrap();
         assert!(file.is_append());
         assert_eq!(get(&file), 2 | O_LARGEFILE | status::APPEND | O_NONBLOCK_FL);
-        set(&file, status::ASYNC | status::DIRECT, |_, _| true).unwrap();
+        set(&file, status::ASYNC | status::DIRECT, |_| true).unwrap();
         assert!(!file.is_append());
         assert_eq!(get(&file), 2 | O_LARGEFILE | status::ASYNC | status::DIRECT);
         // O_NOATIME needs the owner; keeping it once set asks no one.
         assert_eq!(
-            set(&file, status::NOATIME, |_, _| false),
+            set(&file, status::NOATIME, |_| false),
             Err(SyscallError::OperationNotPermitted)
         );
-        set(&file, status::NOATIME, |uid, _| uid == 0).unwrap();
-        set(&file, status::NOATIME | status::APPEND, |_, _| false).unwrap();
+        set(&file, status::NOATIME, |uid| uid == 0).unwrap();
+        set(&file, status::NOATIME | status::APPEND, |_| false).unwrap();
         // O_DIRECT only on a regular file.
         let dir = File::new(root, OpenFlags::read_only());
         assert_eq!(
-            set(&dir, status::DIRECT, |_, _| true),
+            set(&dir, status::DIRECT, |_| true),
             Err(SyscallError::InvalidArgument)
         );
         // An O_APPEND open starts with it.

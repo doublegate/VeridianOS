@@ -5561,6 +5561,7 @@ static void test_namespaces_time(void);
 static void test_namespaces_mnt(void);
 static void test_mount_calls(void);
 static void test_mount_flags(void);
+static void test_mount_no_escape(void);
 static void test_pivot_root(void);
 static void test_user_ns(void);
 static void test_pid_ns(void);
@@ -6013,7 +6014,11 @@ static void restart_after_stop(const char *name, int mode)
     if (mode == RESTART_PPOLL)
         report(name, stopped && out[2] == 0 && slept >= 450 && after >= 150 && after < 450, why);
     else
-        report(name, stopped && out[2] == 0 && slept >= 300 && after < 200, why);
+        /* Its deadline passed while it was stopped: it ends soon after
+         * SIGCONT. A sleep started again would take 300 ms more; the margin
+         * below that is for slow CI guests (200 ms seen on GitHub's 4-CPU
+         * runner, PR #35). */
+        report(name, stopped && out[2] == 0 && slept >= 300 && after < 280, why);
 }
 
 /* adjtimex and clock_adjtime: Linux's NTP state is read by everyone and
@@ -6450,6 +6455,10 @@ static void test_splice_family(void)
     struct iovec w = {"xy", 2};
     if (vmsplice(p[1], &w, 1, 0) != 2 || read(p[0], buf, sizeof(buf)) != 2 ||
         memcmp(buf, "xy", 2)) f |= 524288;
+    /* Empty entries are skipped, not the end (PR #35 review). */
+    struct iovec ws[3] = {{"", 0}, {"ab", 2}, {"c", 1}};
+    if (vmsplice(p[1], ws, 3, 0) != 3 || read(p[0], buf, sizeof(buf)) != 3 ||
+        memcmp(buf, "abc", 3)) f |= 524288;
     errno = 0;
     if (sendfile(out, p[0], NULL, 1) != -1 || errno != EINVAL) f |= 1048576;
     /* Into a pipe nobody reads: EPIPE, and SIGPIPE. */
@@ -7881,6 +7890,27 @@ static void test_text_busy(void)
     if (w < 0) f |= 32;
     close(w);
 
+    /* A shared mapping keeps the write access of the file it was made
+     * from after the descriptor is closed (Linux's vm_file); unmapped, the
+     * file runs again (PR #35 review). */
+    w = open(prog, O_RDWR);
+    void *map = w >= 0 ? mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, w, 0) : MAP_FAILED;
+    if (w >= 0) close(w);
+    for (int unmapped = 0; unmapped < 2; unmapped++) {
+        if (unmapped && map != MAP_FAILED) munmap(map, 4096);
+        pid = fork();
+        if (pid == 0) {
+            char *argv[] = {"sleep", "0", NULL};
+            execv(prog, argv);
+            _exit(errno == ETXTBSY ? 3 : 4);
+        }
+        status = 0;
+        int want = unmapped ? 0 : 3;
+        if (map == MAP_FAILED || pid < 0 || waitpid(pid, &status, 0) != pid ||
+            !WIFEXITED(status) || WEXITSTATUS(status) != want)
+            f |= 64;
+    }
+
     unlink(prog);
     snprintf(why, sizeof(why), "f=%#x errno=%d exec=%d status=%#x", f, errno, exec_errno, ran);
     report("text_busy", f == 0, why);
@@ -8005,6 +8035,29 @@ static void test_inotify_events(void)
         f |= 256;
     snprintf(want, sizeof(want), "%d:8000: ", wr);
     if (strcmp(got, want) != 0) f |= 256;
+
+    /* An attribute set through a symlink changes the target, so the event
+     * is the target's directory's, not the link's (PR #35 review). */
+    int ix = inotify_init1(IN_NONBLOCK);
+    mkdir("/tmp/musl_inotify/data", 0755);
+    mkdir("/tmp/musl_inotify/links", 0755);
+    w = open("/tmp/musl_inotify/data/file", O_CREAT | O_WRONLY, 0644);
+    close(w);
+    symlink("../data/file", "/tmp/musl_inotify/links/alias");
+    int wda = inotify_add_watch(ix, "/tmp/musl_inotify/data", IN_ATTRIB);
+    int wdl = inotify_add_watch(ix, "/tmp/musl_inotify/links", IN_ATTRIB);
+    if (ix < 0 || wda < 1 || wdl < 1 ||
+        setxattr("/tmp/musl_inotify/links/alias", "user.t", "1", 1, 0) != 0 ||
+        inotify_drain(ix, got, sizeof(got), ck) != 0)
+        f |= 1024;
+    snprintf(want, sizeof(want), "%d:4:file ", wda);
+    if (strcmp(got, want) != 0) f |= 1024;
+    close(ix);
+    unlink("/tmp/musl_inotify/links/alias");
+    unlink("/tmp/musl_inotify/data/file");
+    rmdir("/tmp/musl_inotify/links");
+    rmdir("/tmp/musl_inotify/data");
+    inotify_drain(in, got, sizeof(got), ck);
 
     /* The limits are where Linux keeps them. */
     char lim[32] = "";
@@ -9403,6 +9456,48 @@ static void test_mount_flags(void)
 }
 
 /* How many mounts /proc/self/mountinfo shows at mount point `point`. */
+/* A file does not leave a read-only bind mount by another name: a hard
+ * link to another mount of the same filesystem is EXDEV, and a directory
+ * with a mount under it cannot be renamed (mounts stay where they are, so
+ * the moved tree would lose the mount's flags: EBUSY). PR #35 review. */
+static void test_mount_no_escape(void)
+{
+    char why[96];
+    rmdir("/tmp/me");
+    if (mkdir("/tmp/me", 0755) != 0) {
+        report("mount_no_escape", 0, "setup");
+        return;
+    }
+    pid_t child = fork();
+    if (child == 0) {
+        int g = 0;
+        if (unshare(CLONE_NEWNS) != 0 || mount("none", "/tmp/me", "tmpfs", 0, "size=1m") != 0)
+            _exit(0x7f);
+        int fd = -1;
+        if (mkdir("/tmp/me/top", 0755) != 0 || mkdir("/tmp/me/top/a", 0755) != 0 ||
+            mkdir("/tmp/me/top/ro", 0755) != 0 || mkdir("/tmp/me/top/b", 0755) != 0 ||
+            (fd = open("/tmp/me/top/a/f", O_CREAT | O_WRONLY, 0644)) < 0 ||
+            mount("/tmp/me/top/a", "/tmp/me/top/ro", NULL, MS_BIND, NULL) != 0 ||
+            mount(NULL, "/tmp/me/top/ro", NULL, MS_REMOUNT | MS_BIND | MS_RDONLY, NULL) != 0)
+            _exit(0x7e);
+        close(fd);
+        errno = 0;
+        if (!(link("/tmp/me/top/ro/f", "/tmp/me/top/b/g") == -1 && errno == EXDEV)) g |= 1;
+        if (link("/tmp/me/top/a/f", "/tmp/me/top/b/g") != 0) g |= 2;
+        errno = 0;
+        if (!(rename("/tmp/me/top", "/tmp/me/moved") == -1 && errno == EBUSY)) g |= 4;
+        errno = 0;
+        if (!(open("/tmp/me/top/ro/f", O_WRONLY) == -1 && errno == EROFS)) g |= 8;
+        if (umount("/tmp/me/top/ro") != 0 || rename("/tmp/me/top", "/tmp/me/moved") != 0)
+            g |= 16;
+        _exit(g);
+    }
+    int code = t_exit_status(child);
+    rmdir("/tmp/me");
+    snprintf(why, sizeof(why), "code=%#x", code);
+    report("mount_no_escape", code == 0, why);
+}
+
 static int t_mounts_at(const char *point)
 {
     static char info[8192];
@@ -9912,6 +10007,19 @@ static int t_pidns_init(int ready, int go, pid_t outside, int peer, int lockfd)
     }
     if (g != 2) f |= 4;
     if (read(sync[0], &c, 1) != 1 || c != 'o') f |= 8;
+    /* A reaped child's number reads as the namespace numbers it: its
+     * number is freed by the reap, which must not make waitpid and waitid
+     * report 0 (PR #35 review). */
+    pid_t h = fork();
+    if (h == 0) _exit(7);
+    int st = 0;
+    if (h <= 0 || waitpid(h, &st, 0) != h || !WIFEXITED(st) || WEXITSTATUS(st) != 7) f |= 4;
+    pid_t k = fork();
+    if (k == 0) _exit(8);
+    siginfo_t si;
+    memset(&si, 0, sizeof(si));
+    if (k <= 0 || waitid(P_PID, k, &si, WEXITED) != 0 || si.si_pid != k || si.si_status != 8)
+        f |= 4;
     if (t_pidns_crossings(outside, peer, lockfd) != 0) f |= 128;
     /* A procfs mounted here shows this namespace (in a mount namespace of
      * its own, so nothing is left behind). */
@@ -10273,6 +10381,7 @@ int main(int argc, char **argv)
     test_namespaces_mnt();
     test_mount_calls();
     test_mount_flags();
+    test_mount_no_escape();
     test_pivot_root();
     test_user_ns();
     test_pid_ns();
