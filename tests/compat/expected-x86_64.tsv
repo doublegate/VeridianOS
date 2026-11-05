@@ -1,53 +1,54 @@
 # Conformance results for x86_64: suite, test, status, note.
 # Baseline of 2026-10-22 (LTP 20260930, libc-test 7b95dfa5), from scripts/run-compat-tests.sh.
 # Refreshed 2026-10-30 from full runs (statfs, uname 7.3.0-veridian); notes refreshed, known: notes kept.
+# Refreshed 2026-11-05 from full runs (the syscall groups; LTP_TIMEOUT_MUL scaled with the limit).
 # Statuses and the update procedure: tests/compat/README.md.
 ltp-syscalls	abort01	PASS	
 ltp-syscalls	accept01	FAIL	accept01.c:91: TFAIL: UDP accept expected EOPNOTSUPP: EINVAL (22)
 ltp-syscalls	accept02	BROK	accept02.c:116: TBROK: ioctl(3,SIOCGIFINDEX,...) failed: EINVAL (22)
-ltp-syscalls	accept03	FAIL	accept03.c:46: TFAIL: accept() on O_PATH file expected EBADF: ENOTSOCK (88)
+ltp-syscalls	accept03	PASS	
 ltp-syscalls	accept4_01	BROK	accept4_01.c:125: TBROK: accept4 failed: EAGAIN/EWOULDBLOCK (11)
 ltp-syscalls	access01	PASS	
 ltp-syscalls	access02	PASS	
 ltp-syscalls	access03	PASS	
-ltp-syscalls	access04	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	acct01	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	acct02	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	access04	PASS	
+ltp-syscalls	acct01	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
+ltp-syscalls	acct02	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	add_key01	CONF	../../../../include/lapi/keyctl.h:27: TCONF: syscall(248) __NR_add_key not supported on your arch
 ltp-syscalls	add_key02	CONF	../../../../include/lapi/keyctl.h:27: TCONF: syscall(248) __NR_add_key not supported on your arch
 ltp-syscalls	add_key03	CONF	../../../../include/lapi/keyctl.h:27: TCONF: syscall(248) __NR_add_key not supported on your arch
 ltp-syscalls	add_key04	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
 ltp-syscalls	add_key05	CONF	tst_cmd.c:270: TCONF: Couldn't find 'useradd' in $PATH
-ltp-syscalls	adjtimex01	BROK	adjtimex01.c:48: TBROK: adjtimex(): failed to save current params: ENOSYS (38)
-ltp-syscalls	adjtimex02	BROK	adjtimex02.c:127: TBROK: adjtimex(): failed to save current params: ENOSYS (38)
-ltp-syscalls	adjtimex03	BROK	adjtimex03.c:55: TBROK: adjtimex(): Unexpeceted error, expecting EINVAL with mode 0x8000: ENOSYS (38)
-ltp-syscalls	alarm02	FAIL	alarm02.c:36: TFAIL: alarm(0) retval 0 != 2147483647: ENOSYS (38)
-ltp-syscalls	alarm03	FAIL	alarm03.c:28: TFAIL: alarm(0) in parent process retval 0 != 100: ENOSYS (38)
-ltp-syscalls	alarm05	FAIL	alarm05.c:28: TFAIL: alarm(1) retval 0 != 9: ENOSYS (38)
-ltp-syscalls	alarm06	FAIL	alarm06.c:33: TFAIL: alarm(0) retval 0 != 1: ENOSYS (38)
-ltp-syscalls	alarm07	FAIL	alarm07.c:34: TFAIL: alarm_cnt (0) != 1 (1)
+ltp-syscalls	adjtimex01	PASS	
+ltp-syscalls	adjtimex02	PASS	
+ltp-syscalls	adjtimex03	PASS	
+ltp-syscalls	alarm02	PASS	
+ltp-syscalls	alarm03	PASS	
+ltp-syscalls	alarm05	PASS	
+ltp-syscalls	alarm06	PASS	
+ltp-syscalls	alarm07	PASS	
 ltp-syscalls	arch_prctl01	FAIL	arch_prctl01.c:55: TFAIL: arch_prctl_set(ARCH_SET_CPUID, index) expected ENODEV: EINVAL (22)
 ltp-syscalls	bind01	FAIL	bind01.c:72: TFAIL: invalid salen succeeded
 ltp-syscalls	bind02	FAIL	bind02.c:39: TFAIL: bind() succeeded
 ltp-syscalls	bind03	PASS	
 ltp-syscalls	bind04	BROK	bind04.c:95: TBROK: connect(4, (no pathname bound), 2) failed: EINVAL (22)
 ltp-syscalls	bind05	BROK	bind05.c:159: TBROK: Error while waiting for connection: EAGAIN/EWOULDBLOCK (11)
-ltp-syscalls	bind06	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	bind06	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	bpf_map01	CONF	../../../../include/lapi/bpf.h:623: TCONF: syscall(321) __NR_bpf not supported on your arch
 ltp-syscalls	bpf_prog01	CONF	../../../../include/lapi/bpf.h:623: TCONF: syscall(321) __NR_bpf not supported on your arch
 ltp-syscalls	bpf_prog02	CONF	../../../../include/lapi/bpf.h:623: TCONF: syscall(321) __NR_bpf not supported on your arch
 ltp-syscalls	bpf_prog03	CONF	../../../../include/lapi/bpf.h:623: TCONF: syscall(321) __NR_bpf not supported on your arch
-ltp-syscalls	bpf_prog04	BROK	tst_taint.c:43: TBROK: Failed to open FILE '/proc/sys/kernel/tainted' for reading: ENOENT (2)
-ltp-syscalls	bpf_prog05	BROK	tst_taint.c:43: TBROK: Failed to open FILE '/proc/sys/kernel/tainted' for reading: ENOENT (2)
-ltp-syscalls	bpf_prog06	BROK	tst_taint.c:43: TBROK: Failed to open FILE '/proc/sys/kernel/tainted' for reading: ENOENT (2)
-ltp-syscalls	bpf_prog07	BROK	tst_taint.c:43: TBROK: Failed to open FILE '/proc/sys/kernel/tainted' for reading: ENOENT (2)
+ltp-syscalls	bpf_prog04	CONF	../../../../include/lapi/bpf.h:623: TCONF: syscall(321) __NR_bpf not supported on your arch
+ltp-syscalls	bpf_prog05	CONF	../../../../include/lapi/bpf.h:623: TCONF: syscall(321) __NR_bpf not supported on your arch
+ltp-syscalls	bpf_prog06	CONF	../../../../include/lapi/bpf.h:623: TCONF: syscall(321) __NR_bpf not supported on your arch
+ltp-syscalls	bpf_prog07	CONF	../../../../include/lapi/bpf.h:623: TCONF: syscall(321) __NR_bpf not supported on your arch
 ltp-syscalls	brk01	PASS	
 ltp-syscalls	brk02	PASS	
 ltp-syscalls	cacheflush01	CONF	tst_test.c:1429: TCONF: system doesn't support cacheflush()
-ltp-syscalls	cachestat01	TIMEOUT	tst_buffers.c:57: TINFO: Test is using guarded buffers
+ltp-syscalls	cachestat01	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	cachestat02	CONF	../../../../include/lapi/mman.h:44: TCONF: syscall(451) __NR_cachestat not supported on your arch
 ltp-syscalls	cachestat03	CONF	tst_hugepage.c:34: TCONF: hugetlbfs is not supported
-ltp-syscalls	cachestat04	TIMEOUT	tst_buffers.c:57: TINFO: Test is using guarded buffers
+ltp-syscalls	cachestat04	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	capget01	PASS	
 ltp-syscalls	capget02	PASS	
 ltp-syscalls	capset01	PASS	
@@ -60,7 +61,7 @@ ltp-syscalls	chdir04	FAIL	chdir04.c:27: TFAIL: chdir() expected ENAMETOOLONG: EN
 ltp-syscalls	chmod01	PASS	
 ltp-syscalls	chmod03	PASS	
 ltp-syscalls	chmod05	PASS	
-ltp-syscalls	chmod06	BROK	tst_device.c:450: TBROK: Failed to acquire device
+ltp-syscalls	chmod06	PASS	
 ltp-syscalls	chmod07	PASS	
 ltp-syscalls	chmod08	PASS	
 ltp-syscalls	chmod09	BROK	tst_device.c:450: TBROK: Failed to acquire device
@@ -70,31 +71,31 @@ ltp-syscalls	chown02	PASS
 ltp-syscalls	chown02_16	CONF	testcases/kernel/syscalls/chown/../utils/compat_tst_16.h:153: TCONF: 16-bit version of chown() is not supported on your platform
 ltp-syscalls	chown03	PASS	
 ltp-syscalls	chown03_16	CONF	testcases/kernel/syscalls/chown/../utils/compat_tst_16.h:153: TCONF: 16-bit version of chown() is not supported on your platform
-ltp-syscalls	chown04	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	chown04_16	BROK	tst_device.c:450: TBROK: Failed to acquire device
+ltp-syscalls	chown04	PASS	
+ltp-syscalls	chown04_16	CONF	testcases/kernel/syscalls/chown/../utils/compat_tst_16.h:153: TCONF: 16-bit version of chown() is not supported on your platform
 ltp-syscalls	chown05	PASS	
 ltp-syscalls	chown05_16	CONF	testcases/kernel/syscalls/chown/../utils/compat_tst_16.h:153: TCONF: 16-bit version of chown() is not supported on your platform
 ltp-syscalls	chroot01	PASS	
 ltp-syscalls	chroot02	PASS	
 ltp-syscalls	chroot03	PASS	
 ltp-syscalls	chroot04	FAIL	chroot04.c:25: TFAIL: no search permission chroot() expected EACCES: EPERM (1)
-ltp-syscalls	clock_adjtime01	CONF	clock_adjtime.h:123: TCONF: syscall(305) __NR_clock_adjtime not supported on your arch
-ltp-syscalls	clock_adjtime02	CONF	clock_adjtime.h:123: TCONF: syscall(305) __NR_clock_adjtime not supported on your arch
+ltp-syscalls	clock_adjtime01	PASS	
+ltp-syscalls	clock_adjtime02	PASS	
 ltp-syscalls	clock_getres01	PASS	
 ltp-syscalls	clock_gettime01	BROK	clock_gettime01.c:82: TBROK: Failed to open FILE '/proc/self/stat' for reading: ENOENT (2)
-ltp-syscalls	clock_gettime02	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	clock_gettime03	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	clock_gettime02	PASS	
+ltp-syscalls	clock_gettime03	PASS	
 ltp-syscalls	clock_gettime04	PASS	
 ltp-syscalls	clock_nanosleep01	FAIL	clock_nanosleep01.c:218: TPASS: clock_nanosleep() failed with: EINVAL (22)
 ltp-syscalls	clock_nanosleep02	FAIL	tst_timer_test.c:314: TFAIL: clock_nanosleep() slept for too long
-ltp-syscalls	clock_nanosleep03	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	clock_nanosleep03	PASS	
 ltp-syscalls	clock_nanosleep04	PASS	
 ltp-syscalls	clock_settime01	PASS	
-ltp-syscalls	clock_settime02	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	clock_settime03	CONF	clock_settime03.c:62: TCONF: syscall(222) __NR_timer_create not supported on your arch
+ltp-syscalls	clock_settime02	FAIL	clock_settime02.c:162: TPASS: clock_settime(CLOCK_REALTIME): failed as expected: EFAULT (14)
+ltp-syscalls	clock_settime03	PASS	
 ltp-syscalls	clock_settime04	PASS	
 ltp-syscalls	clone01	PASS	
-ltp-syscalls	clone02	FAIL	clone02     1  TFAIL  :  clone02.c:140: clone() failed: TEST_ERRNO=EINVAL(22): Invalid argument
+ltp-syscalls	clone02	PASS	
 ltp-syscalls	clone03	PASS	
 ltp-syscalls	clone04	PASS	
 ltp-syscalls	clone05	PASS	
@@ -103,28 +104,28 @@ ltp-syscalls	clone07	PASS
 ltp-syscalls	clone08	BROK	clone08.c:85: TBROK: CLONE_PARENT clone() failed: EINVAL (22)
 ltp-syscalls	clone09	BROK	clone09.c:61: TBROK: Failed to open FILE '/proc/sys/net/ipv4/conf/lo/tag' for reading: ENOENT (2)
 ltp-syscalls	clone10	BROK	clone10.c:59: TBROK: clone() failed: EINVAL (22)
-ltp-syscalls	clone11	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	clone11	PASS	
 ltp-syscalls	clone301	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	clone302	PASS	
-ltp-syscalls	clone303	BROK	tst_cgroup.c:682: TBROK: Can't open /proc/self/mounts: ENOENT (2)
-ltp-syscalls	clone304	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	clone303	CONF	tst_cgroup.c:913: TCONF: V2 'base' controller required, but it's mounted on V1
+ltp-syscalls	clone304	PASS	
 ltp-syscalls	close01	PASS	
 ltp-syscalls	close02	PASS	
 ltp-syscalls	close_range01	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	close_range02	CONF	../../../../include/lapi/close_range.h:25: TCONF: syscall(436) __NR_close_range not supported on your arch
+ltp-syscalls	close_range02	PASS	
 ltp-syscalls	confstr01	PASS	
 ltp-syscalls	connect01	FAIL	connect01.c:139: TFAIL: addrlen is not valid succeeded
-ltp-syscalls	connect02	BROK	tst_taint.c:43: TBROK: Failed to open FILE '/proc/sys/kernel/tainted' for reading: ENOENT (2)
+ltp-syscalls	connect02	CONF	connect02.c:53: TCONF: socket(10, 1, 6) failed: EAFNOSUPPORT (97)
 ltp-syscalls	connect03	FAIL	connect03.c:89: TFAIL: socket type does not support the protocol succeeded
 ltp-syscalls	copy_file_range01	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	copy_file_range02	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	copy_file_range03	BROK	copy_file_range03.c:42: TBROK: copy_file_range unexpectedly failed: ENOSYS (38)
+ltp-syscalls	copy_file_range03	FAIL	copy_file_range03.c:52: TFAIL: diff_us = 0, copy_file_range might not update timestamp
 ltp-syscalls	creat01	PASS	
 ltp-syscalls	creat03	PASS	
 ltp-syscalls	creat04	PASS	
 ltp-syscalls	creat05	FLAKY	HANG once on the GitHub runner, passed on its retry (PR #34, 2026-10-30); last here: PASS
-ltp-syscalls	creat06	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	creat07	FAIL	creat07.c:43: TFAIL: creat() succeeded unexpectedly
+ltp-syscalls	creat06	PASS	
+ltp-syscalls	creat07	PASS	
 ltp-syscalls	creat08	FAIL	creat08.c:55: TFAIL: dir_b/nosetgid: Incorrect group, 65534 != 4
 ltp-syscalls	creat09	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	delete_module01	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
@@ -171,7 +172,7 @@ ltp-syscalls	epoll_wait01	PASS
 ltp-syscalls	epoll_wait02	FAIL	tst_timer_test.c:314: TFAIL: epoll_wait() slept for too long
 ltp-syscalls	epoll_wait03	PASS	
 ltp-syscalls	epoll_wait04	PASS	
-ltp-syscalls	epoll_wait05	FAIL	epoll_wait05.c:78: TFAIL: shutdown(sockfd_client, SHUT_RD) failed: ENOSYS (38)
+ltp-syscalls	epoll_wait05	BROK	epoll_wait05.c:66: TBROK: connect(3, 127.0.0.1, 16) failed: EINVAL (22)
 ltp-syscalls	epoll_wait06	BROK	epoll_wait06.c:41: TBROK: fcntl(4,F_SETPIPE_SZ,...) failed: EINVAL (22)
 ltp-syscalls	epoll_wait07	PASS	
 ltp-syscalls	epoll_wait08	BROK	epoll_wait08.c:54: TBROK: Failed to open FILE '/proc/650/stat' for reading: ENOENT (2)
@@ -183,27 +184,27 @@ ltp-syscalls	epoll_wait13	PASS
 ltp-syscalls	epoll_wait14	PASS	
 ltp-syscalls	epoll_wait15	BROK	epoll_wait15.c:84: TBROK: Failed to open FILE '/proc/673/stat' for reading: ENOENT (2)
 ltp-syscalls	epoll_wait16	BROK	epoll_wait16.c:88: TBROK: Failed to open FILE '/proc/684/stat' for reading: ENOENT (2)
-ltp-syscalls	eventfd01	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	eventfd02	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	eventfd01	PASS	
+ltp-syscalls	eventfd02	PASS	
 ltp-syscalls	eventfd2_01	PASS	
 ltp-syscalls	eventfd2_02	PASS	
 ltp-syscalls	eventfd2_03	PASS	
-ltp-syscalls	eventfd03	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	eventfd04	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	eventfd05	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	eventfd03	PASS	
+ltp-syscalls	eventfd04	PASS	
+ltp-syscalls	eventfd05	PASS	
 ltp-syscalls	eventfd06	CONF	tst_test.c:1429: TCONF: libaio is not available
 ltp-syscalls	execl01	PASS	
 ltp-syscalls	execle01	PASS	
 ltp-syscalls	execlp01	PASS	
 ltp-syscalls	execv01	PASS	
 ltp-syscalls	execve01	PASS	
-ltp-syscalls	execve02	FAIL	execve_child.c:27: TFAIL: execve_child shouldn't be executed
+ltp-syscalls	execve02	PASS	
 ltp-syscalls	execve03	FAIL	execve03.c:106: TFAIL: execve failed unexpectedly; expected Filename too long: ENOENT (2)
-ltp-syscalls	execve04	FAIL	execve_child.c:27: TFAIL: execve_child shouldn't be executed
+ltp-syscalls	execve04	PASS	
 ltp-syscalls	execve05	FLAKY	PASS locally in 41 s of the 60 s limit, TIMEOUT on the GitHub runner (PR #34, 2026-10-30); last here: PASS
-ltp-syscalls	execve06	FAIL	execve06_child.c:15: TFAIL: argc is 0, expected 1
-ltp-syscalls	execveat01	CONF	../../../../include/lapi/execveat.h:18: TCONF: syscall(322) __NR_execveat not supported on your arch
-ltp-syscalls	execveat02	CONF	../../../../include/lapi/execveat.h:18: TCONF: syscall(322) __NR_execveat not supported on your arch
+ltp-syscalls	execve06	PASS	
+ltp-syscalls	execveat01	HANG	no output
+ltp-syscalls	execveat02	PASS	
 ltp-syscalls	execveat03	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	execvp01	PASS	
 ltp-syscalls	exit01	PASS	
@@ -214,8 +215,8 @@ ltp-syscalls	faccessat02	PASS
 ltp-syscalls	faccessat201	PASS	
 ltp-syscalls	faccessat202	PASS	
 ltp-syscalls	fallocate01	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	fallocate02	CONF	fallocate02.c:58: TCONF: fallocate() not supported
-ltp-syscalls	fallocate03	FAIL	fallocate03.c:81: TFAIL: fallocate(fd, DEFAULT_MODE, 8192, 4096) failed: ENOSYS (38)
+ltp-syscalls	fallocate02	PASS	
+ltp-syscalls	fallocate03	PASS	
 ltp-syscalls	fallocate04	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	fallocate05	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	fallocate06	BROK	tst_device.c:450: TBROK: Failed to acquire device
@@ -243,7 +244,7 @@ ltp-syscalls	fanotify21	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	fanotify22	CONF	tst_cmd.c:270: TCONF: Couldn't find 'debugfs' in $PATH
 ltp-syscalls	fanotify23	CONF	tst_sys_conf.c:73: TCONF: Path not found: /proc/sys/vm/vfs_cache_pressure: ENOENT (2)
 ltp-syscalls	fanotify24	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	fanotify25	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	fanotify25	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	fchdir01	PASS	
 ltp-syscalls	fchdir02	PASS	
 ltp-syscalls	fchdir03	PASS	
@@ -252,24 +253,24 @@ ltp-syscalls	fchmod02	PASS
 ltp-syscalls	fchmod03	PASS	
 ltp-syscalls	fchmod04	PASS	
 ltp-syscalls	fchmod05	PASS	
-ltp-syscalls	fchmod06	BROK	tst_device.c:450: TBROK: Failed to acquire device
+ltp-syscalls	fchmod06	PASS	
 ltp-syscalls	fchmodat01	PASS	
 ltp-syscalls	fchmodat02	PASS	
 ltp-syscalls	fchmodat2_01	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	fchmodat2_02	CONF	fchmodat2_02.c:39: TCONF: syscall(452) __NR_fchmodat2 not supported on your arch
+ltp-syscalls	fchmodat2_02	PASS	
 ltp-syscalls	fchown01	PASS	
 ltp-syscalls	fchown01_16	CONF	testcases/kernel/syscalls/fchown/../utils/compat_tst_16.h:143: TCONF: 16-bit version of fchown() is not supported on your platform
 ltp-syscalls	fchown02	PASS	
 ltp-syscalls	fchown02_16	CONF	testcases/kernel/syscalls/fchown/../utils/compat_tst_16.h:143: TCONF: 16-bit version of fchown() is not supported on your platform
 ltp-syscalls	fchown03	PASS	
 ltp-syscalls	fchown03_16	CONF	testcases/kernel/syscalls/fchown/../utils/compat_tst_16.h:143: TCONF: 16-bit version of fchown() is not supported on your platform
-ltp-syscalls	fchown04	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	fchown04_16	BROK	tst_device.c:450: TBROK: Failed to acquire device
+ltp-syscalls	fchown04	PASS	
+ltp-syscalls	fchown04_16	CONF	testcases/kernel/syscalls/fchown/../utils/compat_tst_16.h:143: TCONF: 16-bit version of fchown() is not supported on your platform
 ltp-syscalls	fchown05	PASS	
 ltp-syscalls	fchown05_16	CONF	testcases/kernel/syscalls/fchown/../utils/compat_tst_16.h:143: TCONF: 16-bit version of fchown() is not supported on your platform
 ltp-syscalls	fchownat01	PASS	
 ltp-syscalls	fchownat02	PASS	
-ltp-syscalls	fchownat03	BROK	tst_device.c:450: TBROK: Failed to acquire device
+ltp-syscalls	fchownat03	PASS	
 ltp-syscalls	fcntl01	PASS	
 ltp-syscalls	fcntl01_64	PASS	
 ltp-syscalls	fcntl02	PASS	
@@ -278,40 +279,40 @@ ltp-syscalls	fcntl03	PASS
 ltp-syscalls	fcntl03_64	PASS	
 ltp-syscalls	fcntl04	PASS	
 ltp-syscalls	fcntl04_64	PASS	
-ltp-syscalls	fcntl05	FAIL	fcntl05.c:40: TFAIL: fcntl(3, F_GETLK, &flocks) failed: EINVAL (22)
-ltp-syscalls	fcntl05_64	FAIL	fcntl05.c:40: TFAIL: fcntl(3, F_GETLK, &flocks) failed: EINVAL (22)
+ltp-syscalls	fcntl05	PASS	
+ltp-syscalls	fcntl05_64	PASS	
 ltp-syscalls	fcntl07	PASS	
 ltp-syscalls	fcntl07_64	PASS	
 ltp-syscalls	fcntl08	PASS	
 ltp-syscalls	fcntl08_64	PASS	
-ltp-syscalls	fcntl09	FAIL	fcntl09     1  TFAIL  :  fcntl09.c:163: fcntl(./file_1154, F_SETLK, &flocks) flocks.l_type = F_WRLCK Failed, errno=22 : Invalid argument
-ltp-syscalls	fcntl09_64	FAIL	fcntl09     1  TFAIL  :  fcntl09.c:163: fcntl(./file_1156, F_SETLK, &flocks) flocks.l_type = F_WRLCK Failed, errno=22 : Invalid argument
-ltp-syscalls	fcntl10	FAIL	fcntl10     1  TFAIL  :  fcntl10.c:163: fcntl(tfile_1158, F_SETLKW, &flocks) flocks.l_type = F_WRLCK Failed, errno=22 : Invalid argument
-ltp-syscalls	fcntl10_64	FAIL	fcntl10     1  TFAIL  :  fcntl10.c:163: fcntl(tfile_1160, F_SETLKW, &flocks) flocks.l_type = F_WRLCK Failed, errno=22 : Invalid argument
-ltp-syscalls	fcntl11	FAIL	fcntl11     1  TFAIL  :  fcntl11.c:272: fcntl on file failed: errno=EINVAL(22): Invalid argument
-ltp-syscalls	fcntl11_64	FAIL	fcntl11     1  TFAIL  :  fcntl11.c:272: fcntl on file failed: errno=EINVAL(22): Invalid argument
+ltp-syscalls	fcntl09	PASS	
+ltp-syscalls	fcntl09_64	PASS	
+ltp-syscalls	fcntl10	PASS	
+ltp-syscalls	fcntl10_64	PASS	
+ltp-syscalls	fcntl11	PASS	
+ltp-syscalls	fcntl11_64	PASS	
 ltp-syscalls	fcntl12	PASS	
 ltp-syscalls	fcntl12_64	PASS	
-ltp-syscalls	fcntl13	FAIL	fcntl13.c:45: TFAIL: fcntl(1, F_SETLK, flock) expected EFAULT: EINVAL (22)
-ltp-syscalls	fcntl13_64	FAIL	fcntl13.c:45: TFAIL: fcntl(1, F_SETLK, flock) expected EFAULT: EINVAL (22)
+ltp-syscalls	fcntl13	PASS	
+ltp-syscalls	fcntl13_64	PASS	
 ltp-syscalls	fcntl14	BROK	fcntl14.c:117: TBROK: fcntl(3,F_SETLK,...) failed: EINVAL (22)
 ltp-syscalls	fcntl14_64	BROK	fcntl14.c:117: TBROK: fcntl(3,F_SETLK,...) failed: EINVAL (22)
-ltp-syscalls	fcntl15	BROK	fcntl15.c:142: TBROK: fcntl(3,F_SETLK,...) failed: EINVAL (22)
-ltp-syscalls	fcntl15_64	BROK	fcntl15.c:142: TBROK: fcntl(3,F_SETLK,...) failed: EINVAL (22)
-ltp-syscalls	fcntl16	FAIL	fcntl16     1  TFAIL  :  fcntl16.c:453: First parent lock failed
-ltp-syscalls	fcntl16_64	FAIL	fcntl16     1  TFAIL  :  fcntl16.c:453: First parent lock failed
-ltp-syscalls	fcntl17	FAIL	fcntl17     1  TFAIL  :  fcntl17.c:489: didn't set first child's lock, errno: 0
-ltp-syscalls	fcntl17_64	FAIL	fcntl17     1  TFAIL  :  fcntl17.c:489: didn't set first child's lock, errno: 0
-ltp-syscalls	fcntl18	FAIL	fcntl18     1  TFAIL  :  fcntl18.c:85: Test F_GETLK: for errno EFAULT FAILED
-ltp-syscalls	fcntl18_64	FAIL	fcntl18     1  TFAIL  :  fcntl18.c:85: Test F_GETLK: for errno EFAULT FAILED
-ltp-syscalls	fcntl19	FAIL	fcntl19     1  TFAIL  :  fcntl19.c:314: fcntl on file failed, errno =22
-ltp-syscalls	fcntl19_64	FAIL	fcntl19     1  TFAIL  :  fcntl19.c:314: fcntl on file failed, errno =22
-ltp-syscalls	fcntl20	FAIL	fcntl20     1  TFAIL  :  fcntl20.c:312: fcntl on file failed, errno =22
-ltp-syscalls	fcntl20_64	FAIL	fcntl20     1  TFAIL  :  fcntl20.c:312: fcntl on file failed, errno =22
-ltp-syscalls	fcntl21	FAIL	fcntl21     1  TFAIL  :  fcntl21.c:319: fcntl on file failed, errno =22
-ltp-syscalls	fcntl21_64	FAIL	fcntl21     1  TFAIL  :  fcntl21.c:319: fcntl on file failed, errno =22
-ltp-syscalls	fcntl22	BROK	fcntl22     1  TBROK  :  fcntl22.c:119: fcntl() failed: errno=EINVAL(22): Invalid argument
-ltp-syscalls	fcntl22_64	BROK	fcntl22     1  TBROK  :  fcntl22.c:119: fcntl() failed: errno=EINVAL(22): Invalid argument
+ltp-syscalls	fcntl15	PASS	
+ltp-syscalls	fcntl15_64	PASS	
+ltp-syscalls	fcntl16	PASS	
+ltp-syscalls	fcntl16_64	PASS	
+ltp-syscalls	fcntl17	PASS	
+ltp-syscalls	fcntl17_64	PASS	
+ltp-syscalls	fcntl18	PASS	
+ltp-syscalls	fcntl18_64	PASS	
+ltp-syscalls	fcntl19	PASS	
+ltp-syscalls	fcntl19_64	PASS	
+ltp-syscalls	fcntl20	PASS	
+ltp-syscalls	fcntl20_64	PASS	
+ltp-syscalls	fcntl21	PASS	
+ltp-syscalls	fcntl21_64	PASS	
+ltp-syscalls	fcntl22	PASS	
+ltp-syscalls	fcntl22_64	PASS	
 ltp-syscalls	fcntl23	FAIL	fcntl23     1  TFAIL  :  fcntl23.c:140: fcntl(tfile_1236, F_SETLEASE, F_RDLCK) Failed, errno=22 : Invalid argument
 ltp-syscalls	fcntl23_64	FAIL	fcntl23     1  TFAIL  :  fcntl23.c:140: fcntl(tfile_1238, F_SETLEASE, F_RDLCK) Failed, errno=22 : Invalid argument
 ltp-syscalls	fcntl24	FAIL	fcntl24     1  TFAIL  :  fcntl24.c:150: fcntl(tfile_1240, F_SETLEASE, F_WRLCK) Failed, errno=22 : Invalid argument
@@ -332,18 +333,18 @@ ltp-syscalls	fcntl32	FAIL	fcntl32     1  TFAIL  :  fcntl32.c:115: fcntl(F_SETLEA
 ltp-syscalls	fcntl32_64	FAIL	fcntl32     1  TFAIL  :  fcntl32.c:115: fcntl(F_SETLEASE, F_WRLCK) failed unexpectedly, expected errno is EBUSY or EAGAIN: TEST_ERRNO=EINVAL(22): Invalid argume
 ltp-syscalls	fcntl33	BROK	fcntl33.c:81: TBROK: Failed to open FILE '/proc/sys/fs/lease-break-time' for reading: ENOENT (2)
 ltp-syscalls	fcntl33_64	BROK	fcntl33.c:81: TBROK: Failed to open FILE '/proc/sys/fs/lease-break-time' for reading: ENOENT (2)
-ltp-syscalls	fcntl34	BROK	fcntl34.c:63: TBROK: fcntl(4,38,...) failed: EINVAL (22)
-ltp-syscalls	fcntl34_64	BROK	fcntl34.c:63: TBROK: fcntl(4,38,...) failed: EINVAL (22)
+ltp-syscalls	fcntl34	PASS	
+ltp-syscalls	fcntl34_64	PASS	
 ltp-syscalls	fcntl35	CONF	fcntl35.c:56: TCONF: /proc/sys/fs/pipe-max-size doesn't exist
 ltp-syscalls	fcntl35_64	CONF	fcntl35.c:56: TCONF: /proc/sys/fs/pipe-max-size doesn't exist
-ltp-syscalls	fcntl36	BROK	fcntl36.c:166: TBROK: fcntl(3,38,...) failed: EINVAL (22)
-ltp-syscalls	fcntl36_64	BROK	fcntl36.c:166: TBROK: fcntl(3,38,...) failed: EINVAL (22)
+ltp-syscalls	fcntl36	PASS	
+ltp-syscalls	fcntl36_64	PASS	
 ltp-syscalls	fcntl37	CONF	fcntl37.c:64: TCONF: kernel doesn't support F_GET/SETPIPE_SZ
 ltp-syscalls	fcntl37_64	CONF	fcntl37.c:64: TCONF: kernel doesn't support F_GET/SETPIPE_SZ
-ltp-syscalls	fcntl38	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	fcntl38_64	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	fcntl39	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	fcntl39_64	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	fcntl38	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
+ltp-syscalls	fcntl38_64	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
+ltp-syscalls	fcntl39	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
+ltp-syscalls	fcntl39_64	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	fcntl40	FAIL	fcntl40.c:26: TFAIL: fcntl(fd, F_CREATED_QUERY, 0) (-1) != 0 (0)
 ltp-syscalls	fcntl40_64	FAIL	fcntl40.c:26: TFAIL: fcntl(fd, F_CREATED_QUERY, 0) (-1) != 0 (0)
 ltp-syscalls	fdatasync01	PASS	
@@ -373,10 +374,10 @@ ltp-syscalls	fork01	PASS
 ltp-syscalls	fork03	PASS	
 ltp-syscalls	fork04	PASS	
 ltp-syscalls	fork05	CONF	tst_test.c:1429: TCONF: Test only supports Intel 32 bits
-ltp-syscalls	fork06	TIMEOUT	tst_test.c:1895: TINFO: Overall timeout per run is 0h 00m 30s
+ltp-syscalls	fork06	BROK	tst_test.c:1969: TBROK: Test killed! (timeout?)
 ltp-syscalls	fork07	FLAKY	PASS locally in 36 s of the 60 s limit, failed once on the GitHub runner and passed on its retry (PR #34, 2026-10-30); last here: PASS
 ltp-syscalls	fork08	PASS	
-ltp-syscalls	fork09	TIMEOUT	fork09.c:34: TINFO: Opening files from parent
+ltp-syscalls	fork09	BROK	tst_test.c:1969: TBROK: Test killed! (timeout?)
 ltp-syscalls	fork10	PASS	
 ltp-syscalls	fork11	FLAKY	TIMEOUT and WARN in two x86_64 runs (2026-10-22); last here: WARN; tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	fork13	BROK	tst_sys_conf.c:118: TBROK: Failed to open '/proc/sys/kernel/pid_max' for writing: EACCES (13)
@@ -388,15 +389,15 @@ ltp-syscalls	fsconfig01	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	fsconfig02	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	fsconfig03	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	fsetxattr01	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	fsetxattr02	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	fsetxattr02	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	fsmount01	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	fsmount02	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	fsopen01	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	fsopen02	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	fspick01	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	fspick02	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	fstat02	FAIL	fstat02.c:33: TFAIL: stat_buf.st_nlink (1) != NLINK (2)
-ltp-syscalls	fstat02_64	FAIL	fstat02.c:33: TFAIL: stat_buf.st_nlink (1) != NLINK (2)
+ltp-syscalls	fstat02	PASS	
+ltp-syscalls	fstat02_64	PASS	
 ltp-syscalls	fstat03	PASS	
 ltp-syscalls	fstat03_64	PASS	
 ltp-syscalls	fstatat01	PASS	
@@ -412,8 +413,8 @@ ltp-syscalls	ftruncate01	PASS
 ltp-syscalls	ftruncate01_64	PASS	
 ltp-syscalls	ftruncate03	PASS	
 ltp-syscalls	ftruncate03_64	PASS	
-ltp-syscalls	ftruncate04	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	ftruncate04_64	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	ftruncate04	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
+ltp-syscalls	ftruncate04_64	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	futex_cmp_requeue01	BROK	futex_cmp_requeue01.c:103: TBROK: Failed to open FILE '/proc/1812/stat' for reading: ENOENT (2)
 ltp-syscalls	futex_cmp_requeue02	FAIL	futex_cmp_requeue02.c:55: TFAIL: futex_cmp_requeue() succeeded unexpectedly
 ltp-syscalls	futex_cmp_requeue03	FAIL	futex_cmp_requeue03.c:71: TFAIL: uaddr2 unmapped succeeded
@@ -433,7 +434,7 @@ ltp-syscalls	futex_wake02	BROK	futex_utils.h:46: TBROK: opendir(/proc/1869/task/
 ltp-syscalls	futex_wake03	BROK	futex_wake03.c:80: TBROK: Failed to open FILE '/proc/1928/stat' for reading: ENOENT (2)
 ltp-syscalls	futex_wake04	CONF	tst_hugepage.c:34: TCONF: hugetlbfs is not supported
 ltp-syscalls	futex_wake05	FAIL	futex_wake05.c:67: TFAIL: uaddr unmapped succeeded
-ltp-syscalls	futimesat01	CONF	futimesat01    1  TCONF  :  futimesat01.c:61: syscall(261) __NR_futimesat not supported on your arch
+ltp-syscalls	futimesat01	PASS	
 ltp-syscalls	get_mempolicy01	CONF	tst_test.c:1429: TCONF: test requires libnuma development packages with LIBNUMA_API_VERSION >= 2
 ltp-syscalls	get_mempolicy02	CONF	tst_test.c:1429: TCONF: test requires libnuma development packages with LIBNUMA_API_VERSION >= 2
 ltp-syscalls	get_robust_list01	FAIL	get_robust_list01    5  TFAIL  :  get_robust_list01.c:172: get_robust_list failed unexpectedly: errno=ESRCH(3): No such process
@@ -468,7 +469,7 @@ ltp-syscalls	gethostid01	CONF	tst_test.c:1429: TCONF: sethostid is undefined.
 ltp-syscalls	gethostname01	PASS	
 ltp-syscalls	gethostname02	FAIL	gethostname02.c:23: TFAIL: len is smaller than the actual size succeeded
 ltp-syscalls	getitimer01	FAIL	getitimer01.c:52: TFAIL: getitimer(tc->which, value) failed: ENOSYS (38)
-ltp-syscalls	getitimer02	CONF	getitimer02.c:36: TCONF: syscall(36) __NR_getitimer not supported on your arch
+ltp-syscalls	getitimer02	PASS	
 ltp-syscalls	getpagesize01	PASS	
 ltp-syscalls	getpeername01	FAIL	getpeername01.c:90: TFAIL: getpeername(sockfd, tc->sockaddr, tc->addrlen) expected ENOTCONN: EBADF (9)
 ltp-syscalls	getpgid01	BROK	getpgid01.c:18: TBROK: Failed to open FILE '/proc/1/stat' for reading: ENOENT (2)
@@ -511,7 +512,7 @@ ltp-syscalls	getsockopt02	PASS
 ltp-syscalls	gettid01	BROK	gettid01.c:19: TBROK: Expected 1 conversions got 0 FILE '/proc/self/status'
 ltp-syscalls	gettid02	PASS	
 ltp-syscalls	gettimeofday01	PASS	
-ltp-syscalls	gettimeofday02	TIMEOUT	tst_kconfig.c:73: TINFO: Couldn't locate kernel config!
+ltp-syscalls	gettimeofday02	PASS	
 ltp-syscalls	getuid01	PASS	
 ltp-syscalls	getuid01_16	CONF	testcases/kernel/syscalls/getuid/../utils/compat_tst_16.h:89: TCONF: 16-bit version of getuid() is not supported on your platform
 ltp-syscalls	getuid03	PASS	
@@ -523,38 +524,38 @@ ltp-syscalls	getxattr04	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	getxattr05	CONF	tst_test.c:1429: TCONF: <sys/xattr.h> or <sys/acl.h> does not exist.
 ltp-syscalls	init_module01	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	init_module02	BROK	tst_kconfig.c:658: TBROK: fopen(/proc/cmdline,r) failed: ENOENT (2)
-ltp-syscalls	inotify01	CONF	inotify01.c:133: TCONF: syscall(253) __NR_inotify_init not supported on your arch
-ltp-syscalls	inotify02	CONF	inotify02.c:188: TCONF: syscall(253) __NR_inotify_init not supported on your arch
+ltp-syscalls	inotify01	PASS	
+ltp-syscalls	inotify02	BROK	inotify02.c:95: TBROK: unlink(test_file2) failed: ENOENT (2)
 ltp-syscalls	inotify03	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	inotify04	CONF	inotify04.c:73: TCONF: syscall(253) __NR_inotify_init not supported on your arch
-ltp-syscalls	inotify05	CONF	inotify05.c:124: TCONF: syscall(294) __NR_inotify_init1 not supported on your arch
-ltp-syscalls	inotify06	BROK	inotify06.c:55: TBROK: Failed to open FILE '/proc/sys/fs/inotify/max_user_instances' for reading: ENOENT (2)
-ltp-syscalls	inotify07	TIMEOUT	tst_tmpdir.c:308: TINFO: Using /tmp/LTP_XXXXXX as tmpdir (unknown filesystem)
-ltp-syscalls	inotify08	TIMEOUT	tst_tmpdir.c:308: TINFO: Using /tmp/LTP_XXXXXX as tmpdir (unknown filesystem)
-ltp-syscalls	inotify09	CONF	inotify09.c:76: TCONF: syscall(294) __NR_inotify_init1 not supported on your arch
-ltp-syscalls	inotify10	CONF	inotify10.c:93: TCONF: syscall(253) __NR_inotify_init not supported on your arch
-ltp-syscalls	inotify11	CONF	inotify11.c:63: TCONF: syscall(253) __NR_inotify_init not supported on your arch
-ltp-syscalls	inotify12	CONF	inotify12.c:73: TCONF: syscall(294) __NR_inotify_init1 not supported on your arch
-ltp-syscalls	inotify_init1_01	CONF	inotify_init1_01.c:24: TCONF: syscall(294) __NR_inotify_init1 not supported on your arch
-ltp-syscalls	inotify_init1_02	CONF	inotify_init1_02.c:24: TCONF: syscall(294) __NR_inotify_init1 not supported on your arch
-ltp-syscalls	io_cancel01	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	inotify04	PASS	
+ltp-syscalls	inotify05	PASS	
+ltp-syscalls	inotify06	PASS	
+ltp-syscalls	inotify07	BROK	tst_device.c:450: TBROK: Failed to acquire device
+ltp-syscalls	inotify08	BROK	tst_device.c:450: TBROK: Failed to acquire device
+ltp-syscalls	inotify09	TIMEOUT	../../../../include/tst_fuzzy_sync.h:255: TINFO: end_b - start_b  : { avg = 75203ns, avg_dev =  8721ns, dev_ratio = 0.12 }
+ltp-syscalls	inotify10	PASS	
+ltp-syscalls	inotify11	BROK	tst_test.c:1969: TBROK: Test killed! (timeout?)
+ltp-syscalls	inotify12	FAIL	inotify12.c:82: TFAIL: Could not parse inotify fdinfo
+ltp-syscalls	inotify_init1_01	PASS	
+ltp-syscalls	inotify_init1_02	PASS	
+ltp-syscalls	io_cancel01	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	io_cancel02	CONF	tst_test.c:1429: TCONF: test requires libaio and it's development packages
 ltp-syscalls	io_destroy01	CONF	tst_test.c:1429: TCONF: test requires libaio and it's development packages
-ltp-syscalls	io_destroy02	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	io_getevents01	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	io_destroy02	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
+ltp-syscalls	io_getevents01	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	io_getevents02	CONF	tst_test.c:1429: TCONF: test requires libaio and it's development packages
 ltp-syscalls	io_pgetevents01	CONF	tst_test.c:1429: TCONF: test requires libaio and it's development packages
 ltp-syscalls	io_pgetevents02	CONF	tst_test.c:1429: TCONF: test requires libaio and it's development packages
 ltp-syscalls	io_setup01	CONF	tst_test.c:1429: TCONF: test requires libaio and it's development packages
-ltp-syscalls	io_setup02	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	io_setup02	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	io_submit01	CONF	tst_test.c:1429: TCONF: test requires libaio and it's development packages
-ltp-syscalls	io_submit02	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	io_submit03	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	io_submit04	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	io_submit02	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
+ltp-syscalls	io_submit03	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
+ltp-syscalls	io_submit04	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	io_uring01	CONF	../../../../include/lapi/io_uring.h:336: TCONF: CONFIG_IO_URING not set?
 ltp-syscalls	io_uring02	CONF	../../../../include/lapi/io_uring.h:336: TCONF: CONFIG_IO_URING not set?
 ltp-syscalls	io_uring03	CONF	../../../../include/lapi/io_uring.h:336: TCONF: CONFIG_IO_URING not set?
-ltp-syscalls	io_uring04	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	io_uring04	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	ioctl01	BROK	ioctl01.c:101: TBROK: unable to open pty: ENOENT (2)
 ltp-syscalls	ioctl02	PASS	
 ltp-syscalls	ioctl03	CONF	ioctl03.c:79: TCONF: TUN support is missing?
@@ -563,7 +564,7 @@ ltp-syscalls	ioctl05	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	ioctl06	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	ioctl07	BROK	ioctl07.c:27: TBROK: ioctl(3,(( ((2U)<<30) | ((('R'))<<8) | ((0x00)) | ((sizeof(int))<<16) )),...) failed: EINVAL (22)
 ltp-syscalls	ioctl08	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	ioctl09	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	ioctl09	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	ioctl10	FAIL	ioctl10.c:103: TFAIL: ioctl(fd, PROCMAP_QUERY, q) failed: EINVAL (22)
 ltp-syscalls	ioctl_ficlone01	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	ioctl_ficlone02	BROK	tst_device.c:450: TBROK: Failed to acquire device
@@ -571,39 +572,39 @@ ltp-syscalls	ioctl_ficlone03	BROK	tst_device.c:450: TBROK: Failed to acquire dev
 ltp-syscalls	ioctl_ficlonerange01	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	ioctl_ficlonerange02	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	ioctl_fiemap01	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	ioctl_getlbmd01	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	ioctl_loop01	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	ioctl_loop02	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	ioctl_loop03	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	ioctl_loop04	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	ioctl_loop05	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	ioctl_loop06	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	ioctl_loop07	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	ioctl_ns01	BROK	ioctl_ns01.c:50: TBROK: open(/proc/self/ns/pid,0,0000) failed: ENOENT (2)
-ltp-syscalls	ioctl_ns02	BROK	ioctl_ns02.c:33: TBROK: open(/proc/self/ns/uts,0,0000) failed: ENOENT (2)
-ltp-syscalls	ioctl_ns03	BROK	ioctl_ns03.c:32: TBROK: open(/proc/self/ns/uts,0,0000) failed: ENOENT (2)
-ltp-syscalls	ioctl_ns04	BROK	ioctl_ns04.c:32: TBROK: open(/proc/self/ns/user,0,0000) failed: ENOENT (2)
-ltp-syscalls	ioctl_ns05	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	ioctl_ns06	BROK	ioctl_ns06.c:59: TBROK: ltp_clone failed: EINVAL (22)
-ltp-syscalls	ioctl_ns07	FAIL	ioctl_ns07.c:35: TFAIL: unexpected ioctl error: EINVAL (22)
+ltp-syscalls	ioctl_getlbmd01	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
+ltp-syscalls	ioctl_loop01	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
+ltp-syscalls	ioctl_loop02	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
+ltp-syscalls	ioctl_loop03	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
+ltp-syscalls	ioctl_loop04	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
+ltp-syscalls	ioctl_loop05	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
+ltp-syscalls	ioctl_loop06	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
+ltp-syscalls	ioctl_loop07	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
+ltp-syscalls	ioctl_ns01	PASS	
+ltp-syscalls	ioctl_ns02	PASS	
+ltp-syscalls	ioctl_ns03	PASS	
+ltp-syscalls	ioctl_ns04	PASS	
+ltp-syscalls	ioctl_ns05	PASS	
+ltp-syscalls	ioctl_ns06	PASS	
+ltp-syscalls	ioctl_ns07	PASS	
 ltp-syscalls	ioctl_pidfd01	PASS	
 ltp-syscalls	ioctl_pidfd02	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	ioctl_pidfd03	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	ioctl_pidfd04	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	ioctl_pidfd05	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	ioctl_pidfd06	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	ioctl_pidfd05	FAIL	ioctl_pidfd05.c:46: TFAIL: ioctl(pidfd, PIDFD_GET_INFO, NULL) expected EINVAL: ENOTTY (25)
+ltp-syscalls	ioctl_pidfd06	FAIL	ioctl_pidfd06.c:45: TFAIL: ioctl(pidfd, PIDFD_GET_INFO, info) expected EREMOTE: ENOTTY (25)
 ltp-syscalls	ioctl_sg01	CONF	ioctl_sg01.c:120: TCONF: Could not find any usable SCSI device
-ltp-syscalls	ioperm01	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	ioperm02	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	iopl01	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	iopl02	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	ioperm01	FAIL	exit 5; ioperm01.c:33: TFAIL: ioperm() failed for port address 1021,  errno=38 : ENOSYS: ENOSYS (38)
+ltp-syscalls	ioperm02	FAIL	ioperm02.c:69: TFAIL: Unexpected results for Invalid I/O address ; returned -1 (expected -1), errno 38 (expected errno 22): ENOSYS (38)
+ltp-syscalls	iopl01	FAIL	exit 5; iopl01.c:34: TFAIL: iopl() failed for level 0, errno=38 : ENOSYS: ENOSYS (38)
+ltp-syscalls	iopl02	FAIL	iopl02.c:42: TFAIL: Invalid privilege level returned -1 expected -1, expected EINVAL got : ENOSYS (38)
 ltp-syscalls	ioprio_get01	CONF	ioprio.h:22: TCONF: syscall(252) __NR_ioprio_get not supported on your arch
 ltp-syscalls	ioprio_set01	CONF	ioprio.h:22: TCONF: syscall(252) __NR_ioprio_get not supported on your arch
 ltp-syscalls	ioprio_set02	CONF	ioprio.h:27: TCONF: syscall(251) __NR_ioprio_set not supported on your arch
 ltp-syscalls	ioprio_set03	CONF	ioprio.h:27: TCONF: syscall(251) __NR_ioprio_set not supported on your arch
-ltp-syscalls	kcmp01	CONF	../../../../include/lapi/kcmp.h:36: TCONF: syscall(312) __NR_kcmp not supported on your arch
-ltp-syscalls	kcmp02	CONF	../../../../include/lapi/kcmp.h:36: TCONF: syscall(312) __NR_kcmp not supported on your arch
-ltp-syscalls	kcmp03	TIMEOUT	../../../../include/lapi/kcmp.h:36: TCONF: syscall(312) __NR_kcmp not supported on your arch
+ltp-syscalls	kcmp01	PASS	
+ltp-syscalls	kcmp02	PASS	
+ltp-syscalls	kcmp03	PASS	
 ltp-syscalls	keyctl01	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
 ltp-syscalls	keyctl02	BROK	keyctl02.c:138: TBROK: Failed to open FILE '/proc/sys/kernel/keys/root_maxkeys' for reading: ENOENT (2)
 ltp-syscalls	keyctl03	CONF	../../../../include/lapi/keyctl.h:27: TCONF: syscall(248) __NR_add_key not supported on your arch
@@ -612,7 +613,7 @@ ltp-syscalls	keyctl05	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(
 ltp-syscalls	keyctl06	CONF	../../../../include/lapi/keyctl.h:27: TCONF: syscall(248) __NR_add_key not supported on your arch
 ltp-syscalls	keyctl07	PASS	
 ltp-syscalls	keyctl08	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
-ltp-syscalls	keyctl09	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	keyctl09	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	keyctl10	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
 ltp-syscalls	keyctl11	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
 ltp-syscalls	keyctl12	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
@@ -626,14 +627,14 @@ ltp-syscalls	keyctl19	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(
 ltp-syscalls	keyctl20	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
 ltp-syscalls	keyctl21	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
 ltp-syscalls	keyctl22	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
-ltp-syscalls	keyctl23	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	keyctl23	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	keyctl24	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
-ltp-syscalls	keyctl25	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	keyctl26	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	keyctl27	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	keyctl28	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	keyctl29	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	keyctl30	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	keyctl25	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
+ltp-syscalls	keyctl26	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
+ltp-syscalls	keyctl27	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
+ltp-syscalls	keyctl28	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
+ltp-syscalls	keyctl29	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
+ltp-syscalls	keyctl30	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	kill02	PASS	
 ltp-syscalls	kill03	PASS	
 ltp-syscalls	kill05	BROK	kill05.c:89: TBROK: shmget(1627455496, 4096, 3b6) failed: ENOSYS (38)
@@ -642,7 +643,7 @@ ltp-syscalls	kill08	PASS
 ltp-syscalls	kill10	FLAKY	TIMEOUT and PASS in two x86_64 runs (2026-10-22); last here: PASS
 ltp-syscalls	kill11	PASS	
 ltp-syscalls	kill12	FLAKY	TIMEOUT and PASS in two x86_64 runs (2026-10-22); last here: PASS
-ltp-syscalls	kill13	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	kill13	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	landlock01	CONF	landlock_common.h:28: TCONF: syscall(444) __NR_landlock_create_ruleset not supported on your arch
 ltp-syscalls	landlock02	CONF	landlock_common.h:28: TCONF: syscall(444) __NR_landlock_create_ruleset not supported on your arch
 ltp-syscalls	landlock03	CONF	landlock_common.h:28: TCONF: syscall(444) __NR_landlock_create_ruleset not supported on your arch
@@ -650,20 +651,20 @@ ltp-syscalls	landlock04	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	landlock05	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	landlock06	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	landlock07	CONF	landlock_common.h:28: TCONF: syscall(444) __NR_landlock_create_ruleset not supported on your arch
-ltp-syscalls	landlock08	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	landlock08	CONF	landlock_common.h:28: TCONF: syscall(444) __NR_landlock_create_ruleset not supported on your arch
 ltp-syscalls	landlock09	CONF	landlock_common.h:28: TCONF: syscall(444) __NR_landlock_create_ruleset not supported on your arch
 ltp-syscalls	landlock10	CONF	landlock_common.h:28: TCONF: syscall(444) __NR_landlock_create_ruleset not supported on your arch
-ltp-syscalls	lchown01	BROK	lchown01.c:48: TBROK: lchown(slink_file,700,701) failed: ENOSYS (38)
-ltp-syscalls	lchown01_16	BROK	lchown01.c:48: TBROK: lchown(slink_file,700,701) failed: ENOSYS (38)
-ltp-syscalls	lchown02	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	lchown02_16	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	leapsec01	BROK	leapsec01.c:87: TBROK: adjtimex: ENOSYS (38)
+ltp-syscalls	lchown01	PASS	
+ltp-syscalls	lchown01_16	PASS	
+ltp-syscalls	lchown02	PASS	
+ltp-syscalls	lchown02_16	PASS	
+ltp-syscalls	leapsec01	PASS	
 ltp-syscalls	lgetxattr01	PASS	
 ltp-syscalls	lgetxattr02	PASS	
-ltp-syscalls	link02	FAIL	link02.c:36: TFAIL: link(oldpath,newpath) returned 0 but stat link counts do not match 1 1
-ltp-syscalls	link04	FAIL	link04.c:92: TFAIL: link(<regfile>, <regfile2>) Failed expected errno: 17: EINVAL (22)
-ltp-syscalls	link05	FAIL	link05.c:45: TFAIL: link(lkfile_430, lkfile_430[1-1000]) ret 0 for 1000 files, stat values do not match 1 1
-ltp-syscalls	link08	BROK	tst_device.c:450: TBROK: Failed to acquire device
+ltp-syscalls	link02	PASS	
+ltp-syscalls	link04	PASS	
+ltp-syscalls	link05	BROK	tst_test.c:1969: TBROK: Test killed! (timeout?)
+ltp-syscalls	link08	PASS	
 ltp-syscalls	linkat01	FAIL	linkat01   16  TFAIL  :  linkat01.c:276: linkat failed unexpectedly; expected 2 - No such file or directory: TEST_ERRNO=ENOTDIR(20): Not a directory
 ltp-syscalls	linkat02	BROK	linkat02    1  TBROK  :  tst_device.c:450: Failed to acquire device
 ltp-syscalls	listen01	FAIL	listen01    3  TFAIL  :  listen01.c:102: UDP listen ; returned -1 (expected -1), errno 22 (expected 95)
@@ -698,16 +699,16 @@ ltp-syscalls	lstat02	PASS
 ltp-syscalls	lstat02_64	PASS	
 ltp-syscalls	lstat03	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	lstat03_64	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	madvise01	BROK	madvise01.c:67: TBROK: mount(tmp_madvise, tmp_madvise, tmpfs, 0, 0) failed: ENOSYS (38)
+ltp-syscalls	madvise01	PASS	
 ltp-syscalls	madvise02	BROK	madvise02.c:94: TBROK: mlock failed: ENOSYS (38)
 ltp-syscalls	madvise03	PASS	
 ltp-syscalls	madvise05	PASS	
 ltp-syscalls	madvise06	CONF	tst_test.c:1523: TCONF: Test needs at least 800MB SwapFree
 ltp-syscalls	madvise07	CONF	madvise07.c:57: TCONF: CONFIG_MEMORY_FAILURE probably not set in kconfig: EINVAL (22)
 ltp-syscalls	madvise08	BROK	madvise08.c:66: TBROK: Failed to open FILE '/proc/self/coredump_filter' for reading: ENOENT (2)
-ltp-syscalls	madvise09	BROK	tst_cgroup.c:682: TBROK: Can't open /proc/self/mounts: ENOENT (2)
+ltp-syscalls	madvise09	CONF	tst_cgroup.c:893: TCONF: 'memory' controller required, but not available
 ltp-syscalls	madvise10	PASS	
-ltp-syscalls	madvise11	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	madvise11	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	madvise12	FAIL	madvise12.c:38: TFAIL: madvise(addr, MAP_SIZE, MADV_GUARD_INSTALL) failed: EINVAL (22)
 ltp-syscalls	mallinfo02	CONF	tst_test.c:1429: TCONF: system doesn't implement non-POSIX mallinfo()
 ltp-syscalls	mallinfo2_01	CONF	tst_test.c:1429: TCONF: system doesn't implement non-POSIX mallinfo2()
@@ -732,19 +733,19 @@ ltp-syscalls	mincore02	BROK	mincore02.c:47: TBROK: mmap(0,16384,PROT_READ | PROT
 ltp-syscalls	mincore03	BROK	mincore03.c:59: TBROK: mincore failed: ENOSYS (38)
 ltp-syscalls	mincore04	BROK	mincore04.c:58: TBROK: mlock() failed: ENOSYS (38)
 ltp-syscalls	mkdir02	FAIL	mkdir02.c:32: TFAIL: New dir FAILED to inherit GID: has 65534, expected 4
-ltp-syscalls	mkdir03	BROK	tst_device.c:450: TBROK: Failed to acquire device
+ltp-syscalls	mkdir03	PASS	
 ltp-syscalls	mkdir04	PASS	
 ltp-syscalls	mkdir05	PASS	
 ltp-syscalls	mkdir09	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	mkdirat01	PASS	
-ltp-syscalls	mkdirat02	BROK	tst_device.c:450: TBROK: Failed to acquire device
+ltp-syscalls	mkdirat02	PASS	
 ltp-syscalls	mknod01	PASS	
 ltp-syscalls	mknod02	PASS	
 ltp-syscalls	mknod03	FAIL	mknod03.c:35: TFAIL: buf.st_gid (65534) != free_gid (4)
 ltp-syscalls	mknod04	FAIL	mknod04.c:37: TFAIL: buf.st_gid (65534) != free_gid (4)
 ltp-syscalls	mknod05	FAIL	mknod05.c:36: TFAIL: buf.st_gid (0) != free_gid (4)
 ltp-syscalls	mknod06	PASS	
-ltp-syscalls	mknod07	BROK	tst_device.c:450: TBROK: Failed to acquire device
+ltp-syscalls	mknod07	PASS	
 ltp-syscalls	mknod08	PASS	
 ltp-syscalls	mknod09	PASS	
 ltp-syscalls	mknodat01	PASS	
@@ -779,7 +780,7 @@ ltp-syscalls	mmap19	PASS
 ltp-syscalls	mmap20	PASS	
 ltp-syscalls	mmap21_01	BROK	mmap21.c:48: TBROK: msync(0x400000008000, 4096, 4) failed: ENOSYS (38)
 ltp-syscalls	mmap21_02	BROK	mmap21.c:48: TBROK: msync(0x4000003ed000, 4096000, 4) failed: ENOSYS (38)
-ltp-syscalls	mmap22	BROK	tst_cgroup.c:682: TBROK: Can't open /proc/self/mounts: ENOENT (2)
+ltp-syscalls	mmap22	CONF	tst_cgroup.c:893: TCONF: 'memory' controller required, but not available
 ltp-syscalls	mmap23	PASS	
 ltp-syscalls	mmap24	FAIL	mmap24.c:71: TFAIL: mapping at 0x400000004000 + 33554432 exceeds 2GB limit
 ltp-syscalls	modify_ldt01	CONF	tst_test.c:1432: TCONF: This arch 'x86_64' is not supported for test!
@@ -793,10 +794,10 @@ ltp-syscalls	mount06	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	mount07	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	mount08	BROK	mount08.c:36: TBROK: openat(-100<!>, '/proc/728/fd/3', 10400000, 0): ENOENT (2)
 ltp-syscalls	mount_setattr01	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	mount_setattr02	BROK	mount_setattr02.c:79: TBROK: unshare(131072) failed: ENOSYS (38)
+ltp-syscalls	mount_setattr02	CONF	../../../../include/lapi/fsmount.h:120: TCONF: syscall(442) __NR_mount_setattr not supported on your arch
 ltp-syscalls	move_mount01	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	move_mount02	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	move_mount03	BROK	move_mount03.c:85: TBROK: mount(none, LTP_DIR_A, tmpfs, 0, 0) failed: ENOSYS (38)
+ltp-syscalls	move_mount03	CONF	../../../../include/lapi/fsmount.h:104: TCONF: syscall(428) __NR_open_tree not supported on your arch
 ltp-syscalls	move_pages01	CONF	move_pages01    1  TCONF  :  move_pages_support.c:411: test requires libnuma development packages with LIBNUMA_API_VERSION >= 2
 ltp-syscalls	move_pages02	CONF	move_pages02    1  TCONF  :  move_pages_support.c:411: test requires libnuma development packages with LIBNUMA_API_VERSION >= 2
 ltp-syscalls	move_pages03	CONF	move_pages03    1  TCONF  :  move_pages_support.c:411: test requires libnuma development packages with LIBNUMA_API_VERSION >= 2
@@ -825,8 +826,8 @@ ltp-syscalls	mremap02	PASS
 ltp-syscalls	mremap03	PASS	
 ltp-syscalls	mremap04	PASS	
 ltp-syscalls	mremap05	PASS	
-ltp-syscalls	mremap06	BROK	mremap06.c:110: TBROK: fallocate() failed
-ltp-syscalls	mremap07	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	mremap06	FAIL	mremap06.c:55: TFAIL: page 0 wrong value -48 (0x0)
+ltp-syscalls	mremap07	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	mremap08	PASS	
 ltp-syscalls	mremap09	PASS	
 ltp-syscalls	mseal01	CONF	mseal01.c:40: TCONF: syscall(462) __NR_mseal not supported on your arch
@@ -841,11 +842,11 @@ ltp-syscalls	msgctl12	BROK	msgctl12.c:49: TBROK: msgget(0, 180) failed: ENOSYS (
 ltp-syscalls	msgget01	FAIL	msgget01.c:33: TFAIL: msgget() failed: ENOSYS (38)
 ltp-syscalls	msgget02	BROK	msgget02.c:78: TBROK: msgget(1627460692, 600) failed: ENOSYS (38)
 ltp-syscalls	msgget03	CONF	tst_sys_conf.c:73: TCONF: Path not found: /proc/sys/kernel/msgmni: ENOENT (2)
-ltp-syscalls	msgget04	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	msgget05	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	msgget04	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
+ltp-syscalls	msgget05	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	msgrcv01	BROK	msgrcv01.c:68: TBROK: msgget(1627460692, 780) failed: ENOSYS (38)
 ltp-syscalls	msgrcv02	BROK	msgrcv02.c:75: TBROK: msgget(1627460692, 780) failed: ENOSYS (38)
-ltp-syscalls	msgrcv03	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	msgrcv03	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	msgrcv05	BROK	msgrcv05.c:54: TBROK: msgget(1627460692, 780) failed: ENOSYS (38)
 ltp-syscalls	msgrcv06	BROK	msgrcv06.c:35: TBROK: msgget(1627460692, 780) failed: ENOSYS (38)
 ltp-syscalls	msgrcv07	BROK	msgrcv07.c:52: TBROK: msgget(1627460692, 780) failed: ENOSYS (38)
@@ -864,14 +865,14 @@ ltp-syscalls	munlock02	BROK	munlock02.c:34: TBROK: mlock() failed: ENOSYS (38)
 ltp-syscalls	munlockall01	BROK	munlockall01.c:19: TBROK: Expected 1 conversions got 0 FILE '/proc/self/status'
 ltp-syscalls	munmap01	PASS	
 ltp-syscalls	munmap03	PASS	
-ltp-syscalls	munmap04	TIMEOUT	tst_kconfig.c:73: TINFO: Couldn't locate kernel config!
-ltp-syscalls	name_to_handle_at01	FAIL	../../../../include/lapi/name_to_handle_at.h:47: TFAIL: name_to_handle_at() should fail with EOVERFLOW: ENOSYS (38)
-ltp-syscalls	name_to_handle_at02	FAIL	name_to_handle_at02.c:67: TFAIL: invalid-dfd: name_to_handle_at() should fail with EBADF: ENOSYS (38)
-ltp-syscalls	name_to_handle_at03	FAIL	name_to_handle_at03.c:64: TFAIL: test-file: name_to_handle_at() failed: ENOSYS (38)
+ltp-syscalls	munmap04	BROK	tst_test.c:1969: TBROK: Test killed! (timeout?)
+ltp-syscalls	name_to_handle_at01	PASS	
+ltp-syscalls	name_to_handle_at02	PASS	
+ltp-syscalls	name_to_handle_at03	PASS	
 ltp-syscalls	nanosleep01	FAIL	tst_timer_test.c:314: TFAIL: nanosleep() slept for too long
 ltp-syscalls	nanosleep02	PASS	
 ltp-syscalls	nanosleep04	PASS	
-ltp-syscalls	newuname01	BROK	newuname01.c:34: TBROK: Failed to open FILE '/proc/sys/kernel/hostname' for reading: ENOENT (2)
+ltp-syscalls	newuname01	FAIL	newuname01.c:32: TFAIL: name->sysname (VeridianOS) != "Linux" (Linux)
 ltp-syscalls	nftw01	FAIL	nftw01      3  TFAIL  :  tools.c:267: Test failed
 ltp-syscalls	nftw6401	FAIL	nftw6401    3  TFAIL  :  tools64.c:267: Test failed
 ltp-syscalls	nice01	PASS	
@@ -880,7 +881,7 @@ ltp-syscalls	nice03	PASS
 ltp-syscalls	nice04	PASS	
 ltp-syscalls	nice05	PASS	
 ltp-syscalls	open01	PASS	
-ltp-syscalls	open02	FAIL	open02.c:47: TFAIL: open() unprivileged O_RDONLY | O_NOATIME succeeded
+ltp-syscalls	open02	PASS	
 ltp-syscalls	open03	PASS	
 ltp-syscalls	open04	FLAKY	PASS locally in 55 s of the 60 s limit (2026-10-30); last here: PASS
 ltp-syscalls	open06	PASS	
@@ -888,47 +889,47 @@ ltp-syscalls	open07	PASS
 ltp-syscalls	open08	FAIL	open08.c:50: TFAIL: O_RDWR expected ENAMETOOLONG: ENOENT (2)
 ltp-syscalls	open09	PASS	
 ltp-syscalls	open10	FAIL	open10.c:53: TFAIL: dir_b/nosetgid: Incorrect group, 65534 != 4
-ltp-syscalls	open11	BROK	tst_path_has_mnt_flags.c:52: TBROK: tst_path_has_mnt_flags: failed to open /proc/mounts: ENOENT (2)
+ltp-syscalls	open11	PASS	
 ltp-syscalls	open12	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	open13	FAIL	open13.c:76: TFAIL: read() on original FD succeeded
 ltp-syscalls	open14	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	open15	PASS	
-ltp-syscalls	open_by_handle_at01	FAIL	../../../../include/lapi/name_to_handle_at.h:47: TFAIL: name_to_handle_at() should fail with EOVERFLOW: ENOSYS (38)
-ltp-syscalls	open_by_handle_at02	FAIL	../../../../include/lapi/name_to_handle_at.h:47: TFAIL: name_to_handle_at() should fail with EOVERFLOW: ENOSYS (38)
+ltp-syscalls	open_by_handle_at01	PASS	
+ltp-syscalls	open_by_handle_at02	PASS	
 ltp-syscalls	open_tree01	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	open_tree02	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	openat01	PASS	
 ltp-syscalls	openat02	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	openat03	CONF	openat03    1  TCONF  :  openat03.c:56: O_TMPFILE not supported
 ltp-syscalls	openat04	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	openat201	CONF	../../../../include/lapi/openat2.h:53: TCONF: syscall(437) __NR_openat2 not supported on your arch
-ltp-syscalls	openat202	CONF	../../../../include/lapi/openat2.h:53: TCONF: syscall(437) __NR_openat2 not supported on your arch
-ltp-syscalls	openat203	CONF	../../../../include/lapi/openat2.h:53: TCONF: syscall(437) __NR_openat2 not supported on your arch
+ltp-syscalls	openat201	PASS	
+ltp-syscalls	openat202	PASS	
+ltp-syscalls	openat203	PASS	
 ltp-syscalls	pathconf01	PASS	
 ltp-syscalls	pathconf02	FAIL	pathconf02.c:58: TFAIL: pathconf() fail with path prefix is not a directory invalid retval 8: SUCCESS (0)
 ltp-syscalls	pause01	BROK	pause01.c:37: TBROK: Failed to open FILE '/proc/1109/stat' for reading: ENOENT (2)
 ltp-syscalls	pause02	BROK	pause02.c:33: TBROK: Failed to open FILE '/proc/1113/stat' for reading: ENOENT (2)
 ltp-syscalls	perf_event_open01	CONF	perf_event_open01    1  TCONF  :  perf_event_open01.c:106: Kernel doesn't have perf_event support
-ltp-syscalls	perf_event_open02	BROK	perf_event_open02.c:95: TBROK: setitimer: ENOSYS (38)
+ltp-syscalls	perf_event_open02	CONF	perf_event_open02.c:215: TCONF: Kernel doesn't have perf_event support
 ltp-syscalls	perf_event_open03	CONF	perf_event_open03.c:41: TCONF: intel_pt is not available
-ltp-syscalls	personality01	BROK	personality01.c:58: TBROK: persona(0) failed: ENOSYS (38)
-ltp-syscalls	personality02	BROK	personality02.c:27: TBROK: persona(67108864) failed: ENOSYS (38)
-ltp-syscalls	pidfd_getfd01	CONF	../../../../include/lapi/pidfd.h:79: TCONF: syscall(434) __NR_pidfd_open not supported on your arch
-ltp-syscalls	pidfd_getfd02	CONF	../../../../include/lapi/pidfd.h:79: TCONF: syscall(434) __NR_pidfd_open not supported on your arch
-ltp-syscalls	pidfd_open01	CONF	../../../../include/lapi/pidfd.h:79: TCONF: syscall(434) __NR_pidfd_open not supported on your arch
-ltp-syscalls	pidfd_open02	CONF	../../../../include/lapi/pidfd.h:79: TCONF: syscall(434) __NR_pidfd_open not supported on your arch
-ltp-syscalls	pidfd_open03	CONF	../../../../include/lapi/pidfd.h:79: TCONF: syscall(434) __NR_pidfd_open not supported on your arch
-ltp-syscalls	pidfd_open04	CONF	../../../../include/lapi/pidfd.h:79: TCONF: syscall(434) __NR_pidfd_open not supported on your arch
-ltp-syscalls	pidfd_send_signal01	CONF	../../../../include/lapi/pidfd.h:65: TCONF: syscall(424) __NR_pidfd_send_signal not supported on your arch
-ltp-syscalls	pidfd_send_signal02	CONF	../../../../include/lapi/pidfd.h:65: TCONF: syscall(424) __NR_pidfd_send_signal not supported on your arch
+ltp-syscalls	personality01	PASS	
+ltp-syscalls	personality02	PASS	
+ltp-syscalls	pidfd_getfd01	BROK	pidfd_getfd01.c:53: TBROK: Failed to open FILE '/proc/1162/stat' for reading: ENOENT (2)
+ltp-syscalls	pidfd_getfd02	PASS	
+ltp-syscalls	pidfd_open01	PASS	
+ltp-syscalls	pidfd_open02	PASS	
+ltp-syscalls	pidfd_open03	PASS	
+ltp-syscalls	pidfd_open04	PASS	
+ltp-syscalls	pidfd_send_signal01	PASS	
+ltp-syscalls	pidfd_send_signal02	BROK	pidfd_send_signal02.c:72: TBROK: open(/proc/1,589824,0000) failed: ENOENT (2)
 ltp-syscalls	pidfd_send_signal03	CONF	../../../../include/lapi/pidfd.h:65: TCONF: syscall(424) __NR_pidfd_send_signal not supported on your arch
 ltp-syscalls	pipe01	PASS	
 ltp-syscalls	pipe02	PASS	
 ltp-syscalls	pipe2_01	BROK	pipe2_01.c:58: TBROK: pipe2({-1,-1}) failed with flag(16384): EINVAL (22)
-ltp-syscalls	pipe2_02	FAIL	pipe2_02.c:46: TFAIL: test O_CLOEXEC for pipe2 failed
+ltp-syscalls	pipe2_02	PASS	
 ltp-syscalls	pipe2_04	BROK	pipe2_04.c:74: TBROK: fcntl(3,F_SETPIPE_SZ,...) failed: EINVAL (22)
 ltp-syscalls	pipe03	PASS	
-ltp-syscalls	pipe04	WARN	pipe04      0  TWARN  :  pipe04.c:175: call to alarm(0) failed
+ltp-syscalls	pipe04	PASS	
 ltp-syscalls	pipe05	PASS	
 ltp-syscalls	pipe06	PASS	
 ltp-syscalls	pipe07	BROK	pipe07.c:28: TBROK: opendir(/proc/self/fd) failed: ENOENT (2)
@@ -948,20 +949,20 @@ ltp-syscalls	pipeio_5	BROK	pipeio_5    1  TBROK  :  pipeio.c:459: Couldn't alloc
 ltp-syscalls	pipeio_6	BROK	pipeio_6    1  TBROK  :  pipeio.c:459: Couldn't allocate semaphore: errno=ENOSYS(38): Function not implemented
 ltp-syscalls	pipeio_7	BROK	pipeio_7    1  TBROK  :  pipeio.c:459: Couldn't allocate semaphore: errno=ENOSYS(38): Function not implemented
 ltp-syscalls	pipeio_8	BROK	pipeio_8    1  TBROK  :  pipeio.c:459: Couldn't allocate semaphore: errno=ENOSYS(38): Function not implemented
-ltp-syscalls	pivot_root01	FAIL	pivot_root01.c:102: TFAIL: unshare failed: ENOSYS (38)
+ltp-syscalls	pivot_root01	PASS	
 ltp-syscalls	pkey01	CONF	../../../../include/lapi/pkey.h:43: TCONF: syscall(330) __NR_pkey_alloc not supported on your arch
 ltp-syscalls	poll01	PASS	
 ltp-syscalls	poll02	FAIL	tst_timer_test.c:314: TFAIL: poll() slept for too long
 ltp-syscalls	poll03	FAIL	poll03.c:37: TFAIL: Expect: (pfd.revents & ~POLLHUP) == 0
 ltp-syscalls	poll04	PASS	
-ltp-syscalls	posix_fadvise01	FAIL	posix_fadvise01.c:44: TFAIL: unexpected return value - 38 : ENOSYS, advise 0 - expected 0
-ltp-syscalls	posix_fadvise01_64	FAIL	posix_fadvise01.c:44: TFAIL: unexpected return value - 38 : ENOSYS, advise 0 - expected 0
-ltp-syscalls	posix_fadvise02	FAIL	posix_fadvise02.c:49: TFAIL: unexpected returnd value - 38 : ENOSYS - expected 9
-ltp-syscalls	posix_fadvise02_64	FAIL	posix_fadvise02.c:49: TFAIL: unexpected returnd value - 38 : ENOSYS - expected 9
-ltp-syscalls	posix_fadvise03	FAIL	posix_fadvise03.c:95: TFAIL: unexpected return value - 38 : ENOSYS, advise 6 - expected 22
-ltp-syscalls	posix_fadvise03_64	FAIL	posix_fadvise03.c:95: TFAIL: unexpected return value - 38 : ENOSYS, advise 6 - expected 22
-ltp-syscalls	posix_fadvise04	FAIL	posix_fadvise04.c:49: TFAIL: unexpected return value - 38 : ENOSYS - expected 29
-ltp-syscalls	posix_fadvise04_64	FAIL	posix_fadvise04.c:49: TFAIL: unexpected return value - 38 : ENOSYS - expected 29
+ltp-syscalls	posix_fadvise01	PASS	
+ltp-syscalls	posix_fadvise01_64	PASS	
+ltp-syscalls	posix_fadvise02	PASS	
+ltp-syscalls	posix_fadvise02_64	PASS	
+ltp-syscalls	posix_fadvise03	PASS	
+ltp-syscalls	posix_fadvise03_64	PASS	
+ltp-syscalls	posix_fadvise04	PASS	
+ltp-syscalls	posix_fadvise04_64	PASS	
 ltp-syscalls	ppoll01	PASS	
 ltp-syscalls	prctl01	FAIL	prctl01.c:25: TFAIL: prctl(PR_SET_PDEATHSIG) failed: EINVAL (22)
 ltp-syscalls	prctl02	PASS	
@@ -976,24 +977,24 @@ ltp-syscalls	pread01	PASS
 ltp-syscalls	pread01_64	PASS	
 ltp-syscalls	pread02	PASS	
 ltp-syscalls	pread02_64	PASS	
-ltp-syscalls	preadv01	FAIL	preadv01.c:53: TFAIL: Preadv(2) failed: ENOSYS (38)
-ltp-syscalls	preadv01_64	FAIL	preadv01.c:53: TFAIL: Preadv(2) failed: ENOSYS (38)
-ltp-syscalls	preadv02	FAIL	preadv02.c:81: TFAIL: preadv() failed unexpectedly, expected EINVAL: ENOSYS (38)
-ltp-syscalls	preadv02_64	FAIL	preadv02.c:81: TFAIL: preadv() failed unexpectedly, expected EINVAL: ENOSYS (38)
+ltp-syscalls	preadv01	PASS	
+ltp-syscalls	preadv01_64	PASS	
+ltp-syscalls	preadv02	PASS	
+ltp-syscalls	preadv02_64	PASS	
 ltp-syscalls	preadv03	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	preadv03_64	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	preadv201	FAIL	preadv201.c:64: TFAIL: preadv2() failed: ENOSYS (38)
-ltp-syscalls	preadv201_64	FAIL	preadv201.c:64: TFAIL: preadv2() failed: ENOSYS (38)
-ltp-syscalls	preadv202	FAIL	preadv202.c:83: TFAIL: preadv2() failed unexpectedly, expected EINVAL: ENOSYS (38)
-ltp-syscalls	preadv202_64	FAIL	preadv202.c:83: TFAIL: preadv2() failed unexpectedly, expected EINVAL: ENOSYS (38)
+ltp-syscalls	preadv201	PASS	
+ltp-syscalls	preadv201_64	PASS	
+ltp-syscalls	preadv202	PASS	
+ltp-syscalls	preadv202_64	PASS	
 ltp-syscalls	preadv203	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	preadv203_64	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	process_madvise01	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	process_vm_readv01	CONF	process_vm01.c:72: TCONF: syscall(310) __NR_process_vm_readv not supported on your arch
-ltp-syscalls	process_vm_readv02	CONF	process_vm_readv02.c:65: TCONF: syscall(310) __NR_process_vm_readv not supported on your arch
-ltp-syscalls	process_vm_readv03	CONF	process_vm_readv03.c:140: TCONF: syscall(310) __NR_process_vm_readv not supported on your arch
-ltp-syscalls	process_vm_writev01	CONF	process_vm01.c:81: TCONF: syscall(311) __NR_process_vm_writev not supported on your arch
-ltp-syscalls	process_vm_writev02	CONF	process_vm_writev02.c:73: TCONF: syscall(311) __NR_process_vm_writev not supported on your arch
+ltp-syscalls	process_madvise01	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
+ltp-syscalls	process_vm_readv01	PASS	
+ltp-syscalls	process_vm_readv02	PASS	
+ltp-syscalls	process_vm_readv03	PASS	
+ltp-syscalls	process_vm_writev01	PASS	
+ltp-syscalls	process_vm_writev02	PASS	
 ltp-syscalls	profil01	CONF	profil01    1  TCONF  :  profil01.c:135: system doesn't have profil() support
 ltp-syscalls	prot_hsymlinks	SIGNAL	SIGABRT; prot_hsymlinks    1  TBROK  :  prot_hsymlinks.c:323: Failed to run cmd: useradd hsym
 ltp-syscalls	pselect01	FAIL	tst_timer_test.c:314: TFAIL: pselect() slept for too long
@@ -1007,50 +1008,50 @@ ltp-syscalls	ptrace02	PASS
 ltp-syscalls	ptrace03	PASS	
 ltp-syscalls	ptrace04	CONF	ptrace04    1  TCONF  :  ptrace04.c:103: test not supported for your arch (yet)
 ltp-syscalls	ptrace05	BROK	ptrace05.c:65: TBROK: ptrace() failed: ENOSYS (38)
-ltp-syscalls	ptrace06	TIMEOUT	tst_kconfig.c:73: TINFO: Couldn't locate kernel config!
+ltp-syscalls	ptrace06	BROK	tst_test.c:1969: TBROK: Test killed! (timeout?)
 ltp-syscalls	ptrace07	CONF	ptrace07.c:133: TCONF: NT_X86_XSTATE is unsupported
 ltp-syscalls	ptrace08	BROK	ptrace08.c:82: TBROK: ptrace() failed: EINVAL (22)
-ltp-syscalls	ptrace09	TIMEOUT	tst_kconfig.c:73: TINFO: Couldn't locate kernel config!
+ltp-syscalls	ptrace09	BROK	tst_test.c:1969: TBROK: Test killed! (timeout?)
 ltp-syscalls	ptrace10	BROK	ptrace10.c:48: TBROK: ptrace() failed: EINVAL (22)
 ltp-syscalls	ptrace11	BROK	ptrace11.c:34: TBROK: waitpid(1,0,0) failed: ECHILD (10)
 ltp-syscalls	pwrite01	PASS	
 ltp-syscalls	pwrite01_64	PASS	
-ltp-syscalls	pwrite02	FAIL	pwrite02.c:71: TFAIL: pwrite(-1, 1024, 0) expected EBADF: EOPNOTSUPP (95)
-ltp-syscalls	pwrite02_64	FAIL	pwrite02.c:71: TFAIL: pwrite(-1, 1024, 0) expected EBADF: EOPNOTSUPP (95)
+ltp-syscalls	pwrite02	PASS	
+ltp-syscalls	pwrite02_64	PASS	
 ltp-syscalls	pwrite03	PASS	
 ltp-syscalls	pwrite03_64	PASS	
-ltp-syscalls	pwrite04	BROK	pwrite04.c:57: TBROK: pwrite(3,0x400000006060,1024,0) failed: EOPNOTSUPP (95)
-ltp-syscalls	pwrite04_64	BROK	pwrite04.c:57: TBROK: pwrite(3,0x400000006060,1024,0) failed: EOPNOTSUPP (95)
-ltp-syscalls	pwritev01	FAIL	pwritev01.c:55: TFAIL: pwritev() failed: ENOSYS (38)
-ltp-syscalls	pwritev01_64	FAIL	pwritev01.c:55: TFAIL: pwritev() failed: ENOSYS (38)
-ltp-syscalls	pwritev02	FAIL	pwritev02.c:77: TFAIL: pwritev() failed unexpectedly, expected EINVAL: ENOSYS (38)
-ltp-syscalls	pwritev02_64	FAIL	pwritev02.c:77: TFAIL: pwritev() failed unexpectedly, expected EINVAL: ENOSYS (38)
+ltp-syscalls	pwrite04	FAIL	pwrite04.c:61: TFAIL: file size is 2048 != K3
+ltp-syscalls	pwrite04_64	FAIL	pwrite04.c:61: TFAIL: file size is 2048 != K3
+ltp-syscalls	pwritev01	PASS	
+ltp-syscalls	pwritev01_64	PASS	
+ltp-syscalls	pwritev02	PASS	
+ltp-syscalls	pwritev02_64	PASS	
 ltp-syscalls	pwritev03	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	pwritev03_64	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	pwritev201	FAIL	pwritev201.c:63: TFAIL: pwritev2() failed: ENOSYS (38)
-ltp-syscalls	pwritev201_64	FAIL	pwritev201.c:63: TFAIL: pwritev2() failed: ENOSYS (38)
-ltp-syscalls	pwritev202	FAIL	pwritev202.c:83: TFAIL: pwritev2() failed unexpectedly, expected EINVAL: ENOSYS (38)
-ltp-syscalls	pwritev202_64	FAIL	pwritev202.c:83: TFAIL: pwritev2() failed unexpectedly, expected EINVAL: ENOSYS (38)
-ltp-syscalls	quotactl01	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	pwritev201	PASS	
+ltp-syscalls	pwritev201_64	PASS	
+ltp-syscalls	pwritev202	PASS	
+ltp-syscalls	pwritev202_64	PASS	
+ltp-syscalls	quotactl01	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	quotactl02	CONF	tst_test.c:1429: TCONF: System doesn't have <xfs/xqm.h>
 ltp-syscalls	quotactl03	CONF	tst_test.c:1429: TCONF: System doesn't have <xfs/xqm.h>
-ltp-syscalls	quotactl04	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	quotactl04	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	quotactl05	CONF	tst_test.c:1429: TCONF: This system didn't have <xfs/xqm.h>
-ltp-syscalls	quotactl06	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	quotactl06	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	quotactl07	CONF	tst_test.c:1429: TCONF: System doesn't have <xfs/xqm.h>
-ltp-syscalls	quotactl08	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	quotactl09	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	quotactl08	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
+ltp-syscalls	quotactl09	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	read01	PASS	
 ltp-syscalls	read02	PASS	
 ltp-syscalls	read03	PASS	
 ltp-syscalls	read04	PASS	
-ltp-syscalls	readahead01	CONF	readahead01.c:77: TCONF: syscall(187) __NR_readahead not supported on your arch
+ltp-syscalls	readahead01	PASS	
 ltp-syscalls	readahead02	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	readdir01	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	readdir21	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	readlink01	PASS	
 ltp-syscalls	readlink03	FAIL	readlink03.c:66: TFAIL: readlink() sueeeeded unexpectedly
-ltp-syscalls	readlinkat01	BROK	readlinkat01.c:72: TBROK: open(readlink_symlink,2228224,0000) failed: ELOOP (40)
+ltp-syscalls	readlinkat01	PASS	
 ltp-syscalls	readlinkat02	FAIL	readlinkat02.c:54: TFAIL: readlinkat(3, symlink_file, NULL, 0) succeeded
 ltp-syscalls	readv01	PASS	
 ltp-syscalls	readv02	PASS	
@@ -1072,14 +1073,14 @@ ltp-syscalls	rename03	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	rename04	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	rename05	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	rename06	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	rename07	TIMEOUT	tst_tmpdir.c:308: TINFO: Using /tmp/LTP_XXXXXX as tmpdir (unknown filesystem)
-ltp-syscalls	rename08	TIMEOUT	tst_tmpdir.c:308: TINFO: Using /tmp/LTP_XXXXXX as tmpdir (unknown filesystem)
+ltp-syscalls	rename07	BROK	tst_device.c:450: TBROK: Failed to acquire device
+ltp-syscalls	rename08	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	rename09	PASS	
 ltp-syscalls	rename10	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	rename11	BROK	rename11    1  TBROK  :  tst_device.c:450: Failed to acquire device
 ltp-syscalls	rename12	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	rename13	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	rename14	TIMEOUT	rename14    0  TINFO  :  Using /tmp/LTP_XXXXXX as tmpdir (unknown filesystem)
+ltp-syscalls	rename14	PASS	
 ltp-syscalls	rename15	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	renameat01	BROK	renameat01    1  TBROK  :  tst_device.c:450: Failed to acquire device
 ltp-syscalls	renameat201	FAIL	renameat201    1  TFAIL  :  renameat201.c:159: renameat2() got unexpected return value: expected: 17 - EEXIST: TEST_ERRNO=EINVAL(22): Invalid argument
@@ -1091,7 +1092,7 @@ ltp-syscalls	request_key04	CONF	../../../../include/lapi/keyctl.h:52: TCONF: sys
 ltp-syscalls	request_key05	CONF	request_key05.c:29: TCONF: syscall(249) __NR_request_key not supported on your arch
 ltp-syscalls	request_key06	CONF	../../../../include/lapi/keyctl.h:36: TCONF: syscall(249) __NR_request_key not supported on your arch
 ltp-syscalls	rmdir01	PASS	
-ltp-syscalls	rmdir02	BROK	tst_device.c:450: TBROK: Failed to acquire device
+ltp-syscalls	rmdir02	FAIL	rmdir02.c:94: TPASS: rmdir() failed as expected: ENOTEMPTY (39)
 ltp-syscalls	rmdir03	PASS	
 ltp-syscalls	rt_sigaction01	SIGNAL	SIGSEGV; rt_sigaction01    1  TPASS  :  rt_sigaction call succeeded: result = 0
 ltp-syscalls	rt_sigaction02	PASS	
@@ -1100,8 +1101,8 @@ ltp-syscalls	rt_sigprocmask01	SIGNAL	SIGSEGV; rt_sigprocmask01    0  TINFO  :  U
 ltp-syscalls	rt_sigprocmask02	FAIL	rt_sigprocmask02    1  TFAIL  :  rt_sigprocmask02.c:110: Call to rt_sigprocmask() succeeded, but should failed: TEST_ERRNO=SUCCESS(0): No error information
 ltp-syscalls	rt_sigqueueinfo01	FAIL	rt_sigqueueinfo01.c:70: TFAIL: rt_sigqueueinfo() failed: ESRCH (3)
 ltp-syscalls	rt_sigqueueinfo02	PASS	
-ltp-syscalls	rt_sigsuspend01	TIMEOUT	tst_kconfig.c:73: TINFO: Couldn't locate kernel config!
-ltp-syscalls	rt_sigtimedwait01	TIMEOUT	tse_sigwait.c:331: TPASS: Child exited with expected code
+ltp-syscalls	rt_sigsuspend01	BROK	tst_test.c:1973: TBROK: Test killed by SIGSEGV!
+ltp-syscalls	rt_sigtimedwait01	BROK	tst_test.c:1969: TBROK: Test killed! (timeout?)
 ltp-syscalls	rt_tgsigqueueinfo01	PASS	
 ltp-syscalls	sbrk01	FAIL	sbrk01.c:27: TFAIL: sbrk(8192) returned 0xffffffffffffffff failed: ENOMEM (12)
 ltp-syscalls	sbrk02	PASS	
@@ -1115,17 +1116,17 @@ ltp-syscalls	sched_getattr01	PASS
 ltp-syscalls	sched_getattr02	PASS	
 ltp-syscalls	sched_getparam01	PASS	
 ltp-syscalls	sched_getparam03	PASS	
-ltp-syscalls	sched_getscheduler01	BROK	tst_cgroup.c:682: TBROK: Can't open /proc/self/mounts: ENOENT (2)
+ltp-syscalls	sched_getscheduler01	PASS	
 ltp-syscalls	sched_getscheduler02	PASS	
-ltp-syscalls	sched_rr_get_interval01	BROK	tst_cgroup.c:682: TBROK: Can't open /proc/self/mounts: ENOENT (2)
-ltp-syscalls	sched_rr_get_interval02	BROK	tst_cgroup.c:682: TBROK: Can't open /proc/self/mounts: ENOENT (2)
-ltp-syscalls	sched_rr_get_interval03	BROK	tst_cgroup.c:682: TBROK: Can't open /proc/self/mounts: ENOENT (2)
+ltp-syscalls	sched_rr_get_interval01	PASS	
+ltp-syscalls	sched_rr_get_interval02	PASS	
+ltp-syscalls	sched_rr_get_interval03	PASS	
 ltp-syscalls	sched_setaffinity01	PASS	
 ltp-syscalls	sched_setattr01	PASS	
 ltp-syscalls	sched_setattr02	PASS	
 ltp-syscalls	sched_setparam01	PASS	
-ltp-syscalls	sched_setparam02	BROK	tst_cgroup.c:682: TBROK: Can't open /proc/self/mounts: ENOENT (2)
-ltp-syscalls	sched_setparam03	BROK	tst_cgroup.c:682: TBROK: Can't open /proc/self/mounts: ENOENT (2)
+ltp-syscalls	sched_setparam02	PASS	
+ltp-syscalls	sched_setparam03	PASS	
 ltp-syscalls	sched_setparam04	PASS	
 ltp-syscalls	sched_setparam05	PASS	
 ltp-syscalls	sched_setscheduler01	FAIL	sched_setscheduler01.c:67: TFAIL: sched_setscheduler(1, 99, 0x44de20) expected EINVAL: ESRCH (3)
@@ -1133,7 +1134,7 @@ ltp-syscalls	sched_setscheduler02	PASS
 ltp-syscalls	sched_setscheduler03	PASS	
 ltp-syscalls	sched_setscheduler04	FAIL	exit 33; sched_setscheduler04.c:55: TFAIL: Policy NOT reset to SCHED_NORMAL
 ltp-syscalls	sched_yield01	PASS	
-ltp-syscalls	seccomp01	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	seccomp01	CONF	seccomp01.c:239: TCONF: kernel doesn't support SECCOMP_MODE_STRICT. Skipping CONFIG_SECCOMP tests
 ltp-syscalls	select01	PASS	
 ltp-syscalls	select02	FAIL	tst_timer_test.c:314: TFAIL: select() slept for too long
 ltp-syscalls	select03	PASS	
@@ -1157,30 +1158,30 @@ ltp-syscalls	semop04	BROK	semop04.c:68: TBROK: semget(9142, 1, 3b6) failed: ENOS
 ltp-syscalls	semop05	FAIL	semget failed, errno = 38
 ltp-syscalls	send01	BROK	send01      5  TBROK  :  send01.c:323: socket setup failed connect test 4: errno=ENOSYS(38): Function not implemented
 ltp-syscalls	send02	BROK	tst_test.c:1973: TBROK: Test killed by SIGSEGV!
-ltp-syscalls	sendfile02	FAIL	sendfile02.c:65: TFAIL: sendfile() failed to return expected value, expected: 26, got: -1
-ltp-syscalls	sendfile02_64	FAIL	sendfile02.c:65: TFAIL: sendfile() failed to return expected value, expected: 26, got: -1
-ltp-syscalls	sendfile03	FAIL	sendfile03.c:51: TFAIL: sendfile(..) with out_fd=-1 expected EBADF: ENOSYS (38)
-ltp-syscalls	sendfile03_64	FAIL	sendfile03.c:51: TFAIL: sendfile(..) with out_fd=-1 expected EBADF: ENOSYS (38)
-ltp-syscalls	sendfile04	FAIL	sendfile04.c:60: TFAIL: sendfile(..) with pass_mapped_buffer, protection=0 expected EFAULT: ENOSYS (38)
-ltp-syscalls	sendfile04_64	FAIL	sendfile04.c:60: TFAIL: sendfile(..) with pass_mapped_buffer, protection=0 expected EFAULT: ENOSYS (38)
-ltp-syscalls	sendfile05	FAIL	sendfile05.c:39: TFAIL: sendfile(out, in, &offset, ..) with offset=-1 expected EINVAL: ENOSYS (38)
-ltp-syscalls	sendfile05_64	FAIL	sendfile05.c:39: TFAIL: sendfile(out, in, &offset, ..) with offset=-1 expected EINVAL: ENOSYS (38)
-ltp-syscalls	sendfile06	FAIL	sendfile06.c:50: TFAIL: sendfile() failed to return expected value, expected: 26, got: -1
-ltp-syscalls	sendfile06_64	FAIL	sendfile06.c:50: TFAIL: sendfile() failed to return expected value, expected: 26, got: -1
+ltp-syscalls	sendfile02	PASS	
+ltp-syscalls	sendfile02_64	PASS	
+ltp-syscalls	sendfile03	PASS	
+ltp-syscalls	sendfile03_64	PASS	
+ltp-syscalls	sendfile04	PASS	
+ltp-syscalls	sendfile04_64	PASS	
+ltp-syscalls	sendfile05	PASS	
+ltp-syscalls	sendfile05_64	PASS	
+ltp-syscalls	sendfile06	PASS	
+ltp-syscalls	sendfile06_64	PASS	
 ltp-syscalls	sendfile07	BROK	sendfile07.c:38: TBROK: write(out_fd, buf, 1): ENOMEM (12)
 ltp-syscalls	sendfile07_64	BROK	sendfile07.c:38: TBROK: write(out_fd, buf, 1): ENOMEM (12)
-ltp-syscalls	sendfile08	BROK	sendfile08.c:34: TBROK: sendfile() failed: ENOSYS (38)
-ltp-syscalls	sendfile08_64	BROK	sendfile08.c:34: TBROK: sendfile() failed: ENOSYS (38)
+ltp-syscalls	sendfile08	PASS	
+ltp-syscalls	sendfile08_64	PASS	
 ltp-syscalls	sendfile09	CONF	sendfile09.c:44: TCONF: Test on large file needs 5G free space
 ltp-syscalls	sendfile09_64	CONF	sendfile09.c:44: TCONF: Test on large file needs 5G free space
 ltp-syscalls	sendmmsg01	FAIL	exit 33; sendmmsg01.c:28: TFAIL: sendmmsg() failed: EINVAL (22)
 ltp-syscalls	sendmmsg02	PASS	
 ltp-syscalls	sendmsg01	BROK	sendmsg01    1  TBROK  :  sendmsg01.c:544: ip/ifconfig failed to bring up loop back device
 ltp-syscalls	sendmsg02	BROK	sendmsg02    1  TBROK  :  sendmsg02.c:220: Couldn't allocate semaphore: errno=ENOSYS(38): Function not implemented
-ltp-syscalls	sendmsg03	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	sendmsg03	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	sendto01	BROK	sendto01    9  TBROK  :  sendto01.c:392: socket setup failed connect test 8: errno=ENOSYS(38): Function not implemented
 ltp-syscalls	sendto02	CONF	sendto02.c:38: TCONF: sctp protocol was not supported
-ltp-syscalls	sendto03	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	sendto03	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	set_mempolicy01	CONF	tst_test.c:1429: TCONF: test requires libnuma development packages with LIBNUMA_API_VERSION >= 2
 ltp-syscalls	set_mempolicy02	CONF	tst_test.c:1429: TCONF: test requires libnuma development packages with LIBNUMA_API_VERSION >= 2
 ltp-syscalls	set_mempolicy03	CONF	tst_test.c:1429: TCONF: test requires libnuma development packages with LIBNUMA_API_VERSION >= 2
@@ -1189,9 +1190,9 @@ ltp-syscalls	set_robust_list01	PASS
 ltp-syscalls	set_thread_area01	CONF	tst_test.c:1432: TCONF: This arch 'x86_64' is not supported for test!
 ltp-syscalls	set_thread_area02	CONF	tst_test.c:1432: TCONF: This arch 'x86_64' is not supported for test!
 ltp-syscalls	set_tid_address01	PASS	
-ltp-syscalls	setdomainname01	FAIL	exit 37; setdomainname01.c:18: TFAIL: setdomainname() failed: 38: ENOSYS (38)
-ltp-syscalls	setdomainname02	FAIL	exit 37; setdomainname02.c:39: TFAIL: unexpected errno: 38, expected: 22: ENOSYS (38)
-ltp-syscalls	setdomainname03	FAIL	exit 37; setdomainname03.c:27: TFAIL: unexpected errno: 38, expected: EPERM: ENOSYS (38)
+ltp-syscalls	setdomainname01	PASS	
+ltp-syscalls	setdomainname02	PASS	
+ltp-syscalls	setdomainname03	PASS	
 ltp-syscalls	setegid01	PASS	
 ltp-syscalls	setegid02	PASS	
 ltp-syscalls	setfsgid01	PASS	
@@ -1220,13 +1221,13 @@ ltp-syscalls	setgroups02	PASS
 ltp-syscalls	setgroups02_16	CONF	testcases/kernel/syscalls/setgroups/../utils/compat_tst_16.h:74: TCONF: 16-bit version of setgroups() is not supported on your platform
 ltp-syscalls	setgroups03	FAIL	setgroups03.c:48: TFAIL: setgroups(33, groups_list) succeeded
 ltp-syscalls	setgroups03_16	CONF	testcases/kernel/syscalls/setgroups/../utils/compat_tst_16.h:74: TCONF: 16-bit version of setgroups() is not supported on your platform
-ltp-syscalls	sethostname01	FAIL	exit 37; testcases/kernel/syscalls/sethostname/../setdomainname/setdomainname01.c:18: TFAIL: sethostname() failed: 38: ENOSYS (38)
-ltp-syscalls	sethostname02	FAIL	exit 37; testcases/kernel/syscalls/sethostname/../setdomainname/setdomainname02.c:39: TFAIL: unexpected errno: 38, expected: 22: ENOSYS (38)
-ltp-syscalls	sethostname03	FAIL	exit 37; testcases/kernel/syscalls/sethostname/../setdomainname/setdomainname03.c:27: TFAIL: unexpected errno: 38, expected: EPERM: ENOSYS (38)
-ltp-syscalls	setitimer01	FAIL	exit 33; setitimer01.c:124: TFAIL: Child: exited with 0
-ltp-syscalls	setitimer02	CONF	../../../../include/tst_timer.h:382: TCONF: syscall(38) __NR_setitimer not supported on your arch
-ltp-syscalls	setns01	CONF	setns01.c:149: TCONF: syscall(308) __NR_setns not supported on your arch
-ltp-syscalls	setns02	CONF	setns02.c:154: TCONF: syscall(308) __NR_setns not supported on your arch
+ltp-syscalls	sethostname01	PASS	
+ltp-syscalls	sethostname02	PASS	
+ltp-syscalls	sethostname03	PASS	
+ltp-syscalls	setitimer01	PASS	
+ltp-syscalls	setitimer02	PASS	
+ltp-syscalls	setns01	PASS	
+ltp-syscalls	setns02	BROK	setns02.c:165: TBROK: shmget(1090650121, 4096, 3b6) failed: ENOSYS (38)
 ltp-syscalls	setpgid01	PASS	
 ltp-syscalls	setpgid02	PASS	
 ltp-syscalls	setpgid03	PASS	
@@ -1285,12 +1286,12 @@ ltp-syscalls	setsockopt01	FAIL	setsockopt01.c:93: TFAIL: setsockopt() succeeded 
 ltp-syscalls	setsockopt02	CONF	setsockopt02.c:55: TCONF: socket(17, 3, 768) failed: EAFNOSUPPORT (97)
 ltp-syscalls	setsockopt03	PASS	
 ltp-syscalls	setsockopt04	PASS	
-ltp-syscalls	setsockopt05	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	setsockopt06	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	setsockopt07	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	setsockopt08	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	setsockopt09	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	setsockopt10	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	setsockopt05	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
+ltp-syscalls	setsockopt06	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
+ltp-syscalls	setsockopt07	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
+ltp-syscalls	setsockopt08	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
+ltp-syscalls	setsockopt09	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
+ltp-syscalls	setsockopt10	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	setsockopt11	BROK	tst_taint.c:43: TBROK: Failed to open FILE '/proc/sys/kernel/tainted' for reading: ENOENT (2)
 ltp-syscalls	settimeofday01	PASS	
 ltp-syscalls	settimeofday02	PASS	
@@ -1321,8 +1322,8 @@ ltp-syscalls	shmdt02	BROK	shmdt02.c:38: TBROK: shmget(1627455496, 8192, 780) fai
 ltp-syscalls	shmget02	CONF	tst_sys_conf.c:73: TCONF: Path not found: /proc/sys/kernel/shmmax: ENOENT (2)
 ltp-syscalls	shmget03	BROK	shmget03.c:37: TBROK: fopen(/proc/sysvipc/shm,r) failed: ENOENT (2)
 ltp-syscalls	shmget04	BROK	shmget04.c:53: TBROK: shmget(1627460692, 2048, 600) failed: ENOSYS (38)
-ltp-syscalls	shmget05	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	shmget06	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	shmget05	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
+ltp-syscalls	shmget06	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	shutdown01	BROK	shutdown01.c:92: TBROK: recv(3, 0x7ffdf182ea0c, 4, 0) failed: EAGAIN/EWOULDBLOCK (11)
 ltp-syscalls	shutdown02	FAIL	shutdown02.c:38: TFAIL: shutdown(*tc->socket, tc->flags) expected EBADF: ENOSYS (38)
 ltp-syscalls	sigaction01	FAIL	sigaction01    1  TFAIL  :  sigaction01.c:125: SA_RESETHAND should not cause SA_SIGINFO to be cleared, but it was.
@@ -1343,11 +1344,11 @@ ltp-syscalls	signalfd4_02	PASS
 ltp-syscalls	sigpending02	PASS	
 ltp-syscalls	sigprocmask01	PASS	
 ltp-syscalls	sigrelse01	PASS	
-ltp-syscalls	sigsuspend01	TIMEOUT	tst_kconfig.c:73: TINFO: Couldn't locate kernel config!
+ltp-syscalls	sigsuspend01	PASS	
 ltp-syscalls	sigsuspend02	PASS	
-ltp-syscalls	sigtimedwait01	TIMEOUT	tst_kconfig.c:73: TINFO: Couldn't locate kernel config!
+ltp-syscalls	sigtimedwait01	BROK	tst_test.c:1969: TBROK: Test killed! (timeout?)
 ltp-syscalls	sigwait01	PASS	
-ltp-syscalls	sigwaitinfo01	TIMEOUT	tst_kconfig.c:73: TINFO: Couldn't locate kernel config!
+ltp-syscalls	sigwaitinfo01	BROK	tst_test.c:1969: TBROK: Test killed! (timeout?)
 ltp-syscalls	socket01	FAIL	socket01.c:67: TFAIL: expected EPROTONOSUPPORT(93): EINVAL (22)
 ltp-syscalls	socket02	PASS	
 ltp-syscalls	socketcall01	CONF	socketcall01.c:39: TCONF: syscall(-1) __NR_socketcall not supported on your arch
@@ -1356,13 +1357,13 @@ ltp-syscalls	socketcall03	CONF	socketcall03.c:32: TCONF: syscall(-1) __NR_socket
 ltp-syscalls	socketpair01	FAIL	socketpair01.c:73: TFAIL: expected EPROTONOSUPPORT(93): EINVAL (22)
 ltp-syscalls	socketpair02	PASS	
 ltp-syscalls	sockioctl01	BROK	sockioctl01    6  TBROK  :  sockioctl01.c:225: ioctl(3,SIOCGIFCONF,...) failed: errno=EINVAL(22): Invalid argument
-ltp-syscalls	splice01	BROK	splice01.c:64: TBROK: splice(fd_in, pipe) failed: ENOSYS (38)
+ltp-syscalls	splice01	PASS	
 ltp-syscalls	splice02	BROK	splice02.c:126: TBROK: fcntl(4,F_GETPIPE_SZ,...) failed: EINVAL (22)
-ltp-syscalls	splice03	FAIL	splice03.c:87: TFAIL: splice() failed unexpectedly; expected: 9 - EBADF: ENOSYS (38)
-ltp-syscalls	splice04	FAIL	splice04.c:56: TFAIL: splice error: ENOSYS (38)
+ltp-syscalls	splice03	PASS	
+ltp-syscalls	splice04	PASS	
 ltp-syscalls	splice05	FAIL	splice05.c:69: TFAIL: splice error: ENOSYS (38)
 ltp-syscalls	splice06	CONF	tst_sys_conf.c:73: TCONF: Path not found: /proc/sys/fs/pipe-max-size: ENOENT (2)
-ltp-syscalls	splice07	FAIL	exit 33; splice07.c:56: TFAIL: splice() on file -> file expected EBADF, EINVAL: ENOSYS (38)
+ltp-syscalls	splice07	BROK	tst_fd.c:151: TCONF: Skipping fanotify: ENOSYS (38)
 ltp-syscalls	splice08	BROK	splice08.c:74: TBROK: open(/dev/full,0,0000) failed: ENOENT (2)
 ltp-syscalls	splice09	FAIL	splice09.c:37: TFAIL: splice(pipefd[0], NULL, dev_fd, NULL, sizeof(buf), 0) failed: ENOSYS (38)
 ltp-syscalls	ssetmask01	CONF	ssetmask01    1  TCONF  :  ssetmask01.c:115: syscall(-1) __NR_ssetmask not supported on your arch
@@ -1399,7 +1400,7 @@ ltp-syscalls	statx05	CONF	tst_cmd.c:270: TCONF: Couldn't find 'mkfs.ext4' in $PA
 ltp-syscalls	statx06	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	statx07	CONF	tst_cmd.c:270: TCONF: Couldn't find 'exportfs' in $PATH
 ltp-syscalls	statx08	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	statx09	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	statx09	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	statx10	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	statx11	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	statx12	BROK	tst_device.c:450: TBROK: Failed to acquire device
@@ -1411,14 +1412,14 @@ ltp-syscalls	swapoff02	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	swapon01	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	swapon02	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	swapon03	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	swapon04	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	swapon04	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	switch01	CONF	tst_test.c:1429: TCONF: This system does not support running of switch() syscall
 ltp-syscalls	symlink02	PASS	
-ltp-syscalls	symlink03	FAIL	symlink03    2  TFAIL  :  symlink03.c:183: symlink() Fails, Specified symlink already exists, errno=22, expected errno=17
+ltp-syscalls	symlink03	PASS	
 ltp-syscalls	symlink04	PASS	
 ltp-syscalls	symlinkat01	FAIL	symlinkat01    9  TFAIL  :  symlinkat01.c:199: symlinkat() Failed, errno=20 : Not a directory
 ltp-syscalls	sync01	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	sync_file_range01	CONF	sync_file_range01.c:77: TCONF: syscall(277) __NR_sync_file_range not supported on your arch
+ltp-syscalls	sync_file_range01	PASS	
 ltp-syscalls	sync_file_range02	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	syncfs01	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	syscall01	PASS	
@@ -1427,41 +1428,41 @@ ltp-syscalls	sysconf01	PASS
 ltp-syscalls	sysctl01	CONF	sysctl01.c:53: TCONF: syscall(156) __NR__sysctl not supported on your arch
 ltp-syscalls	sysctl03	CONF	sysctl03.c:55: TCONF: syscall(156) __NR__sysctl not supported on your arch
 ltp-syscalls	sysctl04	CONF	sysctl04.c:52: TCONF: syscall(156) __NR__sysctl not supported on your arch
-ltp-syscalls	sysfs01	CONF	sysfs01.c:20: TCONF: syscall(139) __NR_sysfs not supported on your arch
-ltp-syscalls	sysfs02	CONF	sysfs02.c:23: TCONF: syscall(139) __NR_sysfs not supported on your arch
-ltp-syscalls	sysfs03	CONF	sysfs03.c:19: TCONF: syscall(139) __NR_sysfs not supported on your arch
-ltp-syscalls	sysfs04	CONF	sysfs04.c:20: TCONF: syscall(139) __NR_sysfs not supported on your arch
-ltp-syscalls	sysfs05	CONF	sysfs05.c:33: TCONF: syscall(139) __NR_sysfs not supported on your arch
+ltp-syscalls	sysfs01	PASS	
+ltp-syscalls	sysfs02	PASS	
+ltp-syscalls	sysfs03	PASS	
+ltp-syscalls	sysfs04	PASS	
+ltp-syscalls	sysfs05	PASS	
 ltp-syscalls	sysinfo01	BROK	sysinfo01.c:37: TBROK: Expected 1 conversions got 0 FILE '/proc/meminfo'
 ltp-syscalls	sysinfo02	PASS	
-ltp-syscalls	sysinfo03	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	sysinfo03	PASS	
 ltp-syscalls	syslog11	BROK	tst_sys_conf.c:73: TBROK: Path not found: /proc/sys/kernel/printk: ENOENT (2)
 ltp-syscalls	syslog12	CONF	syslog12.c:70: TCONF: syscall(103) __NR_syslog not supported on your arch
-ltp-syscalls	tee01	BROK	tee01.c:61: TBROK: splice(3, 0, 6, 0, 1024, 0) failed: ENOSYS (38)
-ltp-syscalls	tee02	FAIL	tee02.c:64: TFAIL: tee() failed unexpectedly; expected: 22 - EINVAL: ENOSYS (38)
+ltp-syscalls	tee01	PASS	
+ltp-syscalls	tee02	PASS	
 ltp-syscalls	tgkill01	PASS	
 ltp-syscalls	tgkill02	PASS	
 ltp-syscalls	tgkill03	PASS	
 ltp-syscalls	time01	PASS	
 ltp-syscalls	timer_create01	NOTBUILT	not built: uses glibc's private struct sigevent member _sigev_un
-ltp-syscalls	timer_create02	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	timer_create02	PASS	
 ltp-syscalls	timer_create03	NOTBUILT	not built: uses glibc's private struct sigevent member _sigev_un
-ltp-syscalls	timer_delete01	CONF	timer_delete01.c:35: TCONF: syscall(222) __NR_timer_create not supported on your arch
-ltp-syscalls	timer_delete02	CONF	timer_delete02.c:26: TCONF: syscall(226) __NR_timer_delete not supported on your arch
-ltp-syscalls	timer_getoverrun01	CONF	timer_getoverrun01.c:31: TCONF: syscall(222) __NR_timer_create not supported on your arch
-ltp-syscalls	timer_gettime01	CONF	timer_gettime01.c:40: TCONF: syscall(222) __NR_timer_create not supported on your arch
-ltp-syscalls	timer_settime01	CONF	timer_settime01.c:116: TCONF: syscall(222) __NR_timer_create not supported on your arch
-ltp-syscalls	timer_settime02	CONF	timer_settime02.c:100: TCONF: syscall(222) __NR_timer_create not supported on your arch
-ltp-syscalls	timer_settime03	BROK	timer_settime03.c:65: TBROK: timer_create(CLOCK_REALTIME) failed: ENOSYS (38)
+ltp-syscalls	timer_delete01	PASS	
+ltp-syscalls	timer_delete02	PASS	
+ltp-syscalls	timer_getoverrun01	PASS	
+ltp-syscalls	timer_gettime01	PASS	
+ltp-syscalls	timer_settime01	PASS	
+ltp-syscalls	timer_settime02	PASS	
+ltp-syscalls	timer_settime03	PASS	
 ltp-syscalls	timerfd01	FLAKY	FAIL and WARN in two x86_64 runs (2026-10-22); last here: WARN; tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	timerfd02	PASS	
-ltp-syscalls	timerfd04	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	timerfd04	FAIL	timerfd04.c:106: TFAIL: timerfd CLOCK_MONOTONIC slept too long 540730
 ltp-syscalls	timerfd_create01	PASS	
 ltp-syscalls	timerfd_gettime01	FAIL	timerfd_gettime01.c:91: TFAIL: timerfd_gettime() failed unexpectedly; expected: 22 - Invalid argument: EBADF (9)
 ltp-syscalls	timerfd_settime01	FAIL	timerfd_settime01.c:98: TFAIL: timerfd_settime() failed unexpectedly; expected: 22 - Invalid argument: EBADF (9)
-ltp-syscalls	timerfd_settime02	BROK	tst_taint.c:43: TBROK: Failed to open FILE '/proc/sys/kernel/tainted' for reading: ENOENT (2)
+ltp-syscalls	timerfd_settime02	TIMEOUT	../../../../include/tst_fuzzy_sync.h:255: TINFO: end_b - start_b  : { avg = 12660ns, avg_dev =   427ns, dev_ratio = 0.03 }
 ltp-syscalls	times01	PASS	
-ltp-syscalls	times03	TIMEOUT	tst_memutils.c:153: TINFO: oom_score_adj does not exist, skipping the adjustment
+ltp-syscalls	times03	PASS	
 ltp-syscalls	tkill01	PASS	
 ltp-syscalls	tkill02	PASS	
 ltp-syscalls	truncate02	PASS	
@@ -1477,49 +1478,49 @@ ltp-syscalls	umount2_02	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	umount03	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	uname01	FAIL	uname01.c:27: TFAIL: sysname is not Linux
 ltp-syscalls	uname02	PASS	
-ltp-syscalls	uname04	BROK	uname04.c:72: TBROK: persona(131072) failed: ENOSYS (38)
+ltp-syscalls	uname04	PASS	
 ltp-syscalls	unlink05	PASS	
 ltp-syscalls	unlink07	PASS	
 ltp-syscalls	unlink08	PASS	
 ltp-syscalls	unlink09	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	unlink10	BROK	tst_device.c:450: TBROK: Failed to acquire device
+ltp-syscalls	unlink10	PASS	
 ltp-syscalls	unlinkat01	PASS	
-ltp-syscalls	unshare01	FAIL	unshare01.c:47: TFAIL: unshare(CLONE_FILES) failed: ENOSYS (38)
-ltp-syscalls	unshare02	FAIL	unshare02.c:49: TFAIL: unshare(-1) expected EINVAL: ENOSYS (38)
+ltp-syscalls	unshare01	PASS	
+ltp-syscalls	unshare02	PASS	
 ltp-syscalls	unshare03	CONF	tst_sys_conf.c:73: TCONF: Path not found: /proc/sys/fs/nr_open: ENOENT (2)
-ltp-syscalls	unshare04	FAIL	unshare04.c:47: TFAIL: unshare(CLONE_NEWNS) failed: ENOSYS (38)
+ltp-syscalls	unshare04	PASS	
 ltp-syscalls	unshare05	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	userfaultfd01	CONF	../../../../include/lapi/userfaultfd.h:259: TCONF: syscall(323) __NR_userfaultfd not supported on your arch
 ltp-syscalls	userfaultfd02	CONF	../../../../include/lapi/userfaultfd.h:259: TCONF: syscall(323) __NR_userfaultfd not supported on your arch
-ltp-syscalls	userfaultfd03	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	userfaultfd04	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	userfaultfd05	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	userfaultfd03	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
+ltp-syscalls	userfaultfd04	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
+ltp-syscalls	userfaultfd05	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	userfaultfd06	CONF	../../../../include/lapi/userfaultfd.h:259: TCONF: syscall(323) __NR_userfaultfd not supported on your arch
 ltp-syscalls	userfaultfd07	CONF	../../../../include/lapi/userfaultfd.h:259: TCONF: syscall(323) __NR_userfaultfd not supported on your arch
-ltp-syscalls	ustat01	CONF	ustat01.c:26: TCONF: syscall(136) __NR_ustat not supported on your arch
-ltp-syscalls	ustat02	CONF	ustat02.c:40: TCONF: syscall(136) __NR_ustat not supported on your arch
+ltp-syscalls	ustat01	PASS	
+ltp-syscalls	ustat02	PASS	
 ltp-syscalls	utime01	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	utime02	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	utime03	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	utime04	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	utime05	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	utime06	BROK	tst_device.c:450: TBROK: Failed to acquire device
+ltp-syscalls	utime06	PASS	
 ltp-syscalls	utime07	PASS	
 ltp-syscalls	utimensat01	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	utimes01	BROK	tst_device.c:450: TBROK: Failed to acquire device
+ltp-syscalls	utimes01	FAIL	utimes01.c:83: TFAIL: utimes() failed unexpectedly; expected: 14 - EFAULT: EBADF (9)
 ltp-syscalls	vfork01	PASS	
 ltp-syscalls	vfork02	PASS	
 ltp-syscalls	vhangup01	CONF	vhangup01.c:32: TCONF: syscall(153) __NR_vhangup not supported on your arch
 ltp-syscalls	vhangup02	CONF	vhangup02.c:29: TCONF: syscall(153) __NR_vhangup not supported on your arch
-ltp-syscalls	vmsplice01	BROK	vmsplice01.c:77: TBROK: vmsplice() failed: ENOSYS (38)
-ltp-syscalls	vmsplice02	FAIL	vmsplice02.c:73: TFAIL: vmsplice() failed unexpectedly; expected: 9 - EBADF: ENOSYS (38)
-ltp-syscalls	vmsplice03	BROK	vmsplice03.c:34: TBROK: vmsplice() failed: ENOSYS (38)
+ltp-syscalls	vmsplice01	PASS	
+ltp-syscalls	vmsplice02	PASS	
+ltp-syscalls	vmsplice03	PASS	
 ltp-syscalls	vmsplice04	BROK	vmsplice04.c:74: TBROK: fcntl(4,F_GETPIPE_SZ,...) failed: EINVAL (22)
 ltp-syscalls	wait01	PASS	
 ltp-syscalls	wait02	PASS	
 ltp-syscalls	wait401	BROK	wait401.c:28: TBROK: Failed to open FILE '/proc/1457/stat' for reading: ENOENT (2)
 ltp-syscalls	wait402	PASS	
-ltp-syscalls	wait403	BROK	tst_taint.c:43: TBROK: Failed to open FILE '/proc/sys/kernel/tainted' for reading: ENOENT (2)
+ltp-syscalls	wait403	PASS	
 ltp-syscalls	waitid01	PASS	
 ltp-syscalls	waitid02	PASS	
 ltp-syscalls	waitid03	PASS	
@@ -1533,7 +1534,7 @@ ltp-syscalls	waitid10	PASS
 ltp-syscalls	waitid11	FLAKY	WARN and BROK in two x86_64 runs (2026-10-22); last here: BROK; waitid11.c:29: TBROK: kill(1301,SIGKILL) failed: ESRCH (3)
 ltp-syscalls	waitpid01	PASS	
 ltp-syscalls	waitpid03	PASS	
-ltp-syscalls	waitpid04	FAIL	waitpid04.c:30: TFAIL: waipid(-2147483648, NULL, 0x0) expected ESRCH: ECHILD (10)
+ltp-syscalls	waitpid04	PASS	
 ltp-syscalls	waitpid06	PASS	
 ltp-syscalls	waitpid07	PASS	
 ltp-syscalls	waitpid08	PASS	
@@ -1866,10 +1867,10 @@ open-posix	conformance/interfaces/clock_nanosleep/13-1	PASS
 open-posix	conformance/interfaces/clock_nanosleep/15-1	PASS	
 open-posix	conformance/interfaces/clock_settime/1-1	PASS	
 open-posix	conformance/interfaces/clock_settime/3-1	PASS	
-open-posix	conformance/interfaces/clock_settime/4-1	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/clock_settime/4-2	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/clock_settime/5-1	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/clock_settime/5-2	BROK	timer_create() did not return success
+open-posix	conformance/interfaces/clock_settime/4-1	PASS	
+open-posix	conformance/interfaces/clock_settime/4-2	PASS	
+open-posix	conformance/interfaces/clock_settime/5-1	PASS	
+open-posix	conformance/interfaces/clock_settime/5-2	PASS	
 open-posix	conformance/interfaces/clock_settime/6-1	PASS	
 open-posix	conformance/interfaces/clock_settime/7-1	FLAKY	FAIL and CONF in two x86_64 runs (2026-10-22); last here: CONF; UNTESTED: persistent clock interference after 3 attempts
 open-posix	conformance/interfaces/clock_settime/7-2	CONF	UNTESTED: persistent clock interference after 3 attempts
@@ -1881,8 +1882,8 @@ open-posix	conformance/interfaces/clock_settime/17-2	FAIL	At least one test FAIL
 open-posix	conformance/interfaces/clock_settime/18-1	PASS	
 open-posix	conformance/interfaces/clock_settime/19-1	PASS	
 open-posix	conformance/interfaces/clock_settime/20-1	PASS	
-open-posix	conformance/interfaces/clock_settime/speculative/4-3	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/clock_settime/speculative/4-4	BROK	timer_create() did not return success
+open-posix	conformance/interfaces/clock_settime/speculative/4-3	PASS	
+open-posix	conformance/interfaces/clock_settime/speculative/4-4	PASS	
 open-posix	conformance/interfaces/ctime/1-1	PASS	
 open-posix	conformance/interfaces/difftime/1-1	PASS	
 open-posix	conformance/interfaces/difftime/2-1	PASS	
@@ -1893,15 +1894,15 @@ open-posix	conformance/interfaces/fork/4-1	PASS
 open-posix	conformance/interfaces/fork/6-1	PASS	
 open-posix	conformance/interfaces/fork/7-1	BROK	You may need to execute gencat yourself.
 open-posix	conformance/interfaces/fork/8-1	PASS	
-open-posix	conformance/interfaces/fork/9-1	FAIL	Test ../../../conformance/interfaces/fork/9-1.c FAILED: the alarm() routine does not behave as expected
-open-posix	conformance/interfaces/fork/11-1	BROK	Could not set initial lock: Invalid argument (22)
+open-posix	conformance/interfaces/fork/9-1	PASS	
+open-posix	conformance/interfaces/fork/11-1	PASS	
 open-posix	conformance/interfaces/fork/12-1	PASS	
-open-posix	conformance/interfaces/fork/13-1	BROK	[00:37:09]
+open-posix	conformance/interfaces/fork/13-1	PASS	
 open-posix	conformance/interfaces/fork/14-1	PASS	
 open-posix	conformance/interfaces/fork/16-1	PASS	
 open-posix	conformance/interfaces/fork/17-1	BROK	[00:37:11]
 open-posix	conformance/interfaces/fork/17-2	BROK	[00:37:12]
-open-posix	conformance/interfaces/fork/18-1	BROK	[00:37:13]
+open-posix	conformance/interfaces/fork/18-1	PASS	
 open-posix	conformance/interfaces/fork/19-1	BROK	Failed to create the message queue descriptor: Function not implemented
 open-posix	conformance/interfaces/fork/21-1	PASS	
 open-posix	conformance/interfaces/fork/22-1	PASS	
@@ -2342,14 +2343,14 @@ open-posix	conformance/interfaces/pthread_create/1-1	PASS
 open-posix	conformance/interfaces/pthread_create/1-2	PASS	
 open-posix	conformance/interfaces/pthread_create/1-3	PASS	
 open-posix	conformance/interfaces/pthread_create/1-5	CONF	min stack size: 2048
-open-posix	conformance/interfaces/pthread_create/1-6	BROK	INFO: Affinity works, will use only one thread.
+open-posix	conformance/interfaces/pthread_create/1-6	PASS	
 open-posix	conformance/interfaces/pthread_create/2-1	PASS	
 open-posix	conformance/interfaces/pthread_create/3-1	PASS	
 open-posix	conformance/interfaces/pthread_create/3-2	CONF	min stack size: 2048
 open-posix	conformance/interfaces/pthread_create/4-1	PASS	
 open-posix	conformance/interfaces/pthread_create/5-1	PASS	
 open-posix	conformance/interfaces/pthread_create/8-1	PASS	
-open-posix	conformance/interfaces/pthread_create/11-1	BROK	setitimer(ITIMER_VIRTUAL, ...): Function not implemented
+open-posix	conformance/interfaces/pthread_create/11-1	PASS	
 open-posix	conformance/interfaces/pthread_create/12-1	PASS	
 open-posix	conformance/interfaces/pthread_create/14-1	CONF	[14:37:13]
 open-posix	conformance/interfaces/pthread_create/15-1	CONF	min stack size: 2048
@@ -2486,7 +2487,7 @@ open-posix	conformance/interfaces/pthread_mutexattr_setpshared/2-2	PASS
 open-posix	conformance/interfaces/pthread_mutexattr_setpshared/3-1	PASS	
 open-posix	conformance/interfaces/pthread_mutexattr_setpshared/3-2	PASS	
 open-posix	conformance/interfaces/pthread_mutexattr_settype/1-1	PASS	
-open-posix	conformance/interfaces/pthread_mutexattr_settype/2-1	TIMEOUT	
+open-posix	conformance/interfaces/pthread_mutexattr_settype/2-1	PASS	
 open-posix	conformance/interfaces/pthread_mutexattr_settype/3-1	PASS	
 open-posix	conformance/interfaces/pthread_mutexattr_settype/3-2	PASS	
 open-posix	conformance/interfaces/pthread_mutexattr_settype/3-3	PASS	
@@ -2595,10 +2596,10 @@ open-posix	conformance/interfaces/pthread_spin_init/2-1	PASS
 open-posix	conformance/interfaces/pthread_spin_init/2-2	PASS	
 open-posix	conformance/interfaces/pthread_spin_init/3-1	PASS	
 open-posix	conformance/interfaces/pthread_spin_init/4-1	PASS	
-open-posix	conformance/interfaces/pthread_spin_lock/1-1	TIMEOUT	main: create thread
+open-posix	conformance/interfaces/pthread_spin_lock/1-1	PASS	
 open-posix	conformance/interfaces/pthread_spin_lock/1-2	PASS	
 open-posix	conformance/interfaces/pthread_spin_lock/2-1	PASS	
-open-posix	conformance/interfaces/pthread_spin_lock/3-1	TIMEOUT	main: acquired spin lock
+open-posix	conformance/interfaces/pthread_spin_lock/3-1	PASS	
 open-posix	conformance/interfaces/pthread_spin_lock/3-2	FLAKY	locks a spin lock never initialized: passes when the stack happens to hold 0, otherwise spins until an alarm VeridianOS does not deliver yet (TIMEOUT on a GitHub runner, 2026-10-22); last here: PASS
 open-posix	conformance/interfaces/pthread_spin_trylock/1-1	PASS	
 open-posix	conformance/interfaces/pthread_spin_trylock/2-1	PASS	
@@ -2736,7 +2737,7 @@ open-posix	conformance/interfaces/sem_post/1-2	PASS
 open-posix	conformance/interfaces/sem_post/2-1	PASS	
 open-posix	conformance/interfaces/sem_post/4-1	PASS	
 open-posix	conformance/interfaces/sem_post/5-1	PASS	
-open-posix	conformance/interfaces/sem_post/6-1	FAIL	TEST FAILED
+open-posix	conformance/interfaces/sem_post/6-1	PASS	
 open-posix	conformance/interfaces/sem_post/8-1	CONF	_POSIX_PRIORITY_SCHEDULING not defined
 open-posix	conformance/interfaces/sem_timedwait/1-1	PASS	
 open-posix	conformance/interfaces/sem_timedwait/2-1	PASS	
@@ -2766,7 +2767,7 @@ open-posix	conformance/interfaces/sem_wait/5-1	PASS
 open-posix	conformance/interfaces/sem_wait/7-1	PASS	
 open-posix	conformance/interfaces/sem_wait/11-1	PASS	
 open-posix	conformance/interfaces/sem_wait/12-1	PASS	
-open-posix	conformance/interfaces/sem_wait/13-1	TIMEOUT	
+open-posix	conformance/interfaces/sem_wait/13-1	PASS	
 open-posix	conformance/interfaces/shm_open/1-1	PASS	
 open-posix	conformance/interfaces/shm_open/4-1	PASS	
 open-posix	conformance/interfaces/shm_open/5-1	PASS	
@@ -3416,7 +3417,7 @@ open-posix	conformance/interfaces/sigtimedwait/6-1	PASS
 open-posix	conformance/interfaces/sigwait/1-1	PASS	
 open-posix	conformance/interfaces/sigwait/2-1	PASS	
 open-posix	conformance/interfaces/sigwait/3-1	PASS	
-open-posix	conformance/interfaces/sigwait/4-1	TIMEOUT	
+open-posix	conformance/interfaces/sigwait/4-1	PASS	
 open-posix	conformance/interfaces/sigwait/6-1	PASS	
 open-posix	conformance/interfaces/sigwait/6-2	PASS	
 open-posix	conformance/interfaces/sigwait/7-1	PASS	
@@ -3438,72 +3439,72 @@ open-posix	conformance/interfaces/strlen/1-1	PASS
 open-posix	conformance/interfaces/strncpy/1-1	PASS	
 open-posix	conformance/interfaces/strncpy/2-1	PASS	
 open-posix	conformance/interfaces/time/1-1	PASS	
-open-posix	conformance/interfaces/timer_create/1-1	FAIL	timer_create() did not return success
-open-posix	conformance/interfaces/timer_create/3-1	FAIL	timer_create() did not return success
+open-posix	conformance/interfaces/timer_create/1-1	PASS	
+open-posix	conformance/interfaces/timer_create/3-1	PASS	
 open-posix	conformance/interfaces/timer_create/4-1	PASS	
 open-posix	conformance/interfaces/timer_create/6-1	PASS	
-open-posix	conformance/interfaces/timer_create/7-1	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/timer_create/8-1	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/timer_create/9-1	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/timer_create/10-1	BROK	timer_create did not return success: Function not implemented
-open-posix	conformance/interfaces/timer_create/11-1	BROK	timer_create did not return success: Function not implemented
+open-posix	conformance/interfaces/timer_create/7-1	PASS	
+open-posix	conformance/interfaces/timer_create/8-1	PASS	
+open-posix	conformance/interfaces/timer_create/9-1	PASS	
+open-posix	conformance/interfaces/timer_create/10-1	PASS	
+open-posix	conformance/interfaces/timer_create/11-1	PASS	
 open-posix	conformance/interfaces/timer_create/13-1	PASS	
 open-posix	conformance/interfaces/timer_create/14-1	PASS	
-open-posix	conformance/interfaces/timer_create/16-1	FAIL	Test FAILED
-open-posix	conformance/interfaces/timer_create/speculative/2-1	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/timer_create/speculative/5-1	BROK	timer_create() did not return success
+open-posix	conformance/interfaces/timer_create/16-1	PASS	
+open-posix	conformance/interfaces/timer_create/speculative/2-1	PASS	
+open-posix	conformance/interfaces/timer_create/speculative/5-1	PASS	
 open-posix	conformance/interfaces/timer_create/speculative/15-1	PASS	
-open-posix	conformance/interfaces/timer_delete/1-1	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/timer_delete/1-2	BROK	timer_create() did not return success
+open-posix	conformance/interfaces/timer_delete/1-1	PASS	
+open-posix	conformance/interfaces/timer_delete/1-2	PASS	
 open-posix	conformance/interfaces/timer_delete/2-1	PASS	
 open-posix	conformance/interfaces/timer_delete/3-1	PASS	
 open-posix	conformance/interfaces/timer_delete/4-1	PASS	
 open-posix	conformance/interfaces/timer_delete/speculative/5-1	PASS	
-open-posix	conformance/interfaces/timer_delete/speculative/5-2	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/timer_getoverrun/1-1	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/timer_getoverrun/2-1	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/timer_getoverrun/2-2	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/timer_getoverrun/2-3	BROK	timer_create() did not return success
+open-posix	conformance/interfaces/timer_delete/speculative/5-2	PASS	
+open-posix	conformance/interfaces/timer_getoverrun/1-1	PASS	
+open-posix	conformance/interfaces/timer_getoverrun/2-1	FAIL	FAIL:  0 overruns sent; expected 2
+open-posix	conformance/interfaces/timer_getoverrun/2-2	FAIL	FAIL:  0 overruns sent; expected 75
+open-posix	conformance/interfaces/timer_getoverrun/2-3	FAIL	FAIL:  0 overruns sent; expected 499999999
 open-posix	conformance/interfaces/timer_getoverrun/4-1	PASS	
 open-posix	conformance/interfaces/timer_getoverrun/5-1	PASS	
-open-posix	conformance/interfaces/timer_getoverrun/speculative/6-1	FAIL	Test FAILED
-open-posix	conformance/interfaces/timer_getoverrun/speculative/6-2	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/timer_getoverrun/speculative/6-3	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/timer_gettime/1-1	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/timer_gettime/1-2	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/timer_gettime/1-3	BROK	timer_create(): Function not implemented
-open-posix	conformance/interfaces/timer_gettime/1-4	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/timer_gettime/2-1	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/timer_gettime/2-2	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/timer_gettime/3-1	BROK	timer_create() did not return success
+open-posix	conformance/interfaces/timer_getoverrun/speculative/6-1	PASS	
+open-posix	conformance/interfaces/timer_getoverrun/speculative/6-2	PASS	
+open-posix	conformance/interfaces/timer_getoverrun/speculative/6-3	PASS	
+open-posix	conformance/interfaces/timer_gettime/1-1	PASS	
+open-posix	conformance/interfaces/timer_gettime/1-2	PASS	
+open-posix	conformance/interfaces/timer_gettime/1-3	PASS	
+open-posix	conformance/interfaces/timer_gettime/1-4	PASS	
+open-posix	conformance/interfaces/timer_gettime/2-1	PASS	
+open-posix	conformance/interfaces/timer_gettime/2-2	PASS	
+open-posix	conformance/interfaces/timer_gettime/3-1	PASS	
 open-posix	conformance/interfaces/timer_gettime/4-1	PASS	
 open-posix	conformance/interfaces/timer_gettime/5-1	PASS	
-open-posix	conformance/interfaces/timer_gettime/speculative/6-1	FAIL	Test FAILED
-open-posix	conformance/interfaces/timer_gettime/speculative/6-2	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/timer_gettime/speculative/6-3	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/timer_settime/1-1	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/timer_settime/1-2	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/timer_settime/2-1	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/timer_settime/3-1	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/timer_settime/3-2	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/timer_settime/3-3	BROK	timer_create() did not return success
+open-posix	conformance/interfaces/timer_gettime/speculative/6-1	PASS	
+open-posix	conformance/interfaces/timer_gettime/speculative/6-2	PASS	
+open-posix	conformance/interfaces/timer_gettime/speculative/6-3	PASS	
+open-posix	conformance/interfaces/timer_settime/1-1	PASS	
+open-posix	conformance/interfaces/timer_settime/1-2	PASS	
+open-posix	conformance/interfaces/timer_settime/2-1	PASS	
+open-posix	conformance/interfaces/timer_settime/3-1	PASS	
+open-posix	conformance/interfaces/timer_settime/3-2	PASS	
+open-posix	conformance/interfaces/timer_settime/3-3	PASS	
 open-posix	conformance/interfaces/timer_settime/4-1	PASS	
-open-posix	conformance/interfaces/timer_settime/5-1	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/timer_settime/5-2	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/timer_settime/5-3	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/timer_settime/6-1	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/timer_settime/8-1	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/timer_settime/8-2	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/timer_settime/8-3	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/timer_settime/8-4	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/timer_settime/9-1	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/timer_settime/9-2	BROK	timer_create() did not return success
+open-posix	conformance/interfaces/timer_settime/5-1	PASS	
+open-posix	conformance/interfaces/timer_settime/5-2	PASS	
+open-posix	conformance/interfaces/timer_settime/5-3	TIMEOUT	Caught signal
+open-posix	conformance/interfaces/timer_settime/6-1	PASS	
+open-posix	conformance/interfaces/timer_settime/8-1	PASS	
+open-posix	conformance/interfaces/timer_settime/8-2	PASS	
+open-posix	conformance/interfaces/timer_settime/8-3	PASS	
+open-posix	conformance/interfaces/timer_settime/8-4	PASS	
+open-posix	conformance/interfaces/timer_settime/9-1	PASS	
+open-posix	conformance/interfaces/timer_settime/9-2	PASS	
 open-posix	conformance/interfaces/timer_settime/10-1	PASS	
 open-posix	conformance/interfaces/timer_settime/11-1	PASS	
-open-posix	conformance/interfaces/timer_settime/13-1	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/timer_settime/speculative/12-1	FAIL	Test FAILED
-open-posix	conformance/interfaces/timer_settime/speculative/12-2	BROK	timer_create() did not return success
-open-posix	conformance/interfaces/timer_settime/speculative/12-3	BROK	timer_create() did not return success
+open-posix	conformance/interfaces/timer_settime/13-1	PASS	
+open-posix	conformance/interfaces/timer_settime/speculative/12-1	PASS	
+open-posix	conformance/interfaces/timer_settime/speculative/12-2	PASS	
+open-posix	conformance/interfaces/timer_settime/speculative/12-3	PASS	
 open-posix	functional/mqueues/send_rev_1	BROK	mq_open doesn't return success
 open-posix	functional/mqueues/send_rev_2	BROK	mq_open doesn't return success
 open-posix	functional/semaphores/sem_conpro	PASS	
@@ -3517,8 +3518,8 @@ open-posix	functional/threads/schedule/1-1	PASS
 open-posix	functional/threads/schedule/1-2	PASS	
 open-posix	functional/timers/clocks/invaliddates	PASS	
 open-posix	functional/timers/clocks/twopsetclock	PASS	
-open-posix	functional/timers/timers/twoevtimers	BROK	timer_create() did not return success
-open-posix	functional/timers/timers/twoptimers	BROK	: Function not implemented
+open-posix	functional/timers/timers/twoevtimers	PASS	
+open-posix	functional/timers/timers/twoptimers	PASS	
 libc-test	api/aio	PASS	compile-only
 libc-test	api/arpa_inet	PASS	compile-only
 libc-test	api/assert	PASS	compile-only
@@ -3613,8 +3614,8 @@ libc-test	functional/dirname-static	PASS
 libc-test	functional/dlopen	PASS	
 libc-test	functional/env	PASS	
 libc-test	functional/env-static	PASS	
-libc-test	functional/fcntl	FAIL	src/functional/fcntl.c:27: fcntl(fd, 6, &fl)==0 failed: errno = Invalid argument
-libc-test	functional/fcntl-static	FAIL	src/functional/fcntl.c:27: fcntl(fd, 6, &fl)==0 failed: errno = Invalid argument
+libc-test	functional/fcntl	PASS	
+libc-test	functional/fcntl-static	PASS	
 libc-test	functional/fdopen	PASS	
 libc-test	functional/fdopen-static	PASS	
 libc-test	functional/fnmatch	PASS	

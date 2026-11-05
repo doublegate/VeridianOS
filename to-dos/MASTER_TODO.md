@@ -374,7 +374,8 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
      H5a (the namespaces, init and the main interfaces) and H5b (the remaining pid crossings)
      are done; H6 (network: the namespaces, per-namespace ports, `/proc/net/dev`) is done.
      Process clones that share the descriptor table or signal actions, and CLONE_PARENT (G2b),
-     are done.
+     are done. The expected lists are refreshed from full runs (2026-11-05: LTP 741/730/726 of
+     1,552 on x86_64/AArch64/RISC-V, from 524/519/519).
   4. [ ] Architecture: the Linux ABI as a personality on the microkernel (decided 2026-11-03:
      option (b), over keeping Linux compatibility in the kernel for good), with one security
      model. ADR 0024, written after group 3 and before item 5 (the maintainer's order,
@@ -442,15 +443,16 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
      the adjtime() slew change how fast CLOCK_REALTIME and CLOCK_MONOTONIC advance (as Linux's
      `ntp_tick_length`), and STA_INS/STA_DEL insert or delete a leap second (LTP leapsec01); its own
      commit or PR after group 3. KNOWN-LIMITATIONS "adjtimex and clock_adjtime".
-  9. [ ] Decision point: cut v0.28.0 here (moving 10 to 16 to v0.29) or continue.
-  10. [ ] Sprint F (networking, storage), with `knetd` (N-69) and INET socket readiness.
-  11. [ ] Sprint G (hardening).
-  12. [ ] Sprint H (real hardware, the parts QEMU can check).
-  13. [ ] RISC-V boot: HR-02, HR-04 to HR-06, HR-11.
-  14. [ ] DL: KDE with shared libraries and its media backend.
-  15. [ ] MFA through PAM.
-  16. [ ] IPC redesign (N-79 to N-91); package signing keys (N-55 follow-up).
-  17. [ ] Release v0.28.0 (the tag and GitHub release need the maintainer's confirmation).
+  9. [x] Decision point (decided 2026-11-05): v0.28.0 is cut here, after items 4 to 8, and
+     released (item 17); items 10 to 16 are the v0.29 queue, worked straight after the release.
+  10. [ ] (v0.29) Sprint F (networking, storage), with `knetd` (N-69) and INET socket readiness.
+  11. [ ] (v0.29) Sprint G (hardening).
+  12. [ ] (v0.29) Sprint H (real hardware, the parts QEMU can check).
+  13. [ ] (v0.29) RISC-V boot: HR-02, HR-04 to HR-06, HR-11.
+  14. [ ] (v0.29) DL: KDE with shared libraries and its media backend.
+  15. [ ] (v0.29) MFA through PAM.
+  16. [ ] (v0.29) IPC redesign (N-79 to N-91); package signing keys (N-55 follow-up).
+  17. [ ] Release v0.28.0, after item 8 (the tag and GitHub release need the maintainer's confirmation).
   - Outside the groups: pin every workflow `uses:` to a commit SHA with Dependabot (one ci: pull
     request); delete merged branches once the maintainer agrees.
 - [ ] **v0.28.0:** first the items carried over from v0.27.0, which was cut early (2026-10-18):

@@ -44,6 +44,18 @@ export LTPROOT=/opt/ltp
 export PATH="/opt/ltp/testcases/bin:$PATH"
 export TMPDIR=/tmp
 export LTP_COLORIZE_OUTPUT=0
+# LTP kills a test after its own timeout (30 s by default, lib/tst_test.c),
+# long before the 180 s the host allows under emulation, where a hundred
+# forks take that long. Scale it with the limit, a minute per unit, as
+# LTP_TIMEOUT_MUL is meant for slow machines.
+#
+# The image's ash has no arithmetic (FEATURE_SH_MATH is off), so the whole
+# minutes come from a table.
+mul=1
+for step in 2:120 3:180 4:240 5:300 6:360 7:420 8:480 9:540 10:600; do
+    [ "$limit" -ge "${step#*:}" ] 2>/dev/null && mul="${step%:*}"
+done
+export LTP_TIMEOUT_MUL="$mul"
 
 # ARGs are split into words but never matched against files.
 set -f

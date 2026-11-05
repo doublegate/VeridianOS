@@ -69,9 +69,11 @@ listed but do not fail it; `--strict` fails on any difference.
   tests are `NOTBUILT`.
 - `userland/tests/compat/run.sh` runs in the guest. Each test runs under
   `compat_exec` (same directory): its own process group, a time limit kept
-  by polling (no `alarm`, which VeridianOS does not have yet, and which LTP's
-  own timeout relies on), and its output in a file, of which a few lines
-  naming the problem are printed.
+  by polling (the limit was written before VeridianOS had `alarm`), and its
+  output in a file, of which a few lines naming the problem are printed.
+  LTP also keeps its own timeout (30 s by default); the runner sets
+  `LTP_TIMEOUT_MUL` to the limit in whole minutes (1 under KVM, 3 under TCG),
+  so LTP does not kill a test under emulation long before the limit.
 - `tools/compat/compat.py run` boots QEMU, starts the runner, reads its
   `COMPAT-*` lines from the serial console, and when a test takes the guest
   down (a panic, a hang past the limit, a killed runner) records it as

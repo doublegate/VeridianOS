@@ -4,6 +4,7 @@
 import contextlib
 import io
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -591,7 +592,6 @@ class SyscallCoverage(unittest.TestCase):
         )
 
 
-
 class KernelConfig(unittest.TestCase):
     """tools/compat/gen_kconfig.py (ADR 0023)."""
 
@@ -635,7 +635,9 @@ CONFIG_HZ 250
         import gen_kconfig
 
         linux = {a: {"eventfd2", "io_setup"} for a in gen_kconfig.ARCHES}
-        ok = gen_kconfig.parse("CONFIG_EVENTFD y needs=eventfd2\nCONFIG_AIO n needs=io_setup")
+        ok = gen_kconfig.parse(
+            "CONFIG_EVENTFD y needs=eventfd2\nCONFIG_AIO n needs=io_setup"
+        )
         self.assertEqual(gen_kconfig.problems(ok, {"eventfd2"}, linux), [])
         bad = gen_kconfig.parse("CONFIG_AIO y needs=io_setup")
         self.assertEqual(len(gen_kconfig.problems(bad, {"eventfd2"}, linux)), 1)
@@ -645,6 +647,46 @@ CONFIG_HZ 250
             "Linux has no io_setup on aarch64",
             gen_kconfig.problems(bad, {"io_setup"}, linux)[0],
         )
+
+
+class GuestRunner(unittest.TestCase):
+    """userland/tests/compat/run.sh, run by the host's sh with a fake compat_exec."""
+
+    RUN_SH = Path(__file__).resolve().parents[2] / "userland/tests/compat/run.sh"
+
+    def multiplier(self, *limit):
+        with tempfile.TemporaryDirectory() as d:
+            fake = Path(d) / "exec"
+            fake.write_text('#!/bin/sh\necho "MUL=${LTP_TIMEOUT_MUL-unset}"\n')
+            fake.chmod(0o755)
+            lst = Path(d) / "t.list"
+            lst.write_text(f"1 t - {fake}\n")
+            env = dict(
+                os.environ, COMPAT_EXEC=str(fake), COMPAT_OUT=str(Path(d) / "out")
+            )
+            out = subprocess.run(
+                ["sh", str(self.RUN_SH), str(lst), "1", *limit],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+        return [line for line in out.splitlines() if line.startswith("MUL=")]
+
+    def test_ltp_timeouts_scale_with_the_limit(self):
+        # LTP kills a test after its own timeout (30 s by default), well before
+        # the 180 s the host allows under emulation; its multiplier follows
+        # the limit, in whole minutes, and is never below 1.
+        self.assertEqual(self.multiplier("60"), ["MUL=1"])
+        self.assertEqual(self.multiplier("180"), ["MUL=3"])
+        self.assertEqual(self.multiplier("30"), ["MUL=1"])
+        self.assertEqual(self.multiplier(), ["MUL=1"])
+        self.assertEqual(self.multiplier("600"), ["MUL=10"])
+
+    def test_no_shell_arithmetic(self):
+        # The image's ash is built without FEATURE_SH_MATH: $((...)) is a
+        # syntax error there, although the host's sh accepts it.
+        self.assertNotIn("$((", self.RUN_SH.read_text())
 
 
 if __name__ == "__main__":
