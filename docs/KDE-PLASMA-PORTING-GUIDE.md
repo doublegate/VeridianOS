@@ -1330,7 +1330,7 @@ These OS projects have successfully ported KDE/Qt and can serve as references:
 | Desktop renderer | `kernel/src/desktop/renderer.rs` |
 | Init system | `kernel/src/services/init.rs` |
 | Package manager | `kernel/src/pkg/` |
-| Software porting guide | `docs/SOFTWARE-PORTING-GUIDE.md` |
+| Software porting guide | `docs/PORTING-GUIDE.md` |
 
 ## Appendix C: Glossary
 
@@ -1350,4 +1350,4 @@ These OS projects have successfully ported KDE/Qt and can serve as references:
 
 ---
 
-**See Also**: [Phase 9 TODO](../to-dos/PHASE9_TODO.md) | [Software Porting Guide](SOFTWARE-PORTING-GUIDE.md) | [Performance Report](PERFORMANCE-REPORT.md)
+**See Also**: [Phase 9 TODO](../to-dos/PHASE9_TODO.md) | [Software Porting Guide](PORTING-GUIDE.md) | [Performance Report](PERFORMANCE-REPORT.md)

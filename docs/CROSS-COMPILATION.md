@@ -56,7 +56,7 @@ architecture, selected with `VERIDIAN_ARCH` (default `x86_64`):
 | AArch64 | `aarch64-veridian-linux-musl` | `/opt/veridian/musl-toolchain-aarch64` | `/opt/veridian/musl-sysroot-aarch64` |
 | RISC-V 64 | `riscv64-veridian-linux-musl` | `/opt/veridian/musl-toolchain-riscv64` | `/opt/veridian/musl-sysroot-riscv64` |
 
-They hold musl 1.2.5, Linux 7.2 UAPI headers and GCC 16.2 (C, C++, shared
+They hold musl 1.2.6, Linux 7.2 UAPI headers and GCC 16.2 (C, C++, shared
 runtimes); the loader is `/lib/ld-musl-<arch>.so.1`. Build them with
 `tools/cross/build-musl-toolchain.sh` (x86_64, the KDE pipeline's) or
 `tools/cross/build-musl-arch.sh aarch64|riscv64`. Programs built with them

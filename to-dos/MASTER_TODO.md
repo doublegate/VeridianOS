@@ -325,7 +325,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     coverage reports in `docs/compat/LINUX-SYSCALL-COVERAGE{,-AARCH64,-RISCV64}.md`, checked for
     staleness by the gate and CI; then group by group (process, signals, time, files, memory, ipc, events, network, sched,
     mount, system) with fail-first tests; LTP and musl libc-test in the rootfs suite; rewrite
-    `docs/PORTING-GUIDE.md` (it still lists the pre-ADR-0009 native numbers). Done: W^X
+    `docs/PORTING-GUIDE.md` (done 2026-11-04). Done: W^X
     per-program opt-in (ELF note) and prctl PR_SET_MDWE/PR_GET_MDWE (ADR 0017); mknod and
     mknodat (FIFOs with Linux's open/read/write/poll rules, device nodes opening their device by
     number, socket files; special files on RamFS, tmpfs and BlockFS and in mkfs-blockfs images;
@@ -365,7 +365,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
      and file tiers with ABI-review findings N-194 to N-247 (ETXTBSY, the ramfs and tmpfs
      status-change time, inotify, the pidfd calls, clone3, kcmp, process_vm_* and personality
      are done, rseq stays ENOSYS; fanotify stays ENOSYS, as
-     without CONFIG_FANOTIFY); the `docs/PORTING-GUIDE.md` rewrite. Namespaces follow ADR 0022,
+     without CONFIG_FANOTIFY); the `docs/PORTING-GUIDE.md` rewrite (done 2026-11-04). Namespaces follow ADR 0022,
      one commit per step: H1 (the framework, nsfs, `/proc/<pid>/ns`, unshare, setns, clone; UTS,
      IPC and cgroup) and H2 (time) are done; of H3 (mount), H3a (the namespaces and
      `/proc/<pid>/{mounts,mountinfo}`), H3b (mount(2) and umount2), H3c (per-mount flags) and

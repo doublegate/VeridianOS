@@ -36,6 +36,11 @@
 - The kernel shell's `uname` takes combined options (`-sr`) and `--all`, and reports an
   invalid option or an operand as uname(1) does; an unknown option printed an empty line.
 
+- `docs/PORTING-GUIDE.md` is rewritten for the Linux ABI: the musl toolchains (musl 1.2.6),
+  autotools, CMake, Meson and pkg-config setup, building a program into a root image, the
+  differences from Linux a port meets, credentials, the uname mode and the Portfiles. It replaces
+  the native-numbering syscall lists; `docs/SOFTWARE-PORTING-GUIDE.md`, which described the
+  native `<arch>-veridian` triples, is now a pointer to it.
 - `docs/PORTING-GUIDE.md` describes the privilege model as it is: Unix credentials and Linux
   capabilities for POSIX programs (ADR 0020) beside the object capabilities of the native calls.
   It said VeridianOS had no user or group IDs and that `setuid` should be removed from ported
