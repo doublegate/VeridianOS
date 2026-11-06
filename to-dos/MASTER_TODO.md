@@ -402,7 +402,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
        (no new reach-ins across subsystems), so it can move; README and the design documents
        state the current state (everything in ring 0) and the target.
      - Progress: ADR 0024 accepted 2026-11-05 (`docs/adr/0024-linux-personality.md`; the moves
-       wait for the IPC redesign, item 16); ADR 0025 (proposed) supersedes its "all rights". Its steps, one commit each: [x] 1 object kinds for
+       wait for the IPC redesign, item 16); ADR 0025 (accepted) supersedes its "all rights". Its steps, one commit each: [x] 1 object kinds for
        namespaces, clocks and the system, the grants at launch, `CapabilityDrop`; [x] 2 mount,
        umount2, pivot_root and the private mount calls; [ ] 3 namespaces; [ ] 4 time; [ ] 5
        process and signals; [ ] 6 filesystem inode checks; [ ] 7 system, then the docs.

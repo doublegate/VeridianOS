@@ -75,6 +75,10 @@
 
 ### Added
 
+- `docs/adr/README.md`, an index of the architecture decision records (number, title, status and
+  date), generated from each ADR's own lines by `tools/docs/gen_adr_index.py`; gate.sh and CI fail
+  when it is stale, when a Status is not one of proposed/accepted/rejected/deprecated/superseded,
+  or when an ADR that another supersedes does not say so in its own Status. ADR 0025 is accepted.
 - ADR 0024: the Linux ABI is to be served by a user-space runtime on native IPC and capabilities
   (on the model of Starnix, after the IPC redesign), and every Linux privilege check also needs an
   object capability for what it acts on, so the native model governs Linux programs too. Its first

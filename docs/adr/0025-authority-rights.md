@@ -1,11 +1,12 @@
 # ADR 0025: the rights of the authority capabilities
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-11-05
 - Supersedes: ADR 0024, decision 7, only where it gives "all rights" (at launch, and to the
   creator of a user namespace). The rest of ADR 0024 stands.
 - Tracking: v0.28.0 order of work, item 4, step 2. The maintainer chose on 2026-11-05 to record
-  this change in a superseding ADR rather than by editing ADR 0024.
+  this change in a superseding ADR rather than by editing ADR 0024, and accepted this ADR on
+  2026-11-05.
 
 ## Context
 
