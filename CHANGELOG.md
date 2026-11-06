@@ -33,10 +33,12 @@
 - The expected lists were refreshed again from full runs after the syscall groups (2026-11-05):
   LTP passes 741 of 1,552 tests on x86_64, 730 on AArch64 and 726 on RISC-V, Open POSIX
   1,640/1,637/1,635 of 1,965 and libc-test 527/529/529 of 560. The in-guest runner now sets
-  `LTP_TIMEOUT_MUL` from the per-test limit (1 at 60 s under KVM, 3 at 180 s under emulation):
-  LTP killed a test after its own 30 s, so tests making a hundred forks failed under emulation
-  whenever the host was busy. Three tests that sit at that limit under emulation are `FLAKY`
-  (fork06 and pthread_cond_timedwait 4-2 on AArch64, chdir02 on RISC-V).
+  `LTP_TIMEOUT_MUL` so that LTP's own timeout (30 s per unit) is the per-test limit (2 at 60 s
+  under KVM, 6 at 180 s under emulation): LTP killed a test after its own 30 s, so tests making a
+  hundred forks failed under emulation whenever the host was busy. (A first version counted a
+  unit per minute, which gave LTP half the limit: getpid01 was killed at 90 s on GitHub's
+  runners.) Three tests that sat at the 90 s limit under emulation are `FLAKY` (fork06 and
+  pthread_cond_timedwait 4-2 on AArch64, chdir02 on RISC-V).
 - statfs details: a device node's fstatfs names the filesystem holding the node (it said tmpfs
   wherever the node was), BlockFS on a read-only disk reports `ST_RDONLY`, and statfs of a
   non-directory with a trailing slash is ENOTDIR, as stat is.
