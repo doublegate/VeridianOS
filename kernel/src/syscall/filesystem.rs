@@ -1092,6 +1092,13 @@ pub fn sys_rmdir(path: usize) -> SyscallResult {
     sys_unlinkat(AT_FDCWD, path, AT_REMOVEDIR)
 }
 
+/// What the private mount and umount calls check: CAP_SYS_ADMIN and the
+/// mount namespace's object capability with MODIFY, as mount(2) does.
+fn may_change_mounts() -> bool {
+    Caller::current().capable(crate::process::linux_caps::CAP_SYS_ADMIN)
+        && crate::cap::authority::current_may_change_mounts()
+}
+
 /// Mount a filesystem
 ///
 /// # Arguments
@@ -1100,7 +1107,7 @@ pub fn sys_rmdir(path: usize) -> SyscallResult {
 /// - fs_type: Filesystem type string
 /// - flags: Mount flags
 ///
-/// This is a privileged operation requiring a kernel-level capability.
+/// Privileged: see [`may_change_mounts`].
 pub fn sys_mount(
     _device: usize,
     mount_point: usize,
@@ -1111,33 +1118,11 @@ pub fn sys_mount(
     validate_user_string_ptr(mount_point)?;
     validate_user_string_ptr(fs_type)?;
 
-    // Mount needs CAP_SYS_ADMIN, as on Linux (EPERM), and, as a native
-    // authority over the VFS tree, a Memory object capability with WRITE
-    // and CREATE rights: both must hold (ADR 0020, decision 9).
-    let current = process::current_process().ok_or(SyscallError::InvalidState)?;
-    if !Caller::current().capable(crate::process::linux_caps::CAP_SYS_ADMIN) {
+    // Mount needs CAP_SYS_ADMIN, as on Linux, and a capability with MODIFY
+    // on the caller's mount namespace or a user namespace above it (ADR
+    // 0024, decision 8); EPERM for either.
+    if !may_change_mounts() {
         return Err(SyscallError::OperationNotPermitted);
-    }
-    let cap_space = current.capability_space.lock();
-    let has_mount_perm = {
-        let mut found = false;
-        #[cfg(feature = "alloc")]
-        {
-            let _ = cap_space.iter_capabilities(|entry| {
-                if matches!(entry.object, crate::cap::ObjectRef::Memory { .. })
-                    && entry.rights.contains(crate::cap::Rights::WRITE)
-                    && entry.rights.contains(crate::cap::Rights::CREATE)
-                {
-                    found = true;
-                    return false;
-                }
-                true
-            });
-        }
-        found
-    };
-    if !has_mount_perm {
-        return Err(SyscallError::PermissionDenied);
     }
 
     // Copied in through the fault-tolerant reader (N-43).
@@ -1160,34 +1145,14 @@ pub fn sys_mount(
 /// # Arguments
 /// - mount_point: Mount point to unmount
 ///
-/// This is a privileged operation requiring a kernel-level capability.
+/// Privileged: see [`may_change_mounts`].
 pub fn sys_unmount(mount_point: usize) -> SyscallResult {
     // Validate mount_point string pointer is in user space
     validate_user_string_ptr(mount_point)?;
 
-    // Unmount is a privileged operation - verify the calling process has
-    // a Memory capability with WRITE rights (needed to modify the VFS tree)
-    let current = process::current_process().ok_or(SyscallError::InvalidState)?;
-    let cap_space = current.capability_space.lock();
-    let has_unmount_perm = {
-        let mut found = false;
-        #[cfg(feature = "alloc")]
-        {
-            let _ = cap_space.iter_capabilities(|entry| {
-                if matches!(entry.object, crate::cap::ObjectRef::Memory { .. })
-                    && entry.rights.contains(crate::cap::Rights::WRITE)
-                    && entry.rights.contains(crate::cap::Rights::CREATE)
-                {
-                    found = true;
-                    return false;
-                }
-                true
-            });
-        }
-        found
-    };
-    if !has_unmount_perm {
-        return Err(SyscallError::PermissionDenied);
+    // The same rule as the private mount ([`may_change_mounts`]).
+    if !may_change_mounts() {
+        return Err(SyscallError::OperationNotPermitted);
     }
 
     // Copied in through the fault-tolerant reader (N-43).

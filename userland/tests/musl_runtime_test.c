@@ -5563,6 +5563,7 @@ static void test_mount_calls(void);
 static void test_mount_flags(void);
 static void test_mount_no_escape(void);
 static void test_pivot_root(void);
+static void test_mount_object_cap(void);
 static void test_user_ns(void);
 static void test_pid_ns(void);
 static void test_net_ns(void);
@@ -5592,6 +5593,7 @@ static const struct {
     {"mount_calls", test_mount_calls},
     {"mount_flags", test_mount_flags},
     {"pivot_root", test_pivot_root},
+    {"mount_object_cap", test_mount_object_cap},
     {"user_ns", test_user_ns},
     {"pid_ns", test_pid_ns},
     {"net_ns", test_net_ns},
@@ -9760,6 +9762,84 @@ static void test_pivot_root(void)
     report("pivot_root", f == 0, why);
 }
 
+/* The id NS_GET_ID gives for the namespace `/proc/self/ns/<name>`, or 0. */
+static unsigned long long t_ns_id(const char *name)
+{
+    char path[48];
+    unsigned long long id = 0;
+    snprintf(path, sizeof(path), "/proc/self/ns/%s", name);
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return 0;
+    if (ioctl(fd, T_NS_GET_ID, &id) != 0) id = 0;
+    close(fd);
+    return id;
+}
+
+/* VeridianOS's private CapabilityDrop(kind, id) (ADR 0024); kind 9 is a
+ * namespace, named by its NS_GET_ID id. */
+#define T_SYS_CAPABILITY_DROP 1056
+#define T_CAP_NAMESPACE 9
+
+/* mount's object capability (ADR 0024, decision 8): mount, umount2 and
+ * pivot_root need MODIFY on the mount namespace or on a user namespace
+ * above it, besides CAP_SYS_ADMIN. In a new mount namespace, which no
+ * capability names, mounting works through its owner, the initial user
+ * namespace; once root drops that too, every call is EPERM. */
+static void test_mount_object_cap(void)
+{
+    char why[160];
+    mkdir("/tmp", 01777);
+    rmdir("/tmp/oc");
+    if (mkdir("/tmp/oc", 0755) != 0) {
+        report("mount_object_cap", 0, "setup");
+        return;
+    }
+    pid_t child = fork();
+    if (child == 0) {
+        int g = 0;
+        long dropped_mnt = -2, dropped_user = -2;
+        if (unshare(CLONE_NEWNS) != 0 || mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0)
+            _exit(0x7f);
+        unsigned long long mnt = t_ns_id("mnt"), user = t_ns_id("user");
+        if (mnt == 0 || user == 0) _exit(0x7e);
+        /* Through the owner: nothing names the new mount namespace. */
+        if (mount("none", "/tmp/oc", "tmpfs", 0, NULL) != 0 || mkdir("/tmp/oc/new", 0755) != 0 ||
+            mount("none", "/tmp/oc/new", "tmpfs", 0, NULL) != 0 ||
+            mkdir("/tmp/oc/new/old", 0755) != 0)
+            g |= 1;
+        dropped_mnt = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, mnt);
+        dropped_user = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, user);
+        if (dropped_mnt != 0 || dropped_user != 1) g |= 2;
+        /* Still root with every POSIX capability, but no authority. */
+        if (geteuid() != 0) g |= 4;
+        if (!(mount("none", "/tmp/oc", "tmpfs", 0, NULL) == -1 && errno == EPERM)) g |= 8;
+        if (!(mount(NULL, "/tmp/oc", NULL, MS_REMOUNT | MS_RDONLY, NULL) == -1 && errno == EPERM))
+            g |= 16;
+        if (!(umount2("/tmp/oc/new", MNT_DETACH) == -1 && errno == EPERM)) g |= 32;
+        if (!(syscall(SYS_pivot_root, "/tmp/oc/new", "/tmp/oc/new/old") == -1 && errno == EPERM))
+            g |= 64;
+        /* The mounts made before the drop are still there. */
+        if (t_mounts_at("/tmp/oc") != 1 || t_mounts_at("/tmp/oc/new") != 1) g |= 128;
+        /* A selector naming nothing that can be dropped: EINVAL. */
+        if (!(syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, 0) == -1 && errno == EINVAL)) g |= 256;
+        if (g != 0) {
+            printf("mount-object-cap g=%#x mnt=%ld user=%ld\n", g, dropped_mnt, dropped_user);
+            fflush(stdout);
+        }
+        _exit(g == 0 ? 0 : 1);
+    }
+    int f = 0, code = t_exit_status(child);
+    if (code == 0x7f || code == 0x7e)
+        f |= 1;
+    else if (code != 0)
+        f |= 2;
+    /* The parent's authority is untouched: it can still mount. */
+    if (mount("none", "/tmp/oc", "tmpfs", 0, NULL) != 0 || umount2("/tmp/oc", 0) != 0) f |= 4;
+    rmdir("/tmp/oc");
+    snprintf(why, sizeof(why), "f=%#x code=%d", f, code);
+    report("mount_object_cap", f == 0, why);
+}
+
 /* Write `text` to `path`; 0 or the errno. */
 static int t_write_text(const char *path, const char *text)
 {
@@ -10522,6 +10602,7 @@ int main(int argc, char **argv)
     test_mount_flags();
     test_mount_no_escape();
     test_pivot_root();
+    test_mount_object_cap();
     test_user_ns();
     test_pid_ns();
     test_net_ns();

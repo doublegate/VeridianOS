@@ -1,11 +1,14 @@
 # ADR 0024: the Linux ABI as a personality, under one security model
 
-- Status: accepted
+- Status: accepted; decision 7's "all rights" superseded by ADR 0025 (2026-11-05)
 - Date: 2026-11-05
 - Tracking: v0.28.0 order of work, item 4. The maintainer chose option (b) on 2026-11-03: the Linux
   system calls are to be served from user space on native IPC and capabilities, rather than kept
   in the kernel for good. On the same day they asked for one security model, and for this ADR
   after group 3 and before the remaining calls (item 5), so those calls are built for the move.
+  The maintainer reviewed and accepted the details of this ADR as written on 2026-11-05.
+- Superseded in part 2026-11-05 (step 2): ADR 0025 replaces the "all rights" of decision 7 with
+  every right but GRANT, REVOKE and DELETE.
 
 ## Context
 

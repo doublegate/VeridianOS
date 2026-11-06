@@ -522,6 +522,14 @@ fn process_clone(
             validate_user_ptr(ptr as *const u32, core::mem::size_of::<u32>())?;
         }
     }
+    // The creator of a new user namespace -- the parent, which also writes
+    // the child's maps -- gets authority over it, and the child inherits
+    // that with the rest of the space (ADR 0024, decision 7).
+    if let Some(ns) = &user_ns {
+        let parent = process::current_process().ok_or(SyscallError::InvalidState)?;
+        crate::cap::authority::grant_user_ns(&parent.capability_space.lock(), ns)
+            .map_err(|_| SyscallError::OutOfMemory)?;
+    }
     let on = |flag: u64| req.on(flag);
     super::process::sys_fork_with(&process::fork::ForkOptions {
         share_vm: on(CLONE_VM),

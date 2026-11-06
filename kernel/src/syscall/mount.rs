@@ -5,7 +5,8 @@
 //! The tree operations are `fs::mount`'s; this module copies the arguments
 //! in, resolves the paths in the caller's view, checks privilege and maps
 //! the flags, in Linux's order: the strings, the target, MS_NOUSER, then
-//! CAP_SYS_ADMIN.
+//! CAP_SYS_ADMIN, then (ADR 0024) a capability with MODIFY on the caller's
+//! mount namespace or a user namespace above it, EPERM as well.
 
 use alloc::{string::String, sync::Arc};
 
@@ -153,6 +154,10 @@ pub fn sys_mount(
     if !caller.capable(CAP_SYS_ADMIN) {
         return Err(SyscallError::OperationNotPermitted);
     }
+    // ADR 0024: and the mount namespace's object capability (MODIFY).
+    if !crate::cap::authority::current_may_change_mounts() {
+        return Err(SyscallError::OperationNotPermitted);
+    }
     let tree = view.mount_tree().clone();
     let mut mnt_flags = mount_flags(flags);
     // A remount keeps the atime flags unless it names one.
@@ -217,6 +222,10 @@ pub fn sys_umount2(target: usize, flags: usize) -> SyscallResult {
     if !Caller::current().capable(CAP_SYS_ADMIN) {
         return Err(SyscallError::OperationNotPermitted);
     }
+    // ADR 0024: and the mount namespace's object capability (MODIFY).
+    if !crate::cap::authority::current_may_change_mounts() {
+        return Err(SyscallError::OperationNotPermitted);
+    }
     let how = Umount {
         force: flags & MNT_FORCE != 0,
         detach: flags & MNT_DETACH != 0,
@@ -238,6 +247,10 @@ pub fn sys_pivot_root(new_root: usize, put_old: usize) -> SyscallResult {
     let new = directory(&view, new_root)?;
     let old = directory(&view, put_old)?;
     if !Caller::current().capable(CAP_SYS_ADMIN) {
+        return Err(SyscallError::OperationNotPermitted);
+    }
+    // ADR 0024: and the mount namespace's object capability (MODIFY).
+    if !crate::cap::authority::current_may_change_mounts() {
         return Err(SyscallError::OperationNotPermitted);
     }
     let tree = view.mount_tree().clone();

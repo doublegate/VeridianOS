@@ -81,8 +81,17 @@
   step: object capabilities for namespaces, the clocks and the system (`cap::authority`), which
   every program the kernel starts receives for the namespaces it is in, keeps across exec and
   passes on at fork; the private call `CapabilityDrop` (1056) removes one from the caller's own
-  space, so a launcher can confine what it starts. Nothing checks them yet. Fork no longer copies
-  the capability space a second time (each copy was refused as a duplicate).
+  space, so a launcher can confine what it starts. Fork no longer copies the capability space a
+  second time (each copy was refused as a duplicate). These capabilities carry no GRANT, REVOKE
+  or DELETE right (ADR 0025, superseding ADR 0024's "all rights"): fork copies the token itself,
+  so revoking a copy would have revoked the parent's.
+- mount(2), umount2, pivot_root and the private mount and umount calls also need an object
+  capability with MODIFY on the caller's mount namespace, or on a user namespace above it (ADR
+  0024, step 2): a launcher that drops those can run root unable to mount. Whoever creates a user
+  namespace (unshare, or clone's parent) receives one on it, so mounting in namespaces made inside
+  it keeps working. The private calls no longer accept any Memory capability with WRITE and
+  CREATE, which no process was given; the private umount now needs CAP_SYS_ADMIN, and both give
+  EPERM, not EACCES.
 - `/boot/config-7.3.0-veridian` in every root filesystem (ADR 0023): the Linux kernel
   configuration VeridianOS reports, generated per architecture by `tools/compat/gen_kconfig.py`
   from `abi/kconfig.map`. An option is set only where the kernel does what Linux built with it

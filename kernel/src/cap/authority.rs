@@ -56,6 +56,78 @@ pub fn current_holds(object: &ObjectRef, rights: Rights) -> bool {
     }
 }
 
+/// Whether `space` has `rights` over namespace `ns` (ADR 0024, decision 7):
+/// through a capability on `ns` itself, or on the user namespace that owns
+/// it or one of that one's ancestors, as Linux's `ns_capable(ns->owner, ..)`
+/// reaches every namespace a user namespace owns. For a user namespace the
+/// owner is its parent.
+#[cfg(feature = "alloc")]
+pub fn holds_namespace(
+    space: &CapabilitySpace,
+    ns: &crate::process::ns::NsRef,
+    rights: Rights,
+) -> bool {
+    use crate::process::ns::NsKind;
+    let ident = ns.ident();
+    let mut wanted = Vec::new();
+    wanted.push(ObjectRef::Namespace {
+        kind: ident.kind,
+        id: ident.id,
+    });
+    let mut owner = ns.owner();
+    while let Some(user) = owner {
+        wanted.push(ObjectRef::Namespace {
+            kind: NsKind::User,
+            id: user.ident.id,
+        });
+        owner = user.parent.clone();
+    }
+    matching(space, |o| wanted.contains(o))
+        .into_iter()
+        .any(|(cap, held)| held.contains(rights) && cap_manager().is_valid(cap))
+}
+
+/// [`holds_namespace`] for the calling process; kernel context passes.
+#[cfg(feature = "alloc")]
+pub fn current_holds_namespace(ns: &crate::process::ns::NsRef, rights: Rights) -> bool {
+    match crate::process::current_process() {
+        Some(process) => holds_namespace(&process.capability_space.lock(), ns, rights),
+        None => true,
+    }
+}
+
+/// Whether the caller may change the mounts of the mount namespace it is
+/// in: a capability with MODIFY on it, or on a user namespace above it
+/// (ADR 0024, decision 8). mount(2), umount2, pivot_root and the private
+/// mount and umount calls check this after CAP_SYS_ADMIN; EPERM when it
+/// fails. Kernel context passes.
+#[cfg(feature = "alloc")]
+pub fn current_may_change_mounts() -> bool {
+    let Some(thread) = crate::process::current_thread() else {
+        return true;
+    };
+    let mnt = crate::process::ns::NsRef::Mnt(thread.namespaces().mnt.clone());
+    current_holds_namespace(&mnt, Rights::MODIFY)
+}
+
+/// Give the process whose capability space is `space` [`authority_rights`]
+/// over user namespace `ns`, which it is creating (ADR 0024, decision 7): the
+/// namespaces made inside it then belong to a user namespace it has
+/// authority over, as the owner has on Linux.
+#[cfg(feature = "alloc")]
+pub fn grant_user_ns(
+    space: &CapabilitySpace,
+    ns: &crate::process::userns::UserNs,
+) -> Result<(), super::CapError> {
+    grant(
+        space,
+        &[ObjectRef::Namespace {
+            kind: crate::process::ns::NsKind::User,
+            id: ns.ident.id,
+        }],
+    )
+}
+
 /// The objects a program the kernel starts has authority over: the
 /// namespaces it is in (`user` and `pid` are its process's, the others its
 /// main thread's), both clocks, and the system.
@@ -95,18 +167,31 @@ pub fn initial_objects(
     objects
 }
 
-/// Give `space` a capability with every right over each of `objects`,
-/// inherited at fork and kept across exec. An object `space` already holds
-/// with every right is skipped.
+/// The rights these authority capabilities carry: every right a check asks
+/// for (READ, WRITE, EXECUTE, MODIFY, CREATE), but not GRANT, REVOKE or
+/// DELETE. Fork copies the token itself into the child, so a holder that
+/// could revoke it (`CapabilityRevoke` needs only REVOKE on its own copy)
+/// would revoke its parent's and siblings' copies too; a process gives up
+/// its own authority with `CapabilityDrop` instead (ADR 0025).
+pub fn authority_rights() -> Rights {
+    Rights::ALL
+        .remove(Rights::GRANT)
+        .remove(Rights::REVOKE)
+        .remove(Rights::DELETE)
+}
+
+/// Give `space` a capability with [`authority_rights`] over each of
+/// `objects`, inherited at fork and kept across exec. An object `space`
+/// already holds with those rights is skipped.
 #[cfg(feature = "alloc")]
 pub fn grant(space: &CapabilitySpace, objects: &[ObjectRef]) -> Result<(), super::CapError> {
     for object in objects {
-        if holds(space, object, Rights::ALL) {
+        if holds(space, object, authority_rights()) {
             continue;
         }
         cap_manager().create_capability_with_flags(
             object.clone(),
-            Rights::ALL,
+            authority_rights(),
             space,
             InheritanceFlags::INHERITABLE | InheritanceFlags::PRESERVE_EXEC,
         )?;
@@ -208,9 +293,18 @@ mod tests {
                 set.get(kind).ident().id
             };
             assert!(
-                holds(&space, &ObjectRef::Namespace { kind, id }, Rights::ALL),
+                holds(
+                    &space,
+                    &ObjectRef::Namespace { kind, id },
+                    authority_rights()
+                ),
                 "{kind:?}"
             );
+            assert!(!holds(
+                &space,
+                &ObjectRef::Namespace { kind, id },
+                Rights::REVOKE
+            ));
         }
         for clock in [ClockObject::System, ClockObject::Alarm] {
             assert!(holds(&space, &ObjectRef::Clock { clock }, Rights::MODIFY));
@@ -309,6 +403,92 @@ mod tests {
         assert_eq!(drop_object(&child, TYPE_NAMESPACE as usize, mnt), Some(1));
         assert_eq!(drop_object(&child, TYPE_SYSTEM as usize, 0), Some(1));
         assert_eq!(child.used(), 8);
+    }
+
+    #[test]
+    fn a_forked_copy_cannot_revoke_the_parents_authority() {
+        // Fork copies the token; a revocable copy would let a confined child
+        // revoke the token in its parent's space too.
+        let parent = initial_space();
+        let child = CapabilitySpace::new();
+        child.clone_from(&parent).unwrap();
+        let mut token = None;
+        let _ = child.iter_capabilities(|entry| {
+            if entry.object == ObjectRef::System {
+                token = Some(entry.capability);
+            }
+            true
+        });
+        assert!(crate::cap::revocation::revoke_held(&child, token.unwrap()).is_err());
+        assert!(holds(&parent, &ObjectRef::System, Rights::MODIFY));
+        assert!(holds(&child, &ObjectRef::System, Rights::MODIFY));
+    }
+
+    #[test]
+    fn authority_reaches_what_a_user_namespace_owns_and_below() {
+        use crate::process::{ns::NsRef, userns};
+        let init = userns::initial();
+        let child = userns::UserNs::create(&init, 1000, 1000, false, false).unwrap();
+        let set = ns::initial()
+            .copy_for(
+                ns::CLONE_NEWUTS,
+                &child,
+                &crate::process::pidns::initial(),
+                1000,
+            )
+            .unwrap();
+        let uts = set.get(NsKind::Uts);
+        let space = CapabilitySpace::new();
+        assert!(!holds_namespace(&space, &uts, Rights::MODIFY));
+
+        // The creator's grant covers the namespace itself and what it owns.
+        grant_user_ns(&space, &child).unwrap();
+        assert!(holds_namespace(&space, &uts, Rights::MODIFY));
+        assert!(holds_namespace(
+            &space,
+            &NsRef::User(child.clone()),
+            Rights::MODIFY
+        ));
+        // Not upward: the parent and what it owns directly.
+        assert!(!holds_namespace(
+            &space,
+            &NsRef::User(init.clone()),
+            Rights::READ
+        ));
+        assert!(!holds_namespace(
+            &space,
+            &ns::initial().get(NsKind::Uts),
+            Rights::READ
+        ));
+
+        // An ancestor of the owner reaches it too, and rights still count.
+        let root = CapabilitySpace::new();
+        cap_manager()
+            .create_capability(
+                ObjectRef::Namespace {
+                    kind: NsKind::User,
+                    id: init.ident.id,
+                },
+                Rights::READ,
+                &root,
+            )
+            .unwrap();
+        assert!(holds_namespace(&root, &uts, Rights::READ));
+        assert!(!holds_namespace(&root, &uts, Rights::MODIFY));
+    }
+
+    #[test]
+    fn a_dropped_mount_namespace_still_stands_through_its_owner() {
+        // What a launcher must drop to deny mounting: the mount namespace and
+        // the user namespace above it.
+        let space = initial_space();
+        let set = ns::initial();
+        let mnt = set.get(NsKind::Mnt);
+        let user = set.get(NsKind::User).ident().id as usize;
+        drop_object(&space, TYPE_NAMESPACE as usize, mnt.ident().id as usize).unwrap();
+        assert!(holds_namespace(&space, &mnt, Rights::MODIFY));
+        drop_object(&space, TYPE_NAMESPACE as usize, user).unwrap();
+        assert!(!holds_namespace(&space, &mnt, Rights::MODIFY));
     }
 
     #[test]

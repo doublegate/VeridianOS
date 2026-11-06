@@ -550,9 +550,8 @@ filesystem.
 - **On-disk structures are not validated (N-123).** BlockFS checks only the magic number; the ext4
   and FAT32 readers have unchecked arithmetic and cannot be mounted; the shell `mkfs` does nothing.
   Only mount images you trust.
-- **mount (N-129).** The private mount call needs CAP_SYS_ADMIN and a Memory object capability
-  with WRITE and CREATE, which no user process is given, and the private umount needs only that
-  capability; ADR 0024 replaces both with a capability on the mount namespace (step 2). Type
+- **mount (N-129).** The private mount and umount calls, like mount(2), need CAP_SYS_ADMIN and a
+  capability with MODIFY on the mount namespace or a user namespace above it (ADR 0024). Type
   `blockfs` mounts an empty RAM filesystem.
 - **ETXTBSY counts files opened by name.** A running program cannot be opened for writing or
   truncated, and a file open for writing cannot be executed, as on Linux; but a memfd's own
