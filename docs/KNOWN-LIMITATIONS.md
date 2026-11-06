@@ -413,7 +413,8 @@ What remains:
   namespaces can be created, mapped and joined, ids are translated where they cross the
   system-call boundary, and each privilege check asks about the user namespace Linux names (ADR
   0022 H4a to H4c), with these gaps: mount(2), umount2 and pivot_root still need CAP_SYS_ADMIN
-  in the initial namespace (ADR 0024 will give them object capabilities), so a namespace's root
+  in the initial namespace (and, since ADR 0024 step 2, MODIFY on the mount namespace), so a
+  namespace's root
   can make a mount namespace and join it but not mount in it; a setns through a pidfd that
   joins a user namespace checks the namespaces after it with the caller's credentials from
   before, where Linux uses the new ones; the priority and scheduling calls lack cap_safe_nice's

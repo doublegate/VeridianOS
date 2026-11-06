@@ -96,6 +96,14 @@
   it keeps working. The private calls no longer accept any Memory capability with WRITE and
   CREATE, which no process was given; the private umount now needs CAP_SYS_ADMIN, and both give
   EPERM, not EACCES.
+- The namespace calls need object capabilities too (ADR 0024, step 3), each on the namespace
+  itself or a user namespace above it, and EPERM without: unshare and clone with CLONE_NEW* need
+  CREATE on the namespace each new one is made from (the caller's of that kind; for PID and time
+  the one for children; for CLONE_NEWUSER its user namespace), checked before anything is made;
+  setns needs EXECUTE on its target, after the type's own install rule; sethostname and
+  setdomainname MODIFY on the UTS namespace; writes to `uid_map`, `gid_map` and `setgroups`
+  MODIFY on the user namespace. A launcher can now run root unable to make, join or rename a
+  namespace it has dropped.
 - `/boot/config-7.3.0-veridian` in every root filesystem (ADR 0023): the Linux kernel
   configuration VeridianOS reports, generated per architecture by `tools/compat/gen_kconfig.py`
   from `abi/kconfig.map`. An option is set only where the kernel does what Linux built with it

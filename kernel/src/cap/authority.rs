@@ -110,6 +110,49 @@ pub fn current_may_change_mounts() -> bool {
     current_holds_namespace(&mnt, Rights::MODIFY)
 }
 
+/// Whether `space` may create the namespaces `flags` asks for (ADR 0024,
+/// step 3): CREATE on each namespace a new one is made from -- the one of
+/// that kind in `current`, for PID and time the one for children, below
+/// which a new one is made -- and, for CLONE_NEWUSER, on `user`, the
+/// caller's user namespace. A capability on an owning user namespace
+/// stands for the namespaces it owns ([`holds_namespace`]). unshare and
+/// clone check this after their POSIX checks; EPERM when it fails.
+#[cfg(feature = "alloc")]
+pub fn may_create_namespaces(
+    space: &CapabilitySpace,
+    current: &crate::process::ns::Namespaces,
+    user: &alloc::sync::Arc<crate::process::userns::UserNs>,
+    flags: u64,
+) -> bool {
+    use crate::process::ns::{NsKind, NsRef};
+    NsKind::ALL
+        .into_iter()
+        .filter(|kind| flags & kind.clone_flag() != 0)
+        .all(|kind| {
+            let parent = if kind == NsKind::User {
+                NsRef::User(user.clone())
+            } else {
+                current.get(kind)
+            };
+            holds_namespace(space, &parent, Rights::CREATE)
+        })
+}
+
+/// [`may_create_namespaces`] for the calling process; kernel context passes.
+#[cfg(feature = "alloc")]
+pub fn current_may_create_namespaces(
+    current: &crate::process::ns::Namespaces,
+    user: &alloc::sync::Arc<crate::process::userns::UserNs>,
+    flags: u64,
+) -> bool {
+    match crate::process::current_process() {
+        Some(process) => {
+            may_create_namespaces(&process.capability_space.lock(), current, user, flags)
+        }
+        None => true,
+    }
+}
+
 /// Give the process whose capability space is `space` [`authority_rights`]
 /// over user namespace `ns`, which it is creating (ADR 0024, decision 7): the
 /// namespaces made inside it then belong to a user namespace it has
@@ -489,6 +532,96 @@ mod tests {
         assert!(holds_namespace(&space, &mnt, Rights::MODIFY));
         drop_object(&space, TYPE_NAMESPACE as usize, user).unwrap();
         assert!(!holds_namespace(&space, &mnt, Rights::MODIFY));
+    }
+
+    #[test]
+    fn creating_namespaces_needs_create_on_what_they_are_made_from() {
+        use crate::process::{ns::CLONE_NS_ALL, userns};
+        let set = ns::initial();
+        let init = userns::initial();
+        let space = initial_space();
+        assert!(may_create_namespaces(&space, &set, &init, CLONE_NS_ALL));
+        assert!(may_create_namespaces(
+            &CapabilitySpace::new(),
+            &set,
+            &init,
+            0
+        ));
+        assert!(!may_create_namespaces(
+            &CapabilitySpace::new(),
+            &set,
+            &init,
+            ns::CLONE_NEWUTS
+        ));
+
+        // A UTS namespace stands through the user namespace that owns it:
+        // without both, no new UTS namespace, but the others still come.
+        let user = set.get(NsKind::User).ident().id as usize;
+        drop_object(&space, TYPE_NAMESPACE as usize, set.uts.ident.id as usize).unwrap();
+        assert!(may_create_namespaces(&space, &set, &init, ns::CLONE_NEWUTS));
+        drop_object(&space, TYPE_NAMESPACE as usize, user).unwrap();
+        assert!(!may_create_namespaces(
+            &space,
+            &set,
+            &init,
+            ns::CLONE_NEWUTS
+        ));
+        assert!(!may_create_namespaces(
+            &space,
+            &set,
+            &init,
+            ns::CLONE_NEWUSER
+        ));
+        assert!(may_create_namespaces(&space, &set, &init, ns::CLONE_NEWNS));
+        assert!(!may_create_namespaces(
+            &space,
+            &set,
+            &init,
+            ns::CLONE_NEWNS | ns::CLONE_NEWUTS
+        ));
+    }
+
+    #[test]
+    fn a_new_pid_namespace_is_made_from_the_one_for_children() {
+        use crate::process::userns;
+        let init = userns::initial();
+        let set = ns::initial();
+        // Only a capability on the PID namespace for children, READ and CREATE.
+        let space = CapabilitySpace::new();
+        cap_manager()
+            .create_capability(
+                ObjectRef::Namespace {
+                    kind: NsKind::Pid,
+                    id: set.pid_for_children.ident.id,
+                },
+                Rights::CREATE,
+                &space,
+            )
+            .unwrap();
+        assert!(may_create_namespaces(&space, &set, &init, ns::CLONE_NEWPID));
+        assert!(!may_create_namespaces(
+            &space,
+            &set,
+            &init,
+            ns::CLONE_NEWNET
+        ));
+        let read_only = CapabilitySpace::new();
+        cap_manager()
+            .create_capability(
+                ObjectRef::Namespace {
+                    kind: NsKind::Pid,
+                    id: set.pid_for_children.ident.id,
+                },
+                Rights::READ,
+                &read_only,
+            )
+            .unwrap();
+        assert!(!may_create_namespaces(
+            &read_only,
+            &set,
+            &init,
+            ns::CLONE_NEWPID
+        ));
     }
 
     #[test]

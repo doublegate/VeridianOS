@@ -389,8 +389,9 @@ fn set_tid_checks(tid: i32, may_choose: bool) -> Result<u64, SyscallError> {
 
 /// Linux's kernel_clone: check `req` ([`request_checks`]; a thread of a
 /// process whose children go to another PID namespace than its own is
-/// EINVAL), make the namespaces, reserve the child's number in each PID
-/// namespace level below the initial one and claim its kernel id, with
+/// EINVAL), make the namespaces (each new one needing CREATE on the one it
+/// is made from, EPERM; ADR 0024, step 3), reserve the child's number in each
+/// PID namespace level below the initial one and claim its kernel id, with
 /// set_tid's choices ([`pid_numbers`]), refuse CLONE_INTO_CGROUP (EBADF:
 /// there is no cgroup filesystem, so no descriptor names a cgroup; Linux
 /// checks it after the ID and the pidfd), and make the thread or process.
@@ -412,15 +413,24 @@ fn kernel_clone(mut req: CloneRequest) -> Result<usize, SyscallError> {
     if req.on(ns::CLONE_NEWUSER) && req.on(CLONE_FS) {
         return Err(SyscallError::InvalidArgument);
     }
+    let current_ns = process::current_thread()
+        .ok_or(SyscallError::InvalidState)?
+        .namespaces();
+    // The object capabilities on what each new namespace is made from
+    // (ADR 0024, step 3), before anything is made.
+    if !crate::cap::authority::current_may_create_namespaces(
+        &current_ns,
+        &caller.userns,
+        req.flags & ns::CLONE_NS_ALL,
+    ) {
+        return Err(SyscallError::OperationNotPermitted);
+    }
     let user_ns = if req.on(ns::CLONE_NEWUSER) {
         Some(super::namespaces::new_user_ns(&caller)?)
     } else {
         None
     };
     let owner = user_ns.clone().unwrap_or_else(|| caller.userns.clone());
-    let current_ns = process::current_thread()
-        .ok_or(SyscallError::InvalidState)?
-        .namespaces();
     let active = process::pidns::current();
     if req.on(CLONE_THREAD) && active.ident.id != current_ns.pid_for_children.ident.id {
         return Err(SyscallError::InvalidArgument);

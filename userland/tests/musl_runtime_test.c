@@ -9840,6 +9840,63 @@ static void test_mount_object_cap(void)
     report("mount_object_cap", f == 0, why);
 }
 
+/* The namespace calls' object capabilities (ADR 0024, step 3): unshare and
+ * clone need CREATE on the namespace a new one is made from, setns EXECUTE
+ * on its target, sethostname MODIFY on the UTS namespace, each through the
+ * namespace itself or a user namespace above it. A root child that drops
+ * its UTS namespaces and its user namespace keeps every POSIX capability
+ * but can no longer name, join or make a UTS namespace, nor make a user
+ * namespace; a kind it still holds (IPC) it can still unshare. */
+static void test_ns_object_cap(void)
+{
+    char why[160];
+    pid_t child = fork();
+    if (child == 0) {
+        int g = 0;
+        unsigned long long old_uts = 0;
+        int old = open("/proc/self/ns/uts", O_RDONLY);
+        if (old < 0 || ioctl(old, T_NS_GET_ID, &old_uts) != 0) _exit(0x7f);
+        /* Through the owner: nothing names the new UTS namespace. */
+        if (unshare(CLONE_NEWUTS) != 0 || sethostname("ocap-a", 6) != 0) _exit(0x7e);
+        unsigned long long uts = t_ns_id("uts"), user = t_ns_id("user");
+        if (uts == 0 || user == 0 || uts == old_uts) _exit(0x7d);
+        long d_new = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, uts);
+        long d_old = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, old_uts);
+        long d_user = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, user);
+        if (d_new != 0 || d_old != 1 || d_user != 1) g |= 1;
+        if (geteuid() != 0) g |= 2;
+        if (!(sethostname("ocap-b", 6) == -1 && errno == EPERM)) g |= 4;
+        if (!(setns(old, CLONE_NEWUTS) == -1 && errno == EPERM)) g |= 8;
+        if (!(unshare(CLONE_NEWUTS) == -1 && errno == EPERM)) g |= 16;
+        if (!(unshare(CLONE_NEWUSER) == -1 && errno == EPERM)) g |= 32;
+        long r = syscall(SYS_clone, CLONE_NEWUTS | SIGCHLD, 0, 0, 0, 0);
+        if (r == 0) _exit(0);
+        if (r > 0) {
+            waitpid((pid_t)r, NULL, 0);
+            g |= 64;
+        } else if (errno != EPERM) {
+            g |= 64;
+        }
+        /* Still in the UTS namespace it made, with its name. */
+        struct utsname u;
+        if (uname(&u) != 0 || strcmp(u.nodename, "ocap-a") != 0 || t_ns_id("uts") != uts) g |= 128;
+        /* An IPC namespace is still held, so a new one can be made. */
+        if (unshare(CLONE_NEWIPC) != 0) g |= 256;
+        if (g != 0) {
+            printf("ns-object-cap g=%#x drops=%ld,%ld,%ld\n", g, d_new, d_old, d_user);
+            fflush(stdout);
+        }
+        _exit(g == 0 ? 0 : 1);
+    }
+    int f = 0, code = t_exit_status(child);
+    if (code >= 0x7d && code <= 0x7f)
+        f |= 1;
+    else if (code != 0)
+        f |= 2;
+    snprintf(why, sizeof(why), "f=%#x code=%d", f, code);
+    report("ns_object_cap", f == 0, why);
+}
+
 /* Write `text` to `path`; 0 or the errno. */
 static int t_write_text(const char *path, const char *text)
 {
@@ -10603,6 +10660,7 @@ int main(int argc, char **argv)
     test_mount_no_escape();
     test_pivot_root();
     test_mount_object_cap();
+    test_ns_object_cap();
     test_user_ns();
     test_pid_ns();
     test_net_ns();

@@ -346,7 +346,9 @@ fn user_ns_of(pid: u64) -> Option<Arc<crate::process::userns::UserNs>> {
 /// H4a) through a descriptor `opener` opened, by `writer`, by the rules of
 /// [`UserNs::write_map`] and [`UserNs::write_setgroups`]; setgroups also
 /// needs the opener's CAP_SYS_ADMIN over the namespace (EPERM), which
-/// Linux's proc_setgroups_open checks.
+/// Linux's proc_setgroups_open checks. All three also need the writing
+/// process to hold MODIFY on the namespace, itself or through a user
+/// namespace above it (EPERM; ADR 0024, step 3).
 ///
 /// [`UserNs::write_map`]: crate::process::userns::UserNs::write_map
 /// [`UserNs::write_setgroups`]: crate::process::userns::UserNs::write_setgroups
@@ -360,6 +362,12 @@ fn write_id_map(
 ) -> Result<usize, KernelError> {
     use crate::process::userns::MapError;
     let ns = user_ns_of(pid).ok_or(KernelError::FsError(FsError::NoProcess))?;
+    if !crate::cap::authority::current_holds_namespace(
+        &crate::process::ns::NsRef::User(ns.clone()),
+        crate::cap::Rights::MODIFY,
+    ) {
+        return Err(KernelError::FsError(FsError::OperationNotPermitted));
+    }
     let done = if name == "setgroups" {
         if !opener.ns_capable(&ns, crate::process::linux_caps::CAP_SYS_ADMIN) {
             return Err(KernelError::FsError(FsError::OperationNotPermitted));
