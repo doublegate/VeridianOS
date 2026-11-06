@@ -57,6 +57,7 @@
 /* Capabilities */
 #define SYS_CAPABILITY_GRANT             1054
 #define SYS_CAPABILITY_REVOKE            1055
+#define SYS_CAPABILITY_DROP              1056
 /* Threads */
 #define SYS_THREAD_CREATE                1064
 #define SYS_exit                         60
@@ -414,6 +415,7 @@
 /* Capabilities */
 #define SYS_CAPABILITY_GRANT             1054
 #define SYS_CAPABILITY_REVOKE            1055
+#define SYS_CAPABILITY_DROP              1056
 /* Threads */
 #define SYS_THREAD_CREATE                1064
 #define SYS_exit                         93
@@ -734,6 +736,7 @@
 /* Capabilities */
 #define SYS_CAPABILITY_GRANT             1054
 #define SYS_CAPABILITY_REVOKE            1055
+#define SYS_CAPABILITY_DROP              1056
 /* Threads */
 #define SYS_THREAD_CREATE                1064
 #define SYS_exit                         93

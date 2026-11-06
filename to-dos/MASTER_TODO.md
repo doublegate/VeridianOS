@@ -401,6 +401,11 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
      - [ ] Until the moves: new compatibility code keeps Linux semantics behind module interfaces
        (no new reach-ins across subsystems), so it can move; README and the design documents
        state the current state (everything in ring 0) and the target.
+     - Progress: ADR 0024 accepted 2026-11-05 (`docs/adr/0024-linux-personality.md`; the moves
+       wait for the IPC redesign, item 16). Its steps, one commit each: [x] 1 object kinds for
+       namespaces, clocks and the system, the grants at launch, `CapabilityDrop`; [ ] 2 mount,
+       umount2, pivot_root and the private mount calls; [ ] 3 namespaces; [ ] 4 time; [ ] 5
+       process and signals; [ ] 6 filesystem inode checks; [ ] 7 system, then the docs.
   5. [ ] The Linux system calls still missing after group 3 (added 2026-11-03; 108 of the 111 in
      `docs/compat/LINUX-SYSCALL-COVERAGE.md`, group 3 adds mount, umount2 and pivot_root). One
      branch and pull request, a commit per family below, each with its LTP cases and its

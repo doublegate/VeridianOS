@@ -38,22 +38,10 @@ pub(crate) fn sys_fork_with(opts: &crate::process::fork::ForkOptions) -> Syscall
 
     match crate::process::fork::fork_process_with(opts) {
         Ok((child_pid, _)) => {
-            // In parent process, inherit capabilities to child
+            // The child's capabilities were copied by fork_process_with,
+            // once (a second copy here inserted every token again and
+            // failed on each; ADR 0024).
             if let Some(child_process) = crate::process::get_process(child_pid) {
-                let parent_cap_space = current.capability_space.lock();
-                let child_cap_space = child_process.capability_space.lock();
-
-                // Inherit capabilities from parent to child
-                if let Err(_e) = crate::cap::inheritance::fork_inherit_capabilities(
-                    &parent_cap_space,
-                    &child_cap_space,
-                ) {
-                    // Log error but don't fail the fork
-                    println!("[WARN] Failed to inherit capabilities to child process");
-                }
-                drop(child_cap_space);
-                drop(parent_cap_space);
-
                 // CLONE_PIDFD: the parent's pidfd for the child, stored
                 // before the child runs; a store that faults is EFAULT and
                 // the child never runs, as Linux's copy_process.

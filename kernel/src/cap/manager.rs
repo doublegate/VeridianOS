@@ -162,6 +162,23 @@ impl CapabilityManager {
         rights: Rights,
         cap_space: &CapabilitySpace,
     ) -> Result<CapabilityToken, CapError> {
+        self.create_capability_with_flags(
+            object,
+            rights,
+            cap_space,
+            super::inheritance::InheritanceFlags::INHERITABLE,
+        )
+    }
+
+    /// [`Self::create_capability`] with these inheritance flags (for
+    /// example PRESERVE_EXEC, ADR 0024).
+    pub fn create_capability_with_flags(
+        &self,
+        object: ObjectRef,
+        rights: Rights,
+        cap_space: &CapabilitySpace,
+        inheritance_flags: u32,
+    ) -> Result<CapabilityToken, CapError> {
         // Validate object
         if !object.is_valid() {
             return Err(CapError::InvalidObject);
@@ -192,7 +209,9 @@ impl CapabilityManager {
 
         // Insert into capability space; if that fails, the registry entry
         // and the ID go back (they leaked; PR #25 review).
-        if cap_space.insert(cap, object, rights).is_err() {
+        let entry =
+            super::space::CapabilityEntry::new(cap, object, rights).with_flags(inheritance_flags);
+        if cap_space.insert_entry(entry).is_err() {
             #[cfg(feature = "alloc")]
             self.registry.write().remove(&id);
             self.id_allocator.recycle(id);

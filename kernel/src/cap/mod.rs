@@ -15,6 +15,8 @@
 // enforcement is enabled.
 #![allow(dead_code)]
 
+#[cfg(feature = "alloc")]
+pub mod authority;
 pub mod inheritance;
 pub mod ipc_integration;
 pub mod manager;

@@ -937,6 +937,7 @@ fn handle_syscall(
         Syscall::CapabilityRevoke => crate::cap::revocation::sys_capability_revoke(arg1 as u64)
             .map(|()| 0)
             .map_err(map_kernel_error),
+        Syscall::CapabilityDrop => crate::cap::authority::sys_capability_drop(arg1, arg2),
 
         // Process management
         Syscall::SchedYield => sys_yield(),

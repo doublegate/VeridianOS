@@ -364,7 +364,7 @@ VeridianOS protects against:
 
 ### Current Performance Metrics
 
-- **IPC Latency**: not measured end to end: user programs cannot reach IPC yet (N-33); earlier "< 1μs" figures timed in-kernel helpers
+- **IPC Latency**: not measured end to end: a program can send to and receive from endpoints it created since v0.27, but no two programs talk over IPC yet (N-79 to N-91); earlier "< 1μs" figures timed in-kernel helpers
 - **Context Switch**: < 10μs achieved (✅ meeting target)
 - **Memory Allocation**: < 500ns achieved (✅ exceeding 1μs target)
 - **Page Mapping**: 1.5μs achieved (✅ exceeding 2μs target)

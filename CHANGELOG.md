@@ -75,6 +75,14 @@
 
 ### Added
 
+- ADR 0024: the Linux ABI is to be served by a user-space runtime on native IPC and capabilities
+  (on the model of Starnix, after the IPC redesign), and every Linux privilege check also needs an
+  object capability for what it acts on, so the native model governs Linux programs too. Its first
+  step: object capabilities for namespaces, the clocks and the system (`cap::authority`), which
+  every program the kernel starts receives for the namespaces it is in, keeps across exec and
+  passes on at fork; the private call `CapabilityDrop` (1056) removes one from the caller's own
+  space, so a launcher can confine what it starts. Nothing checks them yet. Fork no longer copies
+  the capability space a second time (each copy was refused as a duplicate).
 - `/boot/config-7.3.0-veridian` in every root filesystem (ADR 0023): the Linux kernel
   configuration VeridianOS reports, generated per architecture by `tools/compat/gen_kconfig.py`
   from `abi/kconfig.map`. An option is set only where the kernel does what Linux built with it
