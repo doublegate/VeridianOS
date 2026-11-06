@@ -675,13 +675,15 @@ class GuestRunner(unittest.TestCase):
 
     def test_ltp_timeouts_scale_with_the_limit(self):
         # LTP kills a test after its own timeout (30 s by default), well before
-        # the 180 s the host allows under emulation; its multiplier follows
-        # the limit, in whole minutes, and is never below 1.
-        self.assertEqual(self.multiplier("60"), ["MUL=1"])
-        self.assertEqual(self.multiplier("180"), ["MUL=3"])
+        # the 180 s the host allows under emulation; its multiplier makes it
+        # the limit (one unit per 30 s, whole units), and is never below 1.
+        self.assertEqual(self.multiplier("60"), ["MUL=2"])
+        self.assertEqual(self.multiplier("180"), ["MUL=6"])
+        self.assertEqual(self.multiplier("100"), ["MUL=3"])
         self.assertEqual(self.multiplier("30"), ["MUL=1"])
-        self.assertEqual(self.multiplier(), ["MUL=1"])
-        self.assertEqual(self.multiplier("600"), ["MUL=10"])
+        self.assertEqual(self.multiplier("10"), ["MUL=1"])
+        self.assertEqual(self.multiplier(), ["MUL=2"])
+        self.assertEqual(self.multiplier("600"), ["MUL=20"])
 
     def test_no_shell_arithmetic(self):
         # The image's ash is built without FEATURE_SH_MATH: $((...)) is a
