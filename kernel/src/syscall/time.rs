@@ -200,7 +200,12 @@ fn read_cpu_clock(clock: Clock) -> Result<u64, SyscallError> {
 fn clock_now_ns(clock: Clock, id: i32) -> Result<i64, SyscallError> {
     match clock {
         Clock::Realtime => Ok(crate::timer::realtime::now_ns()),
-        Clock::Tai => Ok(crate::timer::realtime::now_ns().saturating_add(tai_offset_ns())),
+        // UTC and the TAI offset read together, under the NTP lock that a
+        // leap second moves both under (`timer::steer::service`): else a
+        // read across one pairs the old UTC with the new offset.
+        Clock::Tai => Ok(crate::timer::ntp::with(|ntp| {
+            crate::timer::realtime::now_ns().saturating_add(ntp.tai() as i64 * 1_000_000_000)
+        })),
         Clock::Monotonic => {
             // MONOTONIC_RAW is the clock source as adjtimex leaves it.
             let host = if id == CLOCK_MONOTONIC_RAW {
@@ -341,7 +346,7 @@ pub fn sys_clock_settime(clock_id: usize, tp_ptr: usize) -> SyscallResult {
     let ts: Timespec = super::userspace::read_user(tp_ptr)?;
     let ns = ts.to_ns()?;
     require_time_privilege()?;
-    clock_was_set(crate::timer::realtime::set_now_ns(ns));
+    clock_was_set(crate::timer::set_wall_clock(ns));
     Ok(0)
 }
 
@@ -404,7 +409,7 @@ pub fn sys_settimeofday(tv_ptr: usize, tz_ptr: usize) -> SyscallResult {
         );
     }
     if let Some(ns) = wall_ns {
-        clock_was_set(crate::timer::realtime::set_now_ns(ns));
+        clock_was_set(crate::timer::set_wall_clock(ns));
     }
     Ok(0)
 }
@@ -429,10 +434,12 @@ fn do_adjtimex(tx: &mut crate::timer::ntp::Timex) -> Result<i32, SyscallError> {
         // Linux reports the time read before the step.
         let now = realtime::now_ns();
         let moved = if tx.modes & ntp::ADJ_SETOFFSET != 0 {
-            Some(
-                realtime::inject_offset(ntp::setoffset_ns(tx))
-                    .ok_or(SyscallError::InvalidArgument)?,
-            )
+            let moved = realtime::inject_offset(ntp::setoffset_ns(tx))
+                .ok_or(SyscallError::InvalidArgument)?;
+            // timekeeping_inject_offset clears the NTP state (TK_CLEAR_NTP)
+            // before ntp_adjtimex applies the other modes.
+            ntp.clear();
+            Some(moved)
         } else {
             None
         };

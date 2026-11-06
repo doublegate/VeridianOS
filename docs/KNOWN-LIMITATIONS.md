@@ -62,7 +62,10 @@ exposed were fixed (N-182 to N-189); the rest are listed, with their targets, in
   STA_INS/STA_DEL insert or delete a leap second at midnight UTC. The differences: the phase and
   the slew are delivered a second at a time, as Linux did before 7.0's per-tick drain (the same
   totals); the per-second work and the leap second run in `ktimerd`, so they happen up to a
-  scheduling delay after the second starts, and not at all on a machine where the thread cannot
+  scheduling delay after the second starts (seconds it runs late are charged with what the rate
+  before them delivered, so nothing is lost or given twice, but a second's change of rate starts
+  that delay late; after 64 seconds without it the count restarts), and not at all on a machine
+  where the thread cannot
   start (a rate set by adjtimex still applies); there is no PPS, and no auxiliary clocks. (LTP
   leapsec01 passed before leap seconds existed, as it only checks that a sleep does not end early;
   the runtime test `adjtimex_leap_second_inserted` checks the repeated second.)

@@ -411,9 +411,15 @@
   chunk of the phase offset and up to 500 us of the adjtime() slew, grows maxerror, and inserts or
   deletes a leap second at midnight UTC for STA_INS/STA_DEL (CLOCK_REALTIME reads 23:59:59 twice,
   adjtimex reports TIME_OOP, TAI moves a second, timers on the wall clock follow). Clock reads take
-  the rate from a two-slot snapshot, never waiting for a writer, and nothing runs each second
-  while there is nothing to deliver. clock_adjtime adjusts CLOCK_REALTIME and answers EOPNOTSUPP
-  for every other clock, EINVAL for an ID that names none.
+  the rate and the raw clock in one sequence section, so CLOCK_MONOTONIC never goes back across a
+  rate change; a second `ktimerd` runs late delivers what the rate before it delivered, and
+  nothing runs each second while there is nothing to deliver (a synchronized clock's maxerror
+  still grows each second until it becomes unsynchronized). CPU time and scheduling stay on the
+  unsteered clock, as Linux's sched_clock; sleep deadlines run on CLOCK_MONOTONIC. Setting the
+  clock (settimeofday, clock_settime, ADJ_SETOFFSET) clears the NTP state as on Linux: the slew
+  and phase offset stop, the clock is unsynchronized and no leap second stays armed. CLOCK_TAI
+  reads UTC and the TAI offset together. clock_adjtime adjusts CLOCK_REALTIME and answers
+  EOPNOTSUPP for every other clock, EINVAL for an ID that names none.
 - restart_syscall (`syscall::restart`; it was ENOSYS). A relative nanosleep or clock_nanosleep,
   or a poll with a timeout, that a stop interrupts now carries on to its first deadline once the
   process continues; it started the whole duration again. As in Linux, the interrupted call

@@ -405,10 +405,10 @@ pub fn wait_io(
     precise: bool,
     wake_at: Option<u64>,
 ) -> Result<(), WaitError> {
-    let recheck = (!precise).then(|| now().saturating_add(IO_RECHECK_NS));
+    let recheck = (!precise).then(|| deadline_now().saturating_add(IO_RECHECK_NS));
     let until = [deadline, recheck, wake_at].into_iter().flatten().min();
     match wait_event(&IO_EVENTS, until, || io_seq() != seq) {
-        Err(WaitError::TimedOut) if deadline.is_none_or(|d| now() < d) => Ok(()),
+        Err(WaitError::TimedOut) if deadline.is_none_or(|d| deadline_now() < d) => Ok(()),
         r => r,
     }
 }
@@ -434,8 +434,18 @@ pub fn started() -> bool {
     STARTED.load(Ordering::Acquire)
 }
 
-/// CLOCK_MONOTONIC, which sleeps and timeouts count on.
+/// The scheduler's clock: the clock source as adjtimex leaves it
+/// (CLOCK_MONOTONIC_RAW), as Linux's sched_clock. CPU time, the run
+/// queues' virtual time and load balancing count on it, so a steered
+/// clock (ADJ_TICK, the frequency) never changes how much CPU time a task
+/// is charged.
 fn now() -> u64 {
+    crate::timer::monotonic_raw_ns()
+}
+
+/// CLOCK_MONOTONIC, which sleep deadlines and timeouts count on (the
+/// steered clock, as hrtimers on Linux; see [`clock_ns`]).
+fn deadline_now() -> u64 {
     crate::timer::monotonic_ns()
 }
 
@@ -1295,7 +1305,7 @@ fn runnable_everywhere() -> u64 {
 /// are only tried: an interrupted holder keeps them, and a sleeper not
 /// woken now is woken on a later tick.
 fn wake_expired_sleepers() {
-    let t = now();
+    let t = deadline_now();
     let Some(mut sleepers) = SLEEPERS.try_lock() else {
         return;
     };
@@ -1382,7 +1392,7 @@ pub enum WaitError {
 
 /// The current `monotonic_ns` clock, for [`wait_event`] deadlines.
 pub fn clock_ns() -> u64 {
-    now()
+    deadline_now()
 }
 
 /// Sleep until `cond` holds, a signal must be acted on, or `deadline`
@@ -1403,7 +1413,7 @@ pub fn wait_event(
             Some(Ok(()))
         } else if crate::process::wait_interrupted() {
             Some(Err(WaitError::Interrupted))
-        } else if deadline.is_some_and(|d| now() >= d) {
+        } else if deadline.is_some_and(|d| deadline_now() >= d) {
             Some(Err(WaitError::TimedOut))
         } else {
             None
