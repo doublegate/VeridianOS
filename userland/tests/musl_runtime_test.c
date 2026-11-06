@@ -5995,13 +5995,19 @@ static int restart_attempt(const char *name, int mode, int tries)
         _exit(0);
     }
     char c = 0;
-    long long out[4] = {0, 0, -2, 0}, cont = 0, stop_at = 0;
+    long long out[4] = {0, 0, -2, 0}, cont = 0, sent = 0;
     int stopped = 0;
     if (pid > 0 && read(ready[0], &c, 1) == 1) {
         usleep(50000);
         int st = 0;
-        stop_at = mono_ns();
-        stopped = kill(pid, SIGSTOP) == 0 && waitpid(pid, &st, WUNTRACED) == pid && WIFSTOPPED(st);
+        int killed = kill(pid, SIGSTOP) == 0;
+        /* Taken after kill returns: the parent can lose the CPU between
+         * any earlier reading and the kill itself (1.7 s seen on GitHub's
+         * 4-CPU runner), and a child that finished in that gap was never
+         * stopped. One that finishes after this was stopped too late, and
+         * the kernel is wrong. */
+        sent = mono_ns();
+        stopped = killed && waitpid(pid, &st, WUNTRACED) == pid && WIFSTOPPED(st);
         usleep(250000);
         cont = mono_ns();
         kill(pid, SIGCONT);
@@ -6013,7 +6019,7 @@ static int restart_attempt(const char *name, int mode, int tries)
         close(result[i]);
         close(idle[i]);
     }
-    if (!stopped && out[1] != 0 && out[1] < stop_at && tries > 1)
+    if (!stopped && out[1] != 0 && out[1] < sent && tries > 1)
         return 1;
     long long slept = (out[1] - out[0]) / 1000000, after = (out[1] - cont) / 1000000;
     snprintf(why, sizeof(why),
