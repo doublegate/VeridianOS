@@ -5964,13 +5964,17 @@ static void test_posix_timers(void)
  * which Linux reruns with the time left when the stop came (fs/select.c
  * poll_select_finish): about 250 ms more after the continue. */
 enum { RESTART_SLEEP, RESTART_POLL, RESTART_PPOLL };
-static void restart_after_stop(const char *name, int mode)
+/* One try. Returns 1, without reporting, when the stop came too late to
+ * test anything and tries remain: the child had finished its wait before
+ * the parent sent SIGSTOP (the parent went unscheduled for over 250 ms,
+ * seen on GitHub's 4-CPU runner, PR #35). */
+static int restart_attempt(const char *name, int mode, int tries)
 {
     char why[200];
     int ready[2] = {-1, -1}, result[2] = {-1, -1}, idle[2] = {-1, -1};
     if (pipe(ready) != 0 || pipe(result) != 0 || pipe(idle) != 0) {
         report(name, 0, "pipe failed");
-        return;
+        return 0;
     }
     pid_t pid = fork();
     if (pid == 0) {
@@ -5991,11 +5995,12 @@ static void restart_after_stop(const char *name, int mode)
         _exit(0);
     }
     char c = 0;
-    long long out[4] = {0, 0, -2, 0}, cont = 0;
+    long long out[4] = {0, 0, -2, 0}, cont = 0, stop_at = 0;
     int stopped = 0;
     if (pid > 0 && read(ready[0], &c, 1) == 1) {
         usleep(50000);
         int st = 0;
+        stop_at = mono_ns();
         stopped = kill(pid, SIGSTOP) == 0 && waitpid(pid, &st, WUNTRACED) == pid && WIFSTOPPED(st);
         usleep(250000);
         cont = mono_ns();
@@ -6008,9 +6013,12 @@ static void restart_after_stop(const char *name, int mode)
         close(result[i]);
         close(idle[i]);
     }
+    if (!stopped && out[1] != 0 && out[1] < stop_at && tries > 1)
+        return 1;
     long long slept = (out[1] - out[0]) / 1000000, after = (out[1] - cont) / 1000000;
-    snprintf(why, sizeof(why), "stopped=%d ret=%lld errno=%lld slept=%lldms after_cont=%lldms",
-             stopped, out[2], out[3], slept, after);
+    snprintf(why, sizeof(why),
+             "stopped=%d ret=%lld errno=%lld slept=%lldms after_cont=%lldms tries_left=%d",
+             stopped, out[2], out[3], slept, after, tries - 1);
     if (mode == RESTART_PPOLL)
         report(name, stopped && out[2] == 0 && slept >= 450 && after >= 150 && after < 450, why);
     else
@@ -6019,6 +6027,13 @@ static void restart_after_stop(const char *name, int mode)
          * below that is for slow CI guests (200 ms seen on GitHub's 4-CPU
          * runner, PR #35). */
         report(name, stopped && out[2] == 0 && slept >= 300 && after < 280, why);
+    return 0;
+}
+
+static void restart_after_stop(const char *name, int mode)
+{
+    for (int tries = 5; restart_attempt(name, mode, tries); tries--)
+        ;
 }
 
 /* adjtimex and clock_adjtime: Linux's NTP state is read by everyone and
