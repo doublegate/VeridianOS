@@ -30,12 +30,26 @@
   keeps them, so 225 x86_64 entries still named statfs's ENOSYS); hand-written `known:` notes
   were kept, and given back to the RISC-V memory-exhaustion tests, which went from HANG to
   TIMEOUT.
+- The expected lists were refreshed again from full runs after the syscall groups (2026-11-05):
+  LTP passes 741 of 1,552 tests on x86_64, 730 on AArch64 and 726 on RISC-V, Open POSIX
+  1,640/1,637/1,635 of 1,965 and libc-test 527/529/529 of 560. The in-guest runner now sets
+  `LTP_TIMEOUT_MUL` so that LTP's own timeout (30 s per unit) is the per-test limit (2 at 60 s
+  under KVM, 6 at 180 s under emulation): LTP killed a test after its own 30 s, so tests making a
+  hundred forks failed under emulation whenever the host was busy. (A first version counted a
+  unit per minute, which gave LTP half the limit: getpid01 was killed at 90 s on GitHub's
+  runners.) Three tests that sat at the 90 s limit under emulation are `FLAKY` (fork06 and
+  pthread_cond_timedwait 4-2 on AArch64, chdir02 on RISC-V).
 - statfs details: a device node's fstatfs names the filesystem holding the node (it said tmpfs
   wherever the node was), BlockFS on a read-only disk reports `ST_RDONLY`, and statfs of a
   non-directory with a trailing slash is ENOTDIR, as stat is.
 - The kernel shell's `uname` takes combined options (`-sr`) and `--all`, and reports an
   invalid option or an operand as uname(1) does; an unknown option printed an empty line.
 
+- `docs/PORTING-GUIDE.md` is rewritten for the Linux ABI: the musl toolchains (musl 1.2.6),
+  autotools, CMake, Meson and pkg-config setup, building a program into a root image, the
+  differences from Linux a port meets, credentials, the uname mode and the Portfiles. It replaces
+  the native-numbering syscall lists; `docs/SOFTWARE-PORTING-GUIDE.md`, which described the
+  native `<arch>-veridian` triples, is now a pointer to it.
 - `docs/PORTING-GUIDE.md` describes the privilege model as it is: Unix credentials and Linux
   capabilities for POSIX programs (ADR 0020) beside the object capabilities of the native calls.
   It said VeridianOS had no user or group IDs and that `setuid` should be removed from ported
@@ -63,6 +77,376 @@
 
 ### Added
 
+- `/boot/config-7.3.0-veridian` in every root filesystem (ADR 0023): the Linux kernel
+  configuration VeridianOS reports, generated per architecture by `tools/compat/gen_kconfig.py`
+  from `abi/kconfig.map`. An option is set only where the kernel does what Linux built with it
+  does; `gen_kconfig.py --check` (gate and CI) refuses an option that names a missing or stub
+  system call. LTP's tests that check the kernel configuration (about 95) were TBROK on
+  "Cannot parse kernel .config"; they now run, or are TCONF where an option is unset.
+- fallocate (`fs::falloc`, N-208; it was ENOSYS), with Linux's argument checks in their order
+  (EINVAL, EOPNOTSUPP, EBADF, ESPIPE, EISDIR, ENODEV, EFBIG), RLIMIT_FSIZE, and the removal of
+  set-ID bits and file capabilities a write makes. BlockFS allocates (with or without
+  `FALLOC_FL_KEEP_SIZE`), zeroes ranges and punches holes, and refuses an allocation that does
+  not fit with ENOSPC before changing anything; tmpfs and memfd allocate and punch holes as
+  Linux's `shmem_fallocate` does, a memfd's grow and write seals included; ramfs answers
+  EOPNOTSUPP, as Linux's does. LTP creates its 300 MB loop image with fallocate, so the tests
+  that ask for a block device now stop at once instead of writing the image until the disk is
+  full or the time limit passes.
+- creat, getdents, lchown, ustat and sysfs (x86_64), and preadv, pwritev, preadv2, pwritev2,
+  fchmodat2, close_range, syncfs, sync_file_range, readahead and fadvise64 (all three; they were
+  ENOSYS), as Linux 7.3 has them. The vectored calls check their offset, descriptor and iovec
+  array in Linux's order and take the RWF_* flags: RWF_APPEND, RWF_NOAPPEND, RWF_DSYNC and
+  RWF_SYNC, RWF_NOSIGNAL (EPIPE without SIGPIPE) and RWF_HIPRI; RWF_ATOMIC and RWF_DONTCACHE are
+  EOPNOTSUPP, as on a filesystem without them, and so is RWF_NOWAIT on a pipe or socket. musl's
+  pwrite and pwritev are pwritev2 with RWF_NOAPPEND, so they now write where asked on an
+  O_APPEND file instead of failing with EOPNOTSUPP (LTP's pwrite04 was BROK). fchmodat2 refuses
+  to change a symlink (EOPNOTSUPP) and takes AT_EMPTY_PATH. close_range closes or marks
+  close-on-exec a range of descriptors. readahead and fadvise check their arguments and do
+  nothing more, there being no page cache; syncfs and sync_file_range sync every filesystem, as
+  fsync does. ustat knows the root filesystem, the device every file reports; sysfs lists the
+  filesystem types by their Linux names.
+- sendfile, copy_file_range, splice, tee and vmsplice (they were ENOSYS), following Linux
+  7.3's `fs/read_write.c` and `fs/splice.c`: each checks its descriptors, offsets, flags and
+  file types in Linux's order (ESPIPE for an offset on a pipe, EINVAL for a pipe into itself,
+  O_APPEND output, or neither side a pipe; EBADF, EISDIR, EXDEV, EOVERFLOW and EFBIG for
+  copy_file_range as `generic_copy_file_checks` has them, including overlapping ranges in one
+  file). A given offset moves instead of the file position. Pipes and FIFOs gain a splice read
+  that hands queued bytes on and removes only what the other side took, so a failed write loses
+  nothing, and tee copies without removing. Writes into a pipe nobody reads are EPIPE with
+  SIGPIPE; SPLICE_F_NONBLOCK or O_NONBLOCK makes an empty or full pipe EAGAIN; RLIMIT_FSIZE and
+  the set-ID clearing of a write apply.
+- execveat (it was missing from the syscall table), following Linux 7.3's `fs/exec.c`: the name
+  (EFAULT, or ENOENT for an empty one without AT_EMPTY_PATH), then unknown flags (EINVAL), then the
+  lookup against the directory descriptor (EBADF, ENOTDIR, ELOOP for a final symlink with
+  AT_SYMLINK_NOFOLLOW), then the file (EACCES unless it is a regular file the caller may execute),
+  then argv and envp (EFAULT, E2BIG). AT_EMPTY_PATH runs the descriptor itself; AT_EXECVE_CHECK
+  (new in Linux 7.3) makes the same checks and returns 0 without executing. A program run from a
+  descriptor sees `/dev/fd/N` or `/dev/fd/N/name` as AT_EXECFN and its file's own path in
+  /proc/self/exe; a script run from a close-on-exec descriptor is ENOENT, since its interpreter
+  could not open it.
+- name_to_handle_at and open_by_handle_at, following Linux 7.3's `fs/fhandle.c`. A handle is the
+  file's inode number (type FILEID_INO64_GEN, 12 bytes); open_by_handle_at looks for that number in
+  the filesystem of the given descriptor's mount (the cwd's for AT_FDCWD) and opens the file with
+  open(2)'s checks, a symlink being ELOOP. ramfs, tmpfs and BlockFS can decode handles; elsewhere
+  name_to_handle_at is EOPNOTSUPP unless AT_HANDLE_FID asks for one that is never opened. The
+  errors come in Linux's order (EINVAL for unknown flags or CONNECTABLE with FID or EMPTY_PATH,
+  then the lookup, EOPNOTSUPP, EFAULT, EINVAL for more than 128 bytes, and EOVERFLOW with the size
+  needed written back); AT_HANDLE_MNT_ID_UNIQUE reports statx's unique mount id; a connectable
+  handle opens only below its mount descriptor; open_by_handle_at needs CAP_DAC_READ_SEARCH
+  (EPERM) and is ESTALE for a file that is gone. New error: ESTALE.
+- ioctl decides by what a descriptor is, not by its number: terminal requests reach the console
+  through /dev/console or /dev/tty0 at any fd number (an open of either above fd 2 was not a
+  terminal), and not a file or pipe redirected onto fds 0-2 (which isatty called a terminal). A
+  closed descriptor is EBADF whatever the request, and a request the file does not know is ENOTTY
+  (it was EINVAL). FIONREAD (a regular file's size past the position, a pipe's or FIFO's contents
+  from either end, a PTY's or the console's input), FIONBIO, FIOCLEX and FIONCLEX work on any
+  file; FIOASYNC turning SIGIO on is ENOTTY, since nothing sends it yet (N-198).
+- fcntl record locks work (N-199): F_GETLK, F_SETLK and F_SETLKW, and the open-file-description
+  F_OFD_GETLK, F_OFD_SETLK and F_OFD_SETLKW (they were EINVAL). A POSIX lock belongs to the
+  process's descriptor table, so its threads share it and a fork child does not inherit it, and it
+  goes when the process closes any descriptor of the file or exits; an OFD lock belongs to the open
+  file and goes with its last close. Locks of one owner split and join as on Linux; F_GETLK reports
+  the holder's pid (-1 for an OFD lock); F_SETLKW sleeps until granted (EINTR on a signal) and is
+  EDEADLK when a POSIX waiter would close a cycle of waiting owners. A range is measured from the
+  start, the position or the end, with Linux's EINVAL and EOVERFLOW, and a lock needs a descriptor
+  open for its kind (EBADF).
+- fcntl looks the descriptor up first, so any command on one that is not open is EBADF (F_GETFL
+  and F_SETFL were EINVAL, and an F_SETFD failure was EINVAL whatever it was); an unknown command
+  is EINVAL. F_SETFL changes O_APPEND, which writes honour from then on (it was ignored), and keeps
+  O_ASYNC, O_DIRECT and O_NOATIME for F_GETFL, which also reports O_LARGEFILE as on 64-bit Linux;
+  turning O_NOATIME on needs the file's owner or CAP_FOWNER (EPERM), and O_DIRECT a regular file
+  (EINVAL). New: F_DUPFD_QUERY (N-199). lseek refuses a position past the largest file offset
+  (EINVAL, as Linux's vfs_setpos), and a record-lock range measured from one is EOVERFLOW.
+- readv, writev, preadv and pwritev move their buffers as one transfer (N-200); they made one
+  read or write per buffer. A readv of a pipe, socket or terminal returns what is there instead of
+  waiting again for a later buffer, and a writev of at most PIPE_BUF bytes to a pipe goes in whole
+  or not at all (on a full O_NONBLOCK pipe EAGAIN, where the first buffers used to go in). Every
+  buffer's address range is checked before anything moves (EFAULT with the data left in place, as
+  Linux's import_iovec), and the descriptor before the iovec array, so a bad one is EBADF even
+  with no buffers (it returned 0).
+- link, linkat, symlink and symlinkat report the errno of what failed (N-202); every failure used
+  to be EINVAL. An existing new name is EEXIST, also with a trailing slash, and a missing one with
+  a trailing slash ENOENT; a hard link to a directory, or on a filesystem without hard links, is
+  EPERM, and one into another filesystem EXDEV (checked before the directory, as Linux). linkat
+  follows a final symlink only with AT_SYMLINK_FOLLOW (it always followed), refuses other flags
+  (EINVAL), and with AT_EMPTY_PATH links the file a descriptor names; that needs
+  CAP_DAC_READ_SEARCH, since a file does not record who opened it (Linux also lets the opener
+  through).
+- A trailing slash makes any path name a directory (N-203): a symlink to one is followed and
+  anything else is ENOTDIR, in every call that looks a path up; open, stat and the link calls
+  ignored the slash. getdents and getdents64 of a descriptor that is not a directory are ENOTDIR
+  (they were EIO), a bad one is EBADF before the buffer is looked at, and the end of a directory
+  is 0 with any buffer; fchown of a descriptor that is not open is EBADF (it was EINVAL). Path
+  lookups report a full filesystem as ENOSPC (it was ENOMEM) and other failures as themselves
+  instead of ENOENT (N-206).
+- stat reports real link counts and devices (N-205). `st_nlink` counts a file's names (it was
+  always 1) and is 2 plus the subdirectories for a directory, 0 once a file or directory is
+  removed; linkat with AT_EMPTY_PATH refuses a file with no names left (ENOENT). `st_dev` is an
+  anonymous device per mount, so the root, /proc, /dev and /dev/shm differ (every file was device
+  1), and ustat finds a filesystem by it. On ramfs and tmpfs, chmod, chown and setting the times
+  move the status-change time instead of the modification time, writes and truncation move both,
+  and adding or removing a name moves the directory's times and the file's ctime, as on Linux.
+- Open flags as Linux 7.3 handles them (N-206). An O_PATH descriptor names a file without opening
+  it: no permission check, truncation, FIFO wait or device open, a final symlink kept with
+  O_NOFOLLOW, and open(2) drops every other flag. Only path operations take one (fstat, fstatat
+  and statx with AT_EMPTY_PATH, fstatfs, fchdir, the directory of any `*at` call, fchownat,
+  fchmodat2, linkat, readlinkat of an empty name, execveat, name_to_handle_at, dup and passing it
+  over a socket); read, write, lseek, ioctl, mmap, getdents, fsync, fchmod, fchown, xattrs and
+  the rest are EBADF, and fcntl takes only the duplication, descriptor-flag and F_GETFL commands
+  (F_GETFL reports O_PATH). O_TMPFILE makes an unnamed file in a ramfs or tmpfs directory
+  (EOPNOTSUPP on BlockFS), with write and search permission on it, which linkat with
+  AT_EMPTY_PATH names unless O_EXCL was given; without O_DIRECTORY or a write mode it is EINVAL.
+  O_EMPTYPATH with an empty name opens the descriptor's file again, with the MAC check an open by
+  name makes for the access asked. O_NOATIME needs the file's owner or CAP_FOWNER (EPERM) and
+  O_DIRECT a regular file (EINVAL), and F_GETFL now reports
+  O_ASYNC, O_DIRECT, O_NOATIME, O_DSYNC and O_SYNC given at open. linkat with AT_EMPTY_PATH also
+  links a file for the credentials it was opened with, as Linux 6.10 does, so an unprivileged
+  program can name its O_TMPFILE file.
+- ETXTBSY, as Linux's write counts: a program that is running cannot be opened for writing or
+  truncated (open with a write mode, O_TRUNC, truncate), and a file open for writing cannot be
+  executed. Exec denies writes to the program, a `#!` script and the dynamic loader while it
+  runs, the process keeps the program's denial until it exits or execs again, and fork copies
+  it. Reading, O_PATH and writing again once no process runs the file are unaffected.
+- inotify, as Linux 7.3's `fs/notify/inotify` (the module was a path-based model with no callers,
+  and the system calls were ENOSYS): inotify_init1 (and x86_64's inotify_init), inotify_add_watch
+  and inotify_rm_watch with Linux's argument checks and errors, reads of whole `struct
+  inotify_event` records (EINVAL when the first does not fit), poll and FIONREAD. Watches are on
+  inodes; a directory's also reports its entries' events with their names. Creation, link,
+  unlink and rmdir, rename (MOVED_FROM and MOVED_TO with one cookie, MOVE_SELF), open, read,
+  write, truncate, close, chmod, chown, utimes and the xattr calls report what Linux's fsnotify
+  hooks report, in its order; identical consecutive events merge, a full queue ends in one
+  IN_Q_OVERFLOW, IN_ONESHOT, IN_MASK_ADD, IN_MASK_CREATE, IN_ONLYDIR and IN_DONT_FOLLOW work,
+  and ending a watch queues IN_IGNORED. `/proc/sys/fs/inotify` has the limits, which root may
+  change (16384 queued events, 128 instances and 65536 watches per user to begin with). fanotify
+  stays ENOSYS, as on a kernel built without CONFIG_FANOTIFY.
+- pidfds, as Linux 7.3's `kernel/pid.c` and `fs/pidfs.c`: pidfd_open (PIDFD_NONBLOCK and
+  PIDFD_THREAD), pidfd_send_signal (the scope flags, PIDFD_SELF_THREAD and
+  PIDFD_SELF_THREAD_GROUP, a caller's siginfo under sigqueue's rules, and `/proc/<pid>`
+  directories in place of a pidfd) and pidfd_getfd (for a caller that may ptrace the target).
+  A pidfd is close-on-exec, polls readable once its process has exited and hung up once it is
+  reaped, and its reads are EINVAL. waitid takes P_PIDFD (an O_NONBLOCK pidfd waits as WNOHANG,
+  and EAGAIN when nothing is ready) and now checks its options before its id, as Linux; clone
+  takes CLONE_PIDFD for processes and threads, returning the pidfd through `parent_tid`.
+- clone3, as Linux 7.3's `kernel/fork.c`: `struct clone_args` read as an extensible struct and
+  checked in Linux's order (clone shares the same path), the pidfd stored through its own
+  pointer, the stack given as base and size, CLONE_CLEAR_SIGHAND, CLONE_NNP, CLONE_AUTOREAP (the
+  child is reaped as it exits), CLONE_PIDFD_AUTOKILL (closing the clone pidfd kills the child)
+  and set_tid for a caller with CAP_CHECKPOINT_RESTORE or CAP_SYS_ADMIN. CLONE_INTO_CGROUP is
+  EBADF: there is no cgroup filesystem.
+- kcmp, as Linux 7.3's `kernel/kcmp.c`: whether two tasks share an open file, address space,
+  file table, filesystem state or signal handlers, or a file an epoll instance watches
+  (KCMP_EPOLL_TFD), ordered by an obfuscated address; a CLONE_VM child shares its parent's
+  address space until either execs, and KCMP_IO and KCMP_SYSVSEM find every pair equal (no task
+  has an I/O context or a semaphore undo list). clone accepts CLONE_IO.
+- process_vm_readv and process_vm_writev, as `mm/process_vm_access.c`: copies
+  between the caller and a process it may ptrace, page by page, faulting the target's pages in,
+  writing only where the target may write, and returning what was copied before a fault. Access
+  is checked again for every page, so a set-ID exec in the target ends the copy. A process may
+  always use these calls, and pidfd_getfd, on itself, as Linux's ptrace_may_access allows. An
+  open pidfd keeps its process's id from being chosen again by clone3's set_tid, as Linux's pidfd
+  keeps its struct pid, so CLONE_PIDFD_AUTOKILL's kill cannot reach another process.
+- personality, as Linux 7.3: per thread, inherited, any value stored and the old one returned.
+  STICKY_TIMEOUTS leaves the timeout of select, pselect6 and ppoll unchanged, UNAME26 reports a
+  2.6 release (2.6.63-veridian), and READ_IMPLIES_EXEC makes readable memory executable for a
+  program with the W^X opt-in only (ADR 0017). Exec clears READ_IMPLIES_EXEC, as Linux does for
+  every 64-bit program, and a set-ID exec PER_CLEAR_ON_SETID.
+- kill and the other senders deliver to a zombie, which discards the signal, as Linux; only a
+  reaped process is ESRCH. kill and waitpid take a pid_t's low 32 bits and refuse INT_MIN with
+  ESRCH (N-213). `/proc/sys/kernel/tainted` reads 0.
+- Namespaces, step H1 of ADR 0022: every thread has a namespace set, `/proc/<pid>/ns/*` links
+  read `type:[inode]` with Linux's inode numbers and open nsfs files (NS_GET_NSTYPE, NS_GET_ID,
+  NS_GET_USERNS, NS_GET_PARENT, NS_GET_OWNER_UID and the NS_GET_*_PIDNS calls), and unshare,
+  setns (from an nsfs file or a pidfd) and clone/clone3 take the CLONE_NEW* flags with Linux's
+  checks. UTS namespaces are complete: sethostname, setdomainname, uname and
+  `/proc/sys/kernel/{hostname,domainname}` follow the caller's (the domain name reads "(none)",
+  as on Linux). IPC and cgroup namespaces can be created and joined but hold nothing yet; user,
+  mount, PID and network namespaces exist as their initial ones, and a new one is EINVAL until
+  its step.
+- Time namespaces, step H2 of ADR 0022: unshare(CLONE_NEWTIME) and clone3 make a namespace for
+  the caller's children whose CLOCK_MONOTONIC and CLOCK_BOOTTIME offsets
+  `/proc/<pid>/timens_offsets` sets (Linux's format, checks and error order) until a process
+  enters it, on fork without CLONE_VM, on exec or through setns. Every read of those clocks
+  (clock_gettime and the raw, coarse and alarm variants, `/proc/uptime`, sysinfo) adds the
+  reader's offset, and every absolute deadline on them (clock_nanosleep, timerfd, POSIX timers,
+  FUTEX_WAIT_BITSET) is taken back to the host's clock, as Linux's timens_ktime_to_host.
+- Mount namespaces, the first part of step H3 of ADR 0022: unshare(CLONE_NEWNS), clone, clone3
+  and setns make and join them. A new one holds a copy of the caller's mounts (Linux's
+  copy_tree: new mount ids, the same filesystems), or with UNSHARE_EMPTY_MNTNS or
+  CLONE_EMPTY_MNTNS only the root mount, with the root and working directory moved to it.
+  Path lookups, statx's mount ids and the private mount call work in the caller's namespace.
+  `/proc/<pid>/mounts` and `/proc/<pid>/mountinfo` list a process's mounts under its root in
+  Linux's formats, and `/proc/mounts` links to `self/mounts`. A file's device number (`st_dev`)
+  now belongs to its filesystem rather than to the mount, so it is the same in every namespace,
+  and procfs is listed read-write, as Linux mounts it.
+- Linux mount(2) and umount2 (ADR 0022 H3b), in the caller's mount namespace, with Linux's
+  checks and errors: new tmpfs (`size`, `mode`, `uid`, `gid`), ramfs, proc and devtmpfs mounts
+  (ENODEV for other types), bind mounts of a directory or file (MS_REC copying what is mounted
+  under it), MS_MOVE, MS_REMOUNT with and without MS_BIND, and MS_PRIVATE, MS_SLAVE and
+  MS_UNBINDABLE (MS_SHARED is EINVAL: mounts do not propagate). A mount on a mount point
+  covers it until unmounted. umount2 takes MNT_DETACH, MNT_EXPIRE, MNT_FORCE and
+  UMOUNT_NOFOLLOW, and is EBUSY while a mount has mounts under it or a process of the namespace
+  works, is rooted or has a file open in it. `/proc/<pid>/mounts` and `mountinfo` show the
+  mount flags (`relatime` by default, as Linux), the root of a bind mount, `unbindable` and a
+  read-only superblock; `/proc/filesystems` lists the types mount(2) makes. clone3 now accepts
+  CLONE_EMPTY_MNTNS, which it refused with EINVAL.
+- Mount flags are enforced (ADR 0022 H3c), where and in the order Linux checks them. On a
+  read-only mount or superblock every change is EROFS: opening for writing or with O_TRUNC,
+  creating (EEXIST still first), O_TMPFILE, removing (whether the name exists or not), renaming,
+  linking, chmod, chown, utimes, truncate, setxattr and removexattr, and access(W_OK); a device,
+  FIFO or socket can still be written. Making a mount read-only is EBUSY while a file under it
+  is open for writing. On a noexec mount exec and access(X_OK) are EACCES, mmap with PROT_EXEC
+  is EPERM and mprotect cannot make such a mapping executable (EACCES); on a nodev mount opening
+  a device is EACCES; on a nosuid mount a program's set-ID bits and file capabilities give
+  nothing; on a nosymfollow mount following a symlink is ELOOP. statfs's `f_flags` reports the
+  mount's flags as Linux does (ST_RELATIME on most mounts now). rename now reports EXDEV before
+  its permission checks, as Linux does.
+- pivot_root (ADR 0022 H3d), with Linux's checks in its order (ENOTDIR, ENOENT, EPERM, EBUSY,
+  EINVAL): the new root's mount becomes the caller's root and the old root moves to put_old,
+  also at the namespace root; the roots and working directories of the namespace move with
+  their mounts. `pivot_root(".", ".")` stacks the old root on the new one, out of reach of any
+  path, until `umount2(".", MNT_DETACH)`; at most 16 stack (ENOSPC past that, which bounds the
+  kernel's walks over them). kconfig's CONFIG_MNT_NS now lists it.
+- User namespaces (ADR 0022 H4a): clone and unshare with CLONE_NEWUSER, setns into one, and
+  `/proc/<pid>/{uid_map,gid_map,setgroups}` with Linux's write rules; NS_GET_USERNS,
+  NS_GET_PARENT and NS_GET_OWNER_UID answer by their owners. The creator gets every capability
+  in the new namespace and none outside it. Creating one needs CAP_SYS_ADMIN unless root sets
+  the new `/proc/sys/kernel/unprivileged_userns_clone` to 1 (0 by default);
+  `/proc/sys/user/max_user_namespaces` limits how many each user may make (15000 by default).
+  Set-ID bits are ignored unless the caller's user namespace maps both the file's owner and
+  its group, as Linux's bprm_fill_uid. Writes to the map files and to `timens_offsets` check the
+  credentials the descriptor was opened with, as Linux does. `/proc/<pid>` and its files are
+  now owned by the process's effective user and group while it is dumpable, as on Linux.
+- User and group ids are translated at the system-call boundary (ADR 0022 H4b): the set*id
+  calls, chown, setgroups and tmpfs's `uid=`/`gid=` take the caller's namespace's ids (one it
+  does not map is EINVAL), and the get*id calls, getgroups, stat, statx, SO_PEERCRED, waitid,
+  auxv, `/proc/<pid>/status` and siginfo show ids as the receiving namespace sees them (65534
+  when it does not map them). Root of a user namespace keeps its capabilities across exec and
+  loses them on leaving uid 0, as on Linux, and a file capability applies by its root id.
+  waitid now fills in si_uid, which it left 0. kconfig's CONFIG_USER_NS is now set.
+- Privilege checks ask about the user namespace Linux names (ADR 0022 H4c): root of a user
+  namespace may now make the other namespace types and join those its namespace owns, name its
+  UTS namespace, set its time namespace's offsets, chroot, and signal, trace, renice and change
+  the limits of processes in its namespace; over files it holds its capabilities when its
+  namespace maps the file's owner and group. A file capability it sets is stored as a v3 value
+  naming it, so it grants nothing outside. ptrace of a non-dumpable process needs privilege
+  over the namespace its memory came from, and `/proc/<pid>` of one is owned by that
+  namespace's root. mount, umount2 and pivot_root still need CAP_SYS_ADMIN in the initial
+  namespace (ADR 0024).
+- PID namespaces (ADR 0022 H5a): unshare, clone and clone3 can make one, and setns can join
+  one below the caller's. A process has a number at each level, and getpid, getppid, gettid,
+  fork's and clone's results, wait4, waitid, kill, tkill, tgkill, the process group and session
+  calls, set_tid_address, siginfo's si_pid and clone3's set_tid (one entry per level) all use
+  the caller's namespace's numbers. The first process in a namespace is its init: orphans are
+  reparented to it, it takes from inside only the signals it handles, and when it exits the rest
+  of the namespace is killed and no more processes can be made there (ENOMEM). procfs shows the
+  namespace it was mounted in, `/proc/<pid>/status` has the NStgid, NSpid, NSpgid and NSsid
+  lines, NS_GET_PARENT and the NS_GET_*_PIDNS ioctls work for PID namespaces, and
+  `/proc/sys/user/max_pid_namespaces` limits how many each user may make. readlink of a
+  `/proc/<pid>/ns` link with no namespace behind it is now ENOENT (it was EINVAL), and one the
+  caller may not read EACCES. kconfig's CONFIG_PID_NS is now set.
+- The remaining pid crossings use the caller's PID namespace too (ADR 0022 H5b): the
+  scheduling and priority calls, prlimit64, ptrace, pidfd_open, process_vm_readv and writev,
+  kcmp, capget and capset, rt_sigqueueinfo and rt_tgsigqueueinfo, get_robust_list, CPU clock
+  ids and SIGEV_THREAD_ID. PRIO_USER reaches only processes the caller's namespace numbers,
+  and pidfd_send_signal is EINVAL for a process outside it. The PI futex owner word and the
+  robust-list owner check hold the namespace's thread ids, and SO_PEERCRED, F_GETLK's l_pid,
+  TIOCGPGRP and tcgetpgrp report 0 for a process the caller's namespace does not number.
+- Network namespaces (ADR 0022 H6): unshare, clone and clone3 make one with CLONE_NEWNET and
+  setns joins one. The existing stack and every device are the initial namespace's; a new one
+  has only a loopback interface, down as Linux makes it, so a send or connect from a socket
+  made there is ENETUNREACH. Each namespace has its own ports, a socket keeps the namespace it
+  was made in, and only the initial namespace's listeners get arriving connections. A new
+  `/proc/net/dev` lists the reader's namespace's interfaces with their counters, and
+  `/proc/sys/user/max_net_namespaces` limits how many each user may make. kconfig's
+  CONFIG_NET_NS stays unset until an interface can be configured.
+- A clone that makes a process can share the descriptor table (CLONE_FILES) and, with CLONE_VM,
+  the signal actions (CLONE_SIGHAND), and can make the caller's sibling (CLONE_PARENT): all three
+  were EINVAL (LTP clone02 passes, and clone08's CLONE_PARENT case). The last process to exit
+  closes a shared table; exec, unshare(CLONE_FILES) and close_range(CLOSE_RANGE_UNSHARE) give
+  the caller its own copy first, exec a copy of shared signal actions too, and
+  unshare(CLONE_SIGHAND) with shared actions is EINVAL. A CLONE_PARENT child goes to the
+  caller's parent with the caller's exit signal, and an init (or a process with no parent)
+  cannot make one (EINVAL). kcmp's KCMP_FILES and KCMP_SIGHAND compare the shared tables. A
+  child added to a process whose exit has already moved its children goes to the reaper, as
+  that exit would have moved it. LTP clone10's EINVAL is musl's: its `clone()` refuses
+  CLONE_THREAD, CLONE_SETTLS and CLONE_CHILD_CLEARTID before any system call.
+- bind and connect on an AF_INET socket read a `struct sockaddr_in` (N-64): they decoded a
+  private 6-byte format, so every address from a C program was garbled. Shorter than a
+  sockaddr_in is EINVAL, another family EAFNOSUPPORT (sendto too, which was EINVAL), and a port
+  already listened on is EADDRINUSE (it was EINVAL).
+- rseq stays ENOSYS, as on Linux built without CONFIG_RSEQ: glibc runs without it and musl does
+  not use it.
+- A signal from rt_sigqueueinfo, rt_tgsigqueueinfo or pidfd_send_signal that ends a sender
+  outside the dispatcher leaves through the exit path, and pidfd_getfd checks access and takes
+  the descriptor under the target's credential guard, so a set-ID exec cannot come between.
+- execve of a relative name runs it from the working directory, as on Linux; it searched PATH,
+  which is libc's job (execvp). Exec errors keep their errno (EACCES, ENOTDIR, ELOOP) instead of
+  all being ENOENT, a script's interpreter is opened the same way, and an empty argv gets "" as
+  argv[0].
+- openat2 (it was missing from the syscall table), following Linux 7.3's `fs/open.c` and
+  `fs/namei.c`. `struct open_how` is read as an extensible struct: below 24 bytes EINVAL, above a
+  page E2BIG, nonzero bytes past the known fields E2BIG. Its flags, mode and resolve bits are
+  checked in build_open_flags' order (unknown bits, BENEATH with IN_ROOT, a mode without a
+  creation, O_DIRECTORY with O_CREAT, O_TMPFILE without a write mode, OPENAT2_REGULAR with
+  O_DIRECTORY and O_PATH with other flags are EINVAL; RESOLVE_CACHED with O_CREAT, O_TRUNC or
+  O_TMPFILE is EAGAIN), then the name and the directory. RESOLVE_BENEATH and RESOLVE_IN_ROOT scope
+  the walk to the directory, RESOLVE_NO_XDEV refuses every mount crossing, RESOLVE_NO_SYMLINKS
+  every symlink and RESOLVE_NO_MAGICLINKS /proc/self/exe; a created file's parent is walked with
+  the same flags. OPENAT2_REGULAR opens only a regular file, otherwise EFTYPE (134, new in
+  Linux 7.3).
+- statx (it was ENOSYS), following Linux 7.3's `fs/stat.c`: AT_EMPTY_PATH with a NULL or empty
+  name stats the descriptor (or the working directory with AT_FDCWD), the reserved mask bit, both
+  sync types together and unknown flags are EINVAL, a bad name pointer EFAULT, an empty name
+  without AT_EMPTY_PATH ENOENT, in Linux's order. It reports the numbers stat reports plus the
+  mount: every mount now has an id (the lowest free one, as Linux allocates them) and a unique id
+  above 2^31 (STATX_MNT_ID_UNIQUE), and STATX_ATTR_MOUNT_ROOT marks a mount's root. The whole
+  256-byte struct is written; no birth time is reported.
+- adjtimex and clock_adjtime (they were ENOSYS), from Linux's `kernel/time/ntp.c` and
+  `timekeeping.c` (`timer::ntp`). Everyone may read the NTP state; changing it needs CAP_SYS_TIME,
+  checked in Linux's order, and a refused call leaves the struct unwritten. Status, time constant,
+  error estimates, tick, frequency, the PLL/FLL phase offset and the adjtime() slew are stored and
+  read back with Linux's scaling and clamps, and the call returns TIME_ERROR while
+  unsynchronized. ADJ_SETOFFSET steps CLOCK_REALTIME (timers on it follow; EINVAL before boot)
+  and ADJ_TAI sets the offset CLOCK_TAI now reads; the rest does not steer the clock
+  (KNOWN-LIMITATIONS). clock_adjtime adjusts CLOCK_REALTIME and answers EOPNOTSUPP for every other
+  clock, EINVAL for an ID that names none.
+- restart_syscall (`syscall::restart`; it was ENOSYS). A relative nanosleep or clock_nanosleep,
+  or a poll with a timeout, that a stop interrupts now carries on to its first deadline once the
+  process continues; it started the whole duration again. As in Linux, the interrupted call
+  leaves a restart block and returns -ERESTART_RESTARTBLOCK inside the kernel, which a caught
+  signal turns into EINTR (SA_RESTART or not, with the time left in `rem`) and a stop, or a
+  return with no signal left, into restart_syscall; rt_sigreturn forgets the block, so
+  restart_syscall without one is EINTR. ppoll (musl's poll on AArch64 and RISC-V) and select
+  run again with the time left that they write back, as in Linux.
+- POSIX timers: timer_create, timer_settime, timer_gettime, timer_getoverrun and timer_delete
+  (they were ENOSYS), following Linux's `kernel/time/posix-timers.c` (`process::posix_timer`).
+  Timers run on CLOCK_REALTIME (an absolute setting follows the clock when it is set; a
+  relative one runs on the monotonic clock), the monotonic and boot clocks, TAI, the alarm
+  clocks (with CAP_WAKE_ALARM), and the CPU clocks of the process and its threads; the raw and
+  coarse clocks are EOPNOTSUPP. Each timer queues at most one SI_TIMER signal, beside any
+  pending instance of the same standard signal, to the process or to one thread
+  (SIGEV_THREAD_ID); an interval timer is armed again when its signal is taken, and the
+  expiries missed meanwhile are its overrun (`si_overrun`, timer_getoverrun, signalfd's
+  `ssi_overrun`). A signal from a timer set again or deleted is dropped when taken; a periodic
+  timer whose signal is ignored waits, and resumes when the signal is caught again. SIGEV_NONE
+  timers count down without a signal. Timers are charged to RLIMIT_SIGPENDING, not inherited by
+  fork, and deleted by exec, which also drops their pending signals. sigaction now discards a
+  pending signal whose new action ignores it, as POSIX requires.
+- Interval timers: getitimer, setitimer and alarm (alarm on x86_64 only, as in Linux; they were
+  ENOSYS), following Linux's `kernel/time/itimer.c` (`process::itimer`). ITIMER_REAL sends
+  SIGALRM from a new kernel thread, `ktimerd`, that sleeps until the earliest expiry (the timer
+  interrupt takes none of the locks a signal send needs); an interval timer is armed again when
+  its SIGALRM is taken, so a blocked or slow handler never piles up expiries. ITIMER_VIRTUAL
+  and ITIMER_PROF count user, or user and system, CPU time and send SIGVTALRM and SIGPROF on
+  the way back to user mode, a new value getting one tick more as in Linux. A NULL new value
+  disarms, bad values are EINVAL, alarm rounds the old time up from half a second, a fork child
+  starts with no timers and exec keeps them.
+- utime, utimes and futimesat on x86_64 (the generic table of AArch64 and RISC-V has none of
+  them; they were ENOSYS), sharing utimensat's code as Linux's `do_utimes` does: utime takes
+  whole seconds, utimes and futimesat microseconds (EINVAL outside 0..999999, which also refuses
+  UTIME_NOW and UTIME_OMIT), and futimesat with a NULL path acts on the descriptor. utimensat now
+  returns 0 for two UTIME_OMIT times without looking at the path, and refuses flags on a
+  descriptor (NULL path) with EINVAL, as Linux does.
 - statfs and fstatfs (`fs::statfs`; they were ENOSYS). Every filesystem reports Linux's magic
   number, so programs that tell filesystems apart by `f_type` see what they expect: tmpfs
   (`/dev/shm`, also memfd, devtmpfs and `/dev/console`), ramfs, procfs, ext4, FAT (`MSDOS`),
@@ -180,7 +564,7 @@
   own (`fs::shmem`, shared with memfds), so a `MAP_SHARED` mapping of a file there is the file:
   every mapping, `read` and `write` see one copy (N-230). LTP keeps its results this way, and
   musl's `shm_open` uses `/dev/shm`. The kernel's mount path (`Vfs::mount_by_type`, used by
-  VeridianOS's own mount call) accepts `"tmpfs"`; Linux `mount(2)` is not wired yet. A tmpfs
+  VeridianOS's own mount call) accepts `"tmpfs"`, and so does Linux `mount(2)`. A tmpfs
   root is mode 1777, its default size limit is half of RAM, and it charges whole pages against
   the limit (rounded up to whole pages), as Linux does.
 - Conformance suites on all three architectures (`tests/compat/README.md`): LTP 20260930's
@@ -204,6 +588,46 @@
 
 ### Fixed
 
+- From the PR #35 review:
+  - A file no longer leaves a read-only, noexec or nosuid bind mount by another name: linkat
+    across two mounts (two bind mounts of one filesystem included) is EXDEV, as Linux's
+    do_linkat, and renaming a directory with a mount under it is EBUSY. The rename used to leave
+    the mount at the old path and the moved tree without its flags. linkat with AT_EMPTY_PATH
+    on a descriptor with no name (a pipe, a socket) is EXDEV too, as Linux, rather than
+    skipping the check.
+  - A shared mapping keeps the write access of the file it was made from after the descriptor
+    is closed (Linux's vm_file), so the file cannot be executed meanwhile (ETXTBSY).
+  - wait4, waitpid and waitid in a PID namespace below the initial one report the reaped
+    child's number, not 0. The reap freed the number before it was read.
+  - copy_file_range with a negative input offset is EINVAL. The length clamp used to wrap and
+    panic a dev kernel first.
+  - vmsplice into a pipe skips empty iovec entries instead of stopping at the first one.
+  - An ID a fork or clone has allocated but not yet published can no longer be taken by
+    clone3's set_tid, so two threads never share one ID.
+  - FIONREAD on the console in canonical mode counts every complete line, with erases applied,
+    as Linux's inq_canon.
+  - chmod and the other owner checks in a user namespace need only the file's owner mapped,
+    not its group (Linux's inode_owner_or_capable).
+  - setxattr through a symlink reports IN_ATTRIB at the target.
+  - Timers on the wall clock, in ktimerd and in timerfd, follow a clock set exactly once,
+    however the set races with their arming.
+- pwrite64 on a file opened with O_APPEND appends, whatever the offset, as Linux's does (it
+  wrote at the offset); musl's pwrite asks for the offset through pwritev2 instead.
+- fchownat refuses flags other than AT_SYMLINK_NOFOLLOW and AT_EMPTY_PATH with EINVAL (they were
+  ignored) and takes AT_EMPTY_PATH; chmod of a symlink itself is EOPNOTSUPP, as on Linux.
+- BlockFS on a read-only disk (QEMU's `readonly=on`) refuses every change with EROFS before it
+  starts, as Linux and the ext4 driver do; writes, creates, renames, chmod and the rest succeeded
+  in memory and failed only when the cache was written back.
+- `/proc` entries have one inode number each, the same in a directory listing and in stat (all
+  were 0, and getdents numbered entries by their position, so `find` and `ls -i` disagreed with
+  stat); the root is 1, as on Linux.
+- FAT32 keeps a count of free clusters, so statfs no longer scans the whole table, and keeps the
+  four reserved bits of each entry when it rewrites one; an entry whose low 28 bits are zero is
+  free even with those bits set (it was taken as in use).
+- An ext4 superblock with a block size above 64 KiB (`s_log_block_size` over 6) is refused as
+  Linux refuses it, instead of shifting the size out of range.
+- `veridian-elfctl` pads notes from the start of their segment, as the kernel reads them, so a
+  note segment whose file offset is not a multiple of its 8-byte alignment is read right.
 - A system call could read and write a `PROT_NONE` page that had been touched before `mprotect`
   (N-132 follow-up): such a page keeps its frame mapped for the kernel only, so the kernel's own
   copy did not fault and `write` from it or `read` into it succeeded where Linux returns EFAULT.

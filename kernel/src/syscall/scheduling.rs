@@ -201,9 +201,10 @@ pub(crate) fn thread_exit(thread: &Thread) {
     }
 }
 
-/// The thread a scheduling call names (pid 0: the caller) with its process
-/// ID and owner credentials. `negative` is the error for pid < 0 (EINVAL
-/// for most calls, ESRCH for the affinity ones).
+/// The thread a scheduling call names (pid 0: the caller; otherwise a
+/// thread ID in the caller's PID namespace, as find_task_by_vpid) with its
+/// process ID and owner credentials. `negative` is the error for pid < 0
+/// (EINVAL for most calls, ESRCH for the affinity ones).
 fn target(
     pid: usize,
     negative: SyscallError,
@@ -217,10 +218,11 @@ fn target(
         let thread = crate::process::current_thread().ok_or(SyscallError::InvalidState)?;
         return Ok((process.pid.0, process.credentials(), thread));
     }
+    let kid = crate::process::pidns::from_vnr(tid as i64).ok_or(SyscallError::ProcessNotFound)?;
     let mut found = None;
     crate::process::table::PROCESS_TABLE.for_each(|p| {
         if found.is_none() {
-            if let Some(t) = p.get_thread(crate::process::ThreadId(tid as u64)) {
+            if let Some(t) = p.get_thread(crate::process::ThreadId(kid)) {
                 found = Some((p.pid.0, p.credentials(), t));
             }
         }
@@ -235,10 +237,18 @@ fn caller() -> Result<Caller, SyscallError> {
 }
 
 /// Linux's check_same_owner: the caller's effective UID is the target's
-/// real or effective one, or the caller holds CAP_SYS_NICE.
-fn same_owner(caller: &Caller, target: &Credentials) -> bool {
+/// real or effective one, or the caller holds CAP_SYS_NICE over user
+/// namespace `ns` (the initial one for the sched_set* calls, which ask
+/// `capable`; the target's for setpriority and sched_setaffinity).
+fn same_owner(caller: &Caller, target: &Credentials, ns: &crate::process::userns::UserNs) -> bool {
     let euid = caller.creds.euid;
-    euid == target.euid || euid == target.ruid || caller.capable(CAP_SYS_NICE)
+    euid == target.euid || euid == target.ruid || caller.ns_capable(ns, CAP_SYS_NICE)
+}
+
+/// The user namespace of process `pid` (the initial one if it is gone).
+fn user_ns_of(pid: u64) -> Arc<crate::process::userns::UserNs> {
+    crate::process::table::get_process(crate::process::ProcessId(pid))
+        .map_or_else(crate::process::userns::initial, |p| p.user_ns())
 }
 
 /// Whether the caller may change the scheduling of process `pid`'s threads
@@ -249,7 +259,7 @@ pub(crate) fn may_change_pid(pid: u64) -> bool {
         return false;
     };
     crate::process::table::get_process(crate::process::ProcessId(pid))
-        .is_some_and(|p| same_owner(&me, &p.credentials()))
+        .is_some_and(|p| same_owner(&me, &p.credentials(), &crate::process::userns::initial()))
 }
 
 /// Apply a request to the thread `pid` names.
@@ -267,7 +277,7 @@ fn set(
         me.capable(CAP_SYS_NICE),
         Allowance::of(owner_pid),
     )?;
-    if !same_owner(&me, &owner) {
+    if !same_owner(&me, &owner, &crate::process::userns::initial()) {
         return Err(SyscallError::OperationNotPermitted);
     }
     // The affinity is read under the scheduling lock, which
@@ -560,7 +570,7 @@ pub fn sys_sched_setaffinity(pid: usize, len: usize, mask: usize) -> SyscallResu
     let n = len.min(8);
     userspace::read_user_bytes(mask, &mut raw[..n])?;
     let wanted = u64::from_ne_bytes(raw) & online_mask();
-    if !same_owner(&caller()?, &owner) {
+    if !same_owner(&caller()?, &owner, &user_ns_of(tpid)) {
         return Err(SyscallError::OperationNotPermitted);
     }
     if wanted == 0 {
@@ -595,7 +605,9 @@ pub fn sys_getcpu(cpu: usize, node: usize, _cache: usize) -> SyscallResult {
 
 /// The threads getpriority/setpriority name, with their process IDs and
 /// owners: one thread (PRIO_PROCESS), every thread of a process group
-/// (PRIO_PGRP) or of a user (PRIO_USER); `who` 0 is the caller's.
+/// (PRIO_PGRP) or of a user (PRIO_USER); `who` 0 is the caller's. A pid
+/// or group is a number in the caller's PID namespace, and PRIO_USER skips
+/// processes that namespace does not number, as Linux.
 fn priority_targets(
     which: usize,
     who: usize,
@@ -611,15 +623,19 @@ fn priority_targets(
             let key = match (which, who) {
                 (PRIO_PGRP, 0) => me.pgid.load(core::sync::atomic::Ordering::Acquire),
                 (PRIO_USER, 0) => me.credentials().ruid as u64,
-                (_, w) => w as u64,
+                // A uid of the caller's user namespace (make_kuid); one it
+                // does not map has no processes.
+                (PRIO_USER, w) => me.user_ns().uid_down(w).map_or(u64::MAX, u64::from),
+                (_, w) => crate::process::pidns::from_vnr(w as i32 as i64).unwrap_or(u64::MAX),
             };
+            let ns = me.pid_ns();
             let mut out = Vec::new();
             crate::process::table::PROCESS_TABLE.for_each(|p| {
                 let creds = p.credentials();
                 let hit = if which == PRIO_PGRP {
                     p.pgid.load(core::sync::atomic::Ordering::Acquire) == key
                 } else {
-                    creds.ruid as u64 == key
+                    creds.ruid as u64 == key && crate::process::pidns::nr_in(p.pid.0, &ns) != 0
                 };
                 if hit {
                     for t in p.threads.lock().values() {
@@ -657,7 +673,7 @@ pub fn sys_setpriority(which: usize, who: usize, nice: usize) -> SyscallResult {
     let me = caller()?;
     let mut result = Ok(0);
     for (pid, owner, thread) in targets {
-        if !same_owner(&me, &owner) {
+        if !same_owner(&me, &owner, &user_ns_of(pid)) {
             result = Err(SyscallError::OperationNotPermitted);
             continue;
         }

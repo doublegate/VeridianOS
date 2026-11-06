@@ -299,27 +299,44 @@ impl Credentials {
 /// the process's credentials and the calling thread's effective
 /// capabilities. Linux keeps both in the task's `cred`; here the IDs are
 /// per process and the capability sets per thread.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Caller {
     pub creds: Credentials,
     /// The effective set (pE): what the checks consult.
     pub caps: super::linux_caps::LinuxCaps,
+    /// The user namespace the credentials and the set are in.
+    pub userns: alloc::sync::Arc<super::userns::UserNs>,
 }
+
+/// Two callers are the same credentials (Linux compares `struct cred`
+/// pointers; here the values, and the user namespace by identity).
+impl PartialEq for Caller {
+    fn eq(&self, other: &Self) -> bool {
+        self.creds == other.creds
+            && self.caps == other.caps
+            && self.userns.ident.id == other.userns.ident.id
+    }
+}
+
+impl Eq for Caller {}
 
 impl Caller {
     /// The kernel itself (no current process, as the kernel console):
-    /// root with every capability.
-    pub const KERNEL: Self = Self {
-        creds: Credentials::new(0, 0),
-        caps: super::linux_caps::LinuxCaps::FULL,
-    };
+    /// root with every capability in the initial user namespace.
+    pub fn kernel() -> Self {
+        Self {
+            creds: Credentials::new(0, 0),
+            caps: super::linux_caps::LinuxCaps::FULL,
+            userns: super::userns::initial(),
+        }
+    }
 
     /// The calling thread: its process's credentials and its own
     /// effective set. Kernel context, with no process, is [`Self::KERNEL`];
     /// a process without a current thread holds nothing (fails closed).
     pub fn current() -> Self {
         let Some(process) = super::current_process() else {
-            return Self::KERNEL;
+            return Self::kernel();
         };
         let caps = super::current_thread().map_or(super::linux_caps::LinuxCaps::EMPTY, |t| {
             t.caps.lock().effective
@@ -327,19 +344,49 @@ impl Caller {
         Self {
             creds: process.credentials(),
             caps,
+            userns: process.user_ns(),
         }
     }
 
-    /// Whether the caller holds `cap` (Linux's `capable`, and
-    /// `capable_wrt_inode_uidgid`, in the initial user namespace).
-    pub const fn capable(&self, cap: u32) -> bool {
-        self.caps.has(cap)
+    /// Whether the caller holds `cap` in the initial user namespace
+    /// (Linux's `capable`). A process in a user namespace below it holds
+    /// nothing there, whatever its set, unless the namespace's owner
+    /// rules give it ([`super::userns::UserNs::capable`]); the checks Linux
+    /// asks of another namespace use [`Self::ns_capable`] (ADR 0022 H4c).
+    pub fn capable(&self, cap: u32) -> bool {
+        self.ns_capable(&super::userns::initial(), cap)
     }
 
-    /// Whether the caller owns a file owned by `file_uid` or holds
-    /// CAP_FOWNER (Linux's inode_owner_or_capable).
-    pub const fn owner_or_capable(&self, file_uid: u32) -> bool {
-        self.creds.fsuid == file_uid || self.capable(super::linux_caps::CAP_FOWNER)
+    /// Whether the caller holds `cap` over user namespace `ns` (Linux's
+    /// ns_capable).
+    pub fn ns_capable(&self, ns: &super::userns::UserNs, cap: u32) -> bool {
+        ns.capable(&self.userns, self.creds.euid, self.caps.has(cap))
+    }
+
+    /// Whether the caller holds `cap` in its own user namespace, and that
+    /// namespace maps an inode's owner `uid` and group `gid` (Linux's
+    /// capable_wrt_inode_uidgid): a namespace's root has no privilege over
+    /// files whose IDs it cannot name.
+    pub fn capable_wrt_inode(&self, uid: u32, gid: u32, cap: u32) -> bool {
+        self.userns.uid_up(uid).is_some()
+            && self.userns.gid_up(gid).is_some()
+            && self.ns_capable(&self.userns, cap)
+    }
+
+    /// Whether the caller owns a file owned by `uid` or holds CAP_FOWNER in
+    /// its user namespace, which maps `uid` (Linux's
+    /// inode_owner_or_capable: unlike capable_wrt_inode_uidgid, the file's
+    /// group need not be mapped; PR #35 review).
+    pub fn owner_or_capable(&self, uid: u32) -> bool {
+        self.creds.fsuid == uid
+            || (self.userns.uid_up(uid).is_some()
+                && self.ns_capable(&self.userns, super::linux_caps::CAP_FOWNER))
+    }
+
+    /// Whether the caller is in group `gid` or holds CAP_FSETID over an
+    /// inode owned by `uid` and `gid` (Linux's in_group_or_capable).
+    pub fn in_group_or_capable(&self, uid: u32, gid: u32) -> bool {
+        self.creds.in_group(gid) || self.capable_wrt_inode(uid, gid, super::linux_caps::CAP_FSETID)
     }
 }
 
@@ -559,5 +606,43 @@ mod tests {
             root.setgroups(&too_many, true),
             Err(SyscallError::InvalidArgument)
         );
+    }
+
+    /// A namespace's root holds its capabilities over files whose owner
+    /// and group its namespace maps, and over no others (Linux's
+    /// capable_wrt_inode_uidgid; ADR 0022 H4c).
+    #[test]
+    fn privilege_over_a_file_needs_its_ids_mapped() {
+        use super::super::linux_caps::{LinuxCaps, CAP_CHOWN, CAP_FOWNER};
+        let ns = super::super::userns::test_child(b"0 1000 1\n1 2000 1", b"0 1000 1");
+        let root = Caller {
+            creds: Credentials::new(1000, 1000),
+            caps: LinuxCaps::FULL,
+            userns: ns,
+        };
+        assert!(root.capable_wrt_inode(2000, 1000, CAP_CHOWN));
+        assert!(
+            !root.capable_wrt_inode(0, 1000, CAP_CHOWN),
+            "owner unmapped"
+        );
+        assert!(
+            !root.capable_wrt_inode(2000, 0, CAP_CHOWN),
+            "group unmapped"
+        );
+        assert!(!root.capable(CAP_CHOWN), "nothing in the initial namespace");
+        assert!(root.owner_or_capable(2000));
+        assert!(root.owner_or_capable(1000), "its own file");
+        assert!(!root.owner_or_capable(0), "owner unmapped");
+        // A file whose group the namespace cannot name is still its
+        // owner's to chmod (only the uid must be mapped).
+        assert!(root.capable_wrt_inode(2000, 1000, CAP_FOWNER));
+        assert!(!root.capable_wrt_inode(2000, 0, CAP_FOWNER));
+        let bare = Caller {
+            caps: LinuxCaps::EMPTY,
+            ..root.clone()
+        };
+        assert!(!bare.owner_or_capable(2000));
+        assert!(bare.in_group_or_capable(0, 1000), "its own group");
+        assert!(!bare.in_group_or_capable(2000, 2000));
     }
 }

@@ -9,7 +9,7 @@ use alloc::{string::String, sync::Arc, vec::Vec};
 
 use super::{
     filesystem::{
-        map_resolve_err, read_user_path, read_user_path_or_empty, resolve_at_path, vfs,
+        map_resolve_err, read_user_path, read_user_path_or_empty, resolve_at_path, vfs, want_write,
         AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW,
     },
     userspace, SyscallError, SyscallResult,
@@ -33,12 +33,50 @@ const XATTR_ARGS_SIZE_VER0: usize = 16;
 /// AT_FDCWD names the working directory only when `cwd_ok` (get and set:
 /// Linux's path_getxattrat and path_setxattrat look the empty name up for
 /// a negative fd); list and remove always take the fd, so it is EBADF.
-fn target(
+/// Flags other than AT_SYMLINK_NOFOLLOW and AT_EMPTY_PATH are EINVAL.
+/// An O_PATH descriptor is EBADF here, as Linux's fd-based xattr calls.
+pub(super) fn target(
     dfd: usize,
     path_ptr: usize,
     at_flags: usize,
     cwd_ok: bool,
 ) -> Result<Arc<dyn VfsNode>, SyscallError> {
+    target_in(dfd, path_ptr, at_flags, cwd_ok, false, false).map(|(node, _)| node)
+}
+
+/// [`target`] for the calls that act on what an empty path's descriptor
+/// names, O_PATH descriptors too, the working directory for AT_FDCWD:
+/// fchownat, fchmodat2 and readlinkat.
+pub(super) fn path_target(
+    dfd: usize,
+    path_ptr: usize,
+    at_flags: usize,
+) -> Result<Arc<dyn VfsNode>, SyscallError> {
+    target_in(dfd, path_ptr, at_flags, true, true, false).map(|(node, _)| node)
+}
+
+/// [`path_target`] for a change to the node (fchmodat2, fchownat): EROFS
+/// on a read-only mount (Linux's mnt_want_write), and the node's absolute
+/// path where it has one (a descriptor's, as it was opened), where inotify
+/// reports the change.
+pub(super) fn path_target_located(
+    dfd: usize,
+    path_ptr: usize,
+    at_flags: usize,
+) -> Result<(Arc<dyn VfsNode>, Option<String>), SyscallError> {
+    target_in(dfd, path_ptr, at_flags, true, true, true)
+}
+
+/// The node and its absolute path, as the callers above describe; with
+/// `write` a read-only mount is EROFS once the node is found.
+fn target_in(
+    dfd: usize,
+    path_ptr: usize,
+    at_flags: usize,
+    cwd_ok: bool,
+    path_fds: bool,
+    write: bool,
+) -> Result<(Arc<dyn VfsNode>, Option<String>), SyscallError> {
     if at_flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
         return Err(SyscallError::InvalidArgument);
     }
@@ -54,23 +92,45 @@ fn target(
     let vfs = vfs()?;
     if path.is_empty() {
         if cwd_ok && dfd as u32 as i32 as usize == AT_FDCWD {
-            return vfs.resolve_path(&vfs.get_cwd()).map_err(map_resolve_err);
+            let (node, canonical) = vfs.locate(&vfs.get_cwd(), true).map_err(map_resolve_err)?;
+            if write {
+                want_write(&vfs, &canonical)?;
+            }
+            return Ok((node, None));
         }
         let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
-        let file = proc
-            .file_table
-            .lock()
-            .get(dfd as u32 as usize)
-            .ok_or(SyscallError::BadFileDescriptor)?;
-        return Ok(file.node.clone());
+        let table = proc.file_table.lock();
+        let file = if path_fds {
+            table.get_path(dfd as u32 as usize)
+        } else {
+            table.get(dfd as u32 as usize)
+        };
+        let file = file.ok_or(SyscallError::BadFileDescriptor)?;
+        if write {
+            if let Some(path) = file.path.as_deref() {
+                want_write(&vfs, path)?;
+            }
+        }
+        // The recorded path is in the whole tree; the caller's is inside
+        // its root.
+        let root = vfs.get_root();
+        let at = file
+            .path
+            .as_deref()
+            .map(|path| crate::fs::root_relative(path, &root));
+        return Ok((file.node.clone(), at));
     }
     let abs = resolve_at_path(dfd, &path)?;
-    if at_flags & AT_SYMLINK_NOFOLLOW != 0 {
-        vfs.resolve_path_no_follow(&abs)
-    } else {
-        vfs.resolve_path(&abs)
+    let (node, canonical) = vfs
+        .locate(&abs, at_flags & AT_SYMLINK_NOFOLLOW == 0)
+        .map_err(map_resolve_err)?;
+    if write {
+        want_write(&vfs, &canonical)?;
     }
-    .map_err(map_resolve_err)
+    // The entry actually reached, a followed symlink resolved, inside the
+    // caller's root: events go to its directory (PR #35 review).
+    let root = vfs.get_root();
+    Ok((node, Some(crate::fs::root_relative(&canonical, &root))))
 }
 
 /// An attribute name from user memory (Linux's import_xattr_name): empty,
@@ -111,13 +171,20 @@ fn set(
     }
     let mut bytes = alloc::vec![0u8; size];
     userspace::read_user_bytes(value, &mut bytes)?;
-    let node = target(dfd, path, at_flags, true)?;
+    let (node, at) = target_in(dfd, path, at_flags, true, false, true)?;
     // A file capability must be a v2 or v3 value (cap_convert_nscap,
     // before its CAP_SETFCAP check).
     xattr::check_value(&name, &bytes).map_err(|_| SyscallError::InvalidArgument)?;
     check(&node, &name, true)?;
+    // Stored naming the writer's namespace's root (cap_convert_nscap).
+    if name == xattr::XATTR_NAME_CAPS {
+        let caller = Caller::current();
+        let privileged = caller.capable(crate::process::linux_caps::CAP_SETFCAP);
+        bytes = FileCaps::convert_for_write(&bytes, &caller.userns, privileged)?;
+    }
     node.update_xattrs(&mut |a| a.set(&name, &bytes, flags))
         .map_err(super::map_kernel_error)?;
+    crate::fs::inotify::on_target(at.as_deref(), &node, crate::fs::inotify::IN_ATTRIB);
     Ok(0)
 }
 
@@ -138,7 +205,7 @@ fn get(
     // (cap_inode_getsecurity).
     let converted;
     let found = if name == xattr::XATTR_NAME_CAPS {
-        converted = FileCaps::xattr_for_reader(found)?;
+        converted = FileCaps::xattr_for_reader(found, &crate::process::userns::current())?;
         &converted[..]
     } else {
         found
@@ -178,10 +245,11 @@ fn list(dfd: usize, path: usize, at_flags: usize, out: usize, size: usize) -> Sy
 
 fn remove(dfd: usize, path: usize, at_flags: usize, name: usize) -> SyscallResult {
     let name = read_name(name)?;
-    let node = target(dfd, path, at_flags, false)?;
+    let (node, at) = target_in(dfd, path, at_flags, false, false, true)?;
     check(&node, &name, true)?;
     node.update_xattrs(&mut |a| a.remove(&name))
         .map_err(super::map_kernel_error)?;
+    crate::fs::inotify::on_target(at.as_deref(), &node, crate::fs::inotify::IN_ATTRIB);
     Ok(0)
 }
 

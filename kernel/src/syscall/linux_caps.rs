@@ -55,13 +55,14 @@ pub fn sys_capget(header: usize, data: usize) -> SyscallResult {
     Ok(0)
 }
 
-/// The capability sets of thread `tid` (0: the caller); ESRCH if there is
-/// no such thread.
+/// The capability sets of thread `tid` (0: the caller; a thread ID in the
+/// caller's PID namespace); ESRCH if there is no such thread.
 fn target_caps(tid: u64) -> Result<CapSets, SyscallError> {
     let me = current_thread().ok_or(SyscallError::InvalidState)?;
-    if tid == 0 || tid == me.tid.0 {
+    if tid == 0 || tid == crate::process::pidns::vnr(me.tid.0) {
         return Ok(*me.caps.lock());
     }
+    let tid = crate::process::pidns::from_vnr(tid as i64).ok_or(SyscallError::ProcessNotFound)?;
     let owner = process_of_thread(tid as usize).ok_or(SyscallError::ProcessNotFound)?;
     let thread = get_process(owner)
         .and_then(|p| p.get_thread(ThreadId(tid)))
@@ -76,7 +77,7 @@ pub fn sys_capset(header: usize, data: usize) -> SyscallResult {
     let words = header_words(header)?.ok_or(SyscallError::InvalidArgument)?;
     let pid = header_pid(header)?;
     let me = current_thread().ok_or(SyscallError::InvalidState)?;
-    if pid != 0 && pid as u64 != me.tid.0 {
+    if pid != 0 && pid as u64 != crate::process::pidns::vnr(me.tid.0) {
         return Err(SyscallError::OperationNotPermitted);
     }
     let mut structs = [[0u32; 3]; 2];

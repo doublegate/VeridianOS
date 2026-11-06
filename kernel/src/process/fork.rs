@@ -25,13 +25,20 @@ use crate::{arch::context::ThreadContext, error::KernelError, println};
 
 /// How a clone that makes a new process (not a thread) differs from a
 /// plain fork (N-210). `Default` is fork.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ForkOptions {
     /// CLONE_VM: the child maps the parent's memory itself
     /// (`VirtualAddressSpace::share_from`), not a copy-on-write copy.
     pub share_vm: bool,
     /// CLONE_FS: the child shares the working directory, root and umask.
     pub share_fs: bool,
+    /// CLONE_FILES: the child shares the file table (Linux's files_struct).
+    pub share_files: bool,
+    /// CLONE_SIGHAND: the child shares the signal actions.
+    pub share_sighand: bool,
+    /// CLONE_PARENT: the child's parent is the caller's, and its exit
+    /// signal the caller's own.
+    pub clone_parent: bool,
     /// CLONE_VFORK: the parent waits until the child execs or exits
     /// (`Process::vfork_pending`; the caller waits).
     pub vfork: bool,
@@ -47,6 +54,38 @@ pub struct ForkOptions {
     pub child_settid: Option<usize>,
     /// CLONE_CHILD_CLEARTID: cleared and futex-woken when the child exits.
     pub child_cleartid: Option<usize>,
+    /// CLONE_PIDFD: where to store a pidfd for the child in the parent
+    /// (installed after the child's file table is copied, so the child
+    /// does not have it).
+    pub pidfd: Option<usize>,
+    /// CLONE_PIDFD_AUTOKILL: that pidfd SIGKILLs the child when it is last
+    /// closed.
+    pub pidfd_autokill: bool,
+    /// clone3's set_tid: the child's ID, claimed (`process::IdClaim`).
+    pub pid: Option<ProcessId>,
+    /// Its numbers in the PID namespaces below the initial one, reserved
+    /// by the clone (with set_tid's choices); the fork reserves them
+    /// itself when None.
+    pub pid_numbers: Option<super::pidns::Pending>,
+    /// CLONE_CLEAR_SIGHAND: handlers other than SIG_IGN start as SIG_DFL,
+    /// and every action's flags and mask are cleared (Linux's
+    /// flush_signal_handlers).
+    pub clear_sighand: bool,
+    /// CLONE_NNP: the child starts with no_new_privs set.
+    pub no_new_privs: bool,
+    /// CLONE_AUTOREAP: the child is reaped as it exits
+    /// (`Process::autoreap`).
+    pub autoreap: bool,
+    /// The child's namespaces (`process::ns::for_clone`); the caller's
+    /// when None.
+    pub namespaces: Option<alloc::sync::Arc<super::ns::Namespaces>>,
+    /// CLONE_EMPTY_MNTNS: the child's root and working directory are the
+    /// root of its new, empty mount namespace.
+    pub fs_at_root: bool,
+    /// CLONE_NEWUSER: the child's new user namespace, in which it starts
+    /// with every capability (Linux's set_cred_user_ns); the parent's
+    /// when None.
+    pub user_ns: Option<alloc::sync::Arc<super::userns::UserNs>>,
 }
 
 impl Default for ForkOptions {
@@ -54,6 +93,9 @@ impl Default for ForkOptions {
         Self {
             share_vm: false,
             share_fs: false,
+            share_files: false,
+            share_sighand: false,
+            clone_parent: false,
             vfork: false,
             stack: None,
             tls: None,
@@ -61,6 +103,16 @@ impl Default for ForkOptions {
             parent_settid: None,
             child_settid: None,
             child_cleartid: None,
+            pidfd: None,
+            pidfd_autokill: false,
+            pid: None,
+            pid_numbers: None,
+            clear_sighand: false,
+            no_new_privs: false,
+            autoreap: false,
+            namespaces: None,
+            fs_at_root: false,
+            user_ns: None,
         }
     }
 }
@@ -100,19 +152,60 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
 
     let current_thread = super::current_thread().ok_or(KernelError::ThreadNotFound { tid: 0 })?;
 
+    // The child goes in the PID namespace for its parent's children, with
+    // a number at each level (alloc_pid): one whose init has exited takes
+    // no more (ENOMEM).
+    let pid_ns = opts.namespaces.as_ref().map_or_else(
+        || current_thread.namespaces().pid_for_children.clone(),
+        |n| n.pid_for_children.clone(),
+    );
+    let numbers = match opts.pid_numbers.as_ref().and_then(|p| p.take()) {
+        Some(r) => r,
+        None => super::pidns::reserve(&pid_ns, &[], |_| false).map_err(|e| match e {
+            super::pidns::AllocError::Exhausted => KernelError::WouldBlock,
+            _ => KernelError::OutOfMemory {
+                requested: 0,
+                available: 0,
+            },
+        })?,
+    };
+
     // Create new process as copy of current
     // The child has its parent's credentials: a process that dropped to
     // an unprivileged uid used to fork children running as root (N-93). The
     // IDs and the calling thread's capability sets are read as one
     // snapshot, as a concurrent set*id call changes them together.
     let (parent_creds, parent_caps) = current_process.creds_and_caps(&current_thread);
+    // CLONE_PARENT: a sibling of the caller (copy_process's real_parent).
+    let parent = if opts.clone_parent {
+        current_process
+            .parent()
+            .and_then(table::get_process)
+            .ok_or(KernelError::InvalidArgument {
+                name: "flags",
+                value: "CLONE_PARENT without a parent",
+            })?
+    } else {
+        current_process.clone()
+    };
     let new_process = ProcessBuilder::new(format!("{}-fork", current_process.name))
-        .parent(current_process.pid)
+        .parent(parent.pid)
         .priority(*current_process.priority.lock())
         .credentials(parent_creds)
+        .pid(opts.pid)
         .build();
+    new_process.set_user_ns(
+        opts.user_ns
+            .clone()
+            .unwrap_or_else(|| current_process.user_ns()),
+    );
+    // The memory is the parent's copy, with its namespace (dup_mm).
+    new_process.set_mm_user_ns(current_process.mm_user_ns());
 
     let new_pid = new_process.pid;
+    new_process.set_pid_ns(pid_ns.clone());
+    // Released again by `discard_unstarted` if the fork fails.
+    numbers.commit(new_pid.0);
 
     // Everything that can fail once the child exists. On failure the child
     // is freed whole (N-46): its address space, frames, page tables, kernel
@@ -146,10 +239,15 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
             new_caps.clone_from(&current_caps)?;
         }
 
-        // Clone file table so child inherits stdin/stdout/stderr and pipes
+        // The file table: the parent's, shared (CLONE_FILES), or a copy, so
+        // the child inherits stdin/stdout/stderr and pipes (copy_files).
         {
             let parent_ft = current_process.file_table.lock();
-            let child_ft = parent_ft.clone_for_fork();
+            let child_ft = if opts.share_files {
+                parent_ft.clone()
+            } else {
+                alloc::sync::Arc::new(parent_ft.clone_for_fork())
+            };
             *new_process.file_table.lock() = child_ft;
         }
 
@@ -162,6 +260,9 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
                 child_env.insert(key.clone(), value.clone());
             }
             *new_process.exe_path.lock() = current_process.exe_path.lock().clone();
+            // The child runs the same program, so its writes stay denied
+            // until both are gone (Linux's dup_mm keeps mm->exe_file).
+            *new_process.exe_denial.lock() = current_process.exe_denial.lock().clone();
         }
 
         // Inherit uid, gid, pgid, sid from parent
@@ -196,15 +297,9 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
         }
 
         // Signal dispositions and the blocked mask are inherited (POSIX fork);
-        // pending signals are not.
-        {
-            // Both tables together, in their lock order (handler, then the
-            // rest), so no action is copied half old and half new.
-            let handlers = current_process.signal_handlers.lock();
-            let extra = current_process.signal_action_extra.lock();
-            *new_process.signal_handlers.lock() = *handlers;
-            *new_process.signal_action_extra.lock() = *extra;
-        }
+        // pending signals are not. CLONE_SIGHAND shares the actions.
+        new_process
+            .set_sighand(current_process.sighand_for_child(opts.share_sighand, opts.clear_sighand));
         new_process.signal_mask.store(
             current_process
                 .signal_mask
@@ -244,9 +339,13 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
             // (N-93); a copy, because the child's later chdir is its own --
             // unless CLONE_FS shares them.
             .fs(if opts.share_fs {
-                super::thread::ThreadFs::clone_shared(&current_thread.fs)
+                super::thread::ThreadFs::clone_shared(&current_thread.fs())
             } else {
-                super::thread::ThreadFs::clone_copy(&current_thread.fs)
+                let fs = super::thread::ThreadFs::clone_copy(&current_thread.fs());
+                if opts.fs_at_root {
+                    fs.move_to_root();
+                }
+                fs
             });
             let thread = match opts.child_cleartid {
                 Some(ptr) => thread.clear_tid(ptr),
@@ -347,12 +446,30 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
         };
 
         let new_tid = new_thread.tid;
+        let exit_signal = if opts.clone_parent {
+            current_process
+                .exit_signal
+                .load(core::sync::atomic::Ordering::Acquire)
+        } else {
+            opts.exit_signal
+        };
         new_process
             .exit_signal
-            .store(opts.exit_signal, core::sync::atomic::Ordering::Release);
+            .store(exit_signal, core::sync::atomic::Ordering::Release);
         new_process
             .vfork_pending
             .store(opts.vfork, core::sync::atomic::Ordering::Release);
+        new_process
+            .autoreap
+            .store(opts.autoreap, core::sync::atomic::Ordering::Release);
+        if opts.share_vm {
+            new_process.vm_id.store(
+                current_process
+                    .vm_id
+                    .load(core::sync::atomic::Ordering::Acquire),
+                core::sync::atomic::Ordering::Release,
+            );
+        }
 
         // The TID stores happen before the child can run. CLONE_CHILD_SETTID
         // writes the child's memory only: a copy-on-write page is copied first
@@ -360,18 +477,24 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
         // Linux). They are ordinary user stores, so page protection applies,
         // and as on Linux (put_user, result unused) a store that cannot be made
         // is skipped rather than failing a clone whose child already exists.
-        let tid_bytes = (new_tid.0 as u32).to_ne_bytes();
+        // Each stores the TID as its reader sees it: the child its number
+        // in its own namespace (schedule_tail's task_pid_vnr), the parent
+        // its number in the parent's (kernel_clone's pid_vnr).
         if let Some(ptr) = opts.child_settid {
-            let _ = new_process
-                .memory_space
-                .lock()
-                .write_bytes_private(ptr as u64, &tid_bytes, false);
+            let nr = super::pidns::nr_in(new_tid.0, &pid_ns) as u32;
+            let _ = new_process.memory_space.lock().write_bytes_private(
+                ptr as u64,
+                &nr.to_ne_bytes(),
+                false,
+            );
         }
         if let Some(ptr) = opts.parent_settid {
-            let _ = current_process
-                .memory_space
-                .lock()
-                .write_bytes_private(ptr as u64, &tid_bytes, false);
+            let nr = super::pidns::nr_in(new_tid.0, &current_process.pid_ns()) as u32;
+            let _ = current_process.memory_space.lock().write_bytes_private(
+                ptr as u64,
+                &nr.to_ne_bytes(),
+                false,
+            );
         }
 
         // The calling thread's blocked mask (per thread, N-109), alternate
@@ -386,15 +509,45 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
         *new_thread.altstack.lock() = *current_thread.altstack.lock();
         *new_thread.comm.lock() = *current_thread.comm.lock();
         new_thread.no_new_privs.store(
+            opts.no_new_privs
+                || current_thread
+                    .no_new_privs
+                    .load(core::sync::atomic::Ordering::Acquire),
+            core::sync::atomic::Ordering::Release,
+        );
+        new_thread.personality.store(
             current_thread
-                .no_new_privs
+                .personality
                 .load(core::sync::atomic::Ordering::Acquire),
             core::sync::atomic::Ordering::Release,
         );
+        new_thread.set_namespaces(opts.namespaces.clone().unwrap_or_else(|| {
+            // fork and vfork: Linux's copy_namespaces with no namespace
+            // flag, so the child of an unshare(CLONE_NEWTIME) caller enters
+            // the new time namespace (a vfork child, sharing memory, does
+            // not). Without namespace flags it cannot fail.
+            let current = current_thread.namespaces();
+            let flags = if opts.share_vm { 0x100 } else { 0 };
+            super::ns::for_clone(
+                &current,
+                flags,
+                false,
+                &current_process.user_ns(),
+                &current_process.pid_ns(),
+                0,
+            )
+            .unwrap_or(current)
+        }));
         // The sets read with the credentials (above), not re-read here: a
         // set*id call on another thread in between would pair root IDs
         // with dropped sets, which exec turns back into full privilege.
-        *new_thread.caps.lock() = parent_caps;
+        // In a new user namespace it holds every capability, which count
+        // only there and below (set_cred_user_ns).
+        *new_thread.caps.lock() = if opts.user_ns.is_some() {
+            super::linux_caps::CapSets::ROOT
+        } else {
+            parent_caps
+        };
         new_process.add_thread(new_thread)?;
         Ok(new_tid)
     };
@@ -407,10 +560,23 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
         }
     };
 
-    // Add to parent's children list
+    // Add to the parent's children list; once its exit has taken them, to
+    // its reaper's, as that exit would have moved it.
     #[cfg(feature = "alloc")]
     {
-        current_process.children.lock().push(new_pid);
+        let mut list = parent.children.lock();
+        if !parent
+            .children_closed
+            .load(core::sync::atomic::Ordering::Acquire)
+        {
+            list.push(new_pid);
+        } else {
+            drop(list);
+            if let Some(reaper) = super::exit::child_reaper(&parent) {
+                new_process.set_parent(Some(reaper.pid));
+                reaper.children.lock().push(new_pid);
+            }
+        }
     }
 
     // Inherit container membership from parent so forked children
@@ -424,6 +590,18 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
 
     // Add process to table. A fresh pid cannot already be there.
     table::add_process(new_process)?;
+    // Its namespace's init began exiting meanwhile: its kill of the
+    // namespace may have missed this child, which goes again (ENOMEM), as
+    // Linux's alloc_pid checks PIDNS_ADDING with the number's insert.
+    if !pid_ns.adding() {
+        if let Some(child) = table::get_process(new_pid) {
+            super::exit::discard_unstarted(&child);
+        }
+        return Err(KernelError::OutOfMemory {
+            requested: 0,
+            available: 0,
+        });
+    }
 
     // Registered in its container's PID namespace only now, so a fork that
     // failed above leaves nothing there.

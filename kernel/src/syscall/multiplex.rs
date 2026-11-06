@@ -140,8 +140,15 @@ fn remaining(timeout: u64, start: u64) -> u64 {
 /// Write the time left back into a user timespec (`usec` false) or timeval
 /// (`usec` true), as Linux does for a non-zero timeout. A timeout in
 /// read-only memory is not an error (Linux ignores the failed copy).
+/// Under personality's STICKY_TIMEOUTS the timeout is left as it was, as
+/// Linux's poll_select_finish.
 fn write_back_timeout(ptr: usize, timeout: u64, start: u64, usec: bool) {
-    if ptr == 0 || timeout == 0 {
+    let sticky = crate::process::current_thread().is_some_and(|t| {
+        t.personality.load(core::sync::atomic::Ordering::Acquire)
+            & crate::process::personality::STICKY_TIMEOUTS
+            != 0
+    });
+    if ptr == 0 || timeout == 0 || sticky {
         return;
     }
     let left = remaining(timeout, start);
@@ -181,7 +188,30 @@ fn poll_revents(ready: Option<u16>, events: u16) -> u16 {
 /// poll(fds, nfds, timeout): a negative timeout waits without a limit.
 pub fn sys_poll(fds_ptr: usize, nfds: usize, timeout_ms: usize) -> SyscallResult {
     let ms = timeout_ms as i32;
-    poll_for(fds_ptr, nfds, (ms >= 0).then(|| ms as u64 * 1_000_000))
+    if ms < 0 {
+        return poll_for(fds_ptr, nfds, None);
+    }
+    poll_until(
+        fds_ptr,
+        nfds,
+        now_ns().saturating_add(ms as u64 * 1_000_000),
+    )
+}
+
+/// poll until `deadline` (`now_ns`). Interrupted, it leaves a restart
+/// block with the same deadline, so after a stop it does not start the
+/// timeout over (`restart`; Linux's do_restart_poll).
+pub(crate) fn poll_until(fds_ptr: usize, nfds: usize, deadline: u64) -> SyscallResult {
+    match poll_for(fds_ptr, nfds, Some(deadline.saturating_sub(now_ns()))) {
+        Err(SyscallError::Interrupted) => {
+            Err(super::restart::interrupted(super::restart::Restart::Poll {
+                fds_ptr,
+                nfds,
+                deadline,
+            }))
+        }
+        result => result,
+    }
 }
 
 /// poll with a timeout in nanoseconds (`None`: no limit). The pollfd array

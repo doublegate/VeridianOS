@@ -142,6 +142,8 @@ build_programs() {
     printf 'one two\nthree four\nfive\n' > "${BUILD_DIR}/usr/src/wc_test.txt"
     printf 'cherry\napple\nbanana\n' > "${BUILD_DIR}/usr/src/sort_test.txt"
     mkdir -p "${BUILD_DIR}"/{dev,proc,tmp,etc,var}
+    # The kernel configuration Linux programs read (ADR 0023).
+    python3 "${ROOT}/tools/compat/gen_kconfig.py" "${arch}" "${BUILD_DIR}"
 }
 
 build_image() {

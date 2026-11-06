@@ -24,7 +24,10 @@ use alloc::{
 use spin::Mutex;
 
 use super::{pipe::PIPE_BUF, DirEntry, Metadata, NodeType, Permissions, VfsNode};
-use crate::error::{FsError, KernelError};
+use crate::{
+    error::{FsError, KernelError},
+    sync::sleep_mutex::SleepMutex,
+};
 
 /// A FIFO holds as much as an anonymous pipe (Linux: 16 pages).
 const FIFO_CAPACITY: usize = 64 * 1024;
@@ -63,6 +66,9 @@ struct State {
 struct Fifo {
     key: Key,
     state: Mutex<State>,
+    /// Held by each read, and by a splice from the FIFO across its write of
+    /// what it saw, so that two readers never take the same bytes.
+    read_lock: SleepMutex<()>,
 }
 
 impl Drop for Fifo {
@@ -93,6 +99,7 @@ fn attach(inode: &Arc<dyn VfsNode>) -> Arc<Fifo> {
     let fifo = Arc::new(Fifo {
         key,
         state: Mutex::new(State::default()),
+        read_lock: SleepMutex::new(()),
     });
     fifos.insert(key, Arc::downgrade(&fifo));
     fifo
@@ -204,6 +211,7 @@ impl VfsNode for FifoEnd {
     }
 
     fn read(&self, _offset: usize, buffer: &mut [u8]) -> Result<usize, KernelError> {
+        let _read = self.fifo.read_lock.lock();
         let n = {
             let mut st = self.fifo.state.lock();
             if st.buffer.is_empty() {
@@ -243,6 +251,55 @@ impl VfsNode for FifoEnd {
         };
         fifo_event();
         Ok(n)
+    }
+
+    fn pipe_id(&self) -> Option<usize> {
+        Some(Arc::as_ptr(&self.fifo) as usize)
+    }
+
+    /// The bytes in the FIFO (Linux's pipe_ioctl).
+    fn bytes_readable(&self) -> Option<usize> {
+        Some(self.fifo.state.lock().buffer.len())
+    }
+
+    fn pipe_room(&self) -> Result<usize, KernelError> {
+        if !self.write {
+            return Err(KernelError::FsError(FsError::BadFileDescriptor));
+        }
+        let st = self.fifo.state.lock();
+        if st.readers == 0 {
+            return Err(KernelError::BrokenPipe);
+        }
+        Ok(FIFO_CAPACITY - st.buffer.len())
+    }
+
+    fn pipe_splice(
+        &self,
+        max: usize,
+        consume: bool,
+        sink: &mut dyn FnMut(&[u8]) -> Result<usize, KernelError>,
+    ) -> Result<usize, KernelError> {
+        if !self.read {
+            return Err(KernelError::FsError(FsError::BadFileDescriptor));
+        }
+        let _read = self.fifo.read_lock.lock();
+        let buf: alloc::vec::Vec<u8> = {
+            let st = self.fifo.state.lock();
+            if st.buffer.is_empty() {
+                return if st.writers == 0 {
+                    Ok(0)
+                } else {
+                    Err(KernelError::WouldBlock)
+                };
+            }
+            st.buffer.iter().take(max).copied().collect()
+        };
+        let taken = sink(&buf)?.min(buf.len());
+        if consume && taken > 0 {
+            self.fifo.state.lock().buffer.drain(..taken);
+            fifo_event();
+        }
+        Ok(taken)
     }
 
     /// Linux's `pipe_poll`.

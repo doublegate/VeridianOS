@@ -121,7 +121,7 @@ make -j$(nproc)
 make install DESTDIR=$SYSROOT
 ```
 
-See `docs/SOFTWARE-PORTING-GUIDE.md` for detailed cross-compilation
+See `docs/PORTING-GUIDE.md` for detailed cross-compilation
 instructions including sysroot setup, toolchain files, and POSIX compatibility
 notes.
 
@@ -182,5 +182,5 @@ When choosing a category, use one of the standard categories defined in
 - Port manager source: `kernel/src/pkg/ports/mod.rs`
 - TOML parser: `kernel/src/pkg/toml_parser.rs`
 - Port collection: `kernel/src/pkg/ports/collection.rs`
-- Software porting guide: `docs/SOFTWARE-PORTING-GUIDE.md`
+- Software porting guide: `docs/PORTING-GUIDE.md`
 - Software porting (mdBook): `docs/book/src/advanced/software-porting.md`

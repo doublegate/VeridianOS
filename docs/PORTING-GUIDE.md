@@ -1,409 +1,206 @@
-# Porting POSIX Software to VeridianOS
-
-This guide covers the process of porting existing POSIX/Linux software to
-VeridianOS, including syscall compatibility, filesystem differences, and the
-Portfile build system.
-
-> **Status (2026-10-16): partly out of date.** Since v0.27 the only user ABI is Linux's: system
-> call numbers come from Linux's tables (ADR 0009, `docs/adr/0009-linux-syscall-numbering.md`;
-> `abi/linux/syscall_64.tbl` on x86_64, `abi/linux/syscall.tbl` on AArch64 and RISC-V), and the
-> "Supported Syscalls" lists below, which give the old native numbering, no longer apply. Per-call
-> coverage: `docs/compat/LINUX-SYSCALL-COVERAGE.md`; what differs from Linux:
-> `docs/KNOWN-LIMITATIONS.md`. This guide will be rewritten with the syscall coverage work.
-
-## Overview
-
-VeridianOS is a capability-based microkernel. While it provides a POSIX-like
-syscall interface for compatibility, there are important differences from
-traditional Unix systems that affect ported software:
-
-- Unix credentials and Linux capabilities for POSIX programs (ADR 0020), and object
-  capabilities for the native IPC and memory calls
-- Microkernel architecture with user-space drivers
-- A BlockFS root on a virtio disk, with RamFS and tmpfs mounts
-- musl 1.2.5 with GCC cross toolchains for all three architectures
-  (`tools/cross/build-musl-toolchain.sh` for x86_64, `tools/cross/build-musl-arch.sh` for
-  AArch64 and RISC-V), plus the native libc on x86_64
-- Static and dynamically linked programs (musl's loader, `PT_INTERP`)
-
-## Supported Syscalls
-
-The following syscalls are implemented in the kernel. Syscall numbers are
-defined in `kernel/src/syscall/mod.rs`.
-
-### IPC (0-7)
-
-| Number | Name              | Arguments                                    | Description                          |
-|--------|-------------------|----------------------------------------------|--------------------------------------|
-| 0      | IpcSend           | capability, msg_ptr, msg_size, flags         | Send message to IPC endpoint         |
-| 1      | IpcReceive        | endpoint, buffer                             | Receive message from endpoint        |
-| 2      | IpcCall           | capability, send_msg, send_size, recv_buf, recv_size | Send and wait for reply     |
-| 3      | IpcReply          | caller, msg_ptr, msg_size                    | Reply to a previous IPC call         |
-| 4      | IpcCreateEndpoint | permissions                                  | Create a new IPC endpoint            |
-| 5      | IpcBindEndpoint   | endpoint_id, name_ptr                        | Bind endpoint to a name              |
-| 6      | IpcShareMemory    | addr, size, permissions, target_pid          | Share memory region via IPC          |
-| 7      | IpcMapMemory      | capability, addr_hint, flags                 | Map shared memory from another process|
-
-### Process Management (10-18)
-
-| Number | Name              | Arguments                          | Description                          |
-|--------|-------------------|------------------------------------|--------------------------------------|
-| 10     | ProcessYield      | (none)                             | Yield CPU to another process         |
-| 11     | ProcessExit       | exit_code                          | Terminate current process            |
-| 12     | ProcessFork       | (none)                             | Fork the current process             |
-| 13     | ProcessExec       | path_ptr, argv_ptr, envp_ptr       | Execute a new program (ELF binary)   |
-| 14     | ProcessWait       | pid, status_ptr, options           | Wait for child process               |
-| 15     | ProcessGetPid     | (none)                             | Get current process ID               |
-| 16     | ProcessGetPPid    | (none)                             | Get parent process ID                |
-| 17     | ProcessSetPriority| which, who, priority               | Set process scheduling priority      |
-| 18     | ProcessGetPriority| which, who                         | Get process scheduling priority      |
-
-### Memory Management (20-21)
-
-| Number | Name          | Arguments              | Description                |
-|--------|---------------|------------------------|----------------------------|
-| 20     | MemoryMap     | addr, size, prot, flags, fd, offset | Map memory pages  |
-| 21     | MemoryUnmap   | addr, size             | Unmap memory pages         |
-
-### Capability Management (30-31)
-
-| Number | Name             | Arguments            | Description                    |
-|--------|------------------|----------------------|--------------------------------|
-| 30     | CapabilityGrant  | token, target_pid, rights | Grant capability to process |
-| 31     | CapabilityRevoke | token                | Revoke a capability            |
-
-### Thread Management (40-45)
-
-| Number | Name              | Arguments                          | Description                    |
-|--------|-------------------|------------------------------------|--------------------------------|
-| 40     | ThreadCreate      | entry_point, stack_ptr, arg, tls_ptr | Create new thread            |
-| 41     | ThreadExit        | exit_code                          | Terminate current thread       |
-| 42     | ThreadJoin        | tid, retval_ptr                    | Wait for thread to terminate   |
-| 43     | ThreadGetTid      | (none)                             | Get current thread ID          |
-| 44     | ThreadSetAffinity | tid, cpuset_ptr, cpuset_size       | Set thread CPU affinity        |
-| 45     | ThreadGetAffinity | tid, cpuset_ptr, cpuset_size       | Get thread CPU affinity        |
-
-### File Operations (50-59)
-
-| Number | Name          | Arguments                  | Description                    |
-|--------|---------------|----------------------------|--------------------------------|
-| 50     | FileOpen      | path, flags, mode          | Open a file                    |
-| 51     | FileClose     | fd                         | Close a file descriptor        |
-| 52     | FileRead      | fd, buffer, count          | Read from a file               |
-| 53     | FileWrite     | fd, buffer, count          | Write to a file                |
-| 54     | FileSeek      | fd, offset, whence         | Seek within a file             |
-| 55     | FileStat      | fd, stat_buf               | Get file status information    |
-| 56     | FileTruncate  | fd, size                   | Truncate file to given size    |
-| 57     | FileDup       | fd                         | Duplicate a file descriptor    |
-| 58     | FileDup2      | old_fd, new_fd             | Duplicate fd to specific number|
-| 59     | FilePipe      | pipe_fds_ptr               | Create a pipe pair             |
-
-### Directory Operations (60-64)
-
-| Number | Name          | Arguments          | Description                        |
-|--------|---------------|--------------------|------------------------------------|
-| 60     | DirMkdir      | path, mode         | Create a directory                 |
-| 61     | DirRmdir      | path               | Remove a directory                 |
-| 62     | DirOpendir    | path               | Open directory for reading (stub)  |
-| 63     | DirReaddir    | dir_handle         | Read next directory entry (stub)   |
-| 64     | DirClosedir   | dir_handle         | Close directory handle (stub)      |
-
-### Filesystem Management (70-72)
-
-| Number | Name       | Arguments                        | Description                |
-|--------|------------|----------------------------------|----------------------------|
-| 70     | FsMount    | device, mount_point, fs_type, flags | Mount a filesystem      |
-| 71     | FsUnmount  | mount_point                      | Unmount a filesystem       |
-| 72     | FsSync     | (none)                           | Sync all filesystems       |
-
-### Extended Operations (80-113)
-
-| Number | Name            | Arguments              | Description                      |
-|--------|-----------------|------------------------|----------------------------------|
-| 80     | KernelGetInfo   | buf                    | Get kernel version information   |
-| 90     | PkgInstall      | name_ptr, name_len     | Install a package                |
-| 91     | PkgRemove       | name_ptr, name_len     | Remove a package                 |
-| 92     | PkgQuery        | name_ptr, info_buf     | Query package information        |
-| 93     | PkgList         | buf_ptr, buf_size      | List installed packages          |
-| 94     | PkgUpdate       | flags                  | Update package repository index  |
-| 100    | TimeGetUptime   | (none)                 | Get monotonic uptime (ms)        |
-| 101    | TimeCreateTimer | mode, interval_ms, cb  | Create a timer                   |
-| 102    | TimeCancelTimer | timer_id               | Cancel an active timer           |
-| 110    | ProcessGetcwd   | buf, size              | Get current working directory    |
-| 111    | ProcessChdir    | path_ptr               | Change working directory         |
-| 112    | FileIoctl       | fd, cmd, arg           | I/O control (stub)               |
-| 113    | ProcessKill     | pid, signal            | Send signal to a process         |
-
-## Missing and Stub Syscalls
-
-The following POSIX syscalls are not yet implemented and will need workarounds
-in ported software:
-
-| Missing Syscall    | Workaround                                              |
-|--------------------|---------------------------------------------------------|
-| `mmap` (full)      | `MemoryMap` (20) exists but is simplified               |
-| `mprotect`         | Not available; memory protection set at map time        |
-| `select`/`poll`/`epoll` | Use polling loops or IPC-based notification        |
-| `socket`/`bind`/`connect` | Network stack not yet available                  |
-| `openat`/`*at`     | Use absolute paths with `FileOpen`                      |
-| `ioctl`            | Syscall 112 exists but returns `InvalidSyscall`         |
-| `fcntl`            | Not implemented; use `dup`/`dup2` for fd manipulation   |
-| `getdents`         | `DirReaddir` (63) is a stub                             |
-| `link`/`symlink`   | Not supported; VFS has no hard/symbolic links           |
-| `rename`           | Not implemented; copy and delete as workaround          |
-| `exec` variants    | Only `ProcessExec` (13); no `execvp`/`execle`/etc.      |
-| `signal`/`sigaction` | Basic `ProcessKill` (113) exists; no full signal API  |
-
-## Filesystem Differences
-
-### RamFS-Based Virtual Filesystem
-
-VeridianOS uses an in-memory VFS with no persistent storage. All files are
-lost on reboot.
-
-- Root filesystem: RamFS mounted at `/`
-- Device filesystem: DevFS at `/dev`
-- Process filesystem: ProcFS at `/proc`
-- Temporary storage: RamFS at `/tmp`
-
-### No Persistent Storage
-
-There are no block device drivers or disk filesystem implementations yet. If
-your software requires persistent data:
-
-- Write configuration to RamFS (lost on reboot)
-- Consider the package manager's VFS-backed database as a model
-- Persistent storage requires a disk driver and ext2/ext4 implementation
-  (planned for a future phase)
-
-### Path Handling
-
-- Maximum path length: 4096 bytes (enforced by syscall handlers)
-- Path separator: `/` (Unix-style)
-- No symbolic links or hard links
-- No `.` or `..` resolution in VFS (handle in user space)
-- Working directory tracked globally via VFS (per-process CWD planned)
-
-## Signal Handling Differences
-
-VeridianOS defines standard POSIX signal numbers (1-26) but the signal
-delivery mechanism is simplified:
-
-- `ProcessKill` (syscall 113) can send signals to processes
-- `SIGKILL` (9) and `SIGSTOP` (19) are handled by the kernel
-- Other signals are delivered to the process server
-- No `sigaction`, `sigprocmask`, or signal handlers -- signals currently cause
-  default behavior (terminate or ignore)
-- `SIGTSTP` (20), `SIGCONT` (18), `SIGPIPE` (13) are defined but delivery
-  depends on shell job control support
-
-Porting advice: Software that relies on signal handlers should be refactored
-to use polling or IPC-based notification where possible.
-
-## Process Model and Privilege
-
-### Two kinds of capability
-
-1. **Credentials and Linux capabilities (ADR 0020)**: a process has Linux's
-   real, effective, saved and filesystem user and group IDs and supplementary
-   groups, and each thread Linux's capability sets (effective, permitted,
-   inheritable, bounding, ambient, securebits). Every privilege check
-   consults the calling thread's effective set as Linux does: file
-   permissions (CAP_DAC_OVERRIDE, CAP_DAC_READ_SEARCH), ownership
-   (CAP_FOWNER, CAP_CHOWN, CAP_FSETID), signals (CAP_KILL), the set*id calls
-   (CAP_SETUID, CAP_SETGID), and so on. Root holds every capability. The
-   set*id fixups, `capget`/`capset`, the capability `prctl` options, exec's
-   rules and file capabilities (`security.capability`) follow Linux, so
-   libcap, `setcap`-ed programs and services that drop privilege work
-   unmodified. User namespaces do not exist yet.
-
-2. **Object capabilities**: the native IPC and memory calls are authorised
-   by unforgeable capability tokens (`kernel/src/cap/`), inherited on
-   `fork()` and filtered on `exec()`. Where a native call stands for a POSIX
-   privilege it needs both: `mount` takes CAP_SYS_ADMIN and a Memory
-   capability with WRITE and CREATE rights.
-
-3. **Priority Model**: Five priority levels (RealTime, System, Normal, Low,
-   Idle) mapped from numeric ranges 0-140.
-
-### Porting Considerations
-
-- `setuid`/`setgid`, `access()` and `stat().st_mode` behave as on Linux.
-- A program that needs one privilege can run as an ordinary user with a
-  file capability or an ambient capability instead of as root.
-- The kernel console's shell runs with every capability.
-
-## The System Name (uname)
-
-uname reports the release `7.3.0-veridian` to every program, and the
-system name `VeridianOS` unless the program runs in Linux mode, where it
-is `Linux` (ADR 0021). Fork keeps the mode. Exec keeps it when the
-process chose it (the launcher or the prctl); a mode that came from a
-marked program or a glibc binary ends when that program execs another,
-which decides again.
-
-- **autoconf `./configure`** needs nothing: `CONFIG_SITE` points at
-  `/usr/share/config.site`, which sets the build system to
-  `<machine>-unknown-linux-musl` for `config.guess`. Pass `--build` to
-  override it.
-- **Tools that branch on the name at run time** (CMake, Python's
-  `platform` and `sysconfig`, Node, the JDK) need Linux mode. Run them
-  under the launcher (`linux-uname cmake ..`, `linux-uname sh` for a
-  whole session), or mark the program once:
-  - build it with `#include <veridian/linux-uname.h>` in one source file;
-  - or add the note to a built binary: `veridian-elfctl set linux-uname
-    FILE` (run it after `strip`);
-  - binaries built for GNU/Linux (glibc, which emits a GNU ABI tag) are
-    in Linux mode already. A marked program does not pass the mode to
-    what it execs; use the launcher for a whole session.
-- **At run time**: `prctl(PR_VERIDIAN_UNAME, PR_VERIDIAN_UNAME_SET,
-  PR_VERIDIAN_UNAME_LINUX, 0, 0)` enters the mode and
-  `PR_VERIDIAN_UNAME_GET` reads it (constants in
-  `<veridian/linux-uname.h>`; Linux answers EINVAL). `linux-uname`
-  without arguments prints the current mode.
-
-## Using the Portfile System
-
-VeridianOS uses a TOML-based Portfile system for building third-party
-software. Port definitions are in the `ports/` directory.
-
-### Portfile Structure
-
-```toml
-[port]
-name = "example"
-version = "1.0.0"
-description = "Example package for VeridianOS"
-homepage = "https://example.com"
-license = "MIT"
-category = "utils"
-build_type = "autotools"   # or "cmake", "meson", "make"
-
-[sources]
-urls = ["https://example.com/releases/example-1.0.0.tar.xz"]
-checksums = ["sha256-hash-here"]
-
-[dependencies]
-build = ["make"]           # Build-time dependencies
-runtime = []               # Runtime dependencies
-
-[build]
-steps = [
-    "./configure --host=x86_64-veridian --prefix=/usr --with-sysroot=/opt/veridian-sysroot",
-    "make -j$(nproc)",
-    "make install DESTDIR=$PKG_DIR"
-]
-```
-
-### Available Ports
-
-The following ports are defined in the repository (bootstrap toolchain):
-
-| Port       | Version | Build System | Dependencies   |
-|------------|---------|--------------|----------------|
-| binutils   | 2.43    | autotools    | (none)         |
-| gcc        | 14.2.0  | autotools    | binutils       |
-| llvm       | 19.1.0  | cmake        | cmake          |
-| cmake      | --      | --           | --             |
-| make       | --      | --           | --             |
-| meson      | --      | --           | --             |
-| gdb        | --      | --           | --             |
-| pkg-config | --      | --           | --             |
-
-### Environment Variables in Build Steps
-
-| Variable   | Description                                     |
-|------------|-------------------------------------------------|
-| `$PKG_DIR` | Staging directory for installed files (DESTDIR)  |
-| `$(nproc)` | Number of available CPU cores                    |
-
-## Step-by-Step Porting Walkthrough
-
-### 1. Assess Compatibility
-
-Review the software's system call usage. Check for:
-
-- Network socket operations (not available)
-- Signal handlers (simplified signal model)
-- `ioctl` calls (stub only)
-- Dynamic linking (not supported)
-- `/proc` or `/sys` filesystem assumptions
-
-### 2. Create a Portfile
+# Porting Software to VeridianOS
+
+VeridianOS runs Linux programs built against musl. Its only user ABI is Linux's: the system
+call numbers come from Linux's tables (ADR 0009; `abi/linux/syscall_64.tbl` on x86_64,
+`abi/linux/syscall.tbl` on AArch64 and RISC-V), the structures and errno values are Linux's,
+and the kernel's behaviour is checked against Linux 7.3 with LTP, the Open POSIX Test Suite and
+musl's libc-test. Porting a program is therefore mostly cross-compiling it with the musl
+toolchain and knowing where VeridianOS still differs from Linux.
+
+Where to look for detail:
+
+- per-call coverage: `docs/compat/LINUX-SYSCALL-COVERAGE.md` (x86_64), `-AARCH64.md`, `-RISCV64.md`;
+- everything that differs from Linux: `docs/KNOWN-LIMITATIONS.md` (the authority; this guide
+  summarizes the parts that matter most when porting);
+- conformance results: `tests/compat/expected-<arch>.tsv` and `tests/compat/README.md`.
+
+On all three architectures LTP's `syscalls` suite passes 524 (x86_64) and 519 (AArch64, RISC-V)
+of 1,552 tests, Open POSIX about 1,570 of 1,965 and libc-test 527 of 560 (full runs of
+2026-10-30, `CHANGELOG.md`).
+
+## Toolchains
+
+Use the musl toolchains. `tools/cross/veridian-paths.sh` defines one per architecture (every
+path can be overridden from the environment; `VERIDIAN_PREFIX` defaults to `/opt/veridian`):
+
+| Architecture | Triple | Toolchain | Sysroot |
+|--------------|--------|-----------|---------|
+| x86_64    | `x86_64-veridian-linux-musl`  | `/opt/veridian/musl-toolchain`         | `/opt/veridian/musl-sysroot`         |
+| AArch64   | `aarch64-veridian-linux-musl` | `/opt/veridian/musl-toolchain-aarch64` | `/opt/veridian/musl-sysroot-aarch64` |
+| RISC-V 64 | `riscv64-veridian-linux-musl` | `/opt/veridian/musl-toolchain-riscv64` | `/opt/veridian/musl-sysroot-riscv64` |
+
+They hold stock musl 1.2.6 (no system call patch since ADR 0009), Linux 7.2 UAPI headers,
+binutils 2.47 and GCC 16.2 for C and C++ with the shared runtimes (`libgcc_s`, `libstdc++`).
+The compiler is `<triple>-gcc` (for example `aarch64-veridian-linux-musl-gcc`). Build them with:
 
 ```bash
-mkdir -p ports/mypackage
+tools/cross/build-musl.sh && tools/cross/build-musl-toolchain.sh   # x86_64
+tools/cross/build-musl-arch.sh aarch64                             # or riscv64 (needs qemu-user)
 ```
 
-Write `ports/mypackage/Portfile.toml` following the structure above.
+Programs link dynamically by default against `/lib/ld-musl-<arch>.so.1`; `-static` and
+`-static-pie` work too. The toolchain script's `verify` step builds and runs static and dynamic
+C and C++ programs and a `dlopen`.
 
-### 3. Configure for Cross-Compilation
+There is also a toolchain for the native libc (`scripts/build-cross-toolchain.sh`, triple
+`<arch>-veridian`, prefix `/opt/veridian/toolchain`). Only the x86_64 BusyBox root uses it; do
+not port software with it. The CMake and Meson files under `toolchain/` are for that toolchain,
+not for musl (see below).
 
-For autotools projects, pass the VeridianOS host triple and disable shared
-libraries:
+## Build systems
 
-```
---host=x86_64-veridian
---prefix=/usr
---with-sysroot=/opt/veridian/sysroot/x86_64
---disable-shared
---enable-static
-```
+**autotools.** Pass both the host and the build machine:
 
-For CMake projects, use the provided toolchain file:
-
-```
-cmake -B build
-    -DCMAKE_TOOLCHAIN_FILE=toolchain/cmake/veridian-x86_64.cmake
-    -DBUILD_SHARED_LIBS=OFF
+```bash
+./configure --host=x86_64-veridian-linux-musl --build="$(cc -dumpmachine)" --prefix=/usr
 ```
 
-### 4. Patch Source Code
+With `--host` alone, configure decides whether it is cross compiling by running a test program,
+and a build host with musl's loader installed runs it against the host's libraries, so later
+answers are the host's (`tools/cross/lib/cross-env.sh`). `scripts/build-compat-rootfs.sh` (LTP's
+configure) is a working example. On VeridianOS itself `config.guess` needs nothing:
+`/usr/share/config.site`, named by `CONFIG_SITE`, which init, the kernel shell and
+`/etc/profile` set, gives the build system as `<machine>-unknown-linux-musl`. Under `env -i`, or
+with a `--prefix` other than `/usr` or `/usr/local`, pass `--build`.
 
-Common patches needed:
+**CMake.** `tools/cross/cmake-toolchain-veridian-deps.cmake` is the musl toolchain file
+(`CMAKE_SYSTEM_NAME Linux`, the musl sysroot, `pkg-config` confined to it, and
+`veridian-run-target` as `CMAKE_CROSSCOMPILING_EMULATOR`). It is written for x86_64
+(`CMAKE_SYSTEM_PROCESSOR` and the paths); copy and adjust it for the other architectures.
+`toolchain/cmake/veridian-<arch>.cmake` use the native-libc toolchain.
 
-- **Remove dynamic linking**: Set `-static` or `--enable-static --disable-shared`
-- **Stub out socket calls**: Replace with error returns or IPC equivalents
-- **Replace signal handlers**: Use polling loops instead
-- **Fix path assumptions**: Avoid hardcoded `/proc/self`, `/dev/random`, etc.
-- **Capability awareness**: Remove `setuid`/`setgid`/`chmod` calls
+**Meson.** `tools/cross/meson-cross-veridian.txt` is a template that `tools/cross/lib/cross-env.sh`
+fills in (`system = 'linux'`, `veridian-run-target` as `exe_wrapper`); its `[host_machine]` is
+x86_64. `toolchain/meson/*.ini` use the native-libc toolchain.
 
-### 5. Build and Test
+**pkg-config.** There is no wrapper: set `PKG_CONFIG_LIBDIR` to the sysroot's
+`usr/lib/pkgconfig:usr/share/pkgconfig` and `PKG_CONFIG_SYSROOT_DIR` to the sysroot, and unset
+`PKG_CONFIG_PATH`, as `cross-env.sh` does, so no host library leaks in.
 
-Build using the Portfile steps, then transfer the binary to a VeridianOS disk
-image or embed it in the kernel build for testing.
+`veridian-run-target` (written by `cross-env.sh`) runs a VeridianOS program on the build host
+through musl's loader with only the sysroot's libraries; it works for x86_64 programs only.
 
-### 6. Test in QEMU
+## Getting a program onto a disk
 
-Transfer the compiled binary to the VeridianOS environment and test. See
-`CLAUDE.md` for QEMU boot commands for each architecture.
+The root filesystem images are BlockFS disks the kernel mounts as `/`:
 
-## Common Porting Issues and Solutions
+- **AArch64 and RISC-V:** `scripts/build-musl-rootfs.sh aarch64|riscv64` builds BusyBox, init
+  and the test programs into `target/rootfs-musl-<arch>/` and the image
+  `target/rootfs-musl-<arch>.img`. Add a compile line to its `build_programs()`, or copy a
+  binary into the directory and run the script again.
+- **x86_64:** `scripts/build-busybox-rootfs.sh all` then `blockfs` builds
+  `target/rootfs-busybox-build/` and `target/rootfs-blockfs.img`; musl programs are built in its
+  `if [ -x "$musl_cc" ]` section. (`headers` first after a change to the native libc.)
+- **Conformance suites:** `scripts/build-compat-rootfs.sh <arch>` adds LTP and libc-test to
+  either root as `target/rootfs-compat-<arch>.img`.
 
-### "undefined reference to __libc_start_main"
+Boot commands are in `CLAUDE.md`/`AGENTS.md`; `scripts/dev/guest.py` boots an AArch64 or RISC-V
+image and runs commands at its shell (`IMAGE=` picks another image).
 
-The program expects a libc. Add `-nostdlib -nostartfiles` and provide a
-`_start` entry point. See `docs/CROSS-COMPILATION.md` for a freestanding
-example.
+## What differs from Linux
 
-### "cannot find -lpthread"
+The full list, with tracking IDs, is `docs/KNOWN-LIMITATIONS.md`. The differences a port most
+often meets:
 
-Threading is via kernel syscalls (ThreadCreate = 40, etc.), not POSIX threads.
-Remove `-lpthread` from link flags and use raw syscalls for threading.
+**Binaries.** glibc programs do not run (there is no `ld-linux-x86-64.so.2`); rebuild them
+against musl. Binaries built for VeridianOS before ADR 0009 (v0.27) must be rebuilt. There is no
+ASLR and no vDSO (no `AT_SYSINFO_EHDR`), and programs over 1 GiB are refused. W^X is enforced: a
+program that needs writable and executable memory (a JIT) carries the `wxneeded` note
+(`<veridian/wxneeded.h>`, or `veridian-elfctl set wxneeded FILE`; ADR 0017).
 
-### Autotools does not recognize "veridian" OS
+**Threads and signals.** musl's pthreads, TLS, futexes, `sigaction`, `sigaltstack` and
+real-time signals work on all three architectures. Signal handlers save only the x87/SSE state
+on x86_64 (AVX upper halves are lost across a handler), there is no SIGIO/`O_ASYNC`, and
+AArch64 SVE/SME and the RISC-V vector extension are not supported (SIGILL). rseq is ENOSYS, as
+without CONFIG_RSEQ.
 
-Add the VeridianOS target triple to `config.sub` in the source tree. Add a
-case for the `veridian` OS name in the operating system recognition section.
+**Files.** The root is BlockFS: writes stay in memory until `sync`, there is no journal, and
+directories hold at most 12 blocks of entries. `/tmp` is a directory on the root; `/dev/shm` is
+a tmpfs. `mount(2)` can make tmpfs, ramfs, proc and devtmpfs only; ext4 and FAT cannot be
+mounted. `/sys` is a few stub files, not sysfs. A `MAP_SHARED` mapping of a regular file is a
+private copy except on tmpfs, memfds and `/dev/shm`. Timestamps have one-second resolution
+(`tv_nsec` is 0); `/dev/fd` and `/proc/self/fd` do not exist; `O_TMPFILE` fails on BlockFS.
 
-### Program hangs on startup
+**Terminals.** PTYs answer only the window-size ioctls, so `tcgetattr` on a PTY fails; job
+control is partial.
 
-Likely waiting for input on a file descriptor that is not connected.
-VeridianOS provides serial UART fallback for stdin/stdout/stderr (fd 0/1/2),
-but other file descriptors must be explicitly opened via `FileOpen` (50).
+**Networking.** AF_UNIX stream and datagram sockets with path names work (no SOCK_SEQPACKET,
+no abstract names, no Unix sockets in SCM_RIGHTS). AF_INET is not usable yet: UDP datagrams do
+not reach the socket layer and TCP has no real handshake, retransmission or close (sprint F).
+AF_INET6 and AF_NETLINK are EAFNOSUPPORT. A program that needs IP networking cannot be ported
+until sprint F.
 
-### "permission denied" errors
+**Namespaces and containers.** UTS, IPC, cgroup, time, mount, PID, user and network namespaces
+exist (ADR 0022); a new network namespace has only a loopback interface that is down and cannot
+be brought up, and creating a user namespace needs CAP_SYS_ADMIN unless root sets
+`/proc/sys/kernel/unprivileged_userns_clone` to 1.
 
-Check that the calling process has appropriate capabilities. In VeridianOS,
-even the shell process needs WRITE + CREATE capabilities for privileged
-operations like mounting filesystems or installing packages.
+## Credentials and privilege
+
+There are two kinds of capability:
+
+1. **Credentials and Linux capabilities (ADR 0020).** A process has Linux's real, effective,
+   saved and filesystem user and group IDs and supplementary groups, and each thread Linux's
+   capability sets (effective, permitted, inheritable, bounding, ambient, securebits). Every
+   privilege check consults them as Linux does, in the user namespace that owns the object
+   (file permissions, ownership, signals, the set*id calls, and so on). The set*id fixups,
+   `capget`/`capset`, the capability `prctl` options, exec's rules and file capabilities
+   (`security.capability`) follow Linux, so libcap, `setcap`-ed programs and services that drop
+   privilege work unmodified.
+2. **Object capabilities.** The native IPC and memory calls are authorised by unforgeable
+   capability tokens (`kernel/src/cap/`), inherited on `fork()` and filtered on `exec()`. Where a
+   native call stands for a POSIX privilege it needs both: `mount` takes CAP_SYS_ADMIN and a
+   Memory capability with WRITE and CREATE rights. ADR 0024 (planned) extends this to every
+   Linux privilege check.
+
+`setuid`/`setgid`, `access()` and `stat().st_mode` behave as on Linux, and a program that needs
+one privilege can run as an ordinary user with a file or ambient capability instead of as root.
+The kernel console's shell runs with every capability.
+
+## The system name (uname)
+
+uname reports the release `7.3.0-veridian` to every program, and the system name `VeridianOS`
+unless the program runs in Linux mode, where it is `Linux` (ADR 0021). Fork keeps the mode.
+Exec keeps it when the process chose it (the launcher or the prctl); a mode that came from a
+marked program or a glibc binary ends when that program execs another, which decides again.
+
+- **autoconf `./configure`** needs nothing (`config.site`, above).
+- **Tools that branch on the name at run time** (CMake, Python's `platform` and `sysconfig`,
+  Node, the JDK) need Linux mode. Run them under the launcher (`linux-uname cmake ..`,
+  `linux-uname sh` for a whole session), or mark the program once:
+  - build it with `#include <veridian/linux-uname.h>` in one source file (from musl builds, add
+    `-idirafter userland/libc/include`);
+  - or add the note to a built binary: `veridian-elfctl set linux-uname FILE` (run it after
+    `strip`; `tools/veridian-elfctl`).
+  A marked program does not pass the mode to what it execs; use the launcher for a session.
+- **At run time**: `prctl(PR_VERIDIAN_UNAME, PR_VERIDIAN_UNAME_SET, PR_VERIDIAN_UNAME_LINUX, 0,
+  0)` enters the mode and `PR_VERIDIAN_UNAME_GET` reads it (Linux answers EINVAL).
+  `linux-uname` without arguments prints the current mode.
+
+## Ports
+
+`ports/<name>/Portfile.toml` describes a package: `[port]` (name, version, description,
+homepage, license, category, `build_type`), `[sources]` (URLs and SHA-256 checksums, or a
+`local_path`), `[dependencies]` (build and runtime), `[build]` (shell steps using `$PKG_DIR`,
+`$SRC_DIR`, `$BUILD_DIR` and `$VERIDIAN_TARGET`, and patches) and optionally `[native_build]`.
+`ports/README.md` describes the fields. The ports are binutils, gcc, cmake, gdb, llvm, make,
+meson, ninja, pkg-config and three in-tree programs (edit, libcurses, sysinfo).
+
+Nothing builds a port from its Portfile yet: the kernel's `pkg` module parses Portfiles, but its
+step runner does not execute commands. Build software with the toolchains and scripts above; the
+Portfiles record the versions, sources and steps.
+
+## Common problems
+
+- **A configure test runs on the host.** Pass `--build="$(cc -dumpmachine)"` with `--host`.
+- **The build finds host libraries.** pkg-config is not confined to the sysroot: set
+  `PKG_CONFIG_LIBDIR` and `PKG_CONFIG_SYSROOT_DIR` and unset `PKG_CONFIG_PATH`.
+- **`config.sub` does not know the system.** Use the musl triple (`*-linux-musl`), which every
+  `config.sub` knows, not `*-veridian`.
+- **A program fails with ENOSYS or EINVAL on a call Linux supports.** Look the call up in the
+  coverage table and in KNOWN-LIMITATIONS; most gaps are listed there with their plan.
+- **CMake, Python or Node takes VeridianOS for an unknown system.** Run it in Linux mode (uname,
+  above).
+- **A JIT dies on its first generated code.** Mark it `wxneeded` (W^X, above).
+- **An old binary crashes at once.** It was built with the pre-ADR-0009 numbers; rebuild it.
+- **Data is gone after a reset.** BlockFS keeps writes in memory until `sync`.

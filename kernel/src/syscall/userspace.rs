@@ -473,8 +473,146 @@ pub fn read_user_vec(addr: usize, len: usize, max: usize) -> Result<Vec<u8>, Sys
 /// Bounce-buffer size for bulk transfers between the kernel and user memory.
 pub(crate) const USER_COPY_CHUNK: usize = 64 * 1024;
 
+/// User memory made of (address, length) segments, moved as one buffer of
+/// their total length: one segment for read(2) and write(2), the iovec
+/// array for readv(2) and writev(2), so that a vectored call is one
+/// transfer -- one pipe write (atomic up to PIPE_BUF), one read that does
+/// not wait again for a later buffer (N-200).
+#[derive(Clone, Copy)]
+pub struct UserSegs<'a> {
+    segs: &'a [(usize, usize)],
+    /// Bytes at the start of `segs` that are not part of the buffer.
+    skip: usize,
+    len: usize,
+}
+
+impl<'a> UserSegs<'a> {
+    /// The buffer made of `segs`, in order.
+    pub fn new(segs: &'a [(usize, usize)]) -> Self {
+        let len = segs.iter().fold(0usize, |t, &(_, n)| t.saturating_add(n));
+        Self { segs, skip: 0, len }
+    }
+
+    /// Its length in bytes.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether it is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The buffer without its first `n` bytes.
+    pub fn advance(self, n: usize) -> Self {
+        let n = n.min(self.len);
+        Self {
+            skip: self.skip + n,
+            len: self.len - n,
+            ..self
+        }
+    }
+
+    /// Its first `n` bytes.
+    pub fn truncate(self, n: usize) -> Self {
+        Self {
+            len: self.len.min(n),
+            ..self
+        }
+    }
+
+    /// Check the address range of every segment (not null, no overflow,
+    /// below the end of user space), as Linux's import_iovec checks each
+    /// iovec with access_ok before any I/O: EFAULT here moves nothing.
+    /// Pages are checked as they are copied.
+    pub fn validate(&self) -> Result<(), SyscallError> {
+        let mut result = Ok(());
+        self.pieces(0, self.len, |addr, range| {
+            result = validate_user_range(addr, range.len()).map(|_| ());
+            result.is_ok()
+        });
+        result
+    }
+
+    /// Call `f` with the user address and kernel-buffer range of each
+    /// piece of bytes [off, off + n) of the buffer, in order, until it
+    /// returns false.
+    fn pieces(
+        &self,
+        off: usize,
+        n: usize,
+        mut f: impl FnMut(usize, core::ops::Range<usize>) -> bool,
+    ) {
+        let n = n.min(self.len.saturating_sub(off));
+        let mut start = self.skip + off;
+        let mut done = 0;
+        for &(base, len) in self.segs {
+            if done == n {
+                break;
+            }
+            if start >= len {
+                start -= len;
+                continue;
+            }
+            let take = (len - start).min(n - done);
+            if !f(base + start, done..done + take) {
+                return;
+            }
+            done += take;
+            start = 0;
+        }
+    }
+
+    /// Copy `data` to bytes `off..` of the buffer. On a fault, the number
+    /// of bytes that did reach it (up to the faulting page) and the error.
+    pub(crate) fn copy_out(&self, off: usize, data: &[u8]) -> Result<(), (usize, SyscallError)> {
+        let mut result = Ok(());
+        self.pieces(off, data.len(), |addr, range| {
+            let at = range.start;
+            match write_user_bytes(addr, &data[range.clone()]) {
+                Ok(()) => true,
+                Err(e) => {
+                    result = Err((at + write_user_prefix(addr, &data[range]), e));
+                    false
+                }
+            }
+        });
+        result
+    }
+
+    /// Fill `buf` from bytes `off..` of the buffer; on a fault as for
+    /// [`Self::copy_out`].
+    pub(crate) fn copy_in(&self, off: usize, buf: &mut [u8]) -> Result<(), (usize, SyscallError)> {
+        let mut result = Ok(());
+        let n = buf.len();
+        self.pieces(off, n, |addr, range| {
+            let at = range.start;
+            match read_user_bytes(addr, &mut buf[range.clone()]) {
+                Ok(()) => true,
+                Err(e) => {
+                    result = Err((at + read_user_prefix(addr, &mut buf[range]), e));
+                    false
+                }
+            }
+        });
+        result
+    }
+}
+
 /// Move up to `count` bytes produced by the kernel into user memory at
-/// `addr`, one bounded kernel buffer at a time.
+/// `addr` ([`produce_to_segs`] with one segment).
+pub fn produce_to_user(
+    addr: usize,
+    count: usize,
+    repeat: bool,
+    produce: impl FnMut(&mut [u8]) -> Result<usize, SyscallError>,
+    unread: impl FnMut(usize),
+) -> Result<usize, SyscallError> {
+    produce_to_segs(UserSegs::new(&[(addr, count)]), repeat, produce, unread)
+}
+
+/// Move up to `dst.len()` bytes produced by the kernel into user memory
+/// `dst`, one bounded kernel buffer at a time.
 ///
 /// `produce` fills the buffer it is given and returns how many bytes it
 /// wrote. With `repeat`, another chunk follows a full one (regular files,
@@ -489,19 +627,19 @@ pub(crate) const USER_COPY_CHUNK: usize = 64 * 1024;
 /// was copied; PR #23 review). A stream cannot take bytes back: they are
 /// lost. Before v0.27 these paths built slices over user memory and
 /// faulted in the kernel instead (N-43).
-pub fn produce_to_user(
-    addr: usize,
-    count: usize,
+pub fn produce_to_segs(
+    dst: UserSegs<'_>,
     repeat: bool,
     mut produce: impl FnMut(&mut [u8]) -> Result<usize, SyscallError>,
     mut unread: impl FnMut(usize),
 ) -> Result<usize, SyscallError> {
+    let count = dst.len();
     if count == 0 {
         return Ok(0);
     }
-    // The range only: each chunk's copy checks its pages, so a PROT_NONE
+    // The ranges only: each chunk's copy checks its pages, so a PROT_NONE
     // page past the bytes moved does not fail the whole call.
-    validate_user_range(addr, count)?;
+    dst.validate()?;
     let mut kbuf = alloc::vec![0u8; count.min(USER_COPY_CHUNK)];
     let mut total = 0;
     while total < count {
@@ -512,8 +650,7 @@ pub fn produce_to_user(
             Err(_) => break,
         };
         if n > 0 {
-            if let Err(e) = write_user_bytes(addr + total, &kbuf[..n]) {
-                let copied = write_user_prefix(addr + total, &kbuf[..n]);
+            if let Err((copied, e)) = dst.copy_out(total, &kbuf[..n]) {
                 unread(n - copied);
                 total += copied;
                 return if total > 0 { Ok(total) } else { Err(e) };
@@ -557,30 +694,41 @@ fn read_user_prefix(addr: usize, buf: &mut [u8]) -> usize {
     done
 }
 
-/// Hand up to `count` bytes of user memory at `addr` to `consume`, one
-/// bounded kernel buffer at a time. `consume` returns how many bytes it
-/// accepted; a short count ends the transfer. `repeat` as for
-/// [`produce_to_user`]. An unmapped page gives EFAULT, or the count accepted
-/// so far -- including the readable part of a chunk that faulted part-way,
-/// which `consume` still gets (it was dropped; PR #23 review).
+/// Hand up to `count` bytes of user memory at `addr` to `consume`
+/// ([`consume_from_segs`] with one segment).
 pub fn consume_from_user(
     addr: usize,
     count: usize,
     repeat: bool,
+    consume: impl FnMut(&[u8]) -> Result<usize, SyscallError>,
+) -> Result<usize, SyscallError> {
+    consume_from_segs(UserSegs::new(&[(addr, count)]), repeat, consume)
+}
+
+/// Hand user memory `src` to `consume`, one bounded kernel buffer at a
+/// time: the first chunk gathers up to [`USER_COPY_CHUNK`] bytes across
+/// every segment, so one call sees them together. `consume` returns how
+/// many bytes it accepted; a short count ends the transfer. `repeat` as for
+/// [`produce_to_segs`]. An unmapped page gives EFAULT, or the count accepted
+/// so far -- including the readable part of a chunk that faulted part-way,
+/// which `consume` still gets (it was dropped; PR #23 review).
+pub fn consume_from_segs(
+    src: UserSegs<'_>,
+    repeat: bool,
     mut consume: impl FnMut(&[u8]) -> Result<usize, SyscallError>,
 ) -> Result<usize, SyscallError> {
+    let count = src.len();
     if count == 0 {
         return Ok(0);
     }
-    // The range only: each chunk's copy checks its pages, so a PROT_NONE
+    // The ranges only: each chunk's copy checks its pages, so a PROT_NONE
     // page past the bytes moved does not fail the whole call.
-    validate_user_range(addr, count)?;
+    src.validate()?;
     let mut kbuf = alloc::vec![0u8; count.min(USER_COPY_CHUNK)];
     let mut total = 0;
     while total < count {
         let want = (count - total).min(kbuf.len());
-        if let Err(e) = read_user_bytes(addr + total, &mut kbuf[..want]) {
-            let readable = read_user_prefix(addr + total, &mut kbuf[..want]);
+        if let Err((readable, e)) = src.copy_in(total, &mut kbuf[..want]) {
             if readable > 0 {
                 if let Ok(n) = consume(&kbuf[..readable]) {
                     total += n.min(readable);
@@ -793,6 +941,53 @@ mod accessor_tests {
             consume_from_user(src.as_ptr() as usize, src.len(), true, |k| Ok(k.len() / 2)).unwrap();
         assert_eq!(n, USER_COPY_CHUNK / 2);
         assert!(consume_from_user(KERNEL_ADDR, 8, true, |k| Ok(k.len())).is_err());
+    }
+
+    #[test]
+    fn user_segs_move_as_one_buffer() {
+        // Segments of 3, 0 and 4 bytes, in three separate buffers.
+        let (mut a, mut b, mut c) = ([0u8; 3], [0u8; 1], [0u8; 4]);
+        let segs = [
+            (a.as_mut_ptr() as usize, 3),
+            (b.as_mut_ptr() as usize, 0),
+            (c.as_mut_ptr() as usize, 4),
+        ];
+        let dst = UserSegs::new(&segs);
+        assert_eq!(dst.len(), 7);
+        // One producer call fills all of them (a pipe read is one read).
+        let mut calls = 0;
+        let n = produce_to_segs(
+            dst,
+            false,
+            |k| {
+                calls += 1;
+                k.copy_from_slice(&b"abcdefg"[..k.len()]);
+                Ok(k.len())
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!((n, calls, a, c), (7, 1, *b"abc", *b"defg"));
+        // One consumer call sees them gathered (a pipe write is one write),
+        // here from an offset into the first segment.
+        let mut got = alloc::vec::Vec::new();
+        let n = consume_from_segs(dst.advance(2), false, |k| {
+            got.extend_from_slice(k);
+            Ok(k.len())
+        })
+        .unwrap();
+        assert_eq!((n, &got[..]), (5, &b"cdefg"[..]));
+        assert_eq!(dst.advance(1).truncate(3).len(), 3);
+        assert!(dst.advance(9).is_empty());
+        // A segment outside user space fails the whole buffer, before
+        // anything moves (Linux's import_iovec).
+        let bad = [(a.as_mut_ptr() as usize, 3), (KERNEL_ADDR, 4)];
+        let mut called = false;
+        let r = consume_from_segs(UserSegs::new(&bad), true, |k| {
+            called = true;
+            Ok(k.len())
+        });
+        assert!(r.is_err() && !called);
     }
 
     #[test]

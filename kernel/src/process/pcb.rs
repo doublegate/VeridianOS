@@ -71,6 +71,22 @@ pub enum ProcessPriority {
 }
 
 /// Process Control Block
+/// What ptracer_capable needs of a tracer's credentials: its user
+/// namespace, effective uid and whether it held CAP_SYS_PTRACE.
+#[derive(Clone)]
+pub struct TracerCred {
+    pub userns: alloc::sync::Arc<super::userns::UserNs>,
+    pub euid: u32,
+    pub has_ptrace: bool,
+}
+
+impl TracerCred {
+    /// Whether it holds CAP_SYS_PTRACE over user namespace `ns`.
+    pub fn capable_over(&self, ns: &super::userns::UserNs) -> bool {
+        ns.capable(&self.userns, self.euid, self.has_ptrace)
+    }
+}
+
 pub struct Process {
     /// Process ID
     pub pid: ProcessId,
@@ -98,8 +114,10 @@ pub struct Process {
     /// Capability space
     pub capability_space: Mutex<CapabilitySpace>,
 
-    /// File descriptor table
-    pub file_table: Mutex<FileTable>,
+    /// File descriptor table, Linux's files_struct: shared with the
+    /// processes a CLONE_FILES clone made or was made by, and closed by the
+    /// last of them to exit (`exit::cleanup_process`).
+    pub file_table: Mutex<Arc<FileTable>>,
 
     /// Threads in this process
     #[cfg(feature = "alloc")]
@@ -114,6 +132,12 @@ pub struct Process {
     /// Child processes
     #[cfg(feature = "alloc")]
     pub children: Mutex<Vec<ProcessId>>,
+
+    /// Set, under `children`'s lock, once the exit has taken the children
+    /// to reparent them: a child added after that goes to the reaper
+    /// instead (`fork`; a CLONE_PARENT clone adds to its caller's parent,
+    /// which may be exiting).
+    pub children_closed: core::sync::atomic::AtomicBool,
 
     /// Exit code (set when process exits)
     pub exit_code: AtomicU32,
@@ -136,6 +160,16 @@ pub struct Process {
     /// The signal the parent gets when this process exits: SIGCHLD, or
     /// clone's low byte (0: none) (N-210).
     pub exit_signal: AtomicU32,
+
+    /// clone3's CLONE_AUTOREAP: reaped as it exits, with no zombie and no
+    /// exit signal (Linux 7.0's signal->autoreap). Kept across exec; its own
+    /// children do not inherit it.
+    pub autoreap: core::sync::atomic::AtomicBool,
+
+    /// Which address space this process runs in, as kcmp(KCMP_VM) compares
+    /// them: its own from creation, its parent's for a CLONE_VM child (which
+    /// maps the same memory), and a new one at each exec (`new_vm_id`).
+    pub vm_id: AtomicU64,
 
     /// A CLONE_VFORK child whose parent waits until it execs or exits;
     /// cleared (and PROCESS_EVENTS woken) by either (N-210).
@@ -177,6 +211,17 @@ pub struct Process {
     /// because processes are shared through `Arc` and a set*id call
     /// updates several fields at once.
     creds: Mutex<super::creds::Credentials>,
+    /// The user namespace the credentials are in (Linux's cred->user_ns;
+    /// one per process, as Linux requires a thread group to share it).
+    userns: Mutex<alloc::sync::Arc<super::userns::UserNs>>,
+    /// The user namespace its memory belongs to (Linux's mm->user_ns): the
+    /// credentials' at its last exec, its parent's after fork. Joining or
+    /// making another user namespace leaves it, so what the process held
+    /// before stays guarded by the privilege of the namespace it was in.
+    mm_userns: Mutex<alloc::sync::Arc<super::userns::UserNs>>,
+    /// The PID namespace it is in (Linux's task_active_pid_ns): the one
+    /// its parent's children go to at fork, fixed from then on.
+    pid_ns: Mutex<alloc::sync::Arc<super::pidns::PidNs>>,
 
     /// Process group ID (initialized to pid)
     pub pgid: AtomicU64,
@@ -185,10 +230,10 @@ pub struct Process {
     /// inherited on fork, as on Linux.
     pub tracer: AtomicU64,
 
-    /// Whether the tracer held CAP_SYS_PTRACE when it attached (Linux's
-    /// ptracer_cred, which ptracer_capable checks at exec); meaningful only
-    /// while `tracer` is set. Changed with `tracer`, under `cred_guard`.
-    pub tracer_capable: core::sync::atomic::AtomicBool,
+    /// The tracer's credentials when it attached (Linux's ptracer_cred,
+    /// which ptracer_capable checks at exec); meaningful only while
+    /// `tracer` is set. Changed with `tracer`, under `cred_guard`.
+    pub tracer_cred: Mutex<Option<TracerCred>>,
 
     /// Linux's cred_guard_mutex: exec decides and installs set-ID
     /// credentials under it, and ptrace attaches under it, so a tracer
@@ -210,6 +255,17 @@ pub struct Process {
     /// RLIMIT_CPU's soft and hard values in nanoseconds, for the return to
     /// user mode to check without the lock (u64::MAX: none).
     pub cpu_limit_ns: [core::sync::atomic::AtomicU64; 2],
+    /// Interval timers (setitimer, alarm): none in a fork child, kept
+    /// across exec.
+    pub itimers: Mutex<super::itimer::Itimers>,
+    /// Whether ITIMER_VIRTUAL or ITIMER_PROF is armed, for the return to
+    /// user mode to check without the lock.
+    pub cpu_itimers_armed: core::sync::atomic::AtomicBool,
+    /// POSIX timers (timer_create): none in a fork child, deleted by exec.
+    pub posix_timers: Mutex<super::posix_timer::PosixTimers>,
+    /// Whether a POSIX timer waits on a CPU clock, for the return to user
+    /// mode to check without the lock.
+    pub posix_cpu_armed: core::sync::atomic::AtomicBool,
 
     /// CPU time of the process's exited threads (its live threads' is the
     /// dispatcher's), and of its children it has waited for, with theirs
@@ -237,13 +293,17 @@ pub struct Process {
     #[cfg(feature = "alloc")]
     pub exe_path: Mutex<String>,
 
-    /// Signal handlers (signal number -> handler action)
-    /// 0 = default, 1 = ignore, other values = handler address
-    pub signal_handlers: Mutex<[u64; super::signals::NSIG + 1]>,
+    /// The denial of writes to the running program (Linux's
+    /// mm->exe_file): set by the loader and by a successful exec, copied by
+    /// fork, dropped when the process exits (ETXTBSY, `fs::write_access`).
+    #[cfg(feature = "alloc")]
+    pub exe_denial: Mutex<Option<crate::fs::write_access::WriteDenial>>,
 
-    /// The rest of each signal's action: (sa_flags, sa_restorer, sa_mask),
-    /// kept so sigaction returns what was set (N-95) and for delivery.
-    pub signal_action_extra: Mutex<[(u64, u64, u64); super::signals::NSIG + 1]>,
+    /// Signal actions, Linux's sighand_struct: shared with the processes a
+    /// CLONE_SIGHAND clone made or was made by. Reached only through the
+    /// methods below, which hold this lock while they use the tables, so
+    /// `Arc::strong_count` is the number of processes sharing them.
+    sighand: Mutex<Arc<super::signals::SigHand>>,
 
     /// Pending signals bitmap
     pub pending_signals: AtomicU64,
@@ -302,6 +362,46 @@ impl Process {
     /// and `Credentials::gid_for`.
     pub fn credentials(&self) -> super::creds::Credentials {
         *self.creds.lock()
+    }
+
+    /// The user namespace the credentials are in.
+    pub fn user_ns(&self) -> alloc::sync::Arc<super::userns::UserNs> {
+        self.userns.lock().clone()
+    }
+
+    /// Move the credentials into user namespace `ns` (a new one at clone
+    /// or unshare, or one joined with setns); the caller sets the calling
+    /// thread's capabilities to match (Linux's set_cred_user_ns).
+    pub fn set_user_ns(&self, ns: alloc::sync::Arc<super::userns::UserNs>) {
+        *self.userns.lock() = ns;
+    }
+
+    /// The user namespace its memory belongs to (`mm_userns`).
+    pub fn mm_user_ns(&self) -> alloc::sync::Arc<super::userns::UserNs> {
+        self.mm_userns.lock().clone()
+    }
+
+    /// Set the user namespace its memory belongs to (exec and fork).
+    pub fn set_mm_user_ns(&self, ns: alloc::sync::Arc<super::userns::UserNs>) {
+        *self.mm_userns.lock() = ns;
+    }
+
+    /// The PID namespace it is in (`pid_ns`).
+    pub fn pid_ns(&self) -> alloc::sync::Arc<super::pidns::PidNs> {
+        self.pid_ns.lock().clone()
+    }
+
+    /// Put it in PID namespace `ns` (fork, before anyone can see it).
+    pub fn set_pid_ns(&self, ns: alloc::sync::Arc<super::pidns::PidNs>) {
+        *self.pid_ns.lock() = ns;
+    }
+
+    /// Whether it is the init of a PID namespace below the initial one,
+    /// whose signals from inside that namespace are only those it handles
+    /// (Linux's SIGNAL_UNKILLABLE).
+    pub fn is_ns_init(&self) -> bool {
+        let ns = self.pid_ns();
+        !ns.is_initial() && ns.reaper() == Some(self.pid.0)
     }
 
     /// The process's resource limits.
@@ -400,11 +500,15 @@ impl Process {
         f: impl FnOnce(&mut super::creds::Credentials) -> R,
     ) -> R {
         use super::linux_caps::Uids;
+        // Root is the process's namespace's (cap_emulate_setxuid's
+        // make_kuid(old->user_ns, 0)).
+        let root = self.user_ns().root_uid();
         let uids = |c: &super::creds::Credentials| Uids {
             ruid: c.ruid,
             euid: c.euid,
             suid: c.suid,
             fsuid: c.fsuid,
+            root,
         };
         let threads = self.threads.lock();
         let (result, old, new) = self.update_credentials(|c| {
@@ -415,7 +519,7 @@ impl Process {
         for thread in threads.values() {
             let mut caps = thread.caps.lock();
             if fs {
-                caps.fix_setfsuid(old.fsuid, new.fsuid);
+                caps.fix_setfsuid(old.fsuid, new.fsuid, root);
             } else {
                 caps.fix_setuid(old, new);
             }
@@ -474,16 +578,19 @@ impl Process {
             priority: Mutex::new(priority),
             memory_space: crate::sync::sleep_mutex::SleepMutex::new(VirtualAddressSpace::new()),
             capability_space: Mutex::new(CapabilitySpace::new()),
-            file_table: Mutex::new(FileTable::new()),
+            file_table: Mutex::new(Arc::new(FileTable::new())),
             threads: Mutex::new(BTreeMap::new()),
             ipc_endpoints: Mutex::new(BTreeMap::new()),
             children: Mutex::new(Vec::new()),
+            children_closed: core::sync::atomic::AtomicBool::new(false),
             exit_code: AtomicU32::new(0),
             term_signal: AtomicU32::new(0),
             dispatched: core::sync::atomic::AtomicBool::new(false),
             kill_pending: AtomicU32::new(0),
             exec_tid: AtomicU64::new(0),
             exit_signal: AtomicU32::new(super::signals::SIGCHLD as u32),
+            autoreap: core::sync::atomic::AtomicBool::new(false),
+            vm_id: AtomicU64::new(new_vm_id()),
             vfork_pending: core::sync::atomic::AtomicBool::new(false),
             did_exec: core::sync::atomic::AtomicBool::new(false),
             stop_signal: AtomicU32::new(0),
@@ -494,9 +601,12 @@ impl Process {
             memory_stats: MemoryStats::default(),
             created_at: crate::arch::timer::get_ticks(),
             creds: Mutex::new(super::creds::Credentials::new(0, 0)),
+            userns: Mutex::new(super::userns::initial()),
+            mm_userns: Mutex::new(super::userns::initial()),
+            pid_ns: Mutex::new(super::pidns::initial()),
             pgid: AtomicU64::new(pid.0),
             tracer: AtomicU64::new(0),
-            tracer_capable: core::sync::atomic::AtomicBool::new(false),
+            tracer_cred: Mutex::new(None),
             cred_guard: Mutex::new(()),
             exec_in_progress: core::sync::atomic::AtomicBool::new(false),
             dumpable: core::sync::atomic::AtomicBool::new(true),
@@ -505,6 +615,10 @@ impl Process {
                 core::sync::atomic::AtomicU64::new(u64::MAX),
                 core::sync::atomic::AtomicU64::new(u64::MAX),
             ],
+            itimers: Mutex::new(super::itimer::Itimers::default()),
+            cpu_itimers_armed: core::sync::atomic::AtomicBool::new(false),
+            posix_timers: Mutex::new(super::posix_timer::PosixTimers::default()),
+            posix_cpu_armed: core::sync::atomic::AtomicBool::new(false),
             cpu_exited: Mutex::new(crate::sched::cputime::CpuTimes::ZERO),
             cpu_children: Mutex::new(crate::sched::cputime::CpuTimes::ZERO),
             cpu_split: crate::sched::cputime::PrevSplit::new(),
@@ -515,8 +629,9 @@ impl Process {
             env_vars: Mutex::new(BTreeMap::new()),
             #[cfg(feature = "alloc")]
             exe_path: Mutex::new(String::new()),
-            signal_handlers: Mutex::new([0u64; super::signals::NSIG + 1]),
-            signal_action_extra: Mutex::new([(0, 0, 0); super::signals::NSIG + 1]),
+            #[cfg(feature = "alloc")]
+            exe_denial: Mutex::new(None),
+            sighand: Mutex::new(Arc::new(super::signals::SigHand::new())),
             pending_signals: AtomicU64::new(0),
             rt_queue: super::signals::RtQueue::new(),
             signal_mask: AtomicU64::new(0),
@@ -576,6 +691,11 @@ impl Process {
 
         let thread = Arc::new(thread);
         threads.insert(tid, thread.clone());
+        // Another thread's ID is visible now; the first thread's, the
+        // process's own, once the process is in the table.
+        if tid.0 != self.pid.0 {
+            super::published(tid.0);
+        }
         Ok(thread)
     }
 
@@ -776,7 +896,8 @@ impl Process {
     pub fn reset_signal_handlers(&self) {
         // Caught signals revert to their default action; ignored ones stay
         // ignored (POSIX exec), so a parent's SIG_IGN still applies.
-        let mut handlers = self.signal_handlers.lock();
+        let sighand = self.sighand.lock();
+        let mut handlers = sighand.handlers.lock();
         let mut ignored = 0u64;
         for (sig, handler) in handlers.iter_mut().enumerate() {
             if *handler == 1 {
@@ -785,7 +906,9 @@ impl Process {
                 *handler = 0; // 0 = default action
             }
         }
-        *self.signal_action_extra.lock() = [(0, 0, 0); super::signals::NSIG + 1];
+        *sighand.extra.lock() = [(0, 0, 0); super::signals::NSIG + 1];
+        drop(handlers);
+        drop(sighand);
         // Pending signals survive exec (POSIX), except the ignored ones.
         self.rt_queue.clear(&self.pending_signals, ignored);
     }
@@ -805,7 +928,8 @@ impl Process {
                 operation: "change handler for SIGKILL or SIGSTOP",
             });
         }
-        let mut handlers = self.signal_handlers.lock();
+        let sighand = self.sighand.lock();
+        let mut handlers = sighand.handlers.lock();
         let old = handlers[signum];
         handlers[signum] = handler;
         Ok(old)
@@ -820,8 +944,9 @@ impl Process {
         if signum > super::signals::NSIG {
             return None;
         }
-        let handlers = self.signal_handlers.lock();
-        let extra = self.signal_action_extra.lock();
+        let sighand = self.sighand.lock();
+        let handlers = sighand.handlers.lock();
+        let extra = sighand.extra.lock();
         Some((handlers[signum], extra[signum]))
     }
 
@@ -843,8 +968,9 @@ impl Process {
                 operation: "change handler for SIGKILL or SIGSTOP",
             });
         }
-        let mut handlers = self.signal_handlers.lock();
-        let mut extra = self.signal_action_extra.lock();
+        let sighand = self.sighand.lock();
+        let mut handlers = sighand.handlers.lock();
+        let mut extra = sighand.extra.lock();
         let old = (handlers[signum], extra[signum]);
         if let Some((handler, rest)) = new {
             handlers[signum] = handler;
@@ -859,8 +985,9 @@ impl Process {
         if signum > super::signals::NSIG {
             return;
         }
-        let mut handlers = self.signal_handlers.lock();
-        let mut extra = self.signal_action_extra.lock();
+        let sighand = self.sighand.lock();
+        let mut handlers = sighand.handlers.lock();
+        let mut extra = sighand.extra.lock();
         if handlers[signum] == handler {
             handlers[signum] = 0;
             extra[signum] = (0, 0, 0);
@@ -872,7 +999,64 @@ impl Process {
         if signum > super::signals::NSIG {
             return None;
         }
-        Some(self.signal_handlers.lock()[signum])
+        Some(self.sighand.lock().handlers.lock()[signum])
+    }
+
+    /// The signal actions for a child: these, shared (CLONE_SIGHAND), or a
+    /// copy, with CLONE_CLEAR_SIGHAND's reset when `clear` (Linux's
+    /// copy_sighand).
+    #[cfg(feature = "alloc")]
+    pub fn sighand_for_child(&self, share: bool, clear: bool) -> Arc<super::signals::SigHand> {
+        let sighand = self.sighand.lock();
+        if share {
+            return sighand.clone();
+        }
+        Arc::new(sighand.copy(clear))
+    }
+
+    /// Use `sighand` as this process's signal actions (a new child's).
+    #[cfg(feature = "alloc")]
+    pub fn set_sighand(&self, sighand: Arc<super::signals::SigHand>) {
+        *self.sighand.lock() = sighand;
+    }
+
+    /// Whether another process shares these signal actions
+    /// (unshare(CLONE_SIGHAND) is EINVAL then).
+    #[cfg(feature = "alloc")]
+    pub fn sighand_shared(&self) -> bool {
+        Arc::strong_count(&self.sighand.lock()) > 1
+    }
+
+    /// Give this process its own copy of shared signal actions (exec,
+    /// Linux's de_thread unshare_sighand). The copy is made under the lock,
+    /// so a sharer's change is in it or comes after it.
+    #[cfg(feature = "alloc")]
+    pub fn unshare_sighand(&self) {
+        let mut sighand = self.sighand.lock();
+        if Arc::strong_count(&sighand) > 1 {
+            *sighand = Arc::new(sighand.copy(false));
+        }
+    }
+
+    /// The signal actions' identity, for kcmp(KCMP_SIGHAND).
+    #[cfg(feature = "alloc")]
+    pub fn sighand_id(&self) -> usize {
+        Arc::as_ptr(&self.sighand.lock()) as usize
+    }
+
+    /// SIGCHLD's sa_flags (SA_NOCLDSTOP, SA_NOCLDWAIT).
+    pub fn sigchld_flags(&self) -> u64 {
+        self.sighand.lock().extra.lock()[super::signals::SIGCHLD].0
+    }
+
+    /// Give this process its own copy of a shared file table (exec, Linux's
+    /// unshare_files; unshare(CLONE_FILES)).
+    #[cfg(feature = "alloc")]
+    pub fn unshare_files(&self) {
+        let mut table = self.file_table.lock();
+        if Arc::strong_count(&table) > 1 {
+            *table = Arc::new(table.clone_for_fork());
+        }
     }
 
     /// A CLONE_VFORK child has exec'd or exited: its parent may resume.
@@ -907,7 +1091,7 @@ impl Process {
         // without another instance, as kill does on Linux.
         let _ = self.rt_queue.push(
             &self.pending_signals,
-            info,
+            info.for_receiver(self),
             super::signals::Charge::of(self),
             super::signals::Overflow::Merge,
         );
@@ -959,6 +1143,9 @@ impl Process {
 impl Drop for Process {
     fn drop(&mut self) {
         println!("[PROCESS] Dropping process {}", self.pid.0);
+        // A fork that failed never published its ID.
+        #[cfg(feature = "alloc")]
+        super::published(self.pid.0);
         // Cleanup will be handled by the process lifecycle manager
     }
 }
@@ -1066,6 +1253,83 @@ mod tests {
         let (creds, caps) = proc.creds_and_caps(&threads[0]);
         assert_eq!((creds.ruid, creds.euid, creds.suid), (1000, 1000, 1000));
         assert_eq!(caps.permitted, LinuxCaps::EMPTY);
+    }
+
+    /// A PID namespace's init takes only the signals it handles; SIGKILL
+    /// and SIGSTOP still reach it from outside its namespace (here the
+    /// kernel's context, as no process is current), and a sender outside
+    /// shows as pid 0 (SIGNAL_UNKILLABLE, send_signal_locked).
+    #[test]
+    fn a_pid_namespace_init_takes_only_what_it_handles() {
+        use super::super::{
+            pidns,
+            signals::{init_ignores, SigInfo, SI_USER},
+        };
+        let ns =
+            pidns::PidNs::create(&pidns::initial(), &super::super::userns::initial(), 0).unwrap();
+        let init = make_process(7_000_001, "nsinit");
+        pidns::reserve(&ns, &[], |_| false)
+            .unwrap()
+            .commit(init.pid.0);
+        init.set_pid_ns(ns.clone());
+        assert!(init.is_ns_init());
+        let user = |sig| SigInfo::from_process(sig, SI_USER, 77, 0);
+        assert!(
+            init_ignores(&init, None, &user(15)),
+            "SIGTERM with no handler"
+        );
+        assert!(!init_ignores(&init, None, &user(9)), "SIGKILL from outside");
+        assert!(
+            !init_ignores(&init, None, &user(19)),
+            "SIGSTOP from outside"
+        );
+        // Blocked, it waits for delivery to decide.
+        let t = with_threads(&init, &[init.pid.0]);
+        t[0].sigmask
+            .store(1 << 14, core::sync::atomic::Ordering::Release);
+        assert!(!init_ignores(&init, None, &user(15)), "a blocked signal");
+        t[0].sigmask.store(0, core::sync::atomic::Ordering::Release);
+        init.set_signal_handler(15, 0x4000).unwrap();
+        assert!(!init_ignores(&init, None, &user(15)), "a handled signal");
+        assert_eq!(user(10).for_receiver(&init).pid(), 0);
+        // Its second process is no init; the initial namespace's 1 is not
+        // one of these either.
+        let other = make_process(7_000_002, "nsother");
+        pidns::reserve(&ns, &[], |_| false)
+            .unwrap()
+            .commit(other.pid.0);
+        other.set_pid_ns(ns.clone());
+        assert!(!other.is_ns_init() && !init_ignores(&other, None, &user(15)));
+        assert!(!make_process(1, "init").is_ns_init());
+        pidns::release(init.pid.0);
+        pidns::release(other.pid.0);
+    }
+
+    /// In a user namespace, the setuid fixup's root is the namespace's: its
+    /// uid 0 (kernel uid 1000 here) leaving every root ID drops the sets.
+    /// A signal from the initial namespace shows its sender as this
+    /// namespace sees it (userns_fixup_signal_uid); a kernel siginfo
+    /// (si_code above 0) and a timer's layout are left as they are.
+    #[test]
+    fn a_namespace_root_is_its_own_uid_0() {
+        use super::super::{
+            linux_caps::LinuxCaps,
+            signals::{SigInfo, CLD_EXITED, SI_TIMER, SI_USER},
+        };
+        let ns = super::super::userns::test_child(b"0 1000 1\n1 2000 1", b"0 1000 1");
+        let proc = make_process(6, "nsroot");
+        proc.set_user_ns(ns);
+        proc.change_uids(false, |c| c.setresuid(1000, 1000, 1000, true))
+            .unwrap();
+        let threads = with_threads(&proc, &[60]);
+        proc.change_uids(false, |c| c.setresuid(2000, 2000, 2000, true))
+            .unwrap();
+        assert_eq!(threads[0].caps.lock().permitted, LinuxCaps::EMPTY);
+        let from = |uid, code| SigInfo::from_process(10, code, 1, uid).for_receiver(&proc);
+        assert_eq!(from(2000, SI_USER).uid(), 1);
+        assert_eq!(from(0, SI_USER).uid(), 65534);
+        assert_eq!(from(0, CLD_EXITED).uid(), 0);
+        assert_eq!(from(7, SI_TIMER).uid(), 7, "a timer's overrun, not a uid");
     }
 
     /// A change of effective user or group makes the process non-dumpable
@@ -1441,6 +1705,60 @@ mod tests {
         assert!(proc.is_signal_pending(5));
     }
 
+    /// CLONE_SIGHAND shares the actions: a change in one process is the
+    /// other's, until exec copies them (unshare_sighand); a copy, as fork's,
+    /// keeps the actions apart, and CLONE_CLEAR_SIGHAND's copy keeps only
+    /// SIG_IGN.
+    #[test]
+    fn signal_actions_are_shared_or_copied_as_clone_asks() {
+        let parent = make_process(33, "sighand_parent");
+        parent.set_signal_handler(10, 0x1000).unwrap();
+        parent.set_signal_handler(12, 1).unwrap();
+        let sharer = make_process(34, "sighand_sharer");
+        sharer.set_sighand(parent.sighand_for_child(true, false));
+        assert!(parent.sighand_shared() && sharer.sighand_shared());
+        assert_eq!(parent.sighand_id(), sharer.sighand_id());
+        sharer.set_signal_handler(14, 0x3000).unwrap();
+        assert_eq!(parent.get_signal_handler(14), Some(0x3000));
+
+        let copy = make_process(35, "sighand_copy");
+        copy.set_sighand(parent.sighand_for_child(false, false));
+        assert_ne!(copy.sighand_id(), parent.sighand_id());
+        assert_eq!(copy.get_signal_handler(10), Some(0x1000));
+        copy.set_signal_handler(10, 0x4000).unwrap();
+        assert_eq!(parent.get_signal_handler(10), Some(0x1000));
+
+        let cleared = make_process(36, "sighand_cleared");
+        cleared.set_sighand(parent.sighand_for_child(false, true));
+        assert_eq!(cleared.get_signal_handler(10), Some(0));
+        assert_eq!(cleared.get_signal_handler(12), Some(1));
+
+        // exec in the sharer: its own copy, reset; the parent keeps its own.
+        sharer.unshare_sighand();
+        sharer.reset_signal_handlers();
+        assert_ne!(sharer.sighand_id(), parent.sighand_id());
+        assert!(!parent.sighand_shared());
+        assert_eq!(sharer.get_signal_handler(10), Some(0));
+        assert_eq!(parent.get_signal_handler(10), Some(0x1000));
+    }
+
+    /// CLONE_FILES shares the table; unshare_files (exec, unshare,
+    /// close_range) gives a sharer its own copy, and does nothing to a
+    /// table no one else has.
+    #[test]
+    fn a_shared_file_table_is_copied_when_unshared() {
+        let parent = make_process(37, "files_parent");
+        let sharer = make_process(38, "files_sharer");
+        *sharer.file_table.lock() = parent.file_table.lock().clone();
+        let id = |p: &Process| Arc::as_ptr(&p.file_table.lock()) as usize;
+        assert_eq!(id(&parent), id(&sharer));
+        sharer.unshare_files();
+        assert_ne!(id(&parent), id(&sharer));
+        let before = id(&parent);
+        parent.unshare_files();
+        assert_eq!(id(&parent), before);
+    }
+
     // --- Process identity tests ---
 
     #[test]
@@ -1503,6 +1821,12 @@ mod tests {
     }
 }
 
+/// A new address-space identity (`Process::vm_id`).
+pub fn new_vm_id() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
 /// Process builder for convenient process creation
 #[cfg(feature = "alloc")]
 pub struct ProcessBuilder {
@@ -1510,6 +1834,7 @@ pub struct ProcessBuilder {
     parent: Option<ProcessId>,
     priority: ProcessPriority,
     creds: super::creds::Credentials,
+    pid: Option<ProcessId>,
 }
 
 #[cfg(feature = "alloc")]
@@ -1521,7 +1846,15 @@ impl ProcessBuilder {
             parent: None,
             priority: ProcessPriority::Normal,
             creds: super::creds::Credentials::new(0, 0),
+            pid: None,
         }
+    }
+
+    /// Give the process this ID (clone3's set_tid, claimed with
+    /// [`super::IdClaim`]) rather than a new one.
+    pub fn pid(mut self, pid: Option<ProcessId>) -> Self {
+        self.pid = pid;
+        self
     }
 
     /// Set parent process
@@ -1550,7 +1883,7 @@ impl ProcessBuilder {
     /// `create_process_with_options` does), or clone from an existing
     /// address space (as `fork_process` does).
     pub fn build(self) -> Process {
-        let pid = super::alloc_pid();
+        let pid = self.pid.unwrap_or_else(super::alloc_pid);
         let process = Process::new(pid, self.parent, self.name, self.priority);
         process.update_credentials(|c| *c = self.creds);
         process

@@ -101,9 +101,12 @@ struct TimerFdInstance {
     expirations: u64,
     /// Whether the timer is armed.
     armed: bool,
-    /// Armed with an absolute time on CLOCK_REALTIME: the expiry follows
-    /// the wall clock when it is set ([`clock_was_set`]).
-    wall_absolute: bool,
+    /// Armed with an absolute time on CLOCK_REALTIME: the wall offset
+    /// (`timer::realtime::offset_ns`) the expiry was last converted with.
+    /// A set of the clock moves the expiry by how far the offset has moved
+    /// since ([`clock_was_set`]), so a set racing with the arming is
+    /// neither missed nor applied twice (PR #35 review).
+    wall_offset: Option<i64>,
     /// With TFD_TIMER_CANCEL_ON_SET: the wall clock's set count when armed;
     /// a read after the clock was set fails once with ECANCELED.
     cancel_on_set: Option<u64>,
@@ -141,7 +144,7 @@ pub fn timerfd_create(clockid: u32, flags: u32) -> SyscallResult {
         next_expiry_ns: 0,
         expirations: 0,
         armed: false,
-        wall_absolute: false,
+        wall_offset: None,
         cancel_on_set: None,
     };
 
@@ -224,17 +227,21 @@ pub fn timerfd_settime(
     instance.armed = !new_spec.it_value.is_zero();
     let absolute = flags & TFD_TIMER_ABSTIME != 0;
     let on_wall_clock = absolute && instance.clock_id == CLOCK_REALTIME;
-    instance.wall_absolute = instance.armed && on_wall_clock;
+    let offset = crate::timer::realtime::offset_ns();
+    instance.wall_offset = (instance.armed && on_wall_clock).then_some(offset);
     instance.cancel_on_set =
         (instance.armed && on_wall_clock && flags & TFD_TIMER_CANCEL_ON_SET != 0)
             .then(crate::timer::realtime::set_count);
     instance.next_expiry_ns = match (instance.armed, absolute) {
         (false, _) => 0,
         // A wall time: the monotonic time the wall clock will read it.
-        (true, true) if on_wall_clock => crate::timer::realtime::monotonic_at(
-            new_spec.it_value.to_ns().min(i64::MAX as u64) as i64,
-        ),
-        (true, true) => new_spec.it_value.to_ns(),
+        (true, true) if on_wall_clock => (new_spec.it_value.to_ns().min(i64::MAX as u64) as i64)
+            .saturating_sub(offset)
+            .max(0) as u64,
+        // A monotonic or boot-time one, in the caller's time namespace.
+        (true, true) => {
+            crate::process::ns::clock_to_host(instance.clock_id as i32, new_spec.it_value.to_ns())
+        }
         (true, false) => now.saturating_add(new_spec.it_value.to_ns()),
     };
     drop(registry);
@@ -284,20 +291,31 @@ pub fn timerfd_read(tfd_id: u32) -> Result<u64, SyscallError> {
 /// The wall clock moved by `delta_ns`: timers armed at an absolute wall
 /// time keep it (their monotonic expiry moves the other way), and waiters
 /// are woken (a TFD_TIMER_CANCEL_ON_SET timer's read now fails).
-pub fn clock_was_set(delta_ns: i64) {
+pub fn clock_was_set(_delta_ns: i64) {
     {
         let mut registry = TIMERFD_REGISTRY.lock();
-        for instance in registry.values_mut().filter(|i| i.armed && i.wall_absolute) {
-            instance.next_expiry_ns = if delta_ns >= 0 {
-                instance.next_expiry_ns.saturating_sub(delta_ns as u64)
-            } else {
-                instance
-                    .next_expiry_ns
-                    .saturating_add(delta_ns.unsigned_abs())
-            };
+        let offset = crate::timer::realtime::offset_ns();
+        for instance in registry.values_mut().filter(|i| i.armed) {
+            follow_wall(instance, offset);
         }
     }
     io_changed();
+}
+
+/// Move a wall-clock timer's expiry to wall offset `offset`: by how far
+/// the offset moved since it was converted (a clock ahead makes it due
+/// sooner). Nothing for other timers, or when the offset has not moved.
+fn follow_wall(t: &mut TimerFdInstance, offset: i64) {
+    let Some(was) = t.wall_offset else {
+        return;
+    };
+    let delta = offset.saturating_sub(was);
+    t.next_expiry_ns = if delta >= 0 {
+        t.next_expiry_ns.saturating_sub(delta as u64)
+    } else {
+        t.next_expiry_ns.saturating_add(delta.unsigned_abs())
+    };
+    t.wall_offset = Some(offset);
 }
 
 /// Whether a read would return expirations now.
@@ -579,7 +597,7 @@ mod tests {
             next_expiry_ns: 1000,
             expirations: 0,
             armed: true,
-            wall_absolute: false,
+            wall_offset: None,
             cancel_on_set: None,
         };
         assert_eq!(future_expiry(&t, 999), Some(1000));
@@ -606,7 +624,7 @@ mod tests {
             next_expiry_ns: 1000,
             expirations: 0,
             armed: true,
-            wall_absolute: false,
+            wall_offset: None,
             cancel_on_set: None,
         };
         update(&mut t, 999);
@@ -618,6 +636,36 @@ mod tests {
         update(&mut t, 1400);
         assert_eq!((t.expirations, t.armed), (5, false));
         assert_eq!(current(&t, 2000).it_value, Timespec::default());
+    }
+
+    /// A set of the wall clock moves a wall timer once by what the offset
+    /// moved, however often it is applied: a set that came between the
+    /// arming's conversion and the shift is not applied twice (PR #35
+    /// review).
+    #[test]
+    fn wall_timers_follow_the_offset_once() {
+        let mut t = TimerFdInstance {
+            clock_id: CLOCK_REALTIME,
+            spec: Itimerspec::default(),
+            next_expiry_ns: 5_000,
+            expirations: 0,
+            armed: true,
+            wall_offset: Some(100),
+            cancel_on_set: None,
+        };
+        follow_wall(&mut t, 130);
+        assert_eq!(t.next_expiry_ns, 4_970);
+        follow_wall(&mut t, 130);
+        assert_eq!(t.next_expiry_ns, 4_970, "applied once");
+        follow_wall(&mut t, 80);
+        assert_eq!(t.next_expiry_ns, 5_020);
+        let mut mono = TimerFdInstance {
+            clock_id: CLOCK_MONOTONIC,
+            wall_offset: None,
+            ..t
+        };
+        follow_wall(&mut mono, 9_999);
+        assert_eq!(mono.next_expiry_ns, 5_020);
     }
 
     #[test]

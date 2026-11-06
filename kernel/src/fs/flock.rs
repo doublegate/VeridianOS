@@ -1,8 +1,7 @@
 //! POSIX File Locking (flock/fcntl)
 //!
 //! Implements both whole-file locking (flock semantics) and byte-range
-//! locking (fcntl/POSIX semantics). Per-inode lock tables track ownership
-//! by PID, with deadlock detection for blocking lock requests.
+//! record locking (fcntl), in one table keyed by inode.
 //!
 //! - `flock()`: whole-file advisory locks (LOCK_SH, LOCK_EX, LOCK_UN), owned by
 //!   an open file as on Linux (the caller passes its identity): duplicates and
@@ -10,11 +9,13 @@
 //!   goes with the open file's last close. A request that conflicts returns
 //!   `WouldBlock`; a blocking caller sleeps in [`FLOCK_WAITERS`], which every
 //!   release wakes (N-207)
-//! - `fcntl_setlk()`: byte-range locks (F_SETLK semantics, non-blocking)
-//! - `fcntl_setlkw()`: byte-range locks (F_SETLKW semantics, blocking with
-//!   deadlock detection)
-//! - `fcntl_getlk()`: query conflicting locks (F_GETLK)
-//! - `cleanup_process_locks()`: release all locks held by a process on exit
+//! - [`set_lock`] / [`test_lock`]: fcntl record locks (N-199), POSIX and OFD,
+//!   as Linux's posix_lock_inode: an owner's locks split and join, a conflict
+//!   is reported to the caller (F_SETLKW waits in [`RANGE_WAITERS`]), and a
+//!   POSIX waiter that would close a cycle of waiting owners is a deadlock. A
+//!   POSIX lock's owner is a descriptor table, an OFD lock's an open file;
+//!   [`release_owner`] drops either
+//! - [`cleanup_process_locks`]: the POSIX record locks of an exiting process
 
 #![allow(dead_code)]
 
@@ -52,36 +53,6 @@ pub const F_UNLCK: u16 = 2;
 // Data structures
 // ---------------------------------------------------------------------------
 
-/// A POSIX byte-range lock (used by fcntl F_SETLK / F_GETLK).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FileLock {
-    /// Lock type: F_RDLCK, F_WRLCK, or F_UNLCK.
-    pub lock_type: u16,
-    /// Starting byte offset of the locked region.
-    pub start: u64,
-    /// Length of the locked region (0 means "to end of file").
-    pub len: u64,
-    /// PID of the lock owner.
-    pub pid: u64,
-}
-
-impl FileLock {
-    /// Compute the exclusive end offset of this lock region.
-    /// A length of 0 means "to end of file", represented as u64::MAX.
-    fn end(&self) -> u64 {
-        if self.len == 0 {
-            u64::MAX
-        } else {
-            self.start.saturating_add(self.len)
-        }
-    }
-
-    /// Check whether two lock regions overlap.
-    fn overlaps(&self, other: &FileLock) -> bool {
-        self.start < other.end() && other.start < self.end()
-    }
-}
-
 /// A whole-file advisory lock entry (flock semantics).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FlockEntry {
@@ -107,8 +78,11 @@ fn flock_released() {
 struct LockTable {
     /// Whole-file locks (flock): inode -> list of FlockEntry
     flock_locks: BTreeMap<u64, Vec<FlockEntry>>,
-    /// Byte-range locks (fcntl): inode -> list of FileLock
-    range_locks: BTreeMap<u64, Vec<FileLock>>,
+    /// Record locks (fcntl): inode -> locks, sorted by start
+    range_locks: BTreeMap<u64, Vec<RangeLock>>,
+    /// POSIX owners waiting in F_SETLKW -> the owner they wait for (Linux's
+    /// blocked_hash, which deadlock detection follows)
+    blocked: BTreeMap<u64, u64>,
 }
 
 impl LockTable {
@@ -116,6 +90,7 @@ impl LockTable {
         Self {
             flock_locks: BTreeMap::new(),
             range_locks: BTreeMap::new(),
+            blocked: BTreeMap::new(),
         }
     }
 }
@@ -209,284 +184,254 @@ fn flock_unlock(inode: u64, owner: u64) -> Result<(), KernelError> {
 }
 
 // ---------------------------------------------------------------------------
-// fcntl() range lock implementation
+// fcntl() record locks
 // ---------------------------------------------------------------------------
 
-/// Check whether a proposed range lock conflicts with any existing lock.
-///
-/// Returns `true` if there is a conflict (i.e., the new lock cannot be placed).
-fn check_range_conflict(existing: &[FileLock], new_lock: &FileLock) -> bool {
-    for lock in existing {
-        // Same owner can always re-lock.
-        if lock.pid == new_lock.pid {
-            continue;
-        }
-        // Locks must overlap to conflict.
-        if !lock.overlaps(new_lock) {
-            continue;
-        }
-        // Two read locks never conflict.
-        if lock.lock_type == F_RDLCK && new_lock.lock_type == F_RDLCK {
-            continue;
-        }
-        // At least one write lock and overlapping => conflict.
-        return true;
-    }
-    false
+/// Linux's OFFSET_MAX: a lock ending here runs to the end of the file,
+/// however far the file grows (an `l_len` of 0).
+pub const OFFSET_MAX: u64 = i64::MAX as u64;
+
+/// How many waiting owners deadlock detection follows (Linux's
+/// MAX_DEADLK_ITERATIONS): a longer chain is not reported.
+const MAX_DEADLK_ITERATIONS: usize = 10;
+
+/// A byte-range lock (fcntl F_SETLK and the OFD calls), as Linux's
+/// `struct file_lock` has one: an inclusive range, a type and an owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RangeLock {
+    /// F_RDLCK or F_WRLCK; F_UNLCK in a request to remove.
+    pub kind: u16,
+    /// The first byte.
+    pub start: u64,
+    /// The last byte, inclusive: [`OFFSET_MAX`] to the end of the file.
+    pub end: u64,
+    /// Who holds it: a descriptor table for a POSIX lock (Linux's
+    /// `current->files`, so threads share their locks and a fork child does
+    /// not inherit them), an open file for an OFD lock. One owner's locks
+    /// never conflict with each other.
+    pub owner: u64,
+    /// What F_GETLK reports as `l_pid`: the holder's process, -1 for an OFD
+    /// lock.
+    pub pid: i32,
+    /// An OFD lock: never part of deadlock detection.
+    pub ofd: bool,
 }
 
-/// Find the first existing lock that conflicts with the proposed lock.
-///
-/// Returns `Some(conflicting_lock)` if a conflict exists, `None` otherwise.
-fn find_conflicting_lock(existing: &[FileLock], query: &FileLock) -> Option<FileLock> {
-    for lock in existing {
-        if lock.pid == query.pid {
-            continue;
-        }
-        if !lock.overlaps(query) {
-            continue;
-        }
-        if lock.lock_type == F_RDLCK && query.lock_type == F_RDLCK {
-            continue;
-        }
-        return Some(*lock);
+impl RangeLock {
+    fn overlaps(&self, other: &RangeLock) -> bool {
+        self.start <= other.end && other.start <= self.end
     }
-    None
+
+    /// Whether the two ranges overlap or meet, so that two locks of one
+    /// type and owner make one.
+    fn touches(&self, other: &RangeLock) -> bool {
+        self.start <= other.end.saturating_add(1) && other.start <= self.end.saturating_add(1)
+    }
+
+    /// Linux's posix_locks_conflict: another owner, an overlap, and a write
+    /// lock on either side (an F_UNLCK query conflicts with a write lock).
+    fn conflicts(&self, other: &RangeLock) -> bool {
+        self.owner != other.owner
+            && self.overlaps(other)
+            && (self.kind == F_WRLCK || other.kind == F_WRLCK)
+    }
 }
 
-/// Set a byte-range lock (F_SETLK semantics -- non-blocking).
-///
-/// If `lock.lock_type` is F_UNLCK, removes matching locks from the table.
-/// Otherwise, checks for conflicts and inserts the lock if none exist.
-pub fn fcntl_setlk(inode: u64, lock: &FileLock) -> Result<(), KernelError> {
-    if lock.lock_type == F_UNLCK {
-        return fcntl_unlock(inode, lock);
-    }
-
-    if lock.lock_type != F_RDLCK && lock.lock_type != F_WRLCK {
-        return Err(KernelError::InvalidArgument {
-            name: "lock_type",
-            value: "must be F_RDLCK, F_WRLCK, or F_UNLCK",
-        });
-    }
-
-    let mut table = LOCK_TABLE.write();
-    let locks = table.range_locks.entry(inode).or_default();
-
-    if check_range_conflict(locks, lock) {
-        return Err(KernelError::WouldBlock);
-    }
-
-    // Merge / replace: remove any existing locks from the same PID that
-    // overlap with the new lock, then insert the new one.
-    let pid = lock.pid;
-    let new_start = lock.start;
-    let new_end = lock.end();
-    locks.retain(|existing| {
-        if existing.pid != pid {
-            return true;
-        }
-        // Keep non-overlapping locks from the same owner.
-        !(existing.start < new_end && new_start < existing.end())
-    });
-
-    locks.push(*lock);
-    Ok(())
+/// Why a record lock was not placed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RangeError {
+    /// Another owner's lock is in the way (EAGAIN; F_SETLKW waits).
+    Conflict,
+    /// Waiting would close a cycle of POSIX owners, each waiting for a lock
+    /// of the next (EDEADLK).
+    Deadlock,
 }
 
-/// Set a byte-range lock with blocking (F_SETLKW semantics).
-///
-/// Performs simple cycle-based deadlock detection before blocking. If a
-/// deadlock is detected, returns a deadlock error. Since we lack a full
-/// wait-queue, this currently falls back to `WouldBlock` when the lock
-/// cannot be acquired and no deadlock is detected.
-pub fn fcntl_setlkw(inode: u64, lock: &FileLock) -> Result<(), KernelError> {
-    if lock.lock_type == F_UNLCK {
-        return fcntl_unlock(inode, lock);
-    }
+/// Tasks waiting in F_SETLKW or F_OFD_SETLKW; woken whenever a record
+/// lock goes or changes.
+#[cfg(feature = "alloc")]
+pub static RANGE_WAITERS: crate::sched::dispatch::WaitQueue =
+    crate::sched::dispatch::WaitQueue::new();
 
-    if lock.lock_type != F_RDLCK && lock.lock_type != F_WRLCK {
-        return Err(KernelError::InvalidArgument {
-            name: "lock_type",
-            value: "must be F_RDLCK, F_WRLCK, or F_UNLCK",
-        });
-    }
-
-    let mut table = LOCK_TABLE.write();
-    let locks = table.range_locks.entry(inode).or_default();
-
-    if !check_range_conflict(locks, lock) {
-        // No conflict -- place the lock immediately.
-        let pid = lock.pid;
-        let new_start = lock.start;
-        let new_end = lock.end();
-        locks.retain(|existing| {
-            if existing.pid != pid {
-                return true;
-            }
-            !(existing.start < new_end && new_start < existing.end())
-        });
-        locks.push(*lock);
-        return Ok(());
-    }
-
-    // Conflict exists. Check for deadlocks by seeing if any of the holders
-    // we would wait on are themselves waiting on us (simple cycle detection
-    // across all inodes).
-    if detect_deadlock(&table, lock) {
-        return Err(KernelError::InvalidState {
-            expected: "no deadlock",
-            actual: "deadlock detected",
-        });
-    }
-
-    // In a real kernel we would sleep on a wait-queue. For now, return
-    // WouldBlock since no scheduler integration is wired for file locks.
-    Err(KernelError::WouldBlock)
+/// A record lock went or changed: let waiting requests try again.
+fn range_released() {
+    #[cfg(feature = "alloc")]
+    RANGE_WAITERS.wake_all();
 }
 
-/// Simple deadlock detector.
-///
-/// Starting from `requester`, walks the "waits-for" graph: if process A
-/// requests a lock that conflicts with a lock held by process B, then A
-/// waits-for B. If following this chain leads back to A, a deadlock exists.
-///
-/// This is O(P * L) where P is the number of processes in the chain and L
-/// is the total number of range locks, which is acceptable for the expected
-/// lock counts in practice.
-fn detect_deadlock(table: &LockTable, request: &FileLock) -> bool {
-    let requester_pid = request.pid;
-    let mut visited = Vec::new();
-    let mut frontier = Vec::new();
-
-    // Seed: find all PIDs that hold conflicting locks with our request.
-    for locks in table.range_locks.values() {
-        for lock in locks {
-            if lock.pid == requester_pid {
-                continue;
-            }
-            if !lock.overlaps(request) {
-                continue;
-            }
-            if lock.lock_type == F_RDLCK && request.lock_type == F_RDLCK {
-                continue;
-            }
-            if !frontier.contains(&lock.pid) {
-                frontier.push(lock.pid);
-            }
-        }
-    }
-
-    // BFS: for each PID in the frontier, check if any of the locks they
-    // are waiting for are held by the original requester.
-    while let Some(blocker_pid) = frontier.pop() {
-        if blocker_pid == requester_pid {
-            return true; // Cycle detected.
-        }
-        if visited.contains(&blocker_pid) {
-            continue;
-        }
-        visited.push(blocker_pid);
-
-        // Find all locks held by processes that would conflict with
-        // any lock request from `blocker_pid`. We approximate: if
-        // `blocker_pid` holds a write lock, any other write or read
-        // lock holder on the same range is potentially blocking it
-        // (and vice-versa). We look at all lock holders that conflict
-        // with any lock `blocker_pid` holds.
-        for locks in table.range_locks.values() {
-            let blocker_locks: Vec<&FileLock> =
-                locks.iter().filter(|l| l.pid == blocker_pid).collect();
-            for bl in &blocker_locks {
-                for other in locks {
-                    if other.pid == blocker_pid || visited.contains(&other.pid) {
-                        continue;
-                    }
-                    if !other.overlaps(bl) {
-                        continue;
-                    }
-                    if other.lock_type == F_RDLCK && bl.lock_type == F_RDLCK {
-                        continue;
-                    }
-                    if !frontier.contains(&other.pid) {
-                        frontier.push(other.pid);
-                    }
-                }
-            }
-        }
-    }
-
-    false
-}
-
-/// Unlock byte-range locks matching the given region for the owning PID.
-fn fcntl_unlock(inode: u64, lock: &FileLock) -> Result<(), KernelError> {
-    let mut table = LOCK_TABLE.write();
-    if let Some(locks) = table.range_locks.get_mut(&inode) {
-        let unlock_start = lock.start;
-        let unlock_end = lock.end();
-
-        locks.retain(|existing| {
-            if existing.pid != lock.pid {
-                return true;
-            }
-            // Remove locks that fall entirely within the unlock region.
-            !(existing.start >= unlock_start && existing.end() <= unlock_end)
-        });
-
-        if locks.is_empty() {
-            table.range_locks.remove(&inode);
-        }
-    }
-    Ok(())
-}
-
-/// Query for a conflicting lock (F_GETLK semantics).
-///
-/// If a lock exists that would conflict with the described lock, returns
-/// `Some(conflicting_lock)`. Otherwise returns `None`, indicating the
-/// lock could be placed.
-pub fn fcntl_getlk(inode: u64, lock: &FileLock) -> Result<Option<FileLock>, KernelError> {
-    if lock.lock_type != F_RDLCK && lock.lock_type != F_WRLCK {
-        return Err(KernelError::InvalidArgument {
-            name: "lock_type",
-            value: "must be F_RDLCK or F_WRLCK for F_GETLK",
-        });
-    }
-
+/// F_GETLK: the first lock of another owner that `query` conflicts with.
+pub fn test_lock(key: u64, query: &RangeLock) -> Option<RangeLock> {
     let table = LOCK_TABLE.read();
-    let locks = match table.range_locks.get(&inode) {
-        Some(l) => l,
-        None => return Ok(None),
-    };
+    table
+        .range_locks
+        .get(&key)?
+        .iter()
+        .find(|lock| lock.conflicts(query))
+        .copied()
+}
 
-    Ok(find_conflicting_lock(locks, lock))
+/// F_SETLK: place, change or (F_UNLCK) remove the owner's lock on
+/// `req`'s range, splitting and joining the owner's other locks there as
+/// Linux's posix_lock_inode does. A conflict is reported, never waited
+/// for. With `will_wait` a POSIX request is about to wait: it is
+/// EDEADLK if the owner it waits for is itself waiting, through at most
+/// [`MAX_DEADLK_ITERATIONS`] others, for this one, and is otherwise
+/// recorded as waiting until it succeeds or [`stop_waiting`].
+pub fn set_lock(key: u64, req: &RangeLock, will_wait: bool) -> Result<(), RangeError> {
+    let changed = {
+        let mut table = LOCK_TABLE.write();
+        if req.kind != F_UNLCK {
+            let blocker = table
+                .range_locks
+                .get(&key)
+                .and_then(|locks| locks.iter().find(|lock| lock.conflicts(req)))
+                .map(|lock| lock.owner);
+            if let Some(blocker) = blocker {
+                if will_wait && !req.ofd {
+                    if would_deadlock(&table.blocked, req.owner, blocker) {
+                        table.blocked.remove(&req.owner);
+                        return Err(RangeError::Deadlock);
+                    }
+                    table.blocked.insert(req.owner, blocker);
+                }
+                return Err(RangeError::Conflict);
+            }
+        }
+        table.blocked.remove(&req.owner);
+        let locks = table.range_locks.entry(key).or_default();
+        let changed = apply(locks, *req);
+        if locks.is_empty() {
+            table.range_locks.remove(&key);
+        }
+        changed
+    };
+    if changed {
+        range_released();
+    }
+    Ok(())
+}
+
+/// The owner no longer waits (its F_SETLKW was interrupted).
+pub fn stop_waiting(owner: u64) {
+    LOCK_TABLE.write().blocked.remove(&owner);
+}
+
+/// Linux's posix_locks_deadlock: follow, from `blocker`, the owner each
+/// waiting owner waits for; reaching `caller` closes a cycle.
+fn would_deadlock(blocked: &BTreeMap<u64, u64>, caller: u64, blocker: u64) -> bool {
+    let mut owner = blocker;
+    for _ in 0..MAX_DEADLK_ITERATIONS {
+        match blocked.get(&owner) {
+            Some(&next) if next == caller => return true,
+            Some(&next) => owner = next,
+            None => return false,
+        }
+    }
+    false
+}
+
+/// Apply `req` to its owner's locks in `locks`: a lock of the same type
+/// that overlaps or meets the range joins it; one of another type (or
+/// any, for F_UNLCK) loses the overlapping bytes, keeping what lies on
+/// either side. Returns whether a lock went or changed type (what a
+/// waiter might wait for).
+fn apply(locks: &mut Vec<RangeLock>, mut req: RangeLock) -> bool {
+    let mine = |lock: &RangeLock| lock.owner == req.owner;
+    if req.kind != F_UNLCK {
+        for lock in locks.iter() {
+            if mine(lock) && lock.kind == req.kind && lock.touches(&req) {
+                req.start = req.start.min(lock.start);
+                req.end = req.end.max(lock.end);
+            }
+        }
+    }
+    let mut changed = false;
+    let mut kept = Vec::with_capacity(locks.len() + 2);
+    for lock in locks.drain(..) {
+        if lock.owner != req.owner || !lock.overlaps(&req) {
+            // A same-type neighbour that only met the range was joined.
+            if !(lock.owner == req.owner && lock.kind == req.kind && lock.touches(&req)) {
+                kept.push(lock);
+            }
+            continue;
+        }
+        if lock.kind == req.kind {
+            continue; // joined
+        }
+        changed = true;
+        if lock.start < req.start {
+            kept.push(RangeLock {
+                end: req.start - 1,
+                ..lock
+            });
+        }
+        if lock.end > req.end {
+            kept.push(RangeLock {
+                start: req.end + 1,
+                ..lock
+            });
+        }
+    }
+    if req.kind != F_UNLCK {
+        kept.push(req);
+    }
+    kept.sort_by_key(|lock| (lock.start, lock.owner));
+    *locks = kept;
+    changed
+}
+
+/// Remove every lock `owner` holds on `key`: a POSIX owner's locks when it
+/// closes any descriptor of the file, an OFD lock's at the open file's
+/// last close.
+pub fn release_owner(key: u64, owner: u64) {
+    // Every close asks; most files have no record locks at all.
+    let holds = LOCK_TABLE
+        .read()
+        .range_locks
+        .get(&key)
+        .is_some_and(|locks| locks.iter().any(|lock| lock.owner == owner));
+    if !holds {
+        return;
+    }
+    let changed = {
+        let mut table = LOCK_TABLE.write();
+        let mut changed = false;
+        if let Some(locks) = table.range_locks.get_mut(&key) {
+            let held = locks.len();
+            locks.retain(|lock| lock.owner != owner);
+            changed = locks.len() != held;
+            if locks.is_empty() {
+                table.range_locks.remove(&key);
+            }
+        }
+        changed
+    };
+    if changed {
+        range_released();
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Process cleanup
 // ---------------------------------------------------------------------------
 
-/// Remove the byte-range (fcntl) locks the process `pid` holds, at its
-/// exit. flock locks belong to open files and go with their last close.
+/// Remove the POSIX record locks the process `pid` holds, at its exit
+/// (closing its descriptors has released most already). flock and OFD
+/// locks belong to open files and go with their last close.
 pub fn cleanup_process_locks(pid: u64) {
-    let mut table = LOCK_TABLE.write();
-
-    // Clean up range locks.
-    let empty_range_inodes: Vec<u64> = table
-        .range_locks
-        .iter_mut()
-        .filter_map(|(&inode, locks)| {
-            locks.retain(|l| l.pid != pid);
-            if locks.is_empty() {
-                Some(inode)
-            } else {
-                None
-            }
-        })
-        .collect();
-    for inode in empty_range_inodes {
-        table.range_locks.remove(&inode);
+    let changed = {
+        let mut table = LOCK_TABLE.write();
+        let mut changed = false;
+        table.range_locks.retain(|_, locks| {
+            let held = locks.len();
+            locks.retain(|lock| lock.ofd || lock.pid as i64 as u64 != pid);
+            changed |= locks.len() != held;
+            !locks.is_empty()
+        });
+        changed
+    };
+    if changed {
+        range_released();
     }
 }
 
@@ -597,268 +542,162 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ---- fcntl range lock tests ----
+    // ---- fcntl record locks ----
 
-    #[test]
-    fn test_fcntl_read_locks_compatible() {
-        let ids = unique_inodes(1);
-        let l1 = FileLock {
-            lock_type: F_RDLCK,
-            start: 0,
-            len: 100,
-            pid: 100,
-        };
-        let l2 = FileLock {
-            lock_type: F_RDLCK,
-            start: 50,
-            len: 100,
-            pid: 200,
-        };
-        assert!(fcntl_setlk(ids[0], &l1).is_ok());
-        assert!(fcntl_setlk(ids[0], &l2).is_ok());
+    /// A request of `owner` (its pid the same number) on [start, end].
+    fn rl(kind: u16, start: u64, end: u64, owner: u64) -> RangeLock {
+        RangeLock {
+            kind,
+            start,
+            end,
+            owner,
+            pid: owner as i32,
+            ofd: false,
+        }
+    }
+
+    fn held(key: u64) -> Vec<(u16, u64, u64, u64)> {
+        LOCK_TABLE
+            .read()
+            .range_locks
+            .get(&key)
+            .map(|locks| {
+                locks
+                    .iter()
+                    .map(|l| (l.kind, l.start, l.end, l.owner))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     #[test]
-    fn test_fcntl_write_conflicts_read() {
-        let ids = unique_inodes(1);
-        let l1 = FileLock {
-            lock_type: F_RDLCK,
-            start: 0,
-            len: 100,
-            pid: 100,
-        };
-        let l2 = FileLock {
-            lock_type: F_WRLCK,
-            start: 50,
-            len: 100,
-            pid: 200,
-        };
-        assert!(fcntl_setlk(ids[0], &l1).is_ok());
-        assert_eq!(fcntl_setlk(ids[0], &l2), Err(KernelError::WouldBlock));
+    fn record_locks_conflict_as_read_and_write_locks() {
+        let k = unique_inodes(1)[0];
+        assert_eq!(set_lock(k, &rl(F_RDLCK, 0, 99, 1), false), Ok(()));
+        assert_eq!(set_lock(k, &rl(F_RDLCK, 50, 149, 2), false), Ok(()));
+        assert_eq!(
+            set_lock(k, &rl(F_WRLCK, 90, 90, 3), false),
+            Err(RangeError::Conflict)
+        );
+        assert_eq!(set_lock(k, &rl(F_WRLCK, 150, OFFSET_MAX, 3), false), Ok(()));
+        // F_GETLK finds the first lock in the way, with its holder.
+        let hit = test_lock(k, &rl(F_WRLCK, 0, 10, 4)).unwrap();
+        assert_eq!((hit.start, hit.end, hit.pid), (0, 99, 1));
+        assert_eq!(test_lock(k, &rl(F_RDLCK, 0, 140, 4)), None);
+        // An F_UNLCK query conflicts with a write lock, as on Linux.
+        assert_eq!(test_lock(k, &rl(F_UNLCK, 200, 200, 4)).unwrap().owner, 3);
+        // An owner's own locks never conflict with it.
+        assert_eq!(
+            test_lock(k, &rl(F_WRLCK, 0, 99, 1)).map(|l| l.owner),
+            Some(2)
+        );
     }
 
     #[test]
-    fn test_fcntl_write_conflicts_write() {
-        let ids = unique_inodes(1);
-        let l1 = FileLock {
-            lock_type: F_WRLCK,
-            start: 0,
-            len: 100,
-            pid: 100,
-        };
-        let l2 = FileLock {
-            lock_type: F_WRLCK,
-            start: 50,
-            len: 50,
-            pid: 200,
-        };
-        assert!(fcntl_setlk(ids[0], &l1).is_ok());
-        assert_eq!(fcntl_setlk(ids[0], &l2), Err(KernelError::WouldBlock));
+    fn unlocking_the_middle_splits_a_lock() {
+        let k = unique_inodes(1)[0];
+        set_lock(k, &rl(F_WRLCK, 0, 99, 1), false).unwrap();
+        set_lock(k, &rl(F_UNLCK, 40, 59, 1), false).unwrap();
+        assert_eq!(held(k), [(F_WRLCK, 0, 39, 1), (F_WRLCK, 60, 99, 1)]);
+        assert_eq!(set_lock(k, &rl(F_WRLCK, 45, 50, 2), false), Ok(()));
+        // Unlocking more than is held removes what is there.
+        set_lock(k, &rl(F_UNLCK, 0, OFFSET_MAX, 1), false).unwrap();
+        assert_eq!(held(k), [(F_WRLCK, 45, 50, 2)]);
     }
 
     #[test]
-    fn test_fcntl_non_overlapping_no_conflict() {
-        let ids = unique_inodes(1);
-        let l1 = FileLock {
-            lock_type: F_WRLCK,
-            start: 0,
-            len: 100,
-            pid: 100,
-        };
-        let l2 = FileLock {
-            lock_type: F_WRLCK,
-            start: 100,
-            len: 100,
-            pid: 200,
-        };
-        assert!(fcntl_setlk(ids[0], &l1).is_ok());
-        assert!(fcntl_setlk(ids[0], &l2).is_ok());
+    fn changing_the_type_of_a_part_splits_and_joins() {
+        let k = unique_inodes(1)[0];
+        set_lock(k, &rl(F_WRLCK, 0, 99, 1), false).unwrap();
+        set_lock(k, &rl(F_RDLCK, 40, 59, 1), false).unwrap();
+        assert_eq!(
+            held(k),
+            [
+                (F_WRLCK, 0, 39, 1),
+                (F_RDLCK, 40, 59, 1),
+                (F_WRLCK, 60, 99, 1)
+            ]
+        );
+        assert_eq!(set_lock(k, &rl(F_RDLCK, 45, 50, 2), false), Ok(()));
+        assert_eq!(
+            set_lock(k, &rl(F_RDLCK, 30, 35, 2), false),
+            Err(RangeError::Conflict)
+        );
+        // Writing the read part again joins the three into one.
+        set_lock(k, &rl(F_UNLCK, 45, 50, 2), false).unwrap();
+        set_lock(k, &rl(F_WRLCK, 40, 59, 1), false).unwrap();
+        assert_eq!(held(k), [(F_WRLCK, 0, 99, 1)]);
     }
 
     #[test]
-    fn test_fcntl_same_pid_can_relock() {
-        let ids = unique_inodes(1);
-        let l1 = FileLock {
-            lock_type: F_WRLCK,
-            start: 0,
-            len: 100,
-            pid: 100,
-        };
-        let l2 = FileLock {
-            lock_type: F_RDLCK,
-            start: 0,
-            len: 100,
-            pid: 100,
-        };
-        assert!(fcntl_setlk(ids[0], &l1).is_ok());
-        // Same PID can downgrade.
-        assert!(fcntl_setlk(ids[0], &l2).is_ok());
+    fn locks_of_one_type_that_meet_become_one() {
+        let k = unique_inodes(1)[0];
+        set_lock(k, &rl(F_RDLCK, 0, 9, 1), false).unwrap();
+        set_lock(k, &rl(F_RDLCK, 20, 29, 1), false).unwrap();
+        set_lock(k, &rl(F_RDLCK, 10, 19, 1), false).unwrap();
+        assert_eq!(held(k), [(F_RDLCK, 0, 29, 1)]);
+        // Another owner's adjacent lock stays separate.
+        set_lock(k, &rl(F_RDLCK, 30, 39, 2), false).unwrap();
+        assert_eq!(held(k), [(F_RDLCK, 0, 29, 1), (F_RDLCK, 30, 39, 2)]);
     }
 
     #[test]
-    fn test_fcntl_unlock_region() {
-        let ids = unique_inodes(1);
-        let l1 = FileLock {
-            lock_type: F_WRLCK,
-            start: 0,
-            len: 100,
-            pid: 100,
+    fn waiting_in_a_cycle_is_a_deadlock() {
+        let k = unique_inodes(1)[0];
+        set_lock(k, &rl(F_WRLCK, 1, 1, 11), false).unwrap();
+        set_lock(k, &rl(F_WRLCK, 2, 2, 12), false).unwrap();
+        set_lock(k, &rl(F_WRLCK, 3, 3, 13), false).unwrap();
+        // 11 waits for 12, 12 for 13: 13 asking for 11's byte closes it.
+        assert_eq!(
+            set_lock(k, &rl(F_WRLCK, 2, 2, 11), true),
+            Err(RangeError::Conflict)
+        );
+        assert_eq!(
+            set_lock(k, &rl(F_WRLCK, 3, 3, 12), true),
+            Err(RangeError::Conflict)
+        );
+        assert_eq!(
+            set_lock(k, &rl(F_WRLCK, 1, 1, 13), true),
+            Err(RangeError::Deadlock)
+        );
+        // Without waiting there is nothing to detect.
+        assert_eq!(
+            set_lock(k, &rl(F_WRLCK, 1, 1, 13), false),
+            Err(RangeError::Conflict)
+        );
+        // An OFD request is never a deadlock; once 12 stops waiting, no
+        // cycle is left.
+        let ofd = RangeLock {
+            ofd: true,
+            ..rl(F_WRLCK, 1, 1, 13)
         };
-        assert!(fcntl_setlk(ids[0], &l1).is_ok());
-        let unlock = FileLock {
-            lock_type: F_UNLCK,
-            start: 0,
-            len: 100,
-            pid: 100,
-        };
-        assert!(fcntl_setlk(ids[0], &unlock).is_ok());
-        // Now another process can lock.
-        let l2 = FileLock {
-            lock_type: F_WRLCK,
-            start: 0,
-            len: 100,
-            pid: 200,
-        };
-        assert!(fcntl_setlk(ids[0], &l2).is_ok());
+        assert_eq!(set_lock(k, &ofd, true), Err(RangeError::Conflict));
+        stop_waiting(12);
+        assert_eq!(
+            set_lock(k, &rl(F_WRLCK, 1, 1, 13), true),
+            Err(RangeError::Conflict)
+        );
+        for owner in [11, 12, 13] {
+            stop_waiting(owner);
+            release_owner(k, owner);
+        }
+        assert!(held(k).is_empty());
     }
 
     #[test]
-    fn test_fcntl_zero_len_means_eof() {
-        let ids = unique_inodes(1);
-        let l1 = FileLock {
-            lock_type: F_WRLCK,
-            start: 0,
-            len: 0,
-            pid: 100,
+    fn exit_cleanup_takes_posix_locks_only() {
+        let k = unique_inodes(1)[0];
+        set_lock(k, &rl(F_WRLCK, 0, 9, 21), false).unwrap();
+        let ofd = RangeLock {
+            pid: -1,
+            ofd: true,
+            ..rl(F_WRLCK, 10, 19, 0xAB00)
         };
-        assert!(fcntl_setlk(ids[0], &l1).is_ok());
-        // Any range should conflict.
-        let l2 = FileLock {
-            lock_type: F_WRLCK,
-            start: 99999,
-            len: 1,
-            pid: 200,
-        };
-        assert_eq!(fcntl_setlk(ids[0], &l2), Err(KernelError::WouldBlock));
-    }
-
-    // ---- fcntl_getlk tests ----
-
-    #[test]
-    fn test_getlk_no_conflict() {
-        let ids = unique_inodes(1);
-        let query = FileLock {
-            lock_type: F_WRLCK,
-            start: 0,
-            len: 100,
-            pid: 100,
-        };
-        assert_eq!(fcntl_getlk(ids[0], &query).unwrap(), None);
-    }
-
-    #[test]
-    fn test_getlk_returns_conflicting_lock() {
-        let ids = unique_inodes(1);
-        let l1 = FileLock {
-            lock_type: F_WRLCK,
-            start: 0,
-            len: 100,
-            pid: 100,
-        };
-        assert!(fcntl_setlk(ids[0], &l1).is_ok());
-        let query = FileLock {
-            lock_type: F_WRLCK,
-            start: 50,
-            len: 50,
-            pid: 200,
-        };
-        let result = fcntl_getlk(ids[0], &query).unwrap();
-        assert!(result.is_some());
-        let conflict = result.unwrap();
-        assert_eq!(conflict.pid, 100);
-        assert_eq!(conflict.lock_type, F_WRLCK);
-    }
-
-    #[test]
-    fn test_getlk_invalid_type() {
-        let ids = unique_inodes(1);
-        let query = FileLock {
-            lock_type: F_UNLCK,
-            start: 0,
-            len: 100,
-            pid: 100,
-        };
-        assert!(fcntl_getlk(ids[0], &query).is_err());
-    }
-
-    // ---- setlkw + deadlock detection tests ----
-
-    #[test]
-    fn test_setlkw_no_conflict_succeeds() {
-        let ids = unique_inodes(1);
-        let l1 = FileLock {
-            lock_type: F_WRLCK,
-            start: 0,
-            len: 100,
-            pid: 100,
-        };
-        assert!(fcntl_setlkw(ids[0], &l1).is_ok());
-    }
-
-    #[test]
-    fn test_setlkw_conflict_returns_would_block() {
-        let ids = unique_inodes(1);
-        let l1 = FileLock {
-            lock_type: F_WRLCK,
-            start: 0,
-            len: 100,
-            pid: 100,
-        };
-        assert!(fcntl_setlkw(ids[0], &l1).is_ok());
-        let l2 = FileLock {
-            lock_type: F_WRLCK,
-            start: 0,
-            len: 100,
-            pid: 200,
-        };
-        // No deadlock, just a simple conflict -> WouldBlock.
-        assert_eq!(fcntl_setlkw(ids[0], &l2), Err(KernelError::WouldBlock));
-    }
-
-    #[test]
-    fn test_setlkw_deadlock_detection() {
-        let ids = unique_inodes(2);
-        // Use unique PIDs to avoid interference with other tests.
-        let pid_a: u64 = 9000;
-        let pid_b: u64 = 9001;
-
-        // PID A holds [0..100) on inode ids[0].
-        let la = FileLock {
-            lock_type: F_WRLCK,
-            start: 0,
-            len: 100,
-            pid: pid_a,
-        };
-        assert!(fcntl_setlk(ids[0], &la).is_ok());
-        // PID B holds [0..100) on inode ids[1].
-        let lb = FileLock {
-            lock_type: F_WRLCK,
-            start: 0,
-            len: 100,
-            pid: pid_b,
-        };
-        assert!(fcntl_setlk(ids[1], &lb).is_ok());
-
-        // PID B requests a write lock on inode ids[0] [0..100) (held by PID A).
-        // PID A does not hold anything on inode ids[1], so there is no deadlock cycle.
-        let req = FileLock {
-            lock_type: F_WRLCK,
-            start: 0,
-            len: 100,
-            pid: pid_b,
-        };
-        // Should be WouldBlock, not deadlock.
-        assert_eq!(fcntl_setlkw(ids[0], &req), Err(KernelError::WouldBlock));
+        set_lock(k, &ofd, false).unwrap();
+        cleanup_process_locks(21);
+        assert_eq!(held(k), [(F_WRLCK, 10, 19, 0xAB00)]);
+        release_owner(k, 0xAB00);
+        assert!(held(k).is_empty());
     }
 
     // ---- cleanup tests ----
@@ -881,28 +720,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cleanup_process_locks_range() {
-        let ids = unique_inodes(1);
-        let pid_owner: u64 = 7100;
-        let pid_other: u64 = 7101;
-        let l1 = FileLock {
-            lock_type: F_WRLCK,
-            start: 0,
-            len: 100,
-            pid: pid_owner,
-        };
-        assert!(fcntl_setlk(ids[0], &l1).is_ok());
-        cleanup_process_locks(pid_owner);
-        let l2 = FileLock {
-            lock_type: F_WRLCK,
-            start: 0,
-            len: 100,
-            pid: pid_other,
-        };
-        assert!(fcntl_setlk(ids[0], &l2).is_ok());
-    }
-
-    #[test]
     fn test_cleanup_does_not_affect_other_pids() {
         let ids = unique_inodes(2);
         let pid_a: u64 = 7200;
@@ -916,79 +733,5 @@ mod tests {
             flock(ids[1], pid_c, LOCK_EX | LOCK_NB),
             Err(KernelError::WouldBlock)
         );
-    }
-
-    // ---- FileLock overlap tests ----
-
-    #[test]
-    fn test_filelock_overlap_basic() {
-        let a = FileLock {
-            lock_type: F_WRLCK,
-            start: 0,
-            len: 100,
-            pid: 1,
-        };
-        let b = FileLock {
-            lock_type: F_WRLCK,
-            start: 50,
-            len: 100,
-            pid: 2,
-        };
-        assert!(a.overlaps(&b));
-        assert!(b.overlaps(&a));
-    }
-
-    #[test]
-    fn test_filelock_no_overlap() {
-        let a = FileLock {
-            lock_type: F_WRLCK,
-            start: 0,
-            len: 50,
-            pid: 1,
-        };
-        let b = FileLock {
-            lock_type: F_WRLCK,
-            start: 50,
-            len: 50,
-            pid: 2,
-        };
-        assert!(!a.overlaps(&b));
-        assert!(!b.overlaps(&a));
-    }
-
-    #[test]
-    fn test_filelock_zero_len_overlaps_everything() {
-        let whole = FileLock {
-            lock_type: F_WRLCK,
-            start: 0,
-            len: 0,
-            pid: 1,
-        };
-        let small = FileLock {
-            lock_type: F_WRLCK,
-            start: 999999,
-            len: 1,
-            pid: 2,
-        };
-        assert!(whole.overlaps(&small));
-        assert!(small.overlaps(&whole));
-    }
-
-    #[test]
-    fn test_filelock_end() {
-        let lock = FileLock {
-            lock_type: F_WRLCK,
-            start: 10,
-            len: 20,
-            pid: 1,
-        };
-        assert_eq!(lock.end(), 30);
-        let whole = FileLock {
-            lock_type: F_WRLCK,
-            start: 0,
-            len: 0,
-            pid: 1,
-        };
-        assert_eq!(whole.end(), u64::MAX);
     }
 }

@@ -4,6 +4,7 @@
 import contextlib
 import io
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -589,6 +590,105 @@ class SyscallCoverage(unittest.TestCase):
             syscall_coverage.stub_variants(body),
             {"Rseq", "Statx", "Clone3", "Fallocate", "Sync", "Brk", "Mmap"},
         )
+
+
+class KernelConfig(unittest.TestCase):
+    """tools/compat/gen_kconfig.py (ADR 0023)."""
+
+    MAP = """
+# comment
+CONFIG_EVENTFD y needs=eventfd2
+CONFIG_AIO n  # no io_setup
+CONFIG_X86_64 y arch=x86_64
+CONFIG_HZ 250
+"""
+
+    def test_render_follows_linux_config_format(self):
+        import gen_kconfig
+
+        options = gen_kconfig.parse(self.MAP)
+        text = gen_kconfig.render(options, "aarch64", "7.3.0-veridian")
+        body = [
+            line
+            for line in text.splitlines()
+            if not line.startswith("#") or line.endswith(" is not set")
+        ]
+        self.assertEqual(
+            body, ["CONFIG_EVENTFD=y", "# CONFIG_AIO is not set", "CONFIG_HZ=250"]
+        )
+        self.assertIn("CONFIG_X86_64=y", gen_kconfig.render(options, "x86_64", "r"))
+
+    def test_bad_lines_are_refused(self):
+        import gen_kconfig
+
+        for text in (
+            "CONFIG_A y\nCONFIG_A n",
+            "EVENTFD y",
+            "CONFIG_A",
+            "CONFIG_A y arch=sparc",
+            "CONFIG_A y wants=x",
+        ):
+            with self.assertRaises(ValueError, msg=text):
+                gen_kconfig.parse(text)
+
+    def test_check_refuses_unimplemented_calls(self):
+        import gen_kconfig
+
+        linux = {a: {"eventfd2", "io_setup"} for a in gen_kconfig.ARCHES}
+        ok = gen_kconfig.parse(
+            "CONFIG_EVENTFD y needs=eventfd2\nCONFIG_AIO n needs=io_setup"
+        )
+        self.assertEqual(gen_kconfig.problems(ok, {"eventfd2"}, linux), [])
+        bad = gen_kconfig.parse("CONFIG_AIO y needs=io_setup")
+        self.assertEqual(len(gen_kconfig.problems(bad, {"eventfd2"}, linux)), 1)
+        # A call Linux lacks on an architecture the line covers.
+        linux["aarch64"] = {"eventfd2"}
+        self.assertIn(
+            "Linux has no io_setup on aarch64",
+            gen_kconfig.problems(bad, {"io_setup"}, linux)[0],
+        )
+
+
+class GuestRunner(unittest.TestCase):
+    """userland/tests/compat/run.sh, run by the host's sh with a fake compat_exec."""
+
+    RUN_SH = Path(__file__).resolve().parents[2] / "userland/tests/compat/run.sh"
+
+    def multiplier(self, *limit):
+        with tempfile.TemporaryDirectory() as d:
+            fake = Path(d) / "exec"
+            fake.write_text('#!/bin/sh\necho "MUL=${LTP_TIMEOUT_MUL-unset}"\n')
+            fake.chmod(0o755)
+            lst = Path(d) / "t.list"
+            lst.write_text(f"1 t - {fake}\n")
+            env = dict(
+                os.environ, COMPAT_EXEC=str(fake), COMPAT_OUT=str(Path(d) / "out")
+            )
+            out = subprocess.run(
+                ["sh", str(self.RUN_SH), str(lst), "1", *limit],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+        return [line for line in out.splitlines() if line.startswith("MUL=")]
+
+    def test_ltp_timeouts_scale_with_the_limit(self):
+        # LTP kills a test after its own timeout (30 s by default), well before
+        # the 180 s the host allows under emulation; its multiplier makes it
+        # the limit (one unit per 30 s, whole units), and is never below 1.
+        self.assertEqual(self.multiplier("60"), ["MUL=2"])
+        self.assertEqual(self.multiplier("180"), ["MUL=6"])
+        self.assertEqual(self.multiplier("100"), ["MUL=3"])
+        self.assertEqual(self.multiplier("30"), ["MUL=1"])
+        self.assertEqual(self.multiplier("10"), ["MUL=1"])
+        self.assertEqual(self.multiplier(), ["MUL=2"])
+        self.assertEqual(self.multiplier("600"), ["MUL=20"])
+
+    def test_no_shell_arithmetic(self):
+        # The image's ash is built without FEATURE_SH_MATH: $((...)) is a
+        # syntax error there, although the host's sh accepts it.
+        self.assertNotIn("$((", self.RUN_SH.read_text())
 
 
 if __name__ == "__main__":

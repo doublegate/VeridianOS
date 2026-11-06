@@ -85,24 +85,37 @@ Each group lands with its LTP cases. The counts are "missing" entries in the cov
   - the uid/gid family
   - capget/capset, times, personality, getcpu
   - priority and rlimit calls
-  - pidfd_*, kcmp, process_vm_*, ptrace
-  - unshare/setns
-  - real prctl, rseq
+  - pidfd_*, clone3, kcmp, process_vm_*, ptrace (the pidfd calls, clone3, kcmp and process_vm_*
+    are done; no pidfd ioctls or fdinfo, KNOWN-LIMITATIONS); process clones with CLONE_FILES,
+    CLONE_SIGHAND and CLONE_PARENT (G2b) are done
+  - unshare/setns (ADR 0022: H1 the framework, UTS, IPC and cgroup, H2 time and the mount
+    namespaces of H3, mount(2), umount2, the per-mount flags and pivot_root are done; of H4 the
+    user namespace object, creation, maps and setns (H4a), ids at the boundaries (H4b) and the
+    privilege checks per namespace (H4c); of H5 the PID namespaces with init and the main
+    interfaces (H5a) and the remaining pid crossings (H5b); H6 the network namespaces, each
+    with its own ports and a loopback that is down)
+  - real prctl, rseq (personality is done; rseq stays ENOSYS, as without CONFIG_RSEQ)
 - **signals (11)**
   - The pending/timedwait/suspend/queueinfo family, tkill/tgkill, pause, alarm, itimers,
-    restart_syscall, and a real sigaltstack.
+    restart_syscall, and a real sigaltstack (alarm, the itimers and restart_syscall are done).
   - Semantics to get right: delivery on every return to user mode, SA_RESTART versus EINTR, queued
     realtime signals, per-thread masks, core dumps and job-control stops.
 - **time (14)**
-  - Settable and adjustable clocks, POSIX timers, and the utime family.
+  - Settable and adjustable clocks and POSIX timers (the utime family, the POSIX timers,
+    adjtimex and clock_adjtime are done; adjtimex steers no clock, KNOWN-LIMITATIONS).
   - CLOCK_REALTIME from the RTC epoch, every clock ID, and nanosecond file timestamps.
 - **files (55)**
-  - truncate, fchdir, creat, lchown, getdents, mknodat, readahead/fadvise and the sync family.
+  - truncate, fchdir, creat, lchown, getdents, mknodat, readahead/fadvise and the sync family
+    (creat, lchown, getdents, readahead, fadvise64, syncfs and sync_file_range are done).
   - Locks: flock, POSIX record locks and OFD locks.
-  - sendfile, splice/tee/vmsplice and copy_file_range.
-  - Vectored I/O, renameat2 and openat2, close_range and fchmodat2, and execveat.
-  - Handles, xattrs, inotify and fanotify.
-  - Real statx/statfs/fallocate, and every O_* flag.
+  - sendfile, splice/tee/vmsplice and copy_file_range (done; they copy, KNOWN-LIMITATIONS).
+  - Vectored I/O, renameat2 and openat2, close_range and fchmodat2, and execveat (preadv,
+    pwritev and their `2` forms, close_range, fchmodat2, openat2 and execveat are
+    done).
+  - Handles, xattrs, inotify and fanotify (handles, xattrs and inotify are done; handles decode
+    by a walk and inotify follows paths, KNOWN-LIMITATIONS; fanotify stays ENOSYS, as on a
+    kernel built without CONFIG_FANOTIFY).
+  - Real statx/statfs/fallocate, and every O_* flag (statx and statfs are done).
 - **memory (23)**
   - msync, mincore, the mlock family, real mremap, pkeys, mseal, membarrier and userfaultfd, plus
     the NUMA calls.
@@ -159,22 +172,24 @@ Each group lands with its LTP cases. The counts are "missing" entries in the cov
   the tests x86_64 is expected to pass, `--compat` the full suites, and
   `.github/workflows/compat.yml` the x86_64 tests expected to pass, weekly (the full suites do not
   fit in a GitHub job).
-- **Results (full runs of 2026-10-30; baseline of 2026-10-22).** Passing tests per suite in the
+- **Results (full runs of 2026-11-05; baseline of 2026-10-22).** Passing tests per suite in the
   run that refreshed the expected lists; FLAKY tests (varying results, or passing close to the
   time limit) are accepted either way. Open POSIX counts include its 195 compile-only tests.
 
   | Suite | x86_64 | AArch64 | RISC-V | baseline (x86_64) |
   |---|---|---|---|---|
-  | LTP `syscalls` (1,552) | 524 | 519 | 519 | 24 pass, 206 WARN |
-  | Open POSIX (1,965) | 1,577 | 1,574 | 1,570 | 1,569 |
-  | musl libc-test (560) | 527 | 527 | 527 | 523 |
+  | LTP `syscalls` (1,552) | 741 | 730 | 726 | 24 pass, 206 WARN |
+  | Open POSIX (1,965) | 1,640 | 1,637 | 1,635 | 1,569 |
+  | musl libc-test (560) | 527 | 529 | 529 | 523 |
 
   The LTP gain is statfs and fstatfs (about 233 tests stopped in setup on their ENOSYS) and
   uname's release `7.3.0-veridian` (ADR 0021: about 230 tests passed with LTP's "kernel older than
-  4.4" warning, which now appears once). What still stops most LTP tests before their check is
+  4.4" warning, which now appears once); the full runs of 2026-10-30 had 524/519/519. The
+  syscall groups (2026-11-05) added about 215 more on each architecture. What still stops most LTP tests before their check is
   listed in `docs/KNOWN-LIMITATIONS.md`, "Conformance suites": no test block device (about 175
-  tests, which on AArch64 and RISC-V run into the time limit while they write the image), no
-  kernel configuration, no mount.
+  tests, which on AArch64 and RISC-V run into the time limit while they write the image) and
+  no mount. The kernel configuration LTP reads is `/boot/config-<release>`, generated from
+  `abi/kconfig.map` (ADR 0023).
 - **Coverage tables.** Regenerate the coverage table every release, add one for arm64, and track
   partial semantics per syscall.
 - **Application ladder.** The ladder above runs as CI smoke tests.

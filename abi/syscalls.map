@@ -37,6 +37,7 @@ exit_group
 fork
 vfork
 execve
+execveat
 wait4
 getpid
 getppid
@@ -49,6 +50,7 @@ chroot
 kill
 umask
 uname
+personality
 ProcessGetenv           private 1229
 waitid
 prctl
@@ -83,10 +85,23 @@ rseq
 arch_prctl
 tkill
 tgkill
+pidfd_open
+pidfd_send_signal
+pidfd_getfd
+kcmp
+process_vm_readv
+process_vm_writev
+unshare
+setns
+sethostname
+setdomainname
 
 ## Files
 open
 openat
+openat2
+name_to_handle_at
+open_by_handle_at
 close
 read
 write
@@ -95,6 +110,15 @@ pread64
 pwrite64
 readv
 writev
+preadv
+pwritev
+preadv2
+pwritev2
+sendfile
+copy_file_range
+splice
+tee
+vmsplice
 fstat
 stat
 lstat
@@ -119,9 +143,11 @@ faccessat2
 chmod
 fchmod
 fchmodat
+fchmodat2
 chown
 fchown
 fchownat
+lchown
 mknod
 mknodat
 rename
@@ -134,6 +160,9 @@ symlinkat
 readlink
 readlinkat
 utimensat
+utimes
+futimesat
+utime
 unlink
 unlinkat
 poll
@@ -141,6 +170,11 @@ ppoll
 select
 pselect6
 getdents64
+getdents
+creat
+close_range
+readahead
+fadvise64
 
 ## Extended attributes (ADR 0020)
 setxattr
@@ -171,9 +205,16 @@ DirClosedir             private 1088
 ## Filesystems
 FsMount                 private 1094
 FsUnmount               private 1095
+mount
+umount2
+pivot_root
 sync
 fsync
 fdatasync
+syncfs
+sync_file_range
+ustat
+sysfs
 
 ## Kernel information
 KernelGetInfo           private 1104
@@ -198,8 +239,18 @@ clock_nanosleep
 nanosleep
 gettimeofday
 settimeofday
+adjtimex
+clock_adjtime
 time
 times
+getitimer
+setitimer
+alarm
+timer_create
+timer_settime
+timer_gettime
+timer_getoverrun
+timer_delete
 
 ## Signals
 rt_sigaction
@@ -207,6 +258,7 @@ rt_sigprocmask
 rt_sigsuspend
 pause
 rt_sigreturn
+restart_syscall
 rt_sigpending
 rt_sigtimedwait
 rt_sigqueueinfo
@@ -346,6 +398,7 @@ signalfd
 signalfd4
 
 ## inotify
+inotify_init
 inotify_init1
 inotify_add_watch
 inotify_rm_watch

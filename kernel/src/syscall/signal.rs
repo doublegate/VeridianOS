@@ -128,8 +128,8 @@ const _: () = assert!(core::mem::size_of::<SigAction>() == 24);
 
 /// Install or query a signal handler (syscall 120).
 ///
-/// Reads/writes the signal handler from/to the PCB's signal_handlers table.
-/// The handler address is stored as a u64 in the PCB's `[u64; 32]` array.
+/// Reads/writes the signal handler in the process's signal actions
+/// (`signals::SigHand`, shared by a CLONE_SIGHAND clone).
 ///
 /// # Arguments
 /// - `signum`: Signal number (1-31).
@@ -172,9 +172,17 @@ pub fn sys_sigaction(signum: usize, act_ptr: usize, oldact_ptr: usize) -> Syscal
             (act.sa_flags, act.restorer(), act.sa_mask),
         )
     });
+    #[cfg(feature = "alloc")]
+    let was_ignored = crate::process::signals::ignored(&proc, signum);
     let (old_handler, (flags, restorer, mask)) = proc
         .swap_signal_action(signum, new)
         .map_err(|_| SyscallError::InvalidArgument)?;
+    // An action that ignores the signal discards it if pending; POSIX
+    // timers follow (Linux's do_sigaction).
+    #[cfg(feature = "alloc")]
+    if new.is_some() {
+        crate::process::signals::action_changed(&proc, signum, was_ignored);
+    }
     if oldact_ptr != 0 {
         super::userspace::write_user(
             oldact_ptr,
@@ -298,6 +306,12 @@ fn signal_number(sig: usize) -> Result<usize, SyscallError> {
     }
 }
 
+/// A positive pid or tid the caller passed, as the kernel id its PID
+/// namespace numbers that way: ESRCH for none.
+fn vpid(id: usize) -> Result<u64, SyscallError> {
+    process::pidns::from_vnr(id as i64).ok_or(SyscallError::ProcessNotFound)
+}
+
 /// rt_sigqueueinfo(tgid, sig, info): send `sig` to process `tgid` with the
 /// caller's siginfo (sigqueue passes SI_QUEUE, its pid and uid, and the
 /// value). Permission as kill; EAGAIN when the real-time queue is full.
@@ -306,27 +320,61 @@ pub fn sys_rt_sigqueueinfo(tgid: usize, sig: usize, uinfo: usize) -> SyscallResu
     let tgid = super::process::positive_id(tgid).map_err(|_| SyscallError::ProcessNotFound)?;
     let sig = signal_number(sig)?;
     let caller = process::current_process().ok_or(SyscallError::InvalidState)?;
-    let pid = process::ProcessId(tgid as u64);
+    let pid = process::ProcessId(vpid(tgid)?);
     let info = queued_siginfo(uinfo, sig, caller.pid == pid)?;
     // Existence and permission first (sig 0 stops there).
     super::filesystem::kill_one(&caller, pid, 0)?;
     if sig == 0 {
         return Ok(0);
     }
-    if let Some(target) = process::get_process(pid) {
-        if target
-            .dispatched
-            .load(core::sync::atomic::Ordering::Acquire)
-        {
-            return match crate::process::signals::send_info_to_process(&target, info) {
-                Ok(true) => Ok(0),
-                Ok(false) => super::filesystem::send_info(pid, sig as i32, info),
-                Err(crate::error::KernelError::WouldBlock) => Err(SyscallError::WouldBlock),
-                Err(_) => Err(SyscallError::ProcessNotFound),
-            };
-        }
+    let target = process::get_process(pid).ok_or(SyscallError::ProcessNotFound)?;
+    deliver(&target, None, info)
+}
+
+/// Make the signal `info` names pending for `target` (the caller checked
+/// existence and permission), for its thread `thread` if given: a
+/// dispatched process takes it through its threads' masks, others through
+/// the old path. EAGAIN when a queued real-time signal would exceed
+/// RLIMIT_SIGPENDING.
+#[cfg(feature = "alloc")]
+pub(super) fn deliver(
+    target: &alloc::sync::Arc<process::Process>,
+    thread: Option<&alloc::sync::Arc<process::Thread>>,
+    info: crate::process::signals::SigInfo,
+) -> SyscallResult {
+    let sig = info.si_signo;
+    let errno = |e| match e {
+        crate::error::KernelError::WouldBlock => SyscallError::WouldBlock,
+        _ => SyscallError::ProcessNotFound,
+    };
+    // A zombie discards it (`filesystem::kill_one`).
+    if !target.is_alive() {
+        return Ok(0);
     }
-    super::filesystem::send_info(pid, sig as i32, info)
+    if !target
+        .dispatched
+        .load(core::sync::atomic::Ordering::Acquire)
+    {
+        // As kill_one: a signal that ends the caller itself leaves through
+        // the exit path, or the teardown would return into the address
+        // space it just freed.
+        if process::current_process().is_some_and(|me| me.pid == target.pid)
+            && super::filesystem::terminates(target, sig)
+        {
+            return super::process::exit_current(0, sig as u32);
+        }
+        return super::filesystem::send_info(target.pid, sig, info);
+    }
+    match thread {
+        Some(thread) => crate::process::signals::send_to_thread(target, thread, info)
+            .map(|_| 0)
+            .map_err(errno),
+        None => match crate::process::signals::send_info_to_process(target, info) {
+            Ok(true) => Ok(0),
+            Ok(false) => super::filesystem::send_info(target.pid, sig, info),
+            Err(e) => Err(errno(e)),
+        },
+    }
 }
 
 /// rt_tgsigqueueinfo(tgid, tid, sig, info): as rt_sigqueueinfo, to thread
@@ -337,9 +385,10 @@ pub fn sys_rt_tgsigqueueinfo(tgid: usize, tid: usize, sig: usize, uinfo: usize) 
     let tid = super::process::positive_id(tid)?;
     let sig = signal_number(sig)?;
     let caller = process::current_process().ok_or(SyscallError::InvalidState)?;
-    let pid = process::ProcessId(tgid as u64);
+    let pid = process::ProcessId(vpid(tgid)?);
+    let tid = vpid(tid)?;
     let info = queued_siginfo(uinfo, sig, caller.pid == pid)?;
-    if super::process::process_of_thread(tid) != Some(pid) {
+    if super::process::process_of_thread(tid as usize) != Some(pid) {
         return Err(SyscallError::ProcessNotFound);
     }
     super::filesystem::kill_one(&caller, pid, 0)?;
@@ -347,21 +396,10 @@ pub fn sys_rt_tgsigqueueinfo(tgid: usize, tid: usize, sig: usize, uinfo: usize) 
         return Ok(0);
     }
     let target = process::get_process(pid).ok_or(SyscallError::ProcessNotFound)?;
-    if target
-        .dispatched
-        .load(core::sync::atomic::Ordering::Acquire)
-    {
-        let thread = target
-            .get_thread(process::ThreadId(tid as u64))
-            .ok_or(SyscallError::ProcessNotFound)?;
-        return crate::process::signals::send_to_thread(&target, &thread, info)
-            .map(|_| 0)
-            .map_err(|e| match e {
-                crate::error::KernelError::WouldBlock => SyscallError::WouldBlock,
-                _ => SyscallError::ProcessNotFound,
-            });
-    }
-    super::filesystem::send_info(pid, sig as i32, info)
+    let thread = target
+        .get_thread(process::ThreadId(tid))
+        .ok_or(SyscallError::ProcessNotFound)?;
+    deliver(&target, Some(&thread), info)
 }
 
 /// rt_sigtimedwait(set, info, timeout, sigsetsize): take one of the
@@ -633,6 +671,11 @@ pub fn sys_sigaltstack(ss: usize, old_ss: usize) -> SyscallResult {
 }
 
 pub fn sys_sigreturn(frame_ptr: usize) -> SyscallResult {
+    // rt_sigreturn forgets the restart block, as Linux's: a restart_syscall
+    // after it is EINTR (`restart`).
+    if let Some(thread) = crate::process::current_thread() {
+        *thread.restart.lock() = super::restart::Restart::None;
+    }
     // A dispatched thread: Linux rt_sigreturn, restoring into the live
     // system call frame (the frame address comes from the user RSP, not
     // from an argument). An unusable frame kills the thread with SIGSEGV.

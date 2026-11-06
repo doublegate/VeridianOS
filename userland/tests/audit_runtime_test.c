@@ -2787,7 +2787,7 @@ static void test_realtime_signals(void)
 
 /* --- vfork, and clone without CLONE_THREAD (N-210): vfork was fork,
  * and every non-thread clone EINVAL, so posix_spawn, system and popen
- * failed. ------------------------------------------------------------- */
+ * failed. A process clone may share the descriptor table (G2b). ------ */
 #include <veridian/syscall.h>
 
 static volatile int vfork_mark;
@@ -2839,9 +2839,28 @@ static __attribute__((noinline)) int clone_checks(void)
     if (r < 0 || exit_code_of((pid_t)r) != 0 || settid_slot == 0)
         fails |= 32;
 
-    /* A file table shared between processes is not supported. */
-    if (raw_clone(CLONE_FILES | SIGCHLD, 0, 0) != -EINVAL)
+    /* CLONE_FILES shares the descriptor table: the child's close closes
+     * the parent's descriptor. CLONE_SIGHAND needs CLONE_VM (EINVAL). */
+    int fd = dup(1);
+    r = raw_clone(CLONE_FILES | SIGCHLD, 0, 0);
+    if (r == 0) {
+        close(fd);
+        _exit(0);
+    }
+    errno = 0;
+    if (fd < 0 || r < 0 || exit_code_of((pid_t)r) != 0 || fcntl(fd, F_GETFD) != -1 ||
+        errno != EBADF) {
         fails |= 64;
+        close(fd);
+    }
+    r = raw_clone(CLONE_SIGHAND | SIGCHLD, 0, 0);
+    if (r == 0)
+        _exit(0);
+    if (r != -EINVAL) {
+        if (r > 0)
+            exit_code_of((pid_t)r);
+        fails |= 64;
+    }
     return fails;
 }
 

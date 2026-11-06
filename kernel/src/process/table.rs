@@ -297,13 +297,21 @@ pub fn get_process(pid: ProcessId) -> Option<Arc<Process>> {
 
 /// Add a process to the table
 pub fn add_process(process: Process) -> Result<ProcessId, KernelError> {
-    PROCESS_TABLE.add_process(process)
+    let pid = PROCESS_TABLE.add_process(process)?;
+    #[cfg(feature = "alloc")]
+    super::published(pid.0);
+    Ok(pid)
 }
 
 /// Remove a process from the table
 #[cfg(feature = "alloc")]
 pub fn remove_process(pid: ProcessId) -> Option<Arc<Process>> {
-    PROCESS_TABLE.remove_process(pid)
+    let removed = PROCESS_TABLE.remove_process(pid);
+    // Reaped: its pidfds poll hung up.
+    if removed.is_some() {
+        crate::sched::dispatch::io_event();
+    }
+    removed
 }
 
 /// Check if a process exists

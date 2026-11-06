@@ -232,13 +232,25 @@ impl UnixSocket {
     }
 }
 
-/// The credentials of the peer of socket `socket_id` (SO_PEERCRED), or
-/// [`PeerCred::NONE`] if it has none.
-pub fn peer_cred(socket_id: u64) -> Option<PeerCred> {
-    UNIX_SOCKETS
-        .lock()
-        .get(&socket_id)
-        .map(|s| s.peer_cred.unwrap_or(PeerCred::NONE))
+/// The credentials of the peer of socket `socket_id` (SO_PEERCRED) with
+/// its IDs as a reader in user namespace `reader` sees them
+/// (cred_to_ucred's from_kuid_munged) and its process ID as the caller's
+/// PID namespace numbers it, or [`PeerCred::NONE`] if it has
+/// none.
+pub fn peer_cred(socket_id: u64, reader: &crate::process::userns::UserNs) -> Option<PeerCred> {
+    UNIX_SOCKETS.lock().get(&socket_id).map(|s| {
+        s.peer_cred.map_or(PeerCred::NONE, |c| PeerCred {
+            // In the reader's PID namespace (pid_vnr): 0 for a peer it
+            // does not number.
+            pid: if c.pid > 0 {
+                crate::process::pidns::vnr(c.pid as u64) as i32
+            } else {
+                0
+            },
+            uid: reader.uid_munged(c.uid),
+            gid: reader.gid_munged(c.gid),
+        })
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -943,12 +955,13 @@ mod tests {
     /// socket sees no one (process 0, the overflow IDs).
     #[test]
     fn peer_credentials_are_recorded() {
+        let initial = crate::process::userns::initial();
         let (a, b) = socketpair(UnixSocketType::Stream, 1).unwrap();
-        assert_eq!(peer_cred(a), Some(PeerCred::current()));
-        assert_eq!(peer_cred(b), Some(PeerCred::current()));
+        assert_eq!(peer_cred(a, &initial), Some(PeerCred::current()));
+        assert_eq!(peer_cred(b, &initial), Some(PeerCred::current()));
         let lone = socket_create(UnixSocketType::Stream, 1).unwrap();
-        assert_eq!(peer_cred(lone), Some(PeerCred::NONE));
-        assert_eq!(peer_cred(u64::MAX), None);
+        assert_eq!(peer_cred(lone, &initial), Some(PeerCred::NONE));
+        assert_eq!(peer_cred(u64::MAX, &initial), None);
         for s in [a, b, lone] {
             socket_close(s).unwrap();
         }

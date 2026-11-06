@@ -87,6 +87,14 @@ impl ThreadFs {
         src.clone()
     }
 
+    /// Move the root and working directory to the root of the tree (a
+    /// mount namespace joined, or an empty one made: Linux sets fs->root
+    /// and fs->pwd to the namespace's root mount).
+    pub fn move_to_root(&self) {
+        *self.root.lock() = alloc::string::String::from("/");
+        *self.cwd.lock() = alloc::string::String::from("/");
+    }
+
     /// Copy the filesystem state (non-CLONE_FS semantics).
     ///
     /// Creates a new independent `ThreadFs` with the same cwd and umask
@@ -411,6 +419,10 @@ pub struct Thread {
     /// friends, as Linux's ERESTARTNOHAND and plain EINTR). Set by the
     /// system call dispatcher, consumed by the next signal delivery.
     pub no_restart: AtomicBool,
+    /// What restart_syscall carries on with (`syscall::restart`): set when
+    /// a relative sleep or a timed poll is interrupted, forgotten by
+    /// rt_sigreturn. A new thread has none.
+    pub restart: Mutex<crate::syscall::restart::Restart>,
     /// The alternate signal stack (sigaltstack; N-222). A new thread has
     /// none; fork copies the parent thread's.
     pub altstack: Mutex<super::signals::SigAltStack>,
@@ -425,6 +437,9 @@ pub struct Thread {
     /// privilege (no setuid or setgid). It cannot be cleared, and every
     /// thread and process the thread creates inherits it.
     pub no_new_privs: AtomicBool,
+    /// personality(2)'s value (`process::personality`): per thread, as on
+    /// Linux, and inherited by every thread and process the thread creates.
+    pub personality: core::sync::atomic::AtomicU32,
     /// The Linux capability sets and securebits (ADR 0020). Per thread, as
     /// on Linux: capset changes only the calling thread's. A new thread has
     /// the initial sets (full, as root has); fork and clone copy the
@@ -440,9 +455,13 @@ pub struct Thread {
     fs_released: AtomicBool,
     /// Detached flag (pthread_detach)
     pub detached: AtomicBool,
-    /// Filesystem view (cwd, umask)
+    /// Filesystem view (cwd, umask); replaced by unshare(CLONE_FS) when
+    /// shared.
     #[cfg(feature = "alloc")]
-    pub fs: Arc<ThreadFs>,
+    fs: Mutex<Arc<ThreadFs>>,
+    /// The thread's namespaces (ADR 0022, Linux's nsproxy).
+    #[cfg(feature = "alloc")]
+    ns: Mutex<Arc<super::ns::Namespaces>>,
 }
 
 /// Stack information
@@ -530,6 +549,9 @@ pub struct ThreadParams {
 impl Drop for Thread {
     fn drop(&mut self) {
         self.release_fs();
+        // A clone that failed never published its ID.
+        #[cfg(feature = "alloc")]
+        super::published(self.tid.0);
     }
 }
 
@@ -582,15 +604,18 @@ impl Thread {
             saved_sigmask: AtomicU64::new(0),
             has_saved_sigmask: AtomicBool::new(false),
             no_restart: AtomicBool::new(false),
+            restart: Mutex::new(crate::syscall::restart::Restart::None),
             altstack: Mutex::new(super::signals::SigAltStack::default()),
             robust_list: AtomicUsize::new(0),
             sched: Mutex::new(SchedParams::default()),
             no_new_privs: AtomicBool::new(false),
+            personality: core::sync::atomic::AtomicU32::new(0),
             caps: Mutex::new(super::linux_caps::CapSets::ROOT),
             comm: Mutex::new(comm),
             fs_released: AtomicBool::new(false),
             detached: AtomicBool::new(false),
-            fs,
+            fs: Mutex::new(fs),
+            ns: Mutex::new(super::ns::initial()),
         }
     }
 
@@ -736,7 +761,30 @@ impl Thread {
     /// Get filesystem view (cwd/umask)
     #[cfg(feature = "alloc")]
     pub fn fs(&self) -> Arc<ThreadFs> {
-        self.fs.clone()
+        self.fs.lock().clone()
+    }
+
+    /// Give the thread `new` in place of a filesystem state it shares
+    /// (unshare(CLONE_FS)), moving its count of users over.
+    #[cfg(feature = "alloc")]
+    pub fn replace_fs(&self, new: Arc<ThreadFs>) {
+        new.users.fetch_add(1, Ordering::AcqRel);
+        let old = core::mem::replace(&mut *self.fs.lock(), new);
+        if !self.fs_released.load(Ordering::Acquire) {
+            old.users.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    /// The thread's namespaces.
+    #[cfg(feature = "alloc")]
+    pub fn namespaces(&self) -> Arc<super::ns::Namespaces> {
+        self.ns.lock().clone()
+    }
+
+    /// Give the thread the namespace set `set` (clone, unshare, setns).
+    #[cfg(feature = "alloc")]
+    pub fn set_namespaces(&self, set: Arc<super::ns::Namespaces>) {
+        *self.ns.lock() = set;
     }
 
     /// Stop counting as a user of the filesystem state ([`ThreadFs::users`]),
@@ -745,7 +793,7 @@ impl Thread {
     #[cfg(feature = "alloc")]
     pub fn release_fs(&self) {
         if !self.fs_released.swap(true, Ordering::AcqRel) {
-            self.fs.users.fetch_sub(1, Ordering::AcqRel);
+            self.fs.lock().users.fetch_sub(1, Ordering::AcqRel);
         }
     }
 }

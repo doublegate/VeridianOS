@@ -94,6 +94,10 @@ impl VfsNode for DeviceFile {
         self.device.device_id()
     }
 
+    fn bytes_readable(&self) -> Option<usize> {
+        self.device.bytes_readable()
+    }
+
     fn metadata(&self) -> Result<Metadata, KernelError> {
         self.inode.metadata()
     }
@@ -369,6 +373,13 @@ impl VfsNode for DevNode {
 
     fn device_id(&self) -> Option<(u32, u32)> {
         Some((self._major, self._minor))
+    }
+
+    /// The console's input, as its line discipline would hand it out;
+    /// other devices keep no count (FIONREAD is ENOTTY).
+    fn bytes_readable(&self) -> Option<usize> {
+        matches!(self.name.as_str(), "console" | "tty0")
+            .then(crate::drivers::console_input::bytes_readable)
     }
 
     /// Console input wakes waiters from the x86_64 timer tick; elsewhere

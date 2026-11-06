@@ -203,12 +203,18 @@ fn phys_to_kernel_vaddr(phys_addr: usize) -> usize {
 /// # Returns
 /// Request-specific value on success, or error.
 /// What the ptrace checks need to know about the process to be traced.
+#[derive(Clone)]
 pub(super) struct PtraceTarget {
     pub creds: process::creds::Credentials,
     /// The union of its threads' permitted sets.
     pub permitted: process::linux_caps::LinuxCaps,
     /// Its dumpable flag (PR_SET_DUMPABLE).
     pub dumpable: bool,
+    /// Its user namespace, the one its permitted set means something in.
+    pub userns: alloc::sync::Arc<process::userns::UserNs>,
+    /// The user namespace its memory belongs to (mm->user_ns), whose
+    /// privilege a non-dumpable process needs of a tracer.
+    pub mm_userns: alloc::sync::Arc<process::userns::UserNs>,
 }
 
 impl PtraceTarget {
@@ -218,6 +224,8 @@ impl PtraceTarget {
             creds: process.credentials(),
             permitted: process.permitted_caps(),
             dumpable: process.dumpable.load(core::sync::atomic::Ordering::Acquire),
+            userns: process.user_ns(),
+            mm_userns: process.mm_user_ns(),
         }
     }
 }
@@ -249,16 +257,44 @@ fn may_attach(
     Ok(())
 }
 
-/// Linux `__ptrace_may_access` with `cap_ptrace_access_check`: the caller
-/// holds CAP_SYS_PTRACE, or all three hold:
+/// Linux `__ptrace_may_access` with `cap_ptrace_access_check`, all three
+/// of:
 /// - the target's real, effective and saved IDs are all the caller's real ones
-///   (so a setuid program running privileged is out of reach);
-/// - the target is dumpable (PR_SET_DUMPABLE);
+///   (so a setuid program running privileged is out of reach), or the caller
+///   holds CAP_SYS_PTRACE over the target's user namespace;
+/// - the target is dumpable (PR_SET_DUMPABLE), or the caller holds
+///   CAP_SYS_PTRACE over the user namespace its memory belongs to;
 /// - the target's permitted capabilities are within the caller's permitted set,
 ///   so a process that dropped capabilities with capset cannot trace a child
-///   that kept them and use them through it.
+///   that kept them and use them through it, or the caller holds CAP_SYS_PTRACE
+///   over the target's user namespace; the two sets are compared only in one
+///   user namespace, so capabilities a caller holds in a namespace of its own
+///   do not cover a target outside it.
 ///
 /// Also guards get_robust_list.
+/// [`may_access`] for `target` as a process, with Linux's first rule of
+/// `__ptrace_may_access`: a process may always access itself (its own
+/// thread group), dumpable or not.
+pub(super) fn may_access_process(
+    caller: &process::creds::Caller,
+    caller_permitted: process::linux_caps::LinuxCaps,
+    target: &process::Process,
+) -> bool {
+    process::current_process().is_some_and(|me| me.pid == target.pid)
+        || may_access(caller, caller_permitted, &PtraceTarget::of(target))
+}
+
+/// Whether the calling process may read `target` as ptrace's read mode
+/// allows ([`may_access_process`]): `/proc/<pid>/ns` links need it.
+#[cfg(feature = "alloc")]
+pub(crate) fn may_read_process(target: &process::Process) -> bool {
+    may_access_process(
+        &process::creds::Caller::current(),
+        current_permitted(),
+        target,
+    )
+}
+
 pub(super) fn may_access(
     caller: &process::creds::Caller,
     caller_permitted: process::linux_caps::LinuxCaps,
@@ -268,21 +304,28 @@ pub(super) fn may_access(
     let t = &target.creds;
     let same_user = [t.ruid, t.euid, t.suid].iter().all(|&id| id == c.ruid)
         && [t.rgid, t.egid, t.sgid].iter().all(|&id| id == c.rgid);
-    caller.capable(process::linux_caps::CAP_SYS_PTRACE)
-        || (same_user && target.dumpable && target.permitted.is_subset_of(caller_permitted))
+    let over = |ns| caller.ns_capable(ns, process::linux_caps::CAP_SYS_PTRACE);
+    (same_user || over(&target.userns))
+        && (target.dumpable || over(&target.mm_userns))
+        && ((caller.userns.ident.id == target.userns.ident.id
+            && target.permitted.is_subset_of(caller_permitted))
+            || over(&target.userns))
 }
 
 /// Linux `cap_ptrace_traceme`: a process may make its parent its tracer if
-/// its permitted capabilities are within the parent's, or the parent holds
-/// CAP_SYS_PTRACE. Linux checks the parent task; here any of the parent's
-/// threads may trace, so `parent_permitted` and `parent_capable` are what
-/// all its live threads hold (`Process::common_ptrace_caps`).
+/// both are in one user namespace (`same_ns`) and its permitted
+/// capabilities are within the parent's, or the parent holds
+/// CAP_SYS_PTRACE over the caller's user namespace. Linux checks the
+/// parent task; here any of the parent's threads may trace, so
+/// `parent_permitted` and `parent_capable` are what all its live threads
+/// hold (`Process::common_ptrace_caps`).
 fn may_trace_me(
     own_permitted: process::linux_caps::LinuxCaps,
     parent_permitted: process::linux_caps::LinuxCaps,
     parent_capable: bool,
+    same_ns: bool,
 ) -> bool {
-    own_permitted.is_subset_of(parent_permitted) || parent_capable
+    (same_ns && own_permitted.is_subset_of(parent_permitted)) || parent_capable
 }
 
 /// Checked again with the target's address space locked (the lock exec's
@@ -300,6 +343,14 @@ fn still_traced(target: &process::Process, caller_pid: u64) -> Result<(), Syscal
     Ok(())
 }
 
+/// The process that `pid`, a number in the caller's PID namespace, names
+/// (find_task_by_vpid); ESRCH for none.
+fn by_vpid(pid: usize) -> Result<alloc::sync::Arc<process::Process>, SyscallError> {
+    let kid =
+        process::pidns::from_vnr(pid as u32 as i32 as i64).ok_or(SyscallError::ProcessNotFound)?;
+    process::find_process(process::ProcessId(kid)).ok_or(SyscallError::ProcessNotFound)
+}
+
 /// The process `pid` if the caller is its tracer; ESRCH otherwise, as
 /// Linux answers requests about a process the caller does not trace.
 /// Reading or writing another process's memory needs this relationship;
@@ -308,8 +359,7 @@ fn traced_by_caller(
     pid: usize,
     caller_pid: u64,
 ) -> Result<alloc::sync::Arc<process::Process>, SyscallError> {
-    let target = process::find_process(process::ProcessId(pid as u64))
-        .ok_or(SyscallError::ProcessNotFound)?;
+    let target = by_vpid(pid)?;
     if target.tracer.load(core::sync::atomic::Ordering::Acquire) != caller_pid {
         return Err(SyscallError::ProcessNotFound);
     }
@@ -332,10 +382,29 @@ pub fn sys_ptrace(request: usize, pid: usize, addr: usize, data: usize) -> Sysca
             // threads hold, since any of them may trace (PR #33 review; the
             // main thread alone could be one with more than the rest, or
             // gone). No live thread: EPERM.
-            let (parent_permitted, parent_capable) = process::find_process(parent)
-                .and_then(|p| p.common_ptrace_caps())
+            let parent =
+                process::find_process(parent).ok_or(SyscallError::OperationNotPermitted)?;
+            let (parent_permitted, raw_capable) = parent
+                .common_ptrace_caps()
                 .ok_or(SyscallError::OperationNotPermitted)?;
-            if !may_trace_me(current_permitted(), parent_permitted, parent_capable) {
+            // CAP_SYS_PTRACE over the caller's user namespace
+            // (has_ns_capability); the credentials are kept for exec's
+            // ptracer_capable.
+            let tracer = process::TracerCred {
+                userns: parent.user_ns(),
+                euid: parent.credentials().euid,
+                has_ptrace: raw_capable,
+            };
+            let own_ns = caller.user_ns();
+            let parent_capable = tracer.capable_over(&own_ns);
+            let same_ns = tracer.userns.ident.id == own_ns.ident.id;
+            let parent = parent.pid;
+            if !may_trace_me(
+                current_permitted(),
+                parent_permitted,
+                parent_capable,
+                same_ns,
+            ) {
                 return Err(SyscallError::OperationNotPermitted);
             }
             let _guard = caller.cred_guard.lock();
@@ -343,15 +412,12 @@ pub fn sys_ptrace(request: usize, pid: usize, addr: usize, data: usize) -> Sysca
                 .tracer
                 .compare_exchange(0, parent.0, Ordering::AcqRel, Ordering::Acquire)
                 .map_err(|_| SyscallError::OperationNotPermitted)?;
-            caller
-                .tracer_capable
-                .store(parent_capable, Ordering::Release);
+            *caller.tracer_cred.lock() = Some(tracer);
             Ok(0)
         }
 
         PtraceRequest::Attach => {
-            let target = process::find_process(process::ProcessId(pid as u64))
-                .ok_or(SyscallError::ProcessNotFound)?;
+            let target = by_vpid(pid)?;
             // Checked and attached under the target's credential guard, as
             // a set-ID exec decides under it: the target's credentials
             // cannot change between the check and the attach.
@@ -370,10 +436,11 @@ pub fn sys_ptrace(request: usize, pid: usize, addr: usize, data: usize) -> Sysca
                 .tracer
                 .compare_exchange(0, caller_pid, Ordering::AcqRel, Ordering::Acquire)
                 .map_err(|_| SyscallError::OperationNotPermitted)?;
-            target.tracer_capable.store(
-                me.capable(process::linux_caps::CAP_SYS_PTRACE),
-                Ordering::Release,
-            );
+            *target.tracer_cred.lock() = Some(process::TracerCred {
+                userns: me.userns.clone(),
+                euid: me.creds.euid,
+                has_ptrace: me.caps.has(process::linux_caps::CAP_SYS_PTRACE),
+            });
             Ok(0)
         }
 
@@ -457,16 +524,20 @@ mod tests {
         let user = Caller {
             creds: Credentials::new(1000, 100),
             caps: none,
+            userns: crate::process::userns::initial(),
         };
-        let root = Caller::KERNEL;
+        let root = Caller::kernel();
         let bare_root = Caller {
             creds: Credentials::new(0, 0),
             caps: none,
+            userns: crate::process::userns::initial(),
         };
         let target = |creds: Credentials, permitted: LinuxCaps, dumpable: bool| PtraceTarget {
             creds,
             permitted,
             dumpable,
+            userns: crate::process::userns::initial(),
+            mm_userns: crate::process::userns::initial(),
         };
         let other = Credentials::new(1001, 100);
         let mut setuid_root = Credentials::new(1000, 100);
@@ -501,6 +572,44 @@ mod tests {
         let both = LinuxCaps::EMPTY.with(CAP_KILL).with(CAP_NET_RAW);
         assert_eq!(may_attach(10, &user, both, 20, &keeps, 0), Ok(()));
         assert_eq!(may_attach(10, &root, full, 20, &keeps, 0), Ok(()));
+        // Every capability in a user namespace of its own covers nothing
+        // outside it (cap_ptrace_access_check compares the sets only in
+        // one namespace): the same user cannot trace a process that kept
+        // CAP_NET_RAW in the initial namespace.
+        let own = crate::process::userns::UserNs::create(
+            &crate::process::userns::initial(),
+            1000,
+            100,
+            false,
+            false,
+        )
+        .unwrap();
+        let inside = Caller {
+            creds: user.creds,
+            caps: full,
+            userns: own.clone(),
+        };
+        assert_eq!(may_attach(10, &inside, full, 20, &keeps, 0), eperm);
+        // Within that namespace the rule is the usual one.
+        let mut keeps_inside = target(user.creds, LinuxCaps::EMPTY.with(CAP_NET_RAW), true);
+        keeps_inside.userns = own.clone();
+        assert_eq!(may_attach(10, &inside, full, 20, &keeps_inside, 0), Ok(()));
+        // Its root holds CAP_SYS_PTRACE there (ADR 0022 H4c): any IDs and
+        // capabilities in it, and a non-dumpable process whose memory is
+        // the namespace's, but not one whose memory came from the initial
+        // namespace (it joined later), nor anything outside.
+        let mut stranger = target(other, LinuxCaps::FULL, false);
+        stranger.userns = own.clone();
+        stranger.mm_userns = own.clone();
+        assert_eq!(may_attach(10, &inside, full, 20, &stranger, 0), Ok(()));
+        let mut joined = stranger.clone();
+        joined.mm_userns = crate::process::userns::initial();
+        assert_eq!(may_attach(10, &inside, full, 20, &joined, 0), eperm);
+        let bare_inside = Caller {
+            caps: none,
+            ..inside.clone()
+        };
+        assert_eq!(may_attach(10, &bare_inside, none, 20, &stranger, 0), eperm);
     }
 
     /// PTRACE_TRACEME (Linux's cap_ptrace_traceme): the parent's threads
@@ -511,12 +620,17 @@ mod tests {
         use process::linux_caps::{LinuxCaps, CAP_NET_RAW};
         let raw = LinuxCaps::EMPTY.with(CAP_NET_RAW);
         let none = LinuxCaps::EMPTY;
-        assert!(may_trace_me(none, none, false));
-        assert!(!may_trace_me(raw, none, false));
-        assert!(may_trace_me(raw, raw, false));
+        assert!(may_trace_me(none, none, false, true));
+        assert!(!may_trace_me(raw, none, false, true));
+        assert!(may_trace_me(raw, raw, false, true));
         assert!(
-            may_trace_me(raw, none, true),
+            may_trace_me(raw, none, true, true),
             "CAP_SYS_PTRACE in every thread"
         );
+        // A parent in another user namespace: only CAP_SYS_PTRACE (which
+        // the caller works out over its own namespace).
+        assert!(!may_trace_me(raw, LinuxCaps::FULL, false, false));
+        assert!(!may_trace_me(none, LinuxCaps::FULL, false, false));
+        assert!(may_trace_me(raw, none, true, false));
     }
 }

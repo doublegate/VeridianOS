@@ -114,6 +114,35 @@ impl VfsNode for MemfdNode {
         Ok(())
     }
 
+    /// fallocate as tmpfs does it (`shmem_fallocate`, see `TmpNode`), with
+    /// the seals: a punched hole is EPERM under F_SEAL_WRITE or
+    /// F_SEAL_FUTURE_WRITE, and an allocation ending past the size under
+    /// F_SEAL_GROW, even with KEEP_SIZE.
+    fn fallocate(&self, request: super::falloc::Request) -> Result<(), KernelError> {
+        use super::falloc::Op;
+        if !matches!(request.op, Op::Allocate | Op::PunchHole) {
+            return Err(super::falloc::unsupported());
+        }
+        super::falloc::begin(self, &request)?;
+        let mut pages = self.pages.lock();
+        if request.op == Op::PunchHole {
+            if self.sealed(seals::WRITE | seals::FUTURE_WRITE) {
+                return Err(eperm());
+            }
+            pages.zero(request.offset, request.len);
+        } else {
+            if self.sealed(seals::GROW) && request.end() > pages.size() {
+                return Err(eperm());
+            }
+            let size = request.new_size(pages.size());
+            if size > pages.size() {
+                pages.resize(size)?;
+            }
+        }
+        self.touch(pages.size());
+        Ok(())
+    }
+
     fn metadata(&self) -> Result<Metadata, KernelError> {
         Ok(self.metadata.read().clone())
     }
@@ -255,6 +284,32 @@ mod tests {
         m.add_seals(seals::SEAL).unwrap();
         assert!(eperm(m.add_seals(seals::SHRINK)));
         assert_eq!(m.seals(), Some(seals::GROW | seals::WRITE | seals::SEAL));
+    }
+
+    fn falloc(mode: u32, offset: usize, len: usize) -> super::super::falloc::Request {
+        super::super::falloc::Request::parse(mode, offset as i64, len as i64).unwrap()
+    }
+
+    /// fallocate under the seals (`shmem_fallocate`): F_SEAL_GROW refuses an
+    /// allocation ending past the size, even with KEEP_SIZE, but not one
+    /// within it; F_SEAL_WRITE refuses a punched hole.
+    #[test]
+    fn fallocate_honours_the_seals() {
+        use super::super::falloc::{KEEP_SIZE, PUNCH_HOLE};
+        let m = MemfdNode::new(Permissions::from_mode(0o777), 0, 0, true, 0);
+        m.fallocate(falloc(0, 0, 8192)).unwrap();
+        assert_eq!(m.metadata().unwrap().size, 8192);
+        m.write(0, b"abcd").unwrap();
+        m.fallocate(falloc(PUNCH_HOLE | KEEP_SIZE, 1, 2)).unwrap();
+        let mut buf = [0u8; 4];
+        m.read(0, &mut buf).unwrap();
+        assert_eq!(&buf, b"a\0\0d");
+        m.add_seals(seals::GROW).unwrap();
+        assert!(eperm(m.fallocate(falloc(0, 8000, 400))));
+        assert!(eperm(m.fallocate(falloc(KEEP_SIZE, 8000, 400))));
+        m.fallocate(falloc(0, 0, 8192)).unwrap();
+        m.add_seals(seals::WRITE).unwrap();
+        assert!(eperm(m.fallocate(falloc(PUNCH_HOLE | KEEP_SIZE, 0, 1))));
     }
 
     #[test]

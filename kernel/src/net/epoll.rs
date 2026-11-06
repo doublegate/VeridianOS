@@ -349,6 +349,18 @@ impl EpollNode {
         }
     }
 
+    /// kcmp's KCMP_EPOLL_TFD (Linux's get_epoll_tfile_raw_ptr): the open
+    /// file, by address, of the `nth` registration (from 0) of descriptor
+    /// `fd`, in the order Linux keeps them (by file within one number).
+    pub fn watched_file(&self, fd: i32, nth: usize) -> Option<usize> {
+        self.interest
+            .lock()
+            .range((fd, 0)..=(fd, usize::MAX))
+            .filter(|(_, i)| i.file.strong_count() > 0)
+            .nth(nth)
+            .map(|(&(_, file), _)| file)
+    }
+
     /// The epoll instance behind `file`, if it is one.
     pub fn of(file: &File) -> Option<&EpollNode> {
         file.node.as_any()?.downcast_ref::<EpollNode>()

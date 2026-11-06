@@ -411,9 +411,71 @@ pub fn list_devices() -> Vec<String> {
     }
 }
 
+/// `/proc/net/dev` for a reader in the initial network namespace
+/// (`initial`), which owns every registered device, or in a new one, which
+/// has only its own loopback interface, never used yet (Linux's
+/// dev_seq_show).
+pub fn proc_net_dev(initial: bool) -> String {
+    let mut out = String::from(
+        "Inter-|   Receive                                                |  Transmit\n face \
+         |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop \
+         fifo colls carrier compressed\n",
+    );
+    if initial {
+        let devices_lock = DEVICES.lock();
+        for d in devices_lock.iter().flatten() {
+            out.push_str(&dev_line(d.name(), &d.statistics()));
+        }
+    } else {
+        out.push_str(&dev_line("lo", &DeviceStatistics::default()));
+    }
+    out
+}
+
+/// One interface's `/proc/net/dev` line (Linux's dev_seq_printf_stats;
+/// FIFO, frame, compressed, multicast, collision and carrier counts are
+/// not kept, so 0).
+fn dev_line(name: &str, s: &DeviceStatistics) -> String {
+    alloc::format!(
+        "{:>6}:{:>8} {:>7} {:>4} {:>4} {:>4} {:>5} {:>10} {:>9} {:>8} {:>7} {:>4} {:>4} {:>4} \
+         {:>5} {:>7} {:>10}\n",
+        name,
+        s.rx_bytes,
+        s.rx_packets,
+        s.rx_errors,
+        s.rx_dropped,
+        0,
+        0,
+        0,
+        0,
+        s.tx_bytes,
+        s.tx_packets,
+        s.tx_errors,
+        s.tx_dropped,
+        0,
+        0,
+        0,
+        0
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_network_namespace_lists_only_its_loopback() {
+        let text = proc_net_dev(false);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].starts_with("Inter-|   Receive"));
+        assert!(lines[1].starts_with(" face |bytes    packets errs drop"));
+        assert!(lines[1].ends_with("colls carrier compressed"));
+        assert_eq!(
+            lines[2],
+            "    lo:       0       0    0    0    0     0          0         0        0       0    0    0    0     0       0          0"
+        );
+    }
 
     #[test]
     fn test_loopback_device() {

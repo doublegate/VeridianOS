@@ -73,6 +73,10 @@ jobs:
             # the map and the vendored Linux tables.
             - name: Syscall coverage reports are up to date
               run: python3 tools/compat/syscall_coverage.py --check
+            # The kernel config the root filesystems install claims
+            # only what the kernel implements (ADR 0023).
+            - name: Kernel config claims only implemented features
+              run: python3 tools/compat/gen_kconfig.py --check
             # Host-run checks of native libc code (PNG decoder, C++ EH,
             # division helpers, inet conversions, sscanf fields).
             - name: Native libc host tests

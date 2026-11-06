@@ -19,6 +19,7 @@
 #include <errno.h>
 #include <grp.h>
 #include <sys/stat.h>
+#include <limits.h>
 #include <poll.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
@@ -31,9 +32,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
+#include <termios.h>
+#include <sys/inotify.h>
+#include <sys/ioctl.h>
 #include <sys/fsuid.h>
 #include <sys/mman.h>
+#include <sys/mount.h>
 #include <sys/prctl.h>
+#include <sys/personality.h>
 #include <sys/resource.h>
 #include <sys/sysinfo.h>
 #include <sys/statfs.h>
@@ -41,9 +47,11 @@
 #include <sys/time.h>
 #include <sys/times.h>
 #include <sys/select.h>
+#include <sys/sendfile.h>
 #include <spawn.h>
 #include <sys/wait.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
 #include <sys/un.h>
 #include <sys/auxv.h>
 #include <sys/signalfd.h>
@@ -58,6 +66,7 @@
 #include <sys/random.h>
 #include <linux/futex.h>
 #include <sys/timerfd.h>
+#include <sys/timex.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -5291,6 +5300,170 @@ static void test_dev_shm(void)
     report("dev_shm_maps_the_file_s_pages", ok, why);
 }
 
+/* fallocate (N-208): BlockFS allocates (statfs sees the blocks go), keeps
+ * the size with KEEP_SIZE and punches holes that read as zero; an
+ * allocation larger than the free space is ENOSPC at once, the file
+ * unchanged (LTP's 300 MB loop image); tmpfs grows the file; a memfd's
+ * GROW seal refuses it; and the VFS checks come in Linux's order. */
+#ifndef FALLOC_FL_ZERO_RANGE
+#define FALLOC_FL_ZERO_RANGE 0x10 /* <linux/falloc.h>; musl's fcntl.h lacks it */
+#endif
+static void test_fallocate(void)
+{
+    char why[200];
+    struct statfs a, b;
+    struct stat st;
+    long before = -1, after = -1;
+    int fd = open("/tmp/musl_falloc", O_CREAT | O_RDWR | O_TRUNC, 0600);
+    int ok = fd >= 0 && fstatfs(fd, &a) == 0 && write(fd, "abc", 3) == 3 &&
+             fallocate(fd, 0, 0, 8 * 4096) == 0 && fstat(fd, &st) == 0 &&
+             st.st_size == 8 * 4096 && fstatfs(fd, &b) == 0;
+    if (ok) {
+        before = (long)a.f_bfree;
+        after = (long)b.f_bfree;
+    }
+    char buf[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+    ok = ok && after <= before - 7 && pread(fd, buf, 8, 0) == 8 && memcmp(buf, "abc\0\0\0\0\0", 8) == 0;
+    ok = ok && fallocate(fd, FALLOC_FL_KEEP_SIZE, 8 * 4096, 4096) == 0 && fstat(fd, &st) == 0 &&
+         st.st_size == 8 * 4096;
+    ok = ok && fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 1, 1) == 0 &&
+         pread(fd, buf, 3, 0) == 3 && memcmp(buf, "a\0c", 3) == 0;
+    errno = 0;
+    int big = fd >= 0 ? fallocate(fd, 0, 0, (off_t)b.f_bfree * 4096 * 2 + (1 << 20)) : 0;
+    int e_big = errno;
+    ok = ok && big == -1 && e_big == ENOSPC && fstat(fd, &st) == 0 && st.st_size == 8 * 4096;
+    if (fd >= 0)
+        close(fd);
+    unlink("/tmp/musl_falloc");
+    snprintf(why, sizeof(why), "bfree %ld -> %ld big=%d errno=%d size=%ld", before, after, big,
+             e_big, (long)st.st_size);
+    report("fallocate_blockfs", ok, why);
+
+    fd = open("/dev/shm/musl_falloc", O_CREAT | O_RDWR | O_TRUNC, 0600);
+    ok = fd >= 0 && fallocate(fd, 0, 4096, 4096) == 0 && fstat(fd, &st) == 0 &&
+         st.st_size == 8192;
+    int e_zero = 0;
+    errno = 0;
+    if (fd >= 0 && fallocate(fd, FALLOC_FL_ZERO_RANGE, 0, 1) != 0)
+        e_zero = errno;
+    ok = ok && e_zero == EOPNOTSUPP;
+    if (fd >= 0)
+        close(fd);
+    unlink("/dev/shm/musl_falloc");
+    int mfd = memfd_create("falloc", MFD_ALLOW_SEALING);
+    int e_seal = 0;
+    ok = ok && mfd >= 0 && fallocate(mfd, 0, 0, 4096) == 0 &&
+         fcntl(mfd, F_ADD_SEALS, F_SEAL_GROW) == 0;
+    errno = 0;
+    if (mfd >= 0 && fallocate(mfd, FALLOC_FL_KEEP_SIZE, 0, 8192) != 0)
+        e_seal = errno;
+    ok = ok && e_seal == EPERM && fallocate(mfd, 0, 0, 4096) == 0;
+    if (mfd >= 0)
+        close(mfd);
+    snprintf(why, sizeof(why), "zero_range errno=%d grow-sealed errno=%d", e_zero, e_seal);
+    report("fallocate_tmpfs_memfd", ok, why);
+
+    /* EINVAL before EOPNOTSUPP before EBADF; then the file type. */
+    int ro = open("/tmp", O_RDONLY | O_DIRECTORY), p[2] = {-1, -1};
+    int e[6] = {0};
+    errno = 0;
+    if (fallocate(-1, 0x100, 0, 0) != 0)
+        e[0] = errno;
+    errno = 0;
+    if (fallocate(-1, 0x100, 0, 1) != 0)
+        e[1] = errno;
+    errno = 0;
+    if (fallocate(-1, FALLOC_FL_PUNCH_HOLE, 0, 1) != 0)
+        e[2] = errno;
+    errno = 0;
+    if (fallocate(ro, 0, 0, 1) != 0)
+        e[3] = errno;
+    if (pipe(p) == 0) {
+        errno = 0;
+        if (fallocate(p[1], 0, 0, 1) != 0)
+            e[4] = errno;
+    }
+    fd = open("/tmp/musl_falloc", O_CREAT | O_RDWR | O_TRUNC, 0600);
+    errno = 0;
+    if (fd >= 0 && fallocate(fd, 0, 0x7fffffffffffffffLL, 1) != 0)
+        e[5] = errno;
+    ok = e[0] == EINVAL && e[1] == EOPNOTSUPP && e[2] == EOPNOTSUPP && e[3] == EBADF &&
+         e[4] == ESPIPE && e[5] == EFBIG;
+    for (int i = 0; i < 2; i++)
+        if (p[i] >= 0)
+            close(p[i]);
+    if (ro >= 0)
+        close(ro);
+    if (fd >= 0)
+        close(fd);
+    unlink("/tmp/musl_falloc");
+    snprintf(why, sizeof(why), "errnos %d %d %d %d %d %d", e[0], e[1], e[2], e[3], e[4], e[5]);
+    report("fallocate_checks_in_linux_order", ok, why);
+}
+
+/* utimensat with two UTIME_OMIT times returns 0 without looking at the
+ * path, and on a descriptor (NULL path) takes no flags. x86_64 also has
+ * utime, utimes and futimesat, which musl routes through utimensat, so
+ * they are called directly: whole seconds, microseconds (EINVAL outside
+ * 0..999999, UTIME_NOW included), a path under a directory fd, and a NULL
+ * path acting on the fd. */
+static void test_utimes(void)
+{
+    char why[200];
+    struct timespec omit[2] = {{0, UTIME_OMIT}, {0, UTIME_OMIT}};
+    int fd = open("/tmp/musl_utimes", O_CREAT | O_RDWR | O_TRUNC, 0600);
+    errno = 0;
+    int omit_ok = utimensat(AT_FDCWD, "/tmp/no/such/file", omit, 0) == 0;
+    errno = 0;
+    long r = fd >= 0 ? syscall(SYS_utimensat, fd, NULL, NULL, AT_SYMLINK_NOFOLLOW) : 0;
+    int e_flags = errno;
+    snprintf(why, sizeof(why), "omit=%d fd+flags=%ld errno=%d", omit_ok, r, e_flags);
+    report("utimensat_omit_and_fd_flags", fd >= 0 && omit_ok && r == -1 && e_flags == EINVAL,
+           why);
+#if defined(__x86_64__)
+    struct stat st;
+    long t[2] = {100, 200}; /* struct utimbuf: actime, modtime */
+    int ok = fd >= 0 && syscall(SYS_utime, "/tmp/musl_utimes", t) == 0 &&
+             stat("/tmp/musl_utimes", &st) == 0 && st.st_atime == 100 && st.st_mtime == 200;
+    int step = ok ? 1 : 0;
+    struct timeval tv[2] = {{300, 5}, {400, 999999}};
+    ok = ok && syscall(SYS_utimes, "/tmp/musl_utimes", tv) == 0 &&
+         stat("/tmp/musl_utimes", &st) == 0 && st.st_atime == 300 && st.st_mtime == 400;
+    step += ok;
+    int dir = open("/tmp", O_RDONLY | O_DIRECTORY);
+    tv[0].tv_sec = 500;
+    tv[1].tv_sec = 600;
+    ok = ok && dir >= 0 && syscall(SYS_futimesat, dir, "musl_utimes", tv) == 0 &&
+         fstat(fd, &st) == 0 && st.st_atime == 500 && st.st_mtime == 600;
+    step += ok;
+    tv[0].tv_sec = 700;
+    tv[1].tv_sec = 800;
+    ok = ok && syscall(SYS_futimesat, fd, NULL, tv) == 0 && fstat(fd, &st) == 0 &&
+         st.st_atime == 700 && st.st_mtime == 800;
+    step += ok;
+    int e[2] = {0, 0};
+    tv[1].tv_usec = 1000000;
+    errno = 0;
+    if (syscall(SYS_utimes, "/tmp/musl_utimes", tv) != 0)
+        e[0] = errno;
+    tv[1].tv_usec = UTIME_NOW;
+    errno = 0;
+    if (syscall(SYS_futimesat, fd, NULL, tv) != 0)
+        e[1] = errno;
+    ok = ok && e[0] == EINVAL && e[1] == EINVAL && fstat(fd, &st) == 0 && st.st_mtime == 800 &&
+         syscall(SYS_utime, "/tmp/musl_utimes", NULL) == 0 &&
+         syscall(SYS_utimes, "/tmp/musl_utimes", NULL) == 0;
+    if (dir >= 0)
+        close(dir);
+    snprintf(why, sizeof(why), "steps=%d einval=%d,%d atime=%ld mtime=%ld", step, e[0], e[1],
+             (long)st.st_atime, (long)st.st_mtime);
+    report("legacy_utime_utimes_futimesat", ok, why);
+#endif
+    if (fd >= 0)
+        close(fd);
+    unlink("/tmp/musl_utimes");
+}
+
 /* statfs and fstatfs: each filesystem reports Linux's magic number, tmpfs
  * its page counts against the size limit, and pipes, sockets and
  * anonymous-inode files their pseudo filesystems (fs/statfs.rs). */
@@ -5370,12 +5543,58 @@ static void test_statfs(void)
     report("statfs_errors", ok, why);
 }
 
+static void test_record_locks(void);
+static void test_fcntl_flags(void);
+static void test_vectored_io(void);
+static void test_link_errors(void);
+static void test_stat_numbers(void);
+static void test_open_flags(void);
+static void test_text_busy(void);
+static void test_inotify_events(void);
+static void test_pidfd(void);
+static void test_clone3(void);
+static void test_clone_share(void);
+static void test_kcmp_process_vm(void);
+static void test_personality(void);
+static void test_namespaces_uts(void);
+static void test_namespaces_time(void);
+static void test_namespaces_mnt(void);
+static void test_mount_calls(void);
+static void test_mount_flags(void);
+static void test_mount_no_escape(void);
+static void test_pivot_root(void);
+static void test_user_ns(void);
+static void test_pid_ns(void);
+static void test_net_ns(void);
+
 /* Tests `--only NAME` can run alone (for debugging a single test). */
 static const struct {
     const char *name;
     void (*fn)(void);
 } only_tests[] = {
     {"review_fixes", test_review_fixes},
+    {"record_locks", test_record_locks},
+    {"fcntl_flags", test_fcntl_flags},
+    {"vectored_io", test_vectored_io},
+    {"link_errors", test_link_errors},
+    {"stat_numbers", test_stat_numbers},
+    {"open_flags", test_open_flags},
+    {"text_busy", test_text_busy},
+    {"inotify_events", test_inotify_events},
+    {"pidfd", test_pidfd},
+    {"clone3", test_clone3},
+    {"clone_share", test_clone_share},
+    {"kcmp_process_vm", test_kcmp_process_vm},
+    {"personality", test_personality},
+    {"namespaces_uts", test_namespaces_uts},
+    {"namespaces_time", test_namespaces_time},
+    {"namespaces_mnt", test_namespaces_mnt},
+    {"mount_calls", test_mount_calls},
+    {"mount_flags", test_mount_flags},
+    {"pivot_root", test_pivot_root},
+    {"user_ns", test_user_ns},
+    {"pid_ns", test_pid_ns},
+    {"net_ns", test_net_ns},
     {"threads", test_threads},
     {"cow_race", test_cow_race},
     {"signals", test_signals},
@@ -5401,10 +5620,4682 @@ static const struct {
     {"statfs", test_statfs},
 };
 
+/* Interval timers (setitimer, getitimer, alarm): ITIMER_REAL sends SIGALRM
+ * and an interval one keeps going (re-armed as each SIGALRM is taken);
+ * getitimer reads back what was set; ITIMER_PROF fires on CPU time; bad
+ * arguments are EINVAL; alarm returns the seconds left of the timer it
+ * replaces; a fork child starts with none. */
+static volatile int alrm_count, prof_count;
+static void count_alrm(int sig)
+{
+    (void)sig;
+    alrm_count++;
+}
+static void count_prof(int sig)
+{
+    (void)sig;
+    prof_count++;
+}
+
+static void test_itimers(void)
+{
+    char why[200];
+    struct sigaction sa, old_alrm, old_prof;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = count_alrm;
+    sigaction(SIGALRM, &sa, &old_alrm);
+    sa.sa_handler = count_prof;
+    sigaction(SIGPROF, &sa, &old_prof);
+
+    /* A 20 ms interval timer: three SIGALRMs, then disarmed. */
+    struct itimerval it = {{0, 20000}, {0, 20000}}, got;
+    int set = setitimer(ITIMER_REAL, &it, NULL) == 0;
+    int got_ok = getitimer(ITIMER_REAL, &got) == 0 && got.it_interval.tv_sec == 0 &&
+               got.it_interval.tv_usec == 20000 && got.it_value.tv_sec == 0 &&
+               got.it_value.tv_usec > 0 && got.it_value.tv_usec <= 20000;
+    for (int i = 0; i < 200 && alrm_count < 3; i++)
+        usleep(10000);
+    struct itimerval zero = {{0, 0}, {0, 0}};
+    int disarmed = setitimer(ITIMER_REAL, &zero, &got) == 0 && got.it_interval.tv_usec == 20000;
+    int count = alrm_count;
+    usleep(60000);
+    int stopped = alrm_count == count && getitimer(ITIMER_REAL, &got) == 0 &&
+                  got.it_value.tv_sec == 0 && got.it_value.tv_usec == 0 &&
+                  got.it_interval.tv_usec == 0;
+    snprintf(why, sizeof(why), "set=%d read=%d count=%d disarmed=%d stopped=%d", set, got_ok, count,
+             disarmed, stopped);
+    report("itimer_real_interval", set && got_ok && count >= 3 && disarmed && stopped, why);
+
+    /* ITIMER_PROF on CPU time: a busy loop gets SIGPROF. */
+    struct itimerval prof = {{0, 0}, {0, 10000}};
+    int pset = setitimer(ITIMER_PROF, &prof, NULL) == 0;
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    volatile unsigned long spin = 0;
+    do {
+        for (int i = 0; i < 100000; i++)
+            spin++;
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+    } while (prof_count == 0 && t1.tv_sec - t0.tv_sec < 5);
+    (void)spin;
+    int pread = getitimer(ITIMER_PROF, &got) == 0 && got.it_value.tv_sec == 0 &&
+                got.it_value.tv_usec == 0;
+    snprintf(why, sizeof(why), "set=%d fired=%d disarmed=%d", pset, prof_count, pread);
+    report("itimer_prof_counts_cpu_time", pset && prof_count == 1 && pread, why);
+
+    /* EINVAL: a bad timer, a bad tv_usec, a negative tv_sec. */
+    int e[3] = {0, 0, 0};
+    struct itimerval bad = {{0, 0}, {0, 1000000}};
+    errno = 0;
+    if (setitimer(3, &zero, NULL) != 0)
+        e[0] = errno;
+    errno = 0;
+    if (setitimer(ITIMER_REAL, &bad, NULL) != 0)
+        e[1] = errno;
+    bad.it_value.tv_usec = 0;
+    bad.it_value.tv_sec = -1;
+    errno = 0;
+    if (setitimer(ITIMER_VIRTUAL, &bad, NULL) != 0)
+        e[2] = errno;
+    errno = 0;
+    int gbad = getitimer(3, &got) == -1 && errno == EINVAL;
+    int einval = e[0] == EINVAL && e[1] == EINVAL && e[2] == EINVAL && gbad;
+
+    /* alarm: seconds left of the timer it replaces, rounded up. */
+    unsigned a0 = alarm(10);
+    unsigned a1 = alarm(0);
+    struct itimerval half = {{0, 0}, {2, 600000}};
+    setitimer(ITIMER_REAL, &half, NULL);
+    unsigned a2 = alarm(0);
+    int alarms = a0 == 0 && a1 == 10 && a2 == 3;
+
+    /* A fork child has no timers. */
+    struct itimerval ten = {{0, 0}, {10, 0}};
+    setitimer(ITIMER_REAL, &ten, NULL);
+    int fds[2] = {-1, -1};
+    pipe(fds);
+    pid_t pid = fork();
+    if (pid == 0) {
+        struct itimerval c;
+        char r = getitimer(ITIMER_REAL, &c) == 0 && c.it_value.tv_sec == 0 && c.it_value.tv_usec == 0;
+        write(fds[1], &r, 1);
+        _exit(0);
+    }
+    char child = 0;
+    if (pid > 0) {
+        read(fds[0], &child, 1);
+        waitpid(pid, NULL, 0);
+    }
+    alarm(0);
+    close(fds[0]);
+    close(fds[1]);
+    sigaction(SIGALRM, &old_alrm, NULL);
+    sigaction(SIGPROF, &old_prof, NULL);
+    snprintf(why, sizeof(why), "einval=%d,%d,%d,%d alarm=%u,%u,%u child=%d", e[0], e[1], e[2],
+             gbad, a0, a1, a2, child);
+    report("itimer_checks_alarm_and_fork", einval && alarms && child == 1, why);
+}
+
+/* POSIX timers (timer_create, timer_settime, timer_gettime,
+ * timer_getoverrun, timer_delete): a periodic timer's signal carries
+ * SI_TIMER and its value; a blocked periodic timer is queued once and
+ * reports the expiries missed as its overrun; SIGEV_NONE counts down;
+ * TIMER_ABSTIME in the past fires at once; a deleted timer's pending
+ * signal is dropped; an ignored periodic timer is parked and resumes when
+ * caught again; CPU-clock timers fire on CPU time; a fork child has none. */
+static volatile int ptimer_count, ptimer_code, ptimer_value;
+static void ptimer_handler(int sig, siginfo_t *si, void *uc)
+{
+    (void)sig;
+    (void)uc;
+    ptimer_code = si->si_code;
+    ptimer_value = si->si_value.sival_int;
+    ptimer_count++;
+}
+
+static int ptimer_make(clockid_t clock, int notify, int sig, int value, timer_t *t)
+{
+    struct sigevent sev;
+    memset(&sev, 0, sizeof(sev));
+    sev.sigev_notify = notify;
+    sev.sigev_signo = sig;
+    sev.sigev_value.sival_int = value;
+    return timer_create(clock, &sev, t);
+}
+
+static int ptimer_wait_count(int n)
+{
+    for (int i = 0; i < 300 && ptimer_count < n; i++)
+        usleep(10000);
+    return ptimer_count >= n;
+}
+
+static void test_posix_timers(void)
+{
+    char why[256];
+    int sig = SIGRTMIN + 3;
+    struct sigaction sa, old_sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = ptimer_handler;
+    sa.sa_flags = SA_SIGINFO;
+    sigaction(sig, &sa, &old_sa);
+
+    /* Periodic, caught: SI_TIMER with the timer's value. */
+    timer_t t;
+    int made = ptimer_make(CLOCK_MONOTONIC, SIGEV_SIGNAL, sig, 4242, &t) == 0;
+    struct itimerspec ten_ms = {{0, 10000000}, {0, 10000000}}, cur;
+    int set = made && timer_settime(t, 0, &ten_ms, NULL) == 0;
+    int fired = set && ptimer_wait_count(3);
+    int got = timer_gettime(t, &cur) == 0 && cur.it_interval.tv_nsec == 10000000 &&
+              cur.it_value.tv_sec == 0 && cur.it_value.tv_nsec > 0 &&
+              cur.it_value.tv_nsec <= 10000000;
+    int del = timer_delete(t) == 0;
+    snprintf(why, sizeof(why), "made=%d set=%d fired=%d(%d) code=%d value=%d get=%d del=%d", made,
+             set, fired, ptimer_count, ptimer_code, ptimer_value, got, del);
+    report("posix_timer_periodic_siginfo",
+           made && set && fired && ptimer_code == SI_TIMER && ptimer_value == 4242 && got && del,
+           why);
+
+    /* Blocked periodic: queued once, the missed expiries as its overrun,
+     * and the same through signalfd. */
+    sigset_t set1, old_mask;
+    sigemptyset(&set1);
+    sigaddset(&set1, sig);
+    sigprocmask(SIG_BLOCK, &set1, &old_mask);
+    struct itimerspec five_ms = {{0, 5000000}, {0, 5000000}};
+    made = ptimer_make(CLOCK_MONOTONIC, SIGEV_SIGNAL, sig, 7, &t) == 0;
+    set = made && timer_settime(t, 0, &five_ms, NULL) == 0;
+    usleep(60000);
+    struct timespec wait = {1, 0};
+    siginfo_t si;
+    memset(&si, 0, sizeof(si));
+    int taken = sigtimedwait(&set1, &si, &wait) == sig;
+    /* Taking the signal re-arms the timer, so on a slow machine its next
+     * expiry can be queued before the second wait (seen on RISC-V): a
+     * second signal is a duplicate only if it came before that expiry.
+     * The gap is measured from before timer_gettime, so a stall between
+     * the two (seen on AArch64 with four emulated CPUs) is counted. */
+    struct itimerspec next;
+    struct timespec zero = {0, 0}, w0, w1;
+    clock_gettime(CLOCK_MONOTONIC, &w0);
+    long next_ns = timer_gettime(t, &next) == 0 ? next.it_value.tv_nsec : 0;
+    int overrun = si.si_overrun, getover = timer_getoverrun(t);
+    errno = 0;
+    int again = sigtimedwait(&set1, &si, &zero);
+    int again_errno = errno;
+    int eagain = again == -1 && again_errno == EAGAIN;
+    clock_gettime(CLOCK_MONOTONIC, &w1);
+    long gap = (w1.tv_sec - w0.tv_sec) * 1000000000L + (w1.tv_nsec - w0.tv_nsec);
+    int once = eagain || (again == sig && gap + 1000000 >= next_ns);
+    int fd = signalfd(-1, &set1, SFD_CLOEXEC);
+    struct signalfd_siginfo ssi;
+    memset(&ssi, 0, sizeof(ssi));
+    usleep(20000);
+    int sfd = fd >= 0 && read(fd, &ssi, sizeof(ssi)) == (ssize_t)sizeof(ssi) &&
+              ssi.ssi_code == SI_TIMER && ssi.ssi_tid == (unsigned)(intptr_t)t &&
+              ssi.ssi_int == 7 && ssi.ssi_overrun >= 1;
+    if (fd >= 0)
+        close(fd);
+    struct itimerspec old;
+    struct itimerspec off = {{0, 0}, {0, 0}};
+    int oldok = timer_settime(t, 0, &off, &old) == 0 && old.it_interval.tv_nsec == 5000000;
+    timer_delete(t);
+    snprintf(why, sizeof(why),
+             "made=%d set=%d taken=%d overrun=%d getoverrun=%d once=%d(%d,%d,%ld,%ld) "
+             "sfd=%d(%d,%u,%u) old=%d",
+             made, set, taken, overrun, getover, once, again, again_errno, gap, next_ns, sfd,
+             ssi.ssi_code, ssi.ssi_tid, ssi.ssi_overrun, oldok);
+    report("posix_timer_overrun_when_blocked",
+           made && set && taken && overrun >= 5 && getover == overrun && once && sfd && oldok,
+           why);
+
+    /* SIGEV_NONE counts down; TIMER_ABSTIME in the past fires at once; a
+     * deleted timer's pending signal is dropped; the default sigevent is
+     * SIGALRM with the timer id. */
+    timer_t n;
+    int none = ptimer_make(CLOCK_MONOTONIC, SIGEV_NONE, 0, 0, &n) == 0;
+    struct itimerspec sec = {{0, 0}, {1, 0}}, ms = {{0, 0}, {0, 1000000}};
+    none = none && timer_settime(n, 0, &sec, NULL) == 0 && timer_gettime(n, &cur) == 0 &&
+           cur.it_value.tv_sec == 0 && cur.it_value.tv_nsec > 500000000;
+    none = none && timer_settime(n, 0, &ms, NULL) == 0 && usleep(10000) == 0 &&
+           timer_gettime(n, &cur) == 0 && cur.it_value.tv_sec == 0 && cur.it_value.tv_nsec == 0;
+    timer_delete(n);
+    made = ptimer_make(CLOCK_REALTIME, SIGEV_SIGNAL, sig, 9, &t) == 0;
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+    struct itimerspec past = {{0, 0}, {now.tv_sec - 1, 0}};
+    sigset_t pend;
+    int abs = made && timer_settime(t, TIMER_ABSTIME, &past, NULL) == 0 &&
+              sigpending(&pend) == 0 && sigismember(&pend, sig);
+    int dropped = timer_delete(t) == 0 && sigtimedwait(&set1, &si, &zero) == -1 && errno == EAGAIN;
+    sigset_t alrm;
+    sigemptyset(&alrm);
+    sigaddset(&alrm, SIGALRM);
+    sigset_t alrm_old;
+    sigprocmask(SIG_BLOCK, &alrm, &alrm_old);
+    timer_t d;
+    memset(&si, 0, sizeof(si));
+    int dflt = timer_create(CLOCK_MONOTONIC, NULL, &d) == 0 && timer_settime(d, 0, &ms, NULL) == 0 &&
+               sigtimedwait(&alrm, &si, &wait) == SIGALRM && si.si_code == SI_TIMER &&
+               si.si_value.sival_int == (int)(intptr_t)d;
+    timer_delete(d);
+    sigprocmask(SIG_SETMASK, &alrm_old, NULL);
+    snprintf(why, sizeof(why), "none=%d abs=%d dropped=%d dflt=%d", none, abs, dropped, dflt);
+    report("posix_timer_none_abstime_delete", none && abs && dropped && dflt, why);
+    sigprocmask(SIG_SETMASK, &old_mask, NULL);
+
+    /* Ignored periodic timer: parked, then queued again once caught. */
+    struct sigaction ign;
+    memset(&ign, 0, sizeof(ign));
+    ign.sa_handler = SIG_IGN;
+    sigaction(sig, &ign, NULL);
+    made = ptimer_make(CLOCK_MONOTONIC, SIGEV_SIGNAL, sig, 11, &t) == 0;
+    set = made && timer_settime(t, 0, &five_ms, NULL) == 0;
+    usleep(30000);
+    ptimer_count = 0;
+    sigaction(sig, &sa, NULL);
+    int resumed = set && ptimer_wait_count(2) && ptimer_value == 11;
+    timer_delete(t);
+
+    /* CPU time: a process CPU-clock timer fires while the process spins. */
+    ptimer_count = 0;
+    made = ptimer_make(CLOCK_PROCESS_CPUTIME_ID, SIGEV_SIGNAL, sig, 12, &t) == 0;
+    struct itimerspec cpu = {{0, 0}, {0, 20000000}};
+    set = made && timer_settime(t, 0, &cpu, NULL) == 0;
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    volatile unsigned long spin = 0;
+    do {
+        for (int i = 0; i < 100000; i++)
+            spin++;
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+    } while (ptimer_count == 0 && t1.tv_sec - t0.tv_sec < 5);
+    (void)spin;
+    int cpuok = set && ptimer_count == 1 && ptimer_value == 12 && timer_gettime(t, &cur) == 0 &&
+                cur.it_value.tv_sec == 0 && cur.it_value.tv_nsec == 0;
+    timer_delete(t);
+
+    /* Errors, and a fork child without timers. */
+    timer_t bad = (timer_t)(intptr_t)12345;
+    errno = 0;
+    int e1 = timer_gettime(bad, &cur) == -1 && errno == EINVAL;
+    errno = 0;
+    int e2 = timer_create(1234, NULL, &t) == -1 && errno == EINVAL;
+    errno = 0;
+    int e3 = timer_create(CLOCK_MONOTONIC_RAW, NULL, &t) == -1 && errno == EOPNOTSUPP;
+    made = timer_create(CLOCK_MONOTONIC, NULL, &t) == 0;
+    struct itimerspec badns = {{0, 0}, {0, 1000000000}};
+    errno = 0;
+    int e4 = made && timer_settime(t, 0, &badns, NULL) == -1 && errno == EINVAL;
+    int fds[2] = {-1, -1};
+    pipe(fds);
+    pid_t pid = fork();
+    if (pid == 0) {
+        errno = 0;
+        char r = timer_gettime(t, &cur) == -1 && errno == EINVAL;
+        write(fds[1], &r, 1);
+        _exit(0);
+    }
+    char child = 0;
+    if (pid > 0) {
+        read(fds[0], &child, 1);
+        waitpid(pid, NULL, 0);
+    }
+    close(fds[0]);
+    close(fds[1]);
+    timer_delete(t);
+    /* musl's timer_delete returns the raw -EINVAL without errno: ask the
+     * kernel directly. */
+    errno = 0;
+    int e5 = syscall(SYS_timer_delete, (int)(intptr_t)t) == -1 && errno == EINVAL;
+    sigaction(sig, &old_sa, NULL);
+    snprintf(why, sizeof(why), "resumed=%d(%d) cpu=%d errors=%d,%d,%d,%d,%d child=%d", resumed,
+             ptimer_count, cpuok, e1, e2, e3, e4, e5, child);
+    report("posix_timer_ignore_cpu_errors_fork",
+           resumed && cpuok && e1 && e2 && e3 && e4 && e5 && child == 1, why);
+}
+
+/* restart_syscall: a relative sleep, or a poll with a timeout, that a stop
+ * interrupts carries on to its first deadline once the process continues,
+ * instead of starting the whole duration again (Linux's restart block).
+ * The child tells the parent it is about to wait, is stopped 50 ms in and
+ * continued at 300 ms; it must then return at once, not 300 ms later.
+ * Where there is no poll syscall (arm64, riscv64) musl's poll is ppoll,
+ * which Linux reruns with the time left when the stop came (fs/select.c
+ * poll_select_finish): about 250 ms more after the continue. */
+enum { RESTART_SLEEP, RESTART_POLL, RESTART_PPOLL };
+/* One try. Returns 1, without reporting, when the stop came too late to
+ * test anything and tries remain: the child had finished its wait before
+ * the parent sent SIGSTOP (the parent went unscheduled for over 250 ms,
+ * seen on GitHub's 4-CPU runner, PR #35). */
+static int restart_attempt(const char *name, int mode, int tries)
+{
+    char why[200];
+    int ready[2] = {-1, -1}, result[2] = {-1, -1}, idle[2] = {-1, -1};
+    if (pipe(ready) != 0 || pipe(result) != 0 || pipe(idle) != 0) {
+        report(name, 0, "pipe failed");
+        return 0;
+    }
+    pid_t pid = fork();
+    if (pid == 0) {
+        long long out[4];
+        char c = 1;
+        write(ready[1], &c, 1);
+        out[0] = mono_ns();
+        if (mode != RESTART_SLEEP) {
+            struct pollfd p = {idle[0], POLLIN, 0};
+            out[2] = poll(&p, 1, 300);
+        } else {
+            struct timespec req = {0, 300000000L}, rem = {0, 0};
+            out[2] = nanosleep(&req, &rem);
+        }
+        out[3] = errno;
+        out[1] = mono_ns();
+        write(result[1], out, sizeof(out));
+        _exit(0);
+    }
+    char c = 0;
+    long long out[4] = {0, 0, -2, 0}, cont = 0, sent = 0;
+    int stopped = 0;
+    if (pid > 0 && read(ready[0], &c, 1) == 1) {
+        usleep(50000);
+        int st = 0;
+        int killed = kill(pid, SIGSTOP) == 0;
+        /* Taken after kill returns: the parent can lose the CPU between
+         * any earlier reading and the kill itself (1.7 s seen on GitHub's
+         * 4-CPU runner), and a child that finished in that gap was never
+         * stopped. One that finishes after this was stopped too late, and
+         * the kernel is wrong. */
+        sent = mono_ns();
+        stopped = killed && waitpid(pid, &st, WUNTRACED) == pid && WIFSTOPPED(st);
+        usleep(250000);
+        cont = mono_ns();
+        kill(pid, SIGCONT);
+        read(result[0], out, sizeof(out));
+        waitpid(pid, NULL, 0);
+    }
+    for (int i = 0; i < 2; i++) {
+        close(ready[i]);
+        close(result[i]);
+        close(idle[i]);
+    }
+    if (!stopped && out[1] != 0 && out[1] < sent && tries > 1)
+        return 1;
+    long long slept = (out[1] - out[0]) / 1000000, after = (out[1] - cont) / 1000000;
+    snprintf(why, sizeof(why),
+             "stopped=%d ret=%lld errno=%lld slept=%lldms after_cont=%lldms tries_left=%d",
+             stopped, out[2], out[3], slept, after, tries - 1);
+    if (mode == RESTART_PPOLL)
+        report(name, stopped && out[2] == 0 && slept >= 450 && after >= 150 && after < 450, why);
+    else
+        /* Its deadline passed while it was stopped: it ends soon after
+         * SIGCONT. A sleep started again would take 300 ms more; the margin
+         * below that is for slow CI guests (200 ms seen on GitHub's 4-CPU
+         * runner, PR #35). */
+        report(name, stopped && out[2] == 0 && slept >= 300 && after < 280, why);
+    return 0;
+}
+
+static void restart_after_stop(const char *name, int mode)
+{
+    for (int tries = 5; restart_attempt(name, mode, tries); tries--)
+        ;
+}
+
+/* adjtimex and clock_adjtime: Linux's NTP state is read by everyone and
+ * changed only with CAP_SYS_TIME; ADJ_SETOFFSET steps CLOCK_REALTIME and
+ * ADJ_TAI sets CLOCK_TAI's offset. */
+static long long ts_ns(struct timespec t)
+{
+    return (long long)t.tv_sec * 1000000000LL + t.tv_nsec;
+}
+
+static void test_adjtimex(void)
+{
+    char why[200];
+    struct timex tx;
+    memset(&tx, 0, sizeof(tx));
+    int state = adjtimex(&tx);
+    memset(&tx, 0, sizeof(tx));
+    int raw = syscall(SYS_adjtimex, &tx);
+    int defaults = tx.tick == 10000 && tx.precision == 1 && tx.tolerance == 32768000 &&
+                   tx.time.tv_sec >= 1700000000;
+    /* An invalid tick is refused before anything is written back. */
+    memset(&tx, 0, sizeof(tx));
+    tx.modes = ADJ_TICK;
+    tx.tick = 1;
+    tx.offset = 12345;
+    errno = 0;
+    int badtick = adjtimex(&tx) == -1 && errno == EINVAL && tx.offset == 12345 && tx.tick == 1;
+    int user = 0;
+    pid_t pid = fork();
+    if (pid == 0) {
+        setresuid(1000, 1000, 1000);
+        struct timex u;
+        memset(&u, 0, sizeof(u));
+        int ok = adjtimex(&u) >= 0;
+        u.modes = ADJ_MAXERROR;
+        errno = 0;
+        ok = ok && adjtimex(&u) == -1 && errno == EPERM;
+        memset(&u, 0, sizeof(u));
+        u.modes = ADJ_OFFSET_SS_READ;
+        ok = ok && adjtimex(&u) >= 0;
+        _exit(ok ? 0 : 1);
+    }
+    int st = 0;
+    if (pid > 0 && waitpid(pid, &st, 0) == pid)
+        user = WIFEXITED(st) && WEXITSTATUS(st) == 0;
+    snprintf(why, sizeof(why), "state=%d raw=%d status=%d tick=%ld tol=%ld defaults=%d badtick=%d user=%d",
+             state, raw, tx.status, tx.tick, tx.tolerance, defaults, badtick, user);
+    report("adjtimex_read_and_permission", state == TIME_ERROR && raw == TIME_ERROR && defaults &&
+                                               badtick && user, why);
+
+    /* adjtime's slew is swapped and read back; ADJ_SETOFFSET steps the
+     * wall clock; ADJ_TAI moves CLOCK_TAI. Each is put back. */
+    memset(&tx, 0, sizeof(tx));
+    tx.modes = ADJ_OFFSET_SINGLESHOT;
+    tx.offset = 250000;
+    int set1 = adjtimex(&tx) >= 0;
+    memset(&tx, 0, sizeof(tx));
+    tx.modes = ADJ_OFFSET_SS_READ;
+    int slew = adjtimex(&tx) >= 0 && tx.offset == 250000;
+    memset(&tx, 0, sizeof(tx));
+    tx.modes = ADJ_OFFSET_SINGLESHOT;
+    slew = slew && set1 && adjtimex(&tx) >= 0 && tx.offset == 250000;
+
+    struct timespec a, b, rt, tai;
+    clock_gettime(CLOCK_REALTIME, &a);
+    memset(&tx, 0, sizeof(tx));
+    tx.modes = ADJ_SETOFFSET | ADJ_NANO;
+    tx.time.tv_sec = 1;
+    int stepped = adjtimex(&tx) >= 0;
+    clock_gettime(CLOCK_REALTIME, &b);
+    long long moved = (ts_ns(b) - ts_ns(a)) / 1000000;
+    memset(&tx, 0, sizeof(tx));
+    tx.modes = ADJ_SETOFFSET | ADJ_NANO;
+    tx.time.tv_sec = -1;
+    stepped = stepped && adjtimex(&tx) >= 0 && moved >= 1000 && moved < 1500;
+    /* The fraction must be within a second. */
+    memset(&tx, 0, sizeof(tx));
+    tx.modes = ADJ_SETOFFSET;
+    tx.time.tv_usec = 1000000;
+    errno = 0;
+    int badfrac = adjtimex(&tx) == -1 && errno == EINVAL;
+
+    memset(&tx, 0, sizeof(tx));
+    tx.modes = ADJ_TAI;
+    tx.constant = 37;
+    int taiset = adjtimex(&tx) >= 0 && tx.tai == 37;
+    clock_gettime(CLOCK_REALTIME, &rt);
+    clock_gettime(CLOCK_TAI, &tai);
+    long long tai_ms = (ts_ns(tai) - ts_ns(rt)) / 1000000;
+    memset(&tx, 0, sizeof(tx));
+    tx.modes = ADJ_TAI;
+    tx.constant = 0;
+    taiset = taiset && adjtimex(&tx) >= 0 && tx.tai == 0 && tai_ms >= 36900 && tai_ms <= 37100;
+    snprintf(why, sizeof(why), "slew=%d stepped=%d moved=%lldms badfrac=%d tai=%d(%lldms)", slew,
+             stepped, moved, badfrac, taiset, tai_ms);
+    report("adjtimex_adjtime_setoffset_tai", slew && stepped && badfrac && taiset, why);
+
+    /* clock_adjtime adjusts CLOCK_REALTIME only. */
+    memset(&tx, 0, sizeof(tx));
+    int real = clock_adjtime(CLOCK_REALTIME, &tx) == TIME_ERROR && tx.tick == 10000;
+    errno = 0;
+    int mono = clock_adjtime(CLOCK_MONOTONIC, &tx) == -1 && errno == EOPNOTSUPP;
+    errno = 0;
+    int cpu = clock_adjtime(CLOCK_PROCESS_CPUTIME_ID, &tx) == -1 && errno == EOPNOTSUPP;
+    errno = 0;
+    int none = clock_adjtime(10, &tx) == -1 && errno == EINVAL;
+    errno = 0;
+    int fault = syscall(SYS_clock_adjtime, CLOCK_REALTIME, (void *)8) == -1 && errno == EFAULT;
+    snprintf(why, sizeof(why), "real=%d mono=%d cpu=%d none=%d fault=%d", real, mono, cpu, none,
+             fault);
+    report("clock_adjtime_clocks", real && mono && cpu && none && fault, why);
+}
+
+static volatile int restart_alrm;
+static void restart_on_alrm(int sig)
+{
+    (void)sig;
+    restart_alrm++;
+}
+
+static void test_restart_syscall(void)
+{
+    restart_after_stop("nanosleep_stop_keeps_deadline", RESTART_SLEEP);
+#ifdef SYS_poll
+    restart_after_stop("poll_stop_keeps_deadline", RESTART_POLL);
+#else
+    restart_after_stop("ppoll_stop_reruns_time_left", RESTART_PPOLL);
+#endif
+
+    /* With no restart block it is EINTR; a handler, SA_RESTART or not,
+     * makes an interrupted sleep EINTR with the time left in rem, and the
+     * block it left is gone after the handler (rt_sigreturn). */
+    char why[200];
+    errno = 0;
+    long none = syscall(SYS_restart_syscall);
+    int none_eintr = none == -1 && errno == EINTR;
+    struct sigaction sa, old;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = restart_on_alrm;
+    sa.sa_flags = SA_RESTART;
+    sigaction(SIGALRM, &sa, &old);
+    struct itimerval it = {{0, 0}, {0, 50000}};
+    setitimer(ITIMER_REAL, &it, NULL);
+    struct timespec req = {2, 0}, rem = {0, 0};
+    errno = 0;
+    int r = nanosleep(&req, &rem);
+    int e = errno;
+    int left = rem.tv_sec == 1;
+    errno = 0;
+    long after = syscall(SYS_restart_syscall);
+    int after_eintr = after == -1 && errno == EINTR;
+    sigaction(SIGALRM, &old, NULL);
+    snprintf(why, sizeof(why), "none=%ld,%d handler: ret=%d errno=%d alrm=%d rem=%lld.%09ld after=%ld",
+             none, none_eintr, r, e, restart_alrm, (long long)rem.tv_sec, rem.tv_nsec, after);
+    report("restart_syscall_eintr_and_handler",
+           none_eintr && r == -1 && e == EINTR && restart_alrm == 1 && left && after_eintr, why);
+}
+
+#ifndef RWF_NOSIGNAL
+#define RWF_NOSIGNAL 0x00000100
+#endif
+
+/* Read the file at `path` whole into buf (at most n - 1 bytes, NUL ended). */
+static ssize_t slurp(const char *path, char *buf, size_t n)
+{
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return -1;
+    ssize_t r = read(fd, buf, n - 1);
+    close(fd);
+    if (r >= 0)
+        buf[r] = 0;
+    return r;
+}
+
+/*
+ * preadv, pwritev, preadv2, pwritev2 (group 3 step D1): positioned vectors
+ * leave the file position alone, -1 uses it, and the RWF_* flags are
+ * checked as Linux's. musl's pwrite is pwritev2 with RWF_NOAPPEND, so on
+ * an O_APPEND file it writes where asked, while the raw pwrite64 and
+ * pwritev append, as on Linux. RWF_NOSIGNAL keeps EPIPE quiet.
+ */
+static void test_preadv_pwritev(void)
+{
+    const char *path = "/tmp/musl_vec";
+    char why[160];
+    int f = 0;
+    int fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0644);
+    if (fd < 0 || write(fd, "0123456789", 10) != 10) f |= 1;
+    struct iovec w[2] = {{"ab", 2}, {"cd", 2}};
+    if (pwritev2(fd, w, 2, 2, 0) != 4 || lseek(fd, 0, SEEK_CUR) != 10) f |= 2;
+    char a[4] = {0}, b[4] = {0};
+    struct iovec r[2] = {{a, 3}, {b, 3}};
+    if (preadv(fd, r, 2, 1) != 6 || memcmp(a, "1ab", 3) || memcmp(b, "cd6", 3)) f |= 4;
+    /* Offset -1: at the position, which then moves. */
+    lseek(fd, 8, SEEK_SET);
+    memset(a, 0, sizeof(a));
+    struct iovec one = {a, 3};
+    if (preadv2(fd, &one, 1, -1, RWF_HIPRI) != 2 || memcmp(a, "89", 2) ||
+        lseek(fd, 0, SEEK_CUR) != 10) f |= 8;
+    errno = 0;
+    if (preadv2(fd, &one, 1, 0, 0x200) != -1 || errno != EOPNOTSUPP) f |= 16;
+    errno = 0;
+    if (syscall(SYS_preadv2, fd, &one, 1, -2L, 0L, 0) != -1 || errno != EINVAL) f |= 32;
+    errno = 0;
+    if (pwritev2(fd, w, 1, 0, RWF_APPEND | RWF_NOAPPEND) != -1 || errno != EINVAL) f |= 64;
+    /* RWF_APPEND: at the end, whatever the offset. */
+    if (pwritev2(fd, w, 1, 0, RWF_APPEND) != 2) f |= 128;
+    close(fd);
+    /* O_APPEND: musl's pwrite (pwritev2 with RWF_NOAPPEND) writes at 0;
+     * the raw pwrite64 and pwritev calls append. */
+    fd = open(path, O_RDWR | O_APPEND);
+    struct iovec x = {"Y", 1};
+    if (fd < 0 || pwrite(fd, "X", 1, 0) != 1 ||
+        syscall(SYS_pwrite64, fd, "Z", 1, 0L) != 1 ||
+        syscall(SYS_pwritev, fd, &x, 1, 0L, 0L) != 1) f |= 256;
+    close(fd);
+    char got[32];
+    if (slurp(path, got, sizeof(got)) != 14 || strcmp(got, "X1abcd6789abZY")) f |= 512;
+    /* A pipe has no offset (ESPIPE); with no reader, EPIPE, and SIGPIPE
+     * only without RWF_NOSIGNAL. */
+    int p[2];
+    sigset_t pipe_set, old, pending;
+    sigemptyset(&pipe_set);
+    sigaddset(&pipe_set, SIGPIPE);
+    sigprocmask(SIG_BLOCK, &pipe_set, &old);
+    if (pipe(p) != 0) f |= 1024;
+    errno = 0;
+    if (preadv(p[0], r, 1, 0) != -1 || errno != ESPIPE) f |= 2048;
+    close(p[0]);
+    errno = 0;
+    if (pwritev2(p[1], w, 1, -1, RWF_NOSIGNAL) != -1 || errno != EPIPE) f |= 4096;
+    sigpending(&pending);
+    if (sigismember(&pending, SIGPIPE)) f |= 8192;
+    errno = 0;
+    if (pwritev2(p[1], w, 1, -1, 0) != -1 || errno != EPIPE) f |= 16384;
+    sigpending(&pending);
+    if (!sigismember(&pending, SIGPIPE)) f |= 32768;
+    struct timespec zero = {0, 0};
+    sigtimedwait(&pipe_set, NULL, &zero);
+    sigprocmask(SIG_SETMASK, &old, NULL);
+    close(p[1]);
+    unlink(path);
+    snprintf(why, sizeof(why), "f=0x%x got=%s errno=%d", f, got, errno);
+    report("preadv_pwritev_rwf", f == 0, why);
+}
+
+/*
+ * creat, lchown, fchmodat2 and the old getdents (group 3 step D1).
+ */
+static void test_creat_lchown_fchmodat2(void)
+{
+    const char *path = "/tmp/musl_creat", *link = "/tmp/musl_creat_lnk";
+    char why[160];
+    int f = 0;
+    unlink(link);
+    int fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd < 0 || write(fd, "old", 3) != 3) f |= 1;
+    close(fd);
+    /* creat truncates and opens write-only. */
+#ifdef SYS_creat
+    fd = syscall(SYS_creat, path, 0600);
+#else
+    fd = creat(path, 0600);
+#endif
+    char c;
+    struct stat st;
+    errno = 0;
+    if (fd < 0 || read(fd, &c, 1) != -1 || errno != EBADF || fstat(fd, &st) || st.st_size != 0)
+        f |= 2;
+    close(fd);
+    if (symlink(path, link) != 0) f |= 4;
+    /* lchown changes the link, not its target. */
+    struct stat ls;
+    if (lchown(link, 1000, 1001) != 0 || lstat(link, &ls) || stat(path, &st) ||
+        ls.st_uid != 1000 || ls.st_gid != 1001 || st.st_uid != 0) f |= 8;
+    errno = 0;
+    if (syscall(SYS_fchownat, AT_FDCWD, link, -1, -1, AT_SYMLINK_FOLLOW) != -1 || errno != EINVAL)
+        f |= 16;
+    /* fchmodat2: a symlink's mode cannot change; bad flags are EINVAL;
+     * AT_EMPTY_PATH changes the fd's file. */
+    errno = 0;
+    if (syscall(SYS_fchmodat2, AT_FDCWD, link, 0600, AT_SYMLINK_NOFOLLOW) != -1 ||
+        errno != EOPNOTSUPP) f |= 32;
+    errno = 0;
+    if (syscall(SYS_fchmodat2, AT_FDCWD, path, 0600, 0x8000) != -1 || errno != EINVAL) f |= 64;
+    fd = open(path, O_RDONLY);
+    if (syscall(SYS_fchmodat2, fd, "", 0640, AT_EMPTY_PATH) != 0 || fstat(fd, &st) ||
+        (st.st_mode & 07777) != 0640) f |= 128;
+    if (syscall(SYS_fchmodat2, AT_FDCWD, link, 0604, 0) != 0 || stat(path, &st) ||
+        (st.st_mode & 07777) != 0604) f |= 256;
+    close(fd);
+#ifdef SYS_getdents
+    /* The old record: d_type in its last byte. */
+    mkdir("/tmp/musl_gd", 0755);
+    close(open("/tmp/musl_gd/regular", O_CREAT | O_WRONLY, 0644));
+    int dfd = open("/tmp/musl_gd", O_RDONLY | O_DIRECTORY);
+    char buf[1024];
+    long n = syscall(SYS_getdents, dfd, buf, sizeof(buf));
+    int found = 0;
+    for (long off = 0; off < n;) {
+        unsigned short reclen;
+        memcpy(&reclen, buf + off + 16, 2);
+        if (reclen == 0) break;
+        if (strcmp(buf + off + 18, "regular") == 0 && buf[off + reclen - 1] == DT_REG) found = 1;
+        off += reclen;
+    }
+    if (n <= 0 || !found) f |= 512;
+    close(dfd);
+    unlink("/tmp/musl_gd/regular");
+    rmdir("/tmp/musl_gd");
+#endif
+    unlink(link);
+    unlink(path);
+    snprintf(why, sizeof(why), "f=0x%x errno=%d", f, errno);
+    report("creat_lchown_fchmodat2_getdents", f == 0, why);
+}
+
+/*
+ * close_range, syncfs, sync_file_range, posix_fadvise and readahead
+ * (group 3 step D1).
+ */
+static void test_close_range_and_advice(void)
+{
+    char why[160];
+    int f = 0;
+    /* Fixed numbers well above anything the earlier tests left open. */
+    int null = open("/dev/null", O_RDONLY);
+    int a = dup2(null, 200), b = dup2(null, 201), c = dup2(null, 202);
+    close(null);
+    if (a != 200 || b != 201 || c != 202) f |= 1;
+    if (syscall(SYS_close_range, b, c, 4 /* CLOSE_RANGE_CLOEXEC */) != 0 ||
+        fcntl(b, F_GETFD) != FD_CLOEXEC || fcntl(c, F_GETFD) != FD_CLOEXEC ||
+        fcntl(a, F_GETFD) != 0) f |= 2;
+    errno = 0;
+    if (syscall(SYS_close_range, 5, 4, 0) != -1 || errno != EINVAL) f |= 4;
+    errno = 0;
+    if (syscall(SYS_close_range, 3, ~0U, ~0U) != -1 || errno != EINVAL) f |= 8;
+    if (syscall(SYS_close_range, b, ~0U, 2 /* CLOSE_RANGE_UNSHARE */) != 0 ||
+        fcntl(b, F_GETFD) != -1 || fcntl(c, F_GETFD) != -1 || fcntl(a, F_GETFD) != 0) f |= 16;
+    close(a);
+    int fd = open("/tmp/musl_adv", O_CREAT | O_RDWR | O_TRUNC, 0644);
+    write(fd, "data", 4);
+    errno = 0;
+    if (syncfs(fd) != 0 || syncfs(-1) != -1 || errno != EBADF) f |= 32;
+    if (sync_file_range(fd, 0, 0, SYNC_FILE_RANGE_WRITE | SYNC_FILE_RANGE_WAIT_AFTER) != 0) f |= 64;
+    errno = 0;
+    if (sync_file_range(fd, 0, 0, 8) != -1 || errno != EINVAL) f |= 128;
+    errno = 0;
+    if (sync_file_range(fd, -1, 0, 0) != -1 || errno != EINVAL) f |= 256;
+    if (posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED) != 0 ||
+        posix_fadvise(fd, 0, 0, 99) != EINVAL || posix_fadvise(fd, 0, -1, 0) != EINVAL) f |= 512;
+    if (readahead(fd, 0, 4096) != 0) f |= 1024;
+    int p[2];
+    pipe(p);
+    errno = 0;
+    if (sync_file_range(p[0], 0, 0, 0) != -1 || errno != ESPIPE) f |= 2048;
+    if (posix_fadvise(p[0], 0, 0, 0) != ESPIPE) f |= 4096;
+    errno = 0;
+    if (readahead(p[0], 0, 1) != -1 || errno != EINVAL) f |= 8192;
+    errno = 0;
+    if (readahead(p[1], 0, 1) != -1 || errno != EBADF) f |= 16384;
+    close(p[0]);
+    close(p[1]);
+    close(fd);
+    unlink("/tmp/musl_adv");
+    snprintf(why, sizeof(why), "f=0x%x errno=%d", f, errno);
+    report("close_range_sync_advice", f == 0, why);
+}
+
+/*
+ * sendfile, copy_file_range, splice, tee and vmsplice (group 3 step D2).
+ */
+static void test_splice_family(void)
+{
+    const char *src = "/tmp/musl_sf_src", *dst = "/tmp/musl_sf_dst";
+    char why[160], got[64] = "";
+    int f = 0;
+    int in = open(src, O_CREAT | O_RDWR | O_TRUNC, 0644);
+    int out = open(dst, O_CREAT | O_RDWR | O_TRUNC, 0644);
+    if (in < 0 || out < 0 || write(in, "0123456789", 10) != 10) f |= 1;
+    /* sendfile with an offset reads from it and moves it, not the position;
+     * without one, from the position, which moves. */
+    off_t off = 2;
+    if (sendfile(out, in, &off, 5) != 5 || off != 7 || lseek(in, 0, SEEK_CUR) != 10) f |= 2;
+    lseek(in, 8, SEEK_SET);
+    if (sendfile(out, in, NULL, 100) != 2 || lseek(in, 0, SEEK_CUR) != 10) f |= 4;
+    if (slurp(dst, got, sizeof(got)) != 7 || strcmp(got, "2345689")) f |= 8;
+    /* copy_file_range: the offsets move, the positions do not. */
+    off_t oi = 0, oo = 7;
+    if (copy_file_range(in, &oi, out, &oo, 3, 0) != 3 || oi != 3 || oo != 10 ||
+        lseek(out, 0, SEEK_CUR) != 7) f |= 16;
+    /* Overlap in one file, flags, a directory, O_APPEND, two filesystems. */
+    off_t a = 0, b = 5;
+    errno = 0;
+    if (copy_file_range(out, &a, out, &b, 10, 0) != -1 || errno != EINVAL) f |= 32;
+    errno = 0;
+    if (copy_file_range(in, &a, out, &oo, 1, 1) != -1 || errno != EINVAL) f |= 64;
+    int dir = open("/tmp", O_RDONLY | O_DIRECTORY);
+    errno = 0;
+    if (copy_file_range(dir, NULL, out, NULL, 1, 0) != -1 || errno != EISDIR) f |= 128;
+    close(dir);
+    int app = open(dst, O_WRONLY | O_APPEND);
+    errno = 0;
+    if (copy_file_range(in, &a, app, NULL, 1, 0) != -1 || errno != EBADF) f |= 256;
+    close(app);
+    int shm = open("/dev/shm/musl_sf", O_CREAT | O_RDWR | O_TRUNC, 0644);
+    errno = 0;
+    if (shm < 0 || copy_file_range(in, &a, shm, NULL, 1, 0) != -1 || errno != EXDEV) f |= 512;
+    close(shm);
+    unlink("/dev/shm/musl_sf");
+    /* splice a file into a pipe, tee it into another, read that one back
+     * with vmsplice, then splice the first into the file. */
+    int p[2], q[2];
+    if (pipe(p) || pipe(q)) f |= 1024;
+    off_t so = 1;
+    if (splice(in, &so, p[1], NULL, 4, 0) != 4 || so != 5) f |= 2048;
+    if (tee(p[0], q[1], 100, 0) != 4) f |= 4096;
+    char buf[16] = {0};
+    struct iovec v = {buf, sizeof(buf)};
+    if (vmsplice(q[0], &v, 1, 0) != 4 || memcmp(buf, "1234", 4)) f |= 8192;
+    off_t to = 0;
+    if (splice(p[0], NULL, out, &to, 100, 0) != 4 || to != 4) f |= 16384;
+    if (slurp(dst, got, sizeof(got)) != 10 || strcmp(got, "1234689012")) f |= 32768;
+    /* A pipe takes no offset; a pipe into itself; an empty pipe without
+     * waiting; a pipe is no sendfile source. */
+    errno = 0;
+    if (splice(p[0], &so, out, NULL, 1, 0) != -1 || errno != ESPIPE) f |= 65536;
+    errno = 0;
+    if (splice(p[0], NULL, p[1], NULL, 1, 0) != -1 || errno != EINVAL) f |= 131072;
+    errno = 0;
+    if (splice(p[0], NULL, q[1], NULL, 1, SPLICE_F_NONBLOCK) != -1 || errno != EAGAIN)
+        f |= 262144;
+    struct iovec w = {"xy", 2};
+    if (vmsplice(p[1], &w, 1, 0) != 2 || read(p[0], buf, sizeof(buf)) != 2 ||
+        memcmp(buf, "xy", 2)) f |= 524288;
+    /* Empty entries are skipped, not the end (PR #35 review). */
+    struct iovec ws[3] = {{"", 0}, {"ab", 2}, {"c", 1}};
+    if (vmsplice(p[1], ws, 3, 0) != 3 || read(p[0], buf, sizeof(buf)) != 3 ||
+        memcmp(buf, "abc", 3)) f |= 524288;
+    errno = 0;
+    if (sendfile(out, p[0], NULL, 1) != -1 || errno != EINVAL) f |= 1048576;
+    /* Into a pipe nobody reads: EPIPE, and SIGPIPE. */
+    sigset_t pipe_set, old, pending;
+    sigemptyset(&pipe_set);
+    sigaddset(&pipe_set, SIGPIPE);
+    sigprocmask(SIG_BLOCK, &pipe_set, &old);
+    close(q[0]);
+    so = 0;
+    errno = 0;
+    if (splice(in, &so, q[1], NULL, 1, 0) != -1 || errno != EPIPE) f |= 2097152;
+    sigpending(&pending);
+    if (!sigismember(&pending, SIGPIPE)) f |= 4194304;
+    struct timespec zero = {0, 0};
+    sigtimedwait(&pipe_set, NULL, &zero);
+    sigprocmask(SIG_SETMASK, &old, NULL);
+    close(p[0]);
+    close(p[1]);
+    close(q[1]);
+    close(in);
+    close(out);
+    unlink(src);
+    unlink(dst);
+    snprintf(why, sizeof(why), "f=0x%x got=%s errno=%d", f, got, errno);
+    report("sendfile_copy_splice_tee", f == 0, why);
+}
+
+#if defined(__x86_64__)
+/* ustat and sysfs, x86_64 only (group 3 step D1). */
+static void test_ustat_sysfs(void)
+{
+    char why[160];
+    int f = 0;
+    struct stat st;
+    char ubuf[32];
+    if (stat("/", &st) != 0 || syscall(SYS_ustat, (unsigned)st.st_dev, ubuf) != 0) f |= 1;
+    errno = 0;
+    if (syscall(SYS_ustat, (unsigned)-1, ubuf) != -1 || errno != EINVAL) f |= 2;
+    errno = 0;
+    if (syscall(SYS_ustat, (unsigned)st.st_dev, (void *)-1) != -1 || errno != EFAULT) f |= 4;
+    long idx = syscall(SYS_sysfs, 1, "proc");
+    char name[32] = {0};
+    if (idx < 0 || syscall(SYS_sysfs, 2, idx, name) != 0 || strcmp(name, "proc")) f |= 8;
+    if (syscall(SYS_sysfs, 3) <= idx) f |= 16;
+    errno = 0;
+    if (syscall(SYS_sysfs, 1, "ext0") != -1 || errno != EINVAL) f |= 32;
+    errno = 0;
+    if (syscall(SYS_sysfs, 4) != -1 || errno != EINVAL) f |= 64;
+    errno = 0;
+    if (syscall(SYS_sysfs, 2, 1000, name) != -1 || errno != EINVAL) f |= 128;
+    errno = 0;
+    if (syscall(SYS_sysfs, 1, NULL) != -1 || errno != EFAULT) f |= 256;
+    snprintf(why, sizeof(why), "f=0x%x errno=%d", f, errno);
+    report("ustat_sysfs", f == 0, why);
+}
+#endif
+
+/*
+ * statx (group 3 step D3a): the numbers stat reports, the mount id and
+ * mount root, AT_EMPTY_PATH on a descriptor and on the cwd, and the
+ * argument errors in Linux's order.
+ */
+static void test_statx(void)
+{
+    const char *path = "/tmp/musl_statx", *link_path = "/tmp/musl_statx_ln";
+    char why[200];
+    int f = 0;
+    unlink(path);
+    unlink(link_path);
+    int fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0640);
+    if (fd < 0 || write(fd, "0123456789", 10) != 10) f |= 1;
+    struct stat st;
+    struct statx sx;
+    memset(&sx, 0xa5, sizeof(sx));
+    if (stat(path, &st) || statx(AT_FDCWD, path, 0, STATX_BASIC_STATS, &sx)) f |= 2;
+    if ((sx.stx_mask & STATX_BASIC_STATS) != STATX_BASIC_STATS || !(sx.stx_mask & STATX_MNT_ID) ||
+        (sx.stx_mask & STATX_BTIME))
+        f |= 4;
+    if (sx.stx_ino != st.st_ino || sx.stx_size != 10 || sx.stx_mode != st.st_mode ||
+        sx.stx_uid != st.st_uid || sx.stx_nlink != st.st_nlink ||
+        sx.stx_blocks != (uint64_t)st.st_blocks || sx.stx_blksize != (uint32_t)st.st_blksize ||
+        sx.stx_mtime.tv_sec != st.st_mtime ||
+        makedev(sx.stx_dev_major, sx.stx_dev_minor) != st.st_dev)
+        f |= 8;
+    if ((sx.stx_attributes & STATX_ATTR_MOUNT_ROOT) ||
+        !(sx.stx_attributes_mask & STATX_ATTR_MOUNT_ROOT))
+        f |= 16;
+    /* The rest of the struct is written as zeroes, not left as it was. */
+    if (sx.stx_btime.tv_sec != 0 || sx.__pad2[8] != 0) f |= 32;
+    /* AT_EMPTY_PATH with NULL or "" is the descriptor; with AT_FDCWD the
+     * cwd. */
+    struct statx byfd, empty, cwd;
+    if (statx(fd, NULL, AT_EMPTY_PATH, STATX_BASIC_STATS, &byfd) ||
+        statx(fd, "", AT_EMPTY_PATH, STATX_BASIC_STATS, &empty) ||
+        byfd.stx_ino != sx.stx_ino || empty.stx_ino != sx.stx_ino ||
+        byfd.stx_mnt_id != sx.stx_mnt_id)
+        f |= 64;
+    struct stat dot;
+    if (stat(".", &dot) || statx(AT_FDCWD, "", AT_EMPTY_PATH, 0, &cwd) ||
+        cwd.stx_ino != dot.st_ino)
+        f |= 128;
+    /* Mount roots: "/", /proc and /dev/shm, each with its own id. */
+    struct statx root, proc, shm;
+    if (statx(AT_FDCWD, "/", 0, 0, &root) || statx(AT_FDCWD, "/proc", 0, 0, &proc) ||
+        statx(AT_FDCWD, "/dev/shm", 0, 0, &shm))
+        f |= 256;
+    if (!(root.stx_attributes & STATX_ATTR_MOUNT_ROOT) ||
+        !(proc.stx_attributes & STATX_ATTR_MOUNT_ROOT) ||
+        !(shm.stx_attributes & STATX_ATTR_MOUNT_ROOT) || proc.stx_mnt_id == root.stx_mnt_id ||
+        shm.stx_mnt_id == proc.stx_mnt_id)
+        f |= 512;
+    /* STATX_MNT_ID_UNIQUE instead of STATX_MNT_ID, above 1 << 31. */
+    struct statx uniq;
+    if (statx(AT_FDCWD, "/proc", 0, STATX_MNT_ID_UNIQUE, &uniq) ||
+        !(uniq.stx_mask & STATX_MNT_ID_UNIQUE) || (uniq.stx_mask & STATX_MNT_ID) ||
+        uniq.stx_mnt_id <= (1ULL << 31))
+        f |= 1024;
+    /* AT_SYMLINK_NOFOLLOW stats the link; without it, the target. */
+    struct statx ln, target;
+    if (symlink(path, link_path) ||
+        statx(AT_FDCWD, link_path, AT_SYMLINK_NOFOLLOW, STATX_BASIC_STATS, &ln) ||
+        !S_ISLNK(ln.stx_mode) || statx(AT_FDCWD, link_path, 0, STATX_BASIC_STATS, &target) ||
+        target.stx_ino != sx.stx_ino)
+        f |= 2048;
+    /* A pipe has no path: still a FIFO, with a mount id. */
+    int p[2];
+    struct statx pipe_sx;
+    if (pipe(p) || statx(p[0], NULL, AT_EMPTY_PATH, STATX_BASIC_STATS, &pipe_sx) ||
+        !S_ISFIFO(pipe_sx.stx_mode) || !(pipe_sx.stx_mask & STATX_MNT_ID))
+        f |= 4096;
+    close(p[0]);
+    close(p[1]);
+    /* Errors: the reserved mask bit and both sync types are EINVAL, an
+     * unknown flag on a lookup EINVAL, a negative dirfd with no name EBADF,
+     * a bad name EFAULT before EINVAL, no name without AT_EMPTY_PATH
+     * ENOENT. */
+    struct statx junk;
+    errno = 0;
+    if (statx(AT_FDCWD, path, 0, 0x80000000U, &junk) != -1 || errno != EINVAL) f |= 8192;
+    errno = 0;
+    if (statx(AT_FDCWD, path, AT_STATX_FORCE_SYNC | AT_STATX_DONT_SYNC, 0, &junk) != -1 ||
+        errno != EINVAL)
+        f |= 16384;
+    errno = 0;
+    if (statx(AT_FDCWD, path, 0x8000, 0, &junk) != -1 || errno != EINVAL) f |= 32768;
+    errno = 0;
+    if (statx(-1, NULL, AT_EMPTY_PATH, 0, &junk) != -1 || errno != EBADF) f |= 65536;
+    errno = 0;
+    if (statx(AT_FDCWD, (const char *)1, 0, 0x80000000U, &junk) != -1 || errno != EFAULT)
+        f |= 131072;
+    errno = 0;
+    if (statx(AT_FDCWD, "", 0, 0, &junk) != -1 || errno != ENOENT) f |= 262144;
+    /* Either sync type alone is fine. */
+    if (statx(AT_FDCWD, path, AT_STATX_DONT_SYNC, 0, &junk)) f |= 524288;
+    close(fd);
+    unlink(link_path);
+    unlink(path);
+    snprintf(why, sizeof(why), "f=0x%x mask=0x%x attrs=0x%llx mnt=%llu/%llu/%llu errno=%d", f,
+             sx.stx_mask, (unsigned long long)sx.stx_attributes,
+             (unsigned long long)root.stx_mnt_id, (unsigned long long)proc.stx_mnt_id,
+             (unsigned long long)shm.stx_mnt_id, errno);
+    report("statx", f == 0, why);
+}
+
+/*
+ * openat2 (group 3 step D3b): the extensible struct, build_open_flags'
+ * checks in Linux's order, OPENAT2_REGULAR, and every RESOLVE_* flag.
+ * musl has no wrapper; struct open_how is <linux/openat2.h>'s.
+ */
+struct musl_open_how {
+    uint64_t flags, mode, resolve;
+};
+#define MUSL_RESOLVE_NO_XDEV 0x01
+#define MUSL_RESOLVE_NO_MAGICLINKS 0x02
+#define MUSL_RESOLVE_NO_SYMLINKS 0x04
+#define MUSL_RESOLVE_BENEATH 0x08
+#define MUSL_RESOLVE_IN_ROOT 0x10
+#define MUSL_RESOLVE_CACHED 0x20
+#define MUSL_OPENAT2_REGULAR (1ULL << 32)
+#define MUSL_EFTYPE 134
+
+static long o2(int dfd, const char *path, uint64_t flags, uint64_t mode, uint64_t resolve)
+{
+    struct musl_open_how how = {flags, mode, resolve};
+    return syscall(SYS_openat2, dfd, path, &how, sizeof(how));
+}
+
+/* -1 and errno == want, or a descriptor (closed) when want is 0. */
+static int o2_is(int dfd, const char *path, uint64_t flags, uint64_t mode, uint64_t resolve,
+                 int want)
+{
+    errno = 0;
+    long fd = o2(dfd, path, flags, mode, resolve);
+    if (fd >= 0) close((int)fd);
+    return want ? (fd == -1 && errno == want) : fd >= 0;
+}
+
+static void test_openat2(void)
+{
+    const char *base = "/tmp/musl_o2";
+    char why[200];
+    int f = 0, step = 0;
+    unlink("/tmp/musl_o2/sub/file");
+    unlink("/tmp/musl_o2/abs");
+    unlink("/tmp/musl_o2/rel");
+    unlink("/tmp/musl_o2/up");
+    unlink("/tmp/musl_o2/fifo");
+    unlink("/tmp/musl_o2/new");
+    unlink("/tmp/musl_o2/sub/new");
+    rmdir("/tmp/musl_o2/sub");
+    rmdir(base);
+    unlink("/dev/shm/musl_o2_new");
+    unlink("/dev/shm/musl_o2_abs");
+    if (mkdir(base, 0755) || mkdir("/tmp/musl_o2/sub", 0755)) f |= 1;
+    int w = open("/tmp/musl_o2/sub/file", O_CREAT | O_WRONLY, 0644);
+    if (w < 0 || write(w, "x", 1) != 1) f |= 1;
+    close(w);
+    if (symlink("/tmp/musl_o2/sub/file", "/tmp/musl_o2/abs") ||
+        symlink("sub/file", "/tmp/musl_o2/rel") || symlink("../musl_o2/sub/file", "/tmp/musl_o2/up") ||
+        mkfifo("/tmp/musl_o2/fifo", 0644))
+        f |= 1;
+    int dir = open(base, O_RDONLY | O_DIRECTORY);
+    if (dir < 0) f |= 1;
+
+    /* The struct: below its first version EINVAL, above a page E2BIG, a
+     * zero tail fine, a nonzero one E2BIG, an unreadable one EFAULT. */
+    step = 1;
+    struct {
+        struct musl_open_how how;
+        uint64_t pad;
+    } big = {{O_RDONLY, 0, 0}, 0};
+    errno = 0;
+    if (syscall(SYS_openat2, dir, "sub/file", &big, 0) != -1 || errno != EINVAL) f |= 2;
+    errno = 0;
+    if (syscall(SYS_openat2, dir, "sub/file", &big, 23) != -1 || errno != EINVAL) f |= 2;
+    errno = 0;
+    if (syscall(SYS_openat2, dir, "sub/file", &big, 4097) != -1 || errno != E2BIG) f |= 2;
+    long fd = syscall(SYS_openat2, dir, "sub/file", &big, sizeof(big));
+    if (fd < 0) f |= 4;
+    else close((int)fd);
+    big.pad = 1;
+    errno = 0;
+    if (syscall(SYS_openat2, dir, "sub/file", &big, sizeof(big)) != -1 || errno != E2BIG) f |= 4;
+    char *pages = mmap(NULL, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (pages == MAP_FAILED || munmap(pages + 4096, 4096)) f |= 1;
+    else {
+        struct musl_open_how *edge = (struct musl_open_how *)(pages + 4096 - sizeof(*edge));
+        memset(edge, 0, sizeof(*edge));
+        errno = 0;
+        if (syscall(SYS_openat2, dir, "sub/file", edge, sizeof(*edge) + 1) != -1 || errno != EFAULT)
+            f |= 4;
+        munmap(pages, 4096);
+    }
+
+    /* build_open_flags, in order. */
+    step = 2;
+    if (!o2_is(dir, "sub/file", 1ULL << 33, 0, 0, EINVAL)) f |= 8;
+    if (!o2_is(dir, "sub/file", O_RDONLY, 0, 0x40, EINVAL)) f |= 8;
+    if (!o2_is(dir, "sub/file", O_RDONLY, 0, MUSL_RESOLVE_BENEATH | MUSL_RESOLVE_IN_ROOT, EINVAL))
+        f |= 8;
+    if (!o2_is(dir, "sub/file", O_RDONLY, 0644, 0, EINVAL)) f |= 16;
+    if (!o2_is(dir, "new", O_CREAT | O_WRONLY, 010000, 0, EINVAL)) f |= 16;
+    if (!o2_is(dir, "new", O_CREAT | O_DIRECTORY | O_RDONLY, 0644, 0, EINVAL)) f |= 16;
+    if (!o2_is(dir, "sub", O_TMPFILE | O_RDONLY, 0600, 0, EINVAL)) f |= 32;
+    if (!o2_is(dir, "sub", (O_TMPFILE & ~O_DIRECTORY) | O_RDWR, 0600, 0, EINVAL)) f |= 32;
+    if (!o2_is(dir, "sub", O_DIRECTORY | MUSL_OPENAT2_REGULAR, 0, 0, EINVAL)) f |= 32;
+    if (!o2_is(dir, "sub/file", O_PATH | O_WRONLY, 0, 0, EINVAL)) f |= 32;
+    if (!o2_is(dir, "new", O_CREAT | O_WRONLY, 0644, MUSL_RESOLVE_CACHED, EAGAIN)) f |= 64;
+    if (!o2_is(dir, "sub/file", O_WRONLY | O_TRUNC, 0, MUSL_RESOLVE_CACHED, EAGAIN)) f |= 64;
+    if (!o2_is(dir, "sub/file", O_RDONLY, 0, MUSL_RESOLVE_CACHED, 0)) f |= 64;
+    /* Then the name, then the directory. */
+    if (!o2_is(dir, NULL, O_RDONLY, 0, 0, EFAULT) || !o2_is(dir, "", O_RDONLY, 0, 0, ENOENT))
+        f |= 128;
+    if (!o2_is(-1, "sub/file", O_RDONLY, 0, 0, EBADF) ||
+        !o2_is(-1, "sub/file", O_RDONLY, 0, MUSL_RESOLVE_BENEATH, EBADF))
+        f |= 128;
+    int file_fd = open("/tmp/musl_o2/sub/file", O_RDONLY);
+    if (!o2_is(file_fd, "x", O_RDONLY, 0, MUSL_RESOLVE_NO_XDEV, ENOTDIR)) f |= 128;
+    close(file_fd);
+
+    /* OPENAT2_REGULAR: EFTYPE for a directory, a FIFO or a device. */
+    step = 3;
+    if (!o2_is(dir, "sub/file", O_RDONLY | MUSL_OPENAT2_REGULAR, 0, 0, 0) ||
+        !o2_is(dir, "sub", O_RDONLY | MUSL_OPENAT2_REGULAR, 0, 0, MUSL_EFTYPE) ||
+        !o2_is(dir, "fifo", O_RDONLY | O_NONBLOCK | MUSL_OPENAT2_REGULAR, 0, 0, MUSL_EFTYPE) ||
+        !o2_is(AT_FDCWD, "/dev/null", O_RDONLY | MUSL_OPENAT2_REGULAR, 0, 0, MUSL_EFTYPE))
+        f |= 256;
+
+    /* RESOLVE_NO_SYMLINKS refuses every symlink, RESOLVE_NO_MAGICLINKS only
+     * /proc/self/exe. */
+    step = 4;
+    if (!o2_is(dir, "rel", O_RDONLY, 0, 0, 0) ||
+        !o2_is(dir, "rel", O_RDONLY, 0, MUSL_RESOLVE_NO_SYMLINKS, ELOOP) ||
+        !o2_is(dir, "rel", O_RDONLY, 0, MUSL_RESOLVE_NO_MAGICLINKS, 0) ||
+        !o2_is(AT_FDCWD, "/proc/self/exe", O_RDONLY, 0, 0, 0) ||
+        !o2_is(AT_FDCWD, "/proc/self/exe", O_RDONLY, 0, MUSL_RESOLVE_NO_MAGICLINKS, ELOOP))
+        f |= 512;
+
+    /* RESOLVE_NO_XDEV: entering a mount, leaving one by "..", an absolute
+     * symlink read on another mount than the root's. */
+    step = 5;
+    int shm = open("/dev/shm", O_RDONLY | O_DIRECTORY);
+    if (shm < 0 || symlink("/tmp/musl_o2/sub/file", "/dev/shm/musl_o2_abs")) f |= 1;
+    if (!o2_is(AT_FDCWD, "/proc/version", O_RDONLY, 0, MUSL_RESOLVE_NO_XDEV, EXDEV) ||
+        !o2_is(dir, "abs", O_RDONLY, 0, MUSL_RESOLVE_NO_XDEV, 0) ||
+        !o2_is(shm, "musl_o2_new", O_CREAT | O_WRONLY, 0600, MUSL_RESOLVE_NO_XDEV, 0) ||
+        !o2_is(shm, "..", O_RDONLY | O_DIRECTORY, 0, MUSL_RESOLVE_NO_XDEV, EXDEV) ||
+        !o2_is(shm, "musl_o2_abs", O_RDONLY, 0, MUSL_RESOLVE_NO_XDEV, EXDEV))
+        f |= 1024;
+
+    /* RESOLVE_BENEATH: no absolute path or symlink, no ".." above the
+     * start, no magic link; a create stays inside. */
+    step = 6;
+    int proc_self = open("/proc/self", O_RDONLY | O_DIRECTORY);
+    if (!o2_is(dir, "sub/../sub/file", O_RDONLY, 0, MUSL_RESOLVE_BENEATH, 0) ||
+        !o2_is(dir, "rel", O_RDONLY, 0, MUSL_RESOLVE_BENEATH, 0) ||
+        !o2_is(dir, "/tmp/musl_o2/sub/file", O_RDONLY, 0, MUSL_RESOLVE_BENEATH, EXDEV) ||
+        !o2_is(dir, "../musl_o2/sub/file", O_RDONLY, 0, MUSL_RESOLVE_BENEATH, EXDEV) ||
+        !o2_is(dir, "abs", O_RDONLY, 0, MUSL_RESOLVE_BENEATH, EXDEV) ||
+        !o2_is(dir, "up", O_RDONLY, 0, MUSL_RESOLVE_BENEATH, EXDEV) ||
+        !o2_is(proc_self, "exe", O_RDONLY, 0, MUSL_RESOLVE_BENEATH, EXDEV) ||
+        !o2_is(dir, "sub/new", O_CREAT | O_WRONLY, 0600, MUSL_RESOLVE_BENEATH, 0) ||
+        !o2_is(dir, "../musl_o2/new", O_CREAT | O_WRONLY, 0600, MUSL_RESOLVE_BENEATH, EXDEV))
+        f |= 2048;
+    struct stat st;
+    if (stat("/tmp/musl_o2/sub/new", &st) || stat("/tmp/musl_o2/new", &st) == 0) f |= 2048;
+
+    /* RESOLVE_IN_ROOT: "/" and ".." stay at the start, as under chroot. */
+    step = 7;
+    if (!o2_is(dir, "/sub/file", O_RDONLY, 0, MUSL_RESOLVE_IN_ROOT, 0) ||
+        !o2_is(dir, "../../sub/file", O_RDONLY, 0, MUSL_RESOLVE_IN_ROOT, 0) ||
+        !o2_is(dir, "/proc/version", O_RDONLY, 0, MUSL_RESOLVE_IN_ROOT, ENOENT) ||
+        !o2_is(dir, "abs", O_RDONLY, 0, MUSL_RESOLVE_IN_ROOT, ENOENT) ||
+        !o2_is(proc_self, "exe", O_RDONLY, 0, MUSL_RESOLVE_IN_ROOT, EXDEV))
+        f |= 4096;
+
+    /* openat's behaviour without resolve flags; O_CLOEXEC is kept. */
+    step = 8;
+    fd = o2(dir, "sub/file", O_RDONLY | O_CLOEXEC, 0, 0);
+    if (fd < 0 || !(fcntl((int)fd, F_GETFD) & FD_CLOEXEC)) f |= 8192;
+    if (fd >= 0) close((int)fd);
+
+    close(proc_self);
+    close(shm);
+    close(dir);
+    unlink("/dev/shm/musl_o2_new");
+    unlink("/dev/shm/musl_o2_abs");
+    unlink("/tmp/musl_o2/sub/new");
+    unlink("/tmp/musl_o2/sub/file");
+    unlink("/tmp/musl_o2/abs");
+    unlink("/tmp/musl_o2/rel");
+    unlink("/tmp/musl_o2/up");
+    unlink("/tmp/musl_o2/fifo");
+    rmdir("/tmp/musl_o2/sub");
+    rmdir(base);
+    snprintf(why, sizeof(why), "f=0x%x step=%d errno=%d", f, step, errno);
+    report("openat2", f == 0, why);
+}
+
+#ifndef AT_EXECVE_CHECK
+#define AT_EXECVE_CHECK 0x10000
+#endif
+
+/*
+ * `--exe EXE EXECFN`: the exec under test landed here; exit 0 when
+ * /proc/self/exe is EXE and AT_EXECFN is EXECFN, else which differed.
+ */
+static int print_exe_check(const char *exe, const char *execfn)
+{
+    char buf[512];
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    const char *fn = (const char *)getauxval(AT_EXECFN);
+    int bad = 0;
+    if (n < 0 || (buf[n] = 0, strcmp(buf, exe) != 0)) bad |= 1;
+    if (!fn || strcmp(fn, execfn) != 0) bad |= 2;
+    return bad;
+}
+
+static long musl_execveat(int dfd, const char *path, char *const *argv, char *const *envp,
+                          int flags)
+{
+    return syscall(SYS_execveat, dfd, path, argv, envp, flags);
+}
+
+/* The exit status a child gives when its exec failed with `e`. */
+#define EXEC_ERR(e) (200 + ((e) & 0x3f))
+
+/* Run execveat in a child: its exit status, EXEC_ERR(errno) when the call
+ * failed, or -1 when the child died otherwise. */
+static int execveat_status(int dfd, const char *path, char *const *argv, int flags)
+{
+    char *env[] = {NULL};
+    pid_t pid = fork();
+    if (pid == 0) {
+        musl_execveat(dfd, path, argv, env, flags);
+        _exit(EXEC_ERR(errno));
+    }
+    int status;
+    if (pid < 0 || waitpid(pid, &status, 0) != pid || !WIFEXITED(status)) return -1;
+    return WEXITSTATUS(status);
+}
+
+/*
+ * execveat (group 3 step D3c): a dirfd, AT_FDCWD, AT_EMPTY_PATH on a
+ * descriptor, the names the program gets (/proc/self/exe, AT_EXECFN),
+ * AT_EXECVE_CHECK, a script from a close-on-exec descriptor, and the errors
+ * in Linux's order. execve of a relative name runs it from the working
+ * directory, without a PATH search.
+ */
+static void test_execveat(void)
+{
+    const char *plain = "/tmp/musl_execveat_plain", *script = "/tmp/musl_execveat.sh";
+    const char *junk = "/tmp/musl_execveat_junk", *link_path = "/tmp/musl_execveat_ln";
+    char why[240], self[512], dir[512], fdname[64], fdexecfn[600];
+    int f = 0;
+    char *t_argv[] = {"true", NULL}, *f_argv[] = {"false", NULL};
+    char *env[] = {NULL};
+
+    ssize_t n = readlink("/proc/self/exe", self, sizeof(self) - 1);
+    if (n <= 0) {
+        report("execveat", 0, "readlink /proc/self/exe");
+        return;
+    }
+    self[n] = 0;
+    /* The kernel's launcher records the name it was given, which may run
+     * through a symlink; exec records the file's own path. */
+    char real[512];
+    if (realpath(self, real)) strcpy(self, real);
+    strcpy(dir, self);
+    *strrchr(dir, '/') = 0;
+    const char *base = strrchr(self, '/') + 1;
+
+    /* AT_FDCWD with an absolute name; a dirfd with a relative one. */
+    if (execveat_status(AT_FDCWD, "/bin/true", t_argv, 0) != 0) f |= 1;
+    int bin = open("/bin", O_RDONLY | O_DIRECTORY);
+    if (bin < 0 || execveat_status(bin, "true", t_argv, 0) != 0 ||
+        execveat_status(bin, "false", f_argv, 0) != 1)
+        f |= 2;
+
+    /* The program's names: a dirfd-relative exec is /dev/fd/N/name to
+     * AT_EXECFN and the file itself to /proc/self/exe; AT_EMPTY_PATH is
+     * /dev/fd/N. */
+    int dfd = open(dir, O_RDONLY | O_DIRECTORY);
+    snprintf(fdexecfn, sizeof(fdexecfn), "/dev/fd/%d/%s", dfd, base);
+    char *names_argv[] = {"x", "--exe", self, fdexecfn, NULL};
+    if (dfd < 0 || execveat_status(dfd, base, names_argv, 0) != 0) f |= 4;
+    int exe = open(self, O_RDONLY);
+    snprintf(fdname, sizeof(fdname), "/dev/fd/%d", exe);
+    char *empty_argv[] = {"x", "--exe", self, fdname, NULL};
+    if (exe < 0 || execveat_status(exe, "", empty_argv, AT_EMPTY_PATH) != 0) f |= 8;
+    /* An absolute name is itself, whatever the dirfd. */
+    char *abs_argv[] = {"x", "--exe", self, self, NULL};
+    if (execveat_status(bin, self, abs_argv, 0) != 0) f |= 16;
+
+    /* execve("name") runs ./name: no PATH search, and /proc/self/exe is
+     * the canonical path. */
+    char *rel_argv[] = {"x", "--exe", self, (char *)base, NULL};
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (chdir(dir) == 0) execve(base, rel_argv, env);
+        _exit(EXEC_ERR(errno));
+    }
+    int status = -1;
+    if (pid < 0 || waitpid(pid, &status, 0) != pid || !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 0)
+        f |= 32;
+    pid = fork();
+    if (pid == 0) {
+        if (chdir("/tmp") == 0) execve("true", t_argv, env);
+        _exit(EXEC_ERR(errno));
+    }
+    if (pid < 0 || waitpid(pid, &status, 0) != pid || !WIFEXITED(status) ||
+        WEXITSTATUS(status) != EXEC_ERR(ENOENT))
+        f |= 64;
+
+    /* A script run from a close-on-exec descriptor: its interpreter could
+     * not open /dev/fd/N after the exec, so ENOENT up front. */
+    int sfd = open(script, O_CREAT | O_WRONLY | O_TRUNC, 0755);
+    if (sfd < 0 || write(sfd, "#!/bin/sh\nexit 3\n", 17) != 17) f |= 128;
+    close(sfd);
+    if (execveat_status(AT_FDCWD, script, t_argv, 0) != 3) f |= 128;
+    sfd = open(script, O_RDONLY | O_CLOEXEC);
+    if (sfd < 0 || execveat_status(sfd, "", t_argv, AT_EMPTY_PATH) != EXEC_ERR(ENOENT))
+        f |= 256;
+
+    /* AT_EXECVE_CHECK: the checks and nothing else, so it returns here,
+     * also for a file that is not a program; no execute bit is EACCES. */
+    int jfd = open(junk, O_CREAT | O_WRONLY | O_TRUNC, 0755);
+    if (jfd < 0 || write(jfd, "junk", 4) != 4) f |= 512;
+    close(jfd);
+    errno = 0;
+    if (musl_execveat(AT_FDCWD, "/bin/true", t_argv, env, AT_EXECVE_CHECK) != 0 ||
+        musl_execveat(AT_FDCWD, junk, t_argv, env, AT_EXECVE_CHECK) != 0 ||
+        musl_execveat(exe, "", NULL, NULL, AT_EMPTY_PATH | AT_EXECVE_CHECK) != 0)
+        f |= 1024;
+    int pfd = open(plain, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    close(pfd);
+    errno = 0;
+    if (musl_execveat(AT_FDCWD, plain, t_argv, env, AT_EXECVE_CHECK) != -1 || errno != EACCES)
+        f |= 2048;
+
+    /* Errors: the name first (EFAULT, ENOENT for an empty one without
+     * AT_EMPTY_PATH), then unknown flags (EINVAL), then the lookup (EBADF,
+     * ENOTDIR, ELOOP, ENOENT), then the file (EACCES for a directory, a
+     * file without x), then argv (EFAULT). */
+    struct {
+        int dfd;
+        const char *path;
+        char *const *argv;
+        int flags, err;
+    } cases[] = {
+        {AT_FDCWD, (const char *)1, t_argv, 0x1, EFAULT},
+        {AT_FDCWD, "", t_argv, 0x1, ENOENT},
+        {AT_FDCWD, "/bin/true", t_argv, 0x1, EINVAL},
+        {AT_FDCWD, "/bin/true", t_argv, AT_SYMLINK_FOLLOW, EINVAL},
+        {-1, "", t_argv, AT_EMPTY_PATH, EBADF},
+        {-1, "true", t_argv, 0, EBADF},
+        {exe, "true", t_argv, 0, ENOTDIR},
+        {AT_FDCWD, link_path, t_argv, AT_SYMLINK_NOFOLLOW, ELOOP},
+        {AT_FDCWD, "/tmp/musl_execveat_none", (char *const *)1, 0, ENOENT},
+        {AT_FDCWD, "/tmp", t_argv, 0, EACCES},
+        {AT_FDCWD, plain, t_argv, 0, EACCES},
+        {AT_FDCWD, "/bin/true/", t_argv, 0, ENOTDIR},
+        {AT_FDCWD, "/bin/true", (char *const *)1, 0, EFAULT},
+    };
+    unlink(link_path);
+    if (symlink("/bin/true", link_path)) f |= 4096;
+    int bad_case = -1, bad_errno = 0;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        errno = 0;
+        long r = musl_execveat(cases[i].dfd, cases[i].path, cases[i].argv, env, cases[i].flags);
+        if (r != -1 || errno != cases[i].err) {
+            if (bad_case < 0) bad_case = (int)i, bad_errno = errno;
+            f |= 8192;
+        }
+    }
+    /* Following the symlink is fine. */
+    if (execveat_status(AT_FDCWD, link_path, t_argv, 0) != 0) f |= 16384;
+
+    close(bin);
+    close(dfd);
+    close(exe);
+    close(sfd);
+    unlink(script);
+    unlink(junk);
+    unlink(plain);
+    unlink(link_path);
+    snprintf(why, sizeof(why), "f=0x%x case=%d errno=%d", f, bad_case, bad_errno);
+    report("execveat", f == 0, why);
+}
+
+#ifndef AT_HANDLE_FID
+#define AT_HANDLE_FID 0x200
+#endif
+#ifndef AT_HANDLE_MNT_ID_UNIQUE
+#define AT_HANDLE_MNT_ID_UNIQUE 0x1
+#endif
+#ifndef AT_HANDLE_CONNECTABLE
+#define AT_HANDLE_CONNECTABLE 0x2
+#endif
+
+/* A file handle with room for MAX_HANDLE_SZ bytes. */
+union fh_buf {
+    struct file_handle fh;
+    unsigned char bytes[sizeof(struct file_handle) + MAX_HANDLE_SZ];
+};
+
+/* name_to_handle_at into `b` with all the room there is. */
+static int fh_get(int dfd, const char *name, union fh_buf *b, int *mnt, int flags)
+{
+    b->fh.handle_bytes = MAX_HANDLE_SZ;
+    return name_to_handle_at(dfd, name, &b->fh, mnt, flags);
+}
+
+/* Whether a call returned -1 with errno `e`. */
+static int fails_with(long r, int e)
+{
+    return r == -1 && errno == e;
+}
+
+/*
+ * name_to_handle_at and open_by_handle_at (group 3 step D4): the size
+ * probe, a handle that opens the same file (by path, by AT_EMPTY_PATH on a
+ * descriptor, after following a symlink or not), the mount id statx
+ * reports, AT_HANDLE_FID on procfs, connectable handles below their anchor
+ * only, and the errors in Linux's order, EPERM without CAP_DAC_READ_SEARCH
+ * and ESTALE once the file is gone.
+ */
+static void test_fhandle(void)
+{
+    const char *dir = "/tmp/musl_fh", *file = "/tmp/musl_fh/f", *link_path = "/tmp/musl_fh/ln";
+    const char *other = "/tmp/musl_fh_other";
+    union fh_buf b, d, l, c;
+    char why[160], buf[8];
+    int f = 0, mnt = -1, mnt2 = -1;
+
+    mkdir(dir, 0755);
+    mkdir(other, 0755);
+    int wfd = open(file, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (wfd < 0 || write(wfd, "hi", 2) != 2) f |= 1;
+    close(wfd);
+    unlink(link_path);
+    if (symlink("f", link_path)) f |= 1;
+
+    /* The size probe: EOVERFLOW, with the size needed written back. */
+    struct file_handle probe = {0};
+    errno = 0;
+    if (!fails_with(name_to_handle_at(AT_FDCWD, file, &probe, &mnt, 0), EOVERFLOW) ||
+        probe.handle_bytes == 0 || probe.handle_bytes > MAX_HANDLE_SZ)
+        f |= 2;
+
+    /* The handle opens the same file; the mount id is statx's. */
+    struct statx sx;
+    struct stat st, ost;
+    if (fh_get(AT_FDCWD, file, &b, &mnt, 0) != 0 || b.fh.handle_bytes != probe.handle_bytes ||
+        statx(AT_FDCWD, file, 0, STATX_MNT_ID, &sx) != 0 || (unsigned)mnt != sx.stx_mnt_id)
+        f |= 4;
+    uint64_t umnt = 0;
+    if (fh_get(AT_FDCWD, file, &c, (int *)&umnt, AT_HANDLE_MNT_ID_UNIQUE) != 0 ||
+        umnt <= (1ULL << 31))
+        f |= 4;
+    int fd = open_by_handle_at(AT_FDCWD, &b.fh, O_RDONLY);
+    if (fd < 0 || read(fd, buf, sizeof(buf)) != 2 || memcmp(buf, "hi", 2) != 0 ||
+        fstat(fd, &ost) != 0 || stat(file, &st) != 0 || ost.st_ino != st.st_ino)
+        f |= 8;
+    close(fd);
+
+    /* AT_EMPTY_PATH on a directory descriptor, opened as a directory;
+     * writing a directory is EISDIR. */
+    int dfd = open(dir, O_RDONLY | O_DIRECTORY);
+    if (dfd < 0 || fh_get(dfd, "", &d, &mnt2, AT_EMPTY_PATH) != 0 || mnt2 != mnt) f |= 16;
+    fd = open_by_handle_at(dfd, &d.fh, O_RDONLY | O_DIRECTORY);
+    if (fd < 0 || fstat(fd, &ost) != 0 || !S_ISDIR(ost.st_mode)) f |= 16;
+    close(fd);
+    errno = 0;
+    if (!fails_with(open_by_handle_at(dfd, &d.fh, O_RDWR), EISDIR)) f |= 16;
+
+    /* A symlink's own handle opens as ELOOP; following it, the target. */
+    if (fh_get(AT_FDCWD, link_path, &l, &mnt, 0) != 0) f |= 32;
+    errno = 0;
+    if (!fails_with(open_by_handle_at(AT_FDCWD, &l.fh, O_RDONLY), ELOOP)) f |= 32;
+    if (fh_get(AT_FDCWD, link_path, &l, &mnt, AT_SYMLINK_FOLLOW) != 0 ||
+        l.fh.handle_type != b.fh.handle_type ||
+        memcmp(l.fh.f_handle, b.fh.f_handle, b.fh.handle_bytes) != 0)
+        f |= 32;
+
+    /* procfs cannot decode handles: EOPNOTSUPP, unless AT_HANDLE_FID. */
+    errno = 0;
+    if (!fails_with(fh_get(AT_FDCWD, "/proc/self/status", &c, &mnt, 0), EOPNOTSUPP) ||
+        fh_get(AT_FDCWD, "/proc/self/status", &c, &mnt, AT_HANDLE_FID) != 0)
+        f |= 64;
+
+    /* A connectable handle opens from its directory, not from elsewhere. */
+    int ofd = open(other, O_RDONLY | O_DIRECTORY);
+    if (fh_get(AT_FDCWD, file, &c, &mnt, AT_HANDLE_CONNECTABLE) != 0) f |= 128;
+    fd = open_by_handle_at(dfd, &c.fh, O_RDONLY);
+    if (fd < 0) f |= 128;
+    close(fd);
+    errno = 0;
+    if (ofd < 0 || !fails_with(open_by_handle_at(ofd, &c.fh, O_RDONLY), ESTALE)) f |= 128;
+
+    /* Errors: flags, then the name, then the lookup, then the header. */
+    struct file_handle big = {.handle_bytes = MAX_HANDLE_SZ + 1};
+    int bad_case = -1, bad_errno = 0;
+    int idx = 0;
+#define FH_CASE(call, e)                                   \
+    do {                                                   \
+        errno = 0;                                         \
+        long r_ = (call);                                  \
+        if (!fails_with(r_, e) && bad_case < 0) {          \
+            bad_case = idx;                                \
+            bad_errno = errno;                             \
+        }                                                  \
+        idx++;                                             \
+    } while (0)
+    FH_CASE(fh_get(AT_FDCWD, file, &c, &mnt, -1), EINVAL);
+    FH_CASE(fh_get(AT_FDCWD, file, &c, &mnt, AT_HANDLE_FID | AT_HANDLE_CONNECTABLE), EINVAL);
+    FH_CASE(fh_get(AT_FDCWD, "", &c, &mnt, 0), ENOENT);
+    FH_CASE(fh_get(-1, "f", &c, &mnt, 0), EBADF);
+    FH_CASE(fh_get(AT_FDCWD, (const char *)1, &c, &mnt, 0), EFAULT);
+    FH_CASE(name_to_handle_at(AT_FDCWD, file, (struct file_handle *)1, &mnt, 0), EFAULT);
+    FH_CASE(name_to_handle_at(AT_FDCWD, file, &big, &mnt, 0), EINVAL);
+    FH_CASE(fh_get(AT_FDCWD, file, &c, (int *)1, 0), EFAULT);
+    FH_CASE(open_by_handle_at(AT_FDCWD, (struct file_handle *)1, O_RDONLY), EFAULT);
+    FH_CASE(open_by_handle_at(AT_FDCWD, &big, O_RDONLY), EINVAL);
+    FH_CASE(open_by_handle_at(-1, &b.fh, O_RDONLY), EBADF);
+#undef FH_CASE
+    if (bad_case >= 0) f |= 256;
+
+    /* Without CAP_DAC_READ_SEARCH (an unprivileged child): EPERM. */
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (setuid(65534) != 0) _exit(2);
+        errno = 0;
+        _exit(fails_with(open_by_handle_at(AT_FDCWD, &b.fh, O_RDONLY), EPERM) ? 0 : 1);
+    }
+    int status = -1;
+    if (pid < 0 || waitpid(pid, &status, 0) != pid || !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 0)
+        f |= 512;
+
+    /* Gone, or decoded against a pipe: ESTALE. */
+    int p[2];
+    if (pipe(p) == 0) {
+        errno = 0;
+        if (!fails_with(open_by_handle_at(p[0], &b.fh, O_RDONLY), ESTALE)) f |= 1024;
+        close(p[0]);
+        close(p[1]);
+    }
+    unlink(link_path);
+    unlink(file);
+    errno = 0;
+    if (!fails_with(open_by_handle_at(AT_FDCWD, &b.fh, O_RDONLY), ESTALE)) f |= 1024;
+
+    close(dfd);
+    close(ofd);
+    rmdir(dir);
+    rmdir(other);
+    snprintf(why, sizeof(why), "f=0x%x case=%d errno=%d", f, bad_case, bad_errno);
+    report("fhandle", f == 0, why);
+}
+
+/*
+ * ioctl (group 3 step E1, N-198): a descriptor is a terminal by what it
+ * is, not by its number -- a file is not one even as fd 0, /dev/console
+ * is one above 2; an unknown request is ENOTTY, a closed fd EBADF before
+ * anything else; FIONREAD, FIONBIO and FIOCLEX/FIONCLEX work on any file.
+ */
+static void test_ioctl(void)
+{
+    const char *path = "/tmp/musl_ioctl";
+    struct termios t;
+    char why[96], buf[4];
+    int f = 0, n = -1;
+
+    int fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0644);
+    if (fd < 0 || write(fd, "abcdef", 6) != 6 || lseek(fd, 2, SEEK_SET) != 2) f |= 1;
+    /* A file: FIONREAD is size minus position; no terminal calls. */
+    if (ioctl(fd, FIONREAD, &n) != 0 || n != 4) f |= 2;
+    errno = 0;
+    if (!fails_with(ioctl(fd, TCGETS, &t), ENOTTY) || isatty(fd)) f |= 4;
+    errno = 0;
+    if (!fails_with(ioctl(fd, 0x7fff, 0), ENOTTY)) f |= 4;
+    /* The same file as fd 0 is still not a terminal. */
+    int saved = dup(0);
+    if (saved < 0 || dup2(fd, 0) != 0) f |= 8;
+    errno = 0;
+    if (!fails_with(ioctl(0, TCGETS, &t), ENOTTY)) f |= 8;
+    if (saved >= 0) {
+        dup2(saved, 0);
+        close(saved);
+    }
+
+    /* FIOCLEX and FIONCLEX are F_SETFD's close-on-exec. */
+    if (ioctl(fd, FIOCLEX) != 0 || fcntl(fd, F_GETFD) != FD_CLOEXEC) f |= 16;
+    if (ioctl(fd, FIONCLEX) != 0 || fcntl(fd, F_GETFD) != 0) f |= 16;
+    close(fd);
+    unlink(path);
+
+    /* A closed descriptor: EBADF, whatever the request. */
+    errno = 0;
+    if (!fails_with(ioctl(fd, TCGETS, &t), EBADF)) f |= 32;
+    errno = 0;
+    if (!fails_with(ioctl(fd, FIONREAD, &n), EBADF)) f |= 32;
+
+    /* A pipe: FIONREAD on either end; FIONBIO is O_NONBLOCK. */
+    int p[2];
+    if (pipe(p) != 0 || write(p[1], "hello", 5) != 5) f |= 64;
+    if (ioctl(p[0], FIONREAD, &n) != 0 || n != 5) f |= 64;
+    if (ioctl(p[1], FIONREAD, &n) != 0 || n != 5) f |= 64;
+    if (read(p[0], buf, 2) != 2 || ioctl(p[0], FIONREAD, &n) != 0 || n != 3) f |= 64;
+    int on = 1, off = 0;
+    if (read(p[0], buf, 3) != 3 || ioctl(p[0], FIONBIO, &on) != 0 ||
+        !(fcntl(p[0], F_GETFL) & O_NONBLOCK))
+        f |= 128;
+    errno = 0;
+    if (!fails_with(read(p[0], buf, 1), EAGAIN)) f |= 128;
+    if (ioctl(p[0], FIONBIO, &off) != 0 || (fcntl(p[0], F_GETFL) & O_NONBLOCK)) f |= 128;
+    if (ioctl(p[0], FIOASYNC, &off) != 0) f |= 128;
+    errno = 0;
+    if (!fails_with(ioctl(p[0], TCGETS, &t), ENOTTY)) f |= 128;
+    close(p[0]);
+    close(p[1]);
+
+    /* /dev/console is a terminal at any fd number; /dev/null is not. */
+    int con = open("/dev/console", O_RDWR | O_NOCTTY);
+    if (con < 3 || ioctl(con, TCGETS, &t) != 0 || !isatty(con)) f |= 256;
+    close(con);
+    int null = open("/dev/null", O_RDWR);
+    errno = 0;
+    if (null < 0 || !fails_with(ioctl(null, TCGETS, &t), ENOTTY) ||
+        !fails_with(ioctl(null, FIONREAD, &n), ENOTTY))
+        f |= 512;
+    close(null);
+
+    snprintf(why, sizeof(why), "f=0x%x n=%d errno=%d", f, n, errno);
+    report("ioctl", f == 0, why);
+}
+
+/* One fcntl record-lock request on [start, start + len). */
+static int setlk(int fd, int cmd, short type, off_t start, off_t len)
+{
+    struct flock fl = {.l_type = type, .l_whence = SEEK_SET, .l_start = start, .l_len = len};
+    return fcntl(fd, cmd, &fl);
+}
+
+/* The lock F_GETLK (or F_OFD_GETLK) finds in the way of a write lock on
+ * [start, start + len), in *fl. */
+static int getlk(int fd, int cmd, off_t start, off_t len, struct flock *fl)
+{
+    memset(fl, 0, sizeof(*fl));
+    fl->l_type = F_WRLCK;
+    fl->l_whence = SEEK_SET;
+    fl->l_start = start;
+    fl->l_len = len;
+    return fcntl(fd, cmd, fl);
+}
+
+/* fcntl record locks (N-199): POSIX locks belong to the descriptor table
+ * and go with any close of the file, OFD locks to the open file; a cycle
+ * of F_SETLKW waiters is EDEADLK for the one that would close it. */
+static void test_record_locks(void)
+{
+    const char *path = "/tmp/musl_reclock";
+    struct flock fl;
+    char why[96];
+    int f = 0, child = -1;
+
+    int fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0644);
+    /* [0, 100) less [40, 60): two locks with a hole. */
+    if (fd < 0 || setlk(fd, F_SETLK, F_WRLCK, 0, 100) != 0 ||
+        setlk(fd, F_SETLK, F_UNLCK, 40, 20) != 0)
+        f |= 1;
+    /* An owner's own locks are never in its way. */
+    if (getlk(fd, F_GETLK, 0, 100, &fl) != 0 || fl.l_type != F_UNLCK) f |= 1;
+    pid_t parent = getpid();
+    pid_t pid = fork();
+    if (pid == 0) {
+        int g = 0;
+        /* The inherited descriptor is in another table: the locks are
+         * the parent's. */
+        if (getlk(fd, F_GETLK, 10, 1, &fl) != 0 || fl.l_type != F_WRLCK || fl.l_pid != parent ||
+            fl.l_start != 0 || fl.l_len != 40)
+            g |= 1;
+        errno = 0;
+        if (!fails_with(setlk(fd, F_SETLK, F_RDLCK, 70, 1), EAGAIN)) g |= 2;
+        if (setlk(fd, F_SETLK, F_WRLCK, 45, 10) != 0) g |= 4;
+        _exit(g);
+    }
+    int st = 0;
+    if (pid < 0 || waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+        f |= 2;
+        child = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+    }
+    /* The child's lock went with it. */
+    if (getlk(fd, F_GETLK, 40, 20, &fl) != 0 || fl.l_type != F_UNLCK) f |= 4;
+
+    /* Closing any descriptor of the file drops the table's locks. */
+    int other = open(path, O_RDONLY);
+    if (other < 0 || close(other) != 0) f |= 8;
+    pid = fork();
+    if (pid == 0)
+        _exit(setlk(fd, F_SETLK, F_WRLCK, 0, 0) == 0 ? 0 : 1);
+    if (pid < 0 || waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 0) f |= 8;
+
+    /* An OFD lock conflicts with the same process's POSIX lock, and the
+     * POSIX lock's holder is reported; its own holder is -1. */
+    int ofd = open(path, O_RDWR);
+    if (ofd < 0 || setlk(fd, F_SETLK, F_WRLCK, 0, 10) != 0) f |= 16;
+    errno = 0;
+    if (!fails_with(setlk(ofd, F_OFD_SETLK, F_WRLCK, 5, 1), EAGAIN)) f |= 16;
+    if (getlk(ofd, F_OFD_GETLK, 5, 1, &fl) != 0 || fl.l_type != F_WRLCK || fl.l_pid != parent)
+        f |= 16;
+    if (setlk(ofd, F_OFD_SETLK, F_RDLCK, 200, 0) != 0) f |= 32;
+    errno = 0;
+    if (!fails_with(setlk(fd, F_SETLK, F_WRLCK, 300, 1), EAGAIN)) f |= 32;
+    if (getlk(fd, F_GETLK, 300, 1, &fl) != 0 || fl.l_type != F_RDLCK || fl.l_pid != -1 ||
+        fl.l_start != 200 || fl.l_len != 0)
+        f |= 32;
+    /* An OFD request naming a pid is EINVAL; closing the open file drops
+     * its lock. */
+    struct flock bad = {.l_type = F_RDLCK, .l_whence = SEEK_SET, .l_pid = 1};
+    errno = 0;
+    if (!fails_with(fcntl(ofd, F_OFD_SETLK, &bad), EINVAL)) f |= 64;
+    close(ofd);
+    if (setlk(fd, F_SETLK, F_WRLCK, 300, 1) != 0) f |= 64;
+
+    /* The descriptor must be open for the lock's kind, and F_GETLK asks
+     * about a read or a write lock. */
+    int ro = open(path, O_RDONLY);
+    errno = 0;
+    if (ro < 0 || !fails_with(setlk(ro, F_SETLK, F_WRLCK, 500, 1), EBADF)) f |= 128;
+    close(ro);
+    if (setlk(fd, F_SETLK, F_UNLCK, 0, 0) != 0) f |= 128;
+    struct flock unl = {.l_type = F_UNLCK, .l_whence = SEEK_SET};
+    errno = 0;
+    if (!fails_with(fcntl(fd, F_GETLK, &unl), EINVAL)) f |= 128;
+
+    /* Deadlock: the parent holds byte 0, the child byte 1, and each asks
+     * for the other's. Whichever asks second closes the cycle and gets
+     * EDEADLK, then gives its byte up so the other is granted. */
+    int sync[2];
+    if (pipe(sync) != 0 || setlk(fd, F_SETLK, F_WRLCK, 0, 1) != 0) f |= 256;
+    pid = fork();
+    if (pid == 0) {
+        char c = 'r';
+        if (setlk(fd, F_SETLK, F_WRLCK, 1, 1) != 0 || write(sync[1], &c, 1) != 1) _exit(2);
+        if (setlk(fd, F_SETLKW, F_WRLCK, 0, 1) == 0) _exit(0);
+        int e = errno;
+        setlk(fd, F_SETLK, F_UNLCK, 1, 1);
+        _exit(e == EDEADLK ? 1 : 3);
+    }
+    char c;
+    int parent_deadlk = 0;
+    if (pid < 0 || read(sync[0], &c, 1) != 1) f |= 256;
+    if (setlk(fd, F_SETLKW, F_WRLCK, 1, 1) != 0) {
+        parent_deadlk = errno == EDEADLK ? 1 : 2;
+        setlk(fd, F_SETLK, F_UNLCK, 0, 1);
+    }
+    st = 0;
+    int child_deadlk = pid > 0 && waitpid(pid, &st, 0) == pid && WIFEXITED(st) ? WEXITSTATUS(st) : 9;
+    if (!((parent_deadlk == 1 && child_deadlk == 0) || (parent_deadlk == 0 && child_deadlk == 1)))
+        f |= 512;
+    close(sync[0]);
+    close(sync[1]);
+    close(fd);
+    unlink(path);
+
+    snprintf(why, sizeof(why), "f=0x%x child=%d deadlk=%d/%d errno=%d", f, child, parent_deadlk,
+             child_deadlk, errno);
+    report("record_locks", f == 0, why);
+}
+
+#ifndef F_DUPFD_QUERY
+#define F_DUPFD_QUERY 1027
+#endif
+
+/* fcntl (N-199): every command on a closed descriptor is EBADF and an
+ * unknown one EINVAL; F_SETFL changes O_APPEND (which writes then honour)
+ * and the other status flags, never the access mode. */
+static void test_fcntl_flags(void)
+{
+    const char *path = "/tmp/musl_fcntl_fl";
+    struct flock fl = {.l_type = F_RDLCK, .l_whence = SEEK_SET};
+    char why[96], buf[8] = {0};
+    int f = 0;
+
+    int fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0644);
+    if (fd < 0 || write(fd, "abc", 3) != 3 || lseek(fd, 0, SEEK_SET) != 0) f |= 1;
+    int fl0 = fcntl(fd, F_GETFL);
+    if (fl0 < 0 || (fl0 & O_ACCMODE) != O_RDWR || (fl0 & O_APPEND)) f |= 1;
+    /* O_APPEND on: the write goes to the end. */
+    if (fcntl(fd, F_SETFL, fl0 | O_APPEND) != 0 || !(fcntl(fd, F_GETFL) & O_APPEND)) f |= 2;
+    if (write(fd, "d", 1) != 1 || lseek(fd, 0, SEEK_CUR) != 4) f |= 2;
+    /* Off again: the write goes to the position. */
+    if (fcntl(fd, F_SETFL, fl0) != 0 || lseek(fd, 0, SEEK_SET) != 0 || write(fd, "X", 1) != 1)
+        f |= 4;
+    if (pread(fd, buf, sizeof(buf), 0) != 4 || memcmp(buf, "Xbcd", 4) != 0) f |= 4;
+    /* The access mode is not F_SETFL's to change. */
+    if (fcntl(fd, F_SETFL, O_WRONLY | O_ASYNC) != 0 || (fcntl(fd, F_GETFL) & O_ACCMODE) != O_RDWR ||
+        !(fcntl(fd, F_GETFL) & O_ASYNC))
+        f |= 8;
+    fcntl(fd, F_SETFL, fl0);
+    /* F_DUPFD_QUERY: the same open file or not. */
+    int d = dup(fd), other = open(path, O_RDONLY);
+    if (fcntl(fd, F_DUPFD_QUERY, d) != 1 || fcntl(fd, F_DUPFD_QUERY, other) != 0) f |= 16;
+    errno = 0;
+    if (!fails_with(fcntl(fd, 0x7fff, 0), EINVAL)) f |= 32;
+    close(d);
+    close(other);
+
+    /* O_NOATIME is the owner's: another user is refused. */
+    pid_t pid = fork();
+    if (pid == 0)
+        _exit(setresuid(65534, 65534, 65534) == 0 && fcntl(fd, F_SETFL, O_NOATIME) == -1 &&
+                      errno == EPERM
+                  ? 0
+                  : 1);
+    int st = 0;
+    if (pid < 0 || waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 0) f |= 64;
+    if (fcntl(fd, F_SETFL, O_NOATIME) != 0 || !(fcntl(fd, F_GETFL) & O_NOATIME)) f |= 64;
+
+    /* A closed descriptor: EBADF whatever the command. */
+    close(fd);
+    unlink(path);
+    static const int cmds[] = {F_DUPFD, F_GETFD, F_SETFD,       F_GETFL, F_SETFL,
+                               F_GETLK, F_SETLK, F_DUPFD_QUERY, 0x7fff};
+    for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
+        errno = 0;
+        if (!fails_with(fcntl(fd, cmds[i], &fl), EBADF)) f |= 128;
+    }
+
+    snprintf(why, sizeof(why), "f=0x%x fl0=0x%x errno=%d", f, fl0, errno);
+    report("fcntl_flags", f == 0, why);
+}
+
+/* readv and writev are one transfer each (N-200): a readv of a pipe takes
+ * what is there instead of waiting again for a later buffer, a writev of
+ * at most PIPE_BUF bytes to a pipe goes in whole or not at all, buffers
+ * are filled and drained in order, and a buffer outside user space is
+ * EFAULT before anything is read. The descriptor is checked first. */
+static void test_vectored_io(void)
+{
+    static char page[4096];
+    char why[96], a[8], b[128], x[50], y[100];
+    int f = 0, p[2];
+
+    /* Five bytes in the pipe, buffers of 5 and 100, a writer still open:
+     * readv returns 5 instead of waiting for the second buffer. */
+    if (pipe(p) != 0) f |= 1;
+    pid_t pid = fork();
+    if (pid == 0) {
+        alarm(5);
+        struct iovec r[2] = {{a, 5}, {b, 100}};
+        if (write(p[1], "hello", 5) != 5) _exit(90);
+        ssize_t n = readv(p[0], r, 2);
+        _exit(n == 5 && memcmp(a, "hello", 5) == 0 ? 0 : 91);
+    }
+    int st = 0;
+    if (pid < 0 || waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 0)
+        f |= 2;
+
+    /* In order across buffers, both ways. */
+    struct iovec w2[2] = {{"ab", 2}, {"cde", 3}};
+    struct iovec r2[2] = {{a, 3}, {b, 10}};
+    if (writev(p[1], w2, 2) != 5 || readv(p[0], r2, 2) != 5 || memcmp(a, "abc", 3) ||
+        memcmp(b, "de", 2))
+        f |= 4;
+
+    /* A buffer in kernel space: EFAULT, and the data stays in the pipe. */
+    struct iovec bad[2] = {{a, 2}, {(void *)(uintptr_t)-4096, 3}};
+    errno = 0;
+    if (write(p[1], "hello", 5) != 5 || readv(p[0], bad, 2) != -1 || errno != EFAULT ||
+        read(p[0], b, sizeof(b)) != 5)
+        f |= 8;
+    close(p[0]);
+    close(p[1]);
+
+    /* A full O_NONBLOCK pipe with 100 bytes read out: a writev of 150
+     * bytes (under PIPE_BUF) is EAGAIN, not the first buffer's 50. */
+    int full = 0;
+    if (pipe2(p, O_NONBLOCK) != 0) f |= 1;
+    for (int i = 0; i < 1024 && !full; i++)
+        if (write(p[1], page, sizeof(page)) < 0) full = errno == EAGAIN;
+    memset(x, 'x', sizeof(x));
+    memset(y, 'y', sizeof(y));
+    struct iovec w[2] = {{x, sizeof(x)}, {y, sizeof(y)}};
+    errno = 0;
+    ssize_t n = 0;
+    if (!full || read(p[0], b, 100) != 100 || (n = writev(p[1], w, 2)) != -1 || errno != EAGAIN)
+        f |= 16;
+    close(p[0]);
+    close(p[1]);
+
+    /* A bad descriptor is EBADF even with no buffers. */
+    errno = 0;
+    if (readv(-1, NULL, 0) != -1 || errno != EBADF) f |= 32;
+    errno = 0;
+    if (writev(-1, NULL, 0) != -1 || errno != EBADF) f |= 32;
+
+    snprintf(why, sizeof(why), "f=%#x st=%#x n=%zd errno=%d", f, st, n, errno);
+    report("vectored_io", f == 0, why);
+}
+
+/* Hard and symbolic links fail as on Linux (N-202, N-203, N-206): an
+ * existing new name is EEXIST (with or without a trailing slash), a
+ * missing one with a slash ENOENT, a directory EPERM, unknown linkat flags
+ * EINVAL; linkat follows a final symlink only with AT_SYMLINK_FOLLOW and
+ * links an open file with AT_EMPTY_PATH; a dirfd whose directory was
+ * removed is ENOENT. A trailing slash on a non-directory is ENOTDIR, and
+ * follows a symlink to a directory. fchown of a bad descriptor is EBADF
+ * and getdents64 of a file ENOTDIR. */
+static int errno_is(int ret, int want)
+{
+    return ret == -1 && errno == want;
+}
+
+static void test_link_errors(void)
+{
+    const char *d = "/tmp/musl_links";
+    char why[96];
+    struct stat a, b;
+    int f = 0;
+
+    mkdir(d, 0755);
+    if (chdir(d) != 0) f |= 1;
+    unlink("file");
+    unlink("other");
+    unlink("ln");
+    unlink("sl");
+    unlink("sl2");
+    unlink("viafollow");
+    unlink("vianofollow");
+    unlink("viafd");
+    unlink("dsl");
+    rmdir("sub");
+    rmdir("gone");
+    int fd = open("file", O_CREAT | O_RDWR, 0644);
+    int fd2 = open("other", O_CREAT | O_RDWR, 0644);
+    if (fd < 0 || fd2 < 0 || mkdir("sub", 0755) != 0 || symlink("file", "sl") != 0 ||
+        symlink("sub", "dsl") != 0)
+        f |= 1;
+
+    /* link */
+    if (!errno_is(link("file", "other"), EEXIST)) f |= 2;
+    if (!errno_is(link("file", "other/"), EEXIST)) f |= 2;
+    if (!errno_is(link("file", "ln/"), ENOENT)) f |= 4;
+    if (!errno_is(link("sub", "ln"), EPERM)) f |= 8;
+    if (!errno_is(link("missing", "ln"), ENOENT)) f |= 4;
+    if (link("file", "ln") != 0 || stat("file", &a) != 0 || stat("ln", &b) != 0 ||
+        a.st_ino != b.st_ino)
+        f |= 16;
+
+    /* linkat */
+    if (!errno_is(linkat(AT_FDCWD, "file", AT_FDCWD, "x", 0x1), EINVAL)) f |= 32;
+    if (linkat(AT_FDCWD, "sl", AT_FDCWD, "vianofollow", 0) != 0 ||
+        lstat("vianofollow", &b) != 0 || !S_ISLNK(b.st_mode))
+        f |= 64;
+    if (linkat(AT_FDCWD, "sl", AT_FDCWD, "viafollow", AT_SYMLINK_FOLLOW) != 0 ||
+        lstat("viafollow", &b) != 0 || !S_ISREG(b.st_mode) || b.st_ino != a.st_ino)
+        f |= 128;
+    if (linkat(fd, "", AT_FDCWD, "viafd", AT_EMPTY_PATH) != 0 || stat("viafd", &b) != 0 ||
+        b.st_ino != a.st_ino)
+        f |= 256;
+
+    /* A directory descriptor whose directory is gone. */
+    int gone = -1;
+    if (mkdir("gone", 0755) != 0 || (gone = open("gone", O_DIRECTORY)) < 0 || rmdir("gone") != 0)
+        f |= 1;
+    if (!errno_is(linkat(gone, "x", AT_FDCWD, "y", 0), ENOENT)) f |= 512;
+    if (!errno_is(linkat(AT_FDCWD, "file", gone, "y", 0), ENOENT)) f |= 512;
+    if (!errno_is(symlinkat("file", gone, "y"), ENOENT)) f |= 512;
+    if (!errno_is(linkat(gone, "sub/file", AT_FDCWD, "y", 0), ENOENT)) f |= 512;
+    if (!errno_is(symlinkat("../file", gone, "sub/y"), ENOENT)) f |= 512;
+    close(gone);
+
+    /* symlink */
+    if (!errno_is(symlink("file", "other"), EEXIST)) f |= 1024;
+    if (!errno_is(symlink("", "sl2"), ENOENT)) f |= 1024;
+
+    /* Trailing slashes. */
+    if (!errno_is(stat("file/", &b), ENOTDIR) || !errno_is(open("file/", O_RDONLY), ENOTDIR) ||
+        !errno_is(lstat("sl/", &b), ENOTDIR))
+        f |= 2048;
+    if (lstat("dsl/", &b) != 0 || !S_ISDIR(b.st_mode)) f |= 4096;
+
+    /* fchown and getdents64. */
+    char buf[256];
+    if (!errno_is(fchown(-1, 0, 0), EBADF)) f |= 8192;
+    if (!errno_is((int)syscall(SYS_getdents64, fd, buf, sizeof(buf)), ENOTDIR)) f |= 16384;
+
+    close(fd);
+    close(fd2);
+    const char *names[] = {"file", "other", "ln", "sl", "viafollow", "vianofollow", "viafd", "dsl"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+        unlink(names[i]);
+    rmdir("sub");
+    if (chdir("/") != 0) f |= 1;
+    rmdir(d);
+    snprintf(why, sizeof(why), "f=%#x errno=%d", f, errno);
+    report("link_errors", f == 0, why);
+}
+
+/* stat's numbers (N-205): st_nlink counts a file's names and a
+ * directory's subdirectories (2 + n, 0 once removed), and st_dev is the
+ * same for files on one mount and differs between mounts (the root and
+ * /proc), fstat and fstatat agreeing. */
+static void test_stat_numbers(void)
+{
+    const char *d = "/tmp/musl_statnum";
+    char why[120];
+    struct stat a, b, c, r, p;
+    int f = 0;
+
+    unlink("/tmp/musl_statnum/f");
+    unlink("/tmp/musl_statnum/g");
+    rmdir("/tmp/musl_statnum/s1");
+    rmdir("/tmp/musl_statnum/s2");
+    rmdir(d);
+    if (mkdir(d, 0755) != 0 || chdir(d) != 0) f |= 1;
+    int fd = open("f", O_CREAT | O_RDWR, 0644);
+    if (fd < 0 || fstat(fd, &a) != 0 || a.st_nlink != 1) f |= 2;
+    if (link("f", "g") != 0 || stat("f", &a) != 0 || a.st_nlink != 2 || fstat(fd, &b) != 0 ||
+        b.st_nlink != 2)
+        f |= 4;
+    if (unlink("f") != 0 || fstat(fd, &b) != 0 || b.st_nlink != 1) f |= 8;
+    if (unlink("g") != 0 || fstat(fd, &b) != 0 || b.st_nlink != 0) f |= 16;
+    /* No new name for a file with none left. */
+    if (!(linkat(fd, "", AT_FDCWD, "f", AT_EMPTY_PATH) == -1 && errno == ENOENT)) f |= 16;
+    if (mkdir("s1", 0755) != 0 || mkdir("s2", 0755) != 0 || stat(".", &c) != 0 ||
+        c.st_nlink != 4)
+        f |= 32;
+    int dfd = open("s2", O_DIRECTORY);
+    if (dfd < 0 || rmdir("s2") != 0 || fstat(dfd, &c) != 0 || c.st_nlink != 0 ||
+        stat(".", &c) != 0 || c.st_nlink != 3)
+        f |= 64;
+    close(dfd);
+    /* One device per mount. */
+    if (stat("/", &r) != 0 || stat("/proc", &p) != 0 || r.st_dev == p.st_dev) f |= 128;
+    struct stat pa, pb;
+    if (stat("/proc/self", &pa) != 0 || fstatat(AT_FDCWD, "/proc/self", &pb, 0) != 0 ||
+        pa.st_dev != pb.st_dev || pa.st_dev != p.st_dev)
+        f |= 256;
+    if (stat(".", &c) != 0 || fstat(fd, &b) != 0 || c.st_dev != b.st_dev) f |= 512;
+    close(fd);
+    rmdir("s1");
+    if (chdir("/") != 0) f |= 1;
+    rmdir(d);
+    snprintf(why, sizeof(why), "f=%#x nlink=%lu dev=%#lx/%#lx", f, (unsigned long)c.st_nlink,
+             (unsigned long)r.st_dev, (unsigned long)p.st_dev);
+    report("stat_numbers", f == 0, why);
+}
+
+/* Open flags as Linux 7.3 handles them (N-206): an O_PATH descriptor names
+ * a file without opening it -- no permission check, truncation or FIFO
+ * wait, other flags dropped by open(2) -- and serves only path operations
+ * (fstat, *at directories and AT_EMPTY_PATH, fchdir, dup, F_GETFD/F_SETFD/
+ * F_GETFL); read, write, lseek, ioctl, mmap, getdents64, fsync, fchmod and
+ * F_SETFL are EBADF (fchmod by its system call: musl's falls back to
+ * /proc/self/fd for an O_PATH descriptor, and musl's O_ACCMODE includes
+ * O_PATH, so the access mode is the low two bits). O_TMPFILE makes an
+ * unnamed file in a directory (no links) that linkat with AT_EMPTY_PATH can
+ * name unless O_EXCL was given; it needs O_DIRECTORY and write access
+ * (EINVAL) and a directory (ENOTDIR). O_NOATIME needs the file's owner
+ * (EPERM). */
+static void test_open_flags(void)
+{
+    const char *d = "/tmp/musl_oflags";
+    char why[96], buf[64];
+    struct stat st;
+    int f = 0;
+
+    unlink("/tmp/musl_oflags/file");
+    unlink("/tmp/musl_oflags/sl");
+    unlink("/tmp/musl_oflags/fifo");
+    unlink("/tmp/musl_oflags/viapath");
+    rmdir("/tmp/musl_oflags/sub");
+    rmdir(d);
+    if (mkdir(d, 0755) != 0 || chdir(d) != 0) f |= 1;
+    int w = open("file", O_CREAT | O_WRONLY, 0644);
+    if (w < 0 || write(w, "hello", 5) != 5) f |= 1;
+    close(w);
+    if (mkdir("sub", 0755) != 0 || symlink("file", "sl") != 0 || mkfifo("fifo", 0644) != 0)
+        f |= 1;
+
+    /* O_PATH: other flags dropped (no truncation), no I/O. */
+    int p = open("file", O_PATH | O_RDWR | O_TRUNC);
+    int fl = p < 0 ? 0 : fcntl(p, F_GETFL);
+    if (p < 0 || stat("file", &st) != 0 || st.st_size != 5 || !(fl & O_PATH) ||
+        (fl & 3) != 0)
+        f |= 2;
+    if (!errno_is((int)read(p, buf, 1), EBADF) || !errno_is((int)write(p, "x", 1), EBADF) ||
+        !errno_is((int)lseek(p, 0, SEEK_SET), EBADF) || !errno_is((int)fsync(p), EBADF) ||
+        !errno_is((int)syscall(SYS_fchmod, p, 0600), EBADF) || !errno_is((int)ioctl(p, FIONREAD, &fl), EBADF))
+        f |= 4;
+    if (mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, p, 0) != MAP_FAILED || errno != EBADF) f |= 4;
+    if (!errno_is((int)fcntl(p, F_SETFL, O_NONBLOCK), EBADF) || fcntl(p, F_GETFD) != 0 ||
+        fcntl(p, F_SETFD, FD_CLOEXEC) != 0 || fcntl(p, F_GETFD) != FD_CLOEXEC)
+        f |= 8;
+    /* Path operations work. */
+    int p2 = dup(p);
+    if (p2 < 0 || fstat(p2, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size != 5) f |= 16;
+    if (fstatat(p, "", &st, AT_EMPTY_PATH) != 0 || st.st_size != 5) f |= 16;
+    if (linkat(p, "", AT_FDCWD, "viapath", AT_EMPTY_PATH) != 0 || stat("viapath", &st) != 0 ||
+        st.st_nlink != 2)
+        f |= 32;
+    close(p2);
+    close(p);
+
+    /* An O_PATH directory: a dirfd and fchdir, but no getdents64. */
+    int pd = open("sub", O_PATH | O_DIRECTORY);
+    int made = pd < 0 ? -1 : openat(pd, "inner", O_CREAT | O_WRONLY, 0644);
+    if (made < 0 || fstatat(pd, "inner", &st, 0) != 0) f |= 64;
+    close(made);
+    if (!errno_is((int)syscall(SYS_getdents64, pd, buf, sizeof(buf)), EBADF)) f |= 64;
+    if (fchdir(pd) != 0 || stat("inner", &st) != 0 || chdir(d) != 0) f |= 64;
+    unlinkat(pd, "inner", 0);
+    close(pd);
+    if (!errno_is((int)open("file", O_PATH | O_DIRECTORY), ENOTDIR)) f |= 64;
+
+    /* O_PATH|O_NOFOLLOW names a symlink itself; a FIFO opens at once. */
+    int ps = open("sl", O_PATH | O_NOFOLLOW);
+    long n = ps < 0 ? -1 : readlinkat(ps, "", buf, sizeof(buf));
+    if (ps < 0 || fstat(ps, &st) != 0 || !S_ISLNK(st.st_mode) || n != 4 ||
+        memcmp(buf, "file", 4) != 0)
+        f |= 128;
+    close(ps);
+    int pf = open("fifo", O_PATH);
+    if (pf < 0 || fstat(pf, &st) != 0 || !S_ISFIFO(st.st_mode)) f |= 128;
+    close(pf);
+
+    /* O_TMPFILE, in a tmpfs. */
+    int t = open("/dev/shm", O_TMPFILE | O_RDWR, 0600);
+    if (t < 0 || write(t, "tmp", 3) != 3 || fstat(t, &st) != 0 || st.st_nlink != 0 ||
+        !S_ISREG(st.st_mode))
+        f |= 256;
+    unlink("/dev/shm/musl_oflags_tmp");
+    if (linkat(t, "", AT_FDCWD, "/dev/shm/musl_oflags_tmp", AT_EMPTY_PATH) != 0 ||
+        fstat(t, &st) != 0 || st.st_nlink != 1)
+        f |= 512;
+    int r = open("/dev/shm/musl_oflags_tmp", O_RDONLY);
+    if (r < 0 || read(r, buf, sizeof(buf)) != 3 || memcmp(buf, "tmp", 3) != 0) f |= 512;
+    close(r);
+    close(t);
+    unlink("/dev/shm/musl_oflags_tmp");
+    int te = open("/dev/shm", O_TMPFILE | O_RDWR | O_EXCL, 0600);
+    if (te < 0 || !errno_is((int)linkat(te, "", AT_FDCWD, "/dev/shm/musl_oflags_tmp",
+                                      AT_EMPTY_PATH),
+                               ENOENT))
+        f |= 1024;
+    close(te);
+    if (!errno_is((int)open("/dev/shm", O_TMPFILE | O_RDONLY, 0600), EINVAL) ||
+        !errno_is((int)open("file", O_TMPFILE | O_RDWR, 0600), ENOTDIR))
+        f |= 1024;
+
+    /* O_NOATIME: the owner may, another user may not. Without
+     * CAP_DAC_READ_SEARCH, linkat with AT_EMPTY_PATH links what the caller
+     * opened itself, not a descriptor opened with other credentials. */
+    int na = open("file", O_RDONLY | O_NOATIME);
+    if (na < 0 || !(fcntl(na, F_GETFL) & O_NOATIME)) f |= 2048;
+    close(na);
+    int tp = open("/dev/shm", O_TMPFILE | O_RDWR, 0600);
+    pid_t pid = fork();
+    if (pid == 0) {
+        int dropped = getuid() == 0;
+        if (dropped && setuid(65534) != 0) _exit(2);
+        int o = open("/", O_RDONLY | O_NOATIME);
+        if (!(o == -1 && errno == EPERM)) _exit(1);
+        char nm[48];
+        snprintf(nm, sizeof(nm), "/dev/shm/musl_oflags_u%d", (int)getpid());
+        int u = open("/dev/shm", O_TMPFILE | O_RDWR, 0600);
+        if (u < 0 || linkat(u, "", AT_FDCWD, nm, AT_EMPTY_PATH) != 0) _exit(3);
+        unlink(nm);
+        if (dropped && !(linkat(tp, "", AT_FDCWD, nm, AT_EMPTY_PATH) == -1 && errno == ENOENT))
+            _exit(4);
+        _exit(0);
+    }
+    int status = 0;
+    if (tp < 0 || pid < 0 || waitpid(pid, &status, 0) != pid || !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 0)
+        f |= 4096;
+    close(tp);
+
+    unlink("file");
+    unlink("viapath");
+    unlink("sl");
+    unlink("fifo");
+    rmdir("sub");
+    if (chdir("/") != 0) f |= 1;
+    rmdir(d);
+    snprintf(why, sizeof(why), "f=%#x errno=%d", f, errno);
+    report("open_flags", f == 0, why);
+}
+
+/* ETXTBSY (Linux's i_writecount): a program that is
+ * running cannot be opened for writing or truncated, and a file open for
+ * writing cannot be executed; reading it, O_PATH and writing it once the
+ * process is gone are fine. The program is a copy of sleep, and the
+ * checks wait until it runs. */
+static int txtbsy_copy(const char *from, const char *to)
+{
+    char buf[4096];
+    int in = open(from, O_RDONLY), ok = in >= 0;
+    int out = open(to, O_CREAT | O_TRUNC | O_WRONLY, 0755);
+    ok = ok && out >= 0;
+    ssize_t n;
+    while (ok && (n = read(in, buf, sizeof(buf))) > 0)
+        ok = write(out, buf, (size_t)n) == n;
+    if (in >= 0) close(in);
+    if (out >= 0) close(out);
+    return ok;
+}
+
+static void test_text_busy(void)
+{
+    const char *prog = "/tmp/musl_txtbsy";
+    char why[128];
+    int f = 0;
+
+    unlink(prog);
+    if (!txtbsy_copy("/bin/sleep", prog)) f |= 1;
+
+    /* Open for writing: exec is ETXTBSY. */
+    int w = open(prog, O_WRONLY);
+    pid_t pid = fork();
+    if (pid == 0) {
+        char *argv[] = {"sleep", "0", NULL};
+        execv(prog, argv);
+        _exit(errno == ETXTBSY ? 0 : 1);
+    }
+    int status = 0;
+    if (w < 0 || pid < 0 || waitpid(pid, &status, 0) != pid || !WIFEXITED(status) ||
+        WEXITSTATUS(status) != 0)
+        f |= 2;
+    close(w);
+
+    /* Running: writing and truncating are ETXTBSY. The child's
+     * close-on-exec pipe end closes when its exec succeeds, so the parent
+     * reads end of file then, or the exec's errno. */
+    int ready[2];
+    if (pipe2(ready, O_CLOEXEC) != 0) f |= 1;
+    pid = fork();
+    if (pid == 0) {
+        char *argv[] = {"sleep", "10", NULL};
+        close(ready[0]);
+        execv(prog, argv);
+        int e = errno;
+        if (write(ready[1], &e, sizeof(e)) < 0) _exit(126);
+        _exit(127);
+    }
+    close(ready[1]);
+    int exec_errno = 0;
+    int running = pid > 0 && read(ready[0], &exec_errno, sizeof(exec_errno)) == 0;
+    close(ready[0]);
+    if (!running || !(open(prog, O_WRONLY) == -1 && errno == ETXTBSY)) f |= 4;
+    if (!(truncate(prog, 0) == -1 && errno == ETXTBSY)) f |= 8;
+    if (!(open(prog, O_RDWR | O_TRUNC) == -1 && errno == ETXTBSY)) f |= 8;
+    int r = open(prog, O_RDONLY), p = open(prog, O_PATH);
+    if (r < 0 || p < 0) f |= 16;
+    close(r);
+    close(p);
+    int ran = 0;
+    if (pid > 0) {
+        kill(pid, SIGKILL);
+        waitpid(pid, &ran, 0);
+    }
+    /* The process is gone: the file can be written again. */
+    w = open(prog, O_WRONLY);
+    if (w < 0) f |= 32;
+    close(w);
+
+    /* A shared mapping keeps the write access of the file it was made
+     * from after the descriptor is closed (Linux's vm_file); unmapped, the
+     * file runs again (PR #35 review). */
+    w = open(prog, O_RDWR);
+    void *map = w >= 0 ? mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, w, 0) : MAP_FAILED;
+    if (w >= 0) close(w);
+    for (int unmapped = 0; unmapped < 2; unmapped++) {
+        if (unmapped && map != MAP_FAILED) munmap(map, 4096);
+        pid = fork();
+        if (pid == 0) {
+            char *argv[] = {"sleep", "0", NULL};
+            execv(prog, argv);
+            _exit(errno == ETXTBSY ? 3 : 4);
+        }
+        status = 0;
+        int want = unmapped ? 0 : 3;
+        if (map == MAP_FAILED || pid < 0 || waitpid(pid, &status, 0) != pid ||
+            !WIFEXITED(status) || WEXITSTATUS(status) != want)
+            f |= 64;
+    }
+
+    unlink(prog);
+    snprintf(why, sizeof(why), "f=%#x errno=%d exec=%d status=%#x", f, errno, exec_errno, ran);
+    report("text_busy", f == 0, why);
+}
+
+/* inotify as Linux 7.3's fs/notify: a watch on a directory reports its
+ * entries' events with their names, one on a file the file's own; a move
+ * is MOVED_FROM and MOVED_TO with one cookie, then MOVE_SELF; removing the
+ * last name is ATTRIB, DELETE_SELF and IGNORED as the watch goes, before
+ * the directory's DELETE; an event
+ * identical to the one last queued merges into it; O_PATH opens report
+ * nothing. Events are read as "wd:mask:name" lines. */
+static int inotify_drain(int fd, char *out, size_t len, unsigned *cookies)
+{
+    char buf[4096] __attribute__((aligned(8)));
+    size_t used = 0;
+    int ncookie = 0;
+    out[0] = 0;
+    for (;;) {
+        ssize_t n = read(fd, buf, sizeof(buf));
+        if (n <= 0) return n < 0 && errno == EAGAIN ? 0 : -1;
+        for (char *p = buf; p < buf + n;) {
+            struct inotify_event *ev = (struct inotify_event *)p;
+            int w = snprintf(out + used, len - used, "%d:%x:%s ", ev->wd, ev->mask,
+                             ev->len ? ev->name : "");
+            if (w < 0 || (size_t)w >= len - used) return -1;
+            used += (size_t)w;
+            if (ev->cookie && ncookie < 4) cookies[ncookie++] = ev->cookie;
+            p += sizeof(*ev) + ev->len;
+        }
+    }
+}
+
+static void test_inotify_events(void)
+{
+    const char *d = "/tmp/musl_inotify";
+    char why[160], got[1024], want[512];
+    unsigned ck[4] = {0, 0, 0, 0};
+    int f = 0;
+
+    unlink("/tmp/musl_inotify/a");
+    unlink("/tmp/musl_inotify/b");
+    rmdir("/tmp/musl_inotify/sub");
+    rmdir(d);
+    if (mkdir(d, 0755) != 0) f |= 1;
+
+    /* Arguments. */
+    int in = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    if (in < 0 || !(fcntl(in, F_GETFL) & O_NONBLOCK) || fcntl(in, F_GETFD) != FD_CLOEXEC)
+        f |= 2;
+    char one;
+    if (!(read(in, &one, 1) == -1 && errno == EAGAIN)) f |= 2;
+    if (!(inotify_init1(0x1234) == -1 && errno == EINVAL)) f |= 2;
+    if (!(inotify_add_watch(in, d, 0) == -1 && errno == EINVAL) ||
+        !(inotify_add_watch(in, d, IN_MASK_ADD | IN_MASK_CREATE | IN_CREATE) == -1 &&
+          errno == EINVAL) ||
+        !(inotify_add_watch(0x7fff, d, IN_CREATE) == -1 && errno == EBADF) ||
+        !(inotify_add_watch(1, d, IN_CREATE) == -1 && errno == EINVAL) ||
+        !(inotify_add_watch(in, "/tmp/musl_inotify/none", IN_CREATE) == -1 && errno == ENOENT) ||
+        !(inotify_rm_watch(in, 12345) == -1 && errno == EINVAL))
+        f |= 2;
+
+    int wd = inotify_add_watch(in, d, IN_ALL_EVENTS);
+    if (wd < 1 || inotify_add_watch(in, d, IN_ALL_EVENTS) != wd ||
+        !(inotify_add_watch(in, d, IN_CREATE | IN_MASK_CREATE) == -1 && errno == EEXIST))
+        f |= 4;
+
+    /* A new file: CREATE, OPEN, one MODIFY for two writes, CLOSE_WRITE. */
+    int w = open("/tmp/musl_inotify/a", O_CREAT | O_WRONLY, 0644);
+    if (w < 0 || write(w, "x", 1) != 1 || write(w, "y", 1) != 1) f |= 8;
+    close(w);
+    int r = open("/tmp/musl_inotify/a", O_RDONLY);
+    if (r < 0 || read(r, &one, 1) != 1) f |= 8;
+    close(r);
+    int p = open("/tmp/musl_inotify/a", O_PATH);
+    close(p);
+    struct pollfd pfd = {in, POLLIN, 0};
+    int avail = 0;
+    if (poll(&pfd, 1, 0) != 1 || !(pfd.revents & POLLIN) || ioctl(in, FIONREAD, &avail) != 0 ||
+        avail != 7 * 32)
+        f |= 16;
+    /* A buffer too small for the next event. */
+    char small[8];
+    if (!(read(in, small, sizeof(small)) == -1 && errno == EINVAL)) f |= 16;
+    if (inotify_drain(in, got, sizeof(got), ck) != 0) f |= 8;
+    snprintf(want, sizeof(want), "%d:100:a %d:20:a %d:2:a %d:8:a %d:20:a %d:1:a %d:10:a ", wd,
+             wd, wd, wd, wd, wd, wd);
+    if (strcmp(got, want) != 0) f |= 8;
+
+    /* A file's own watch: no names. chmod, rename, unlink. */
+    int wf = inotify_add_watch(in, "/tmp/musl_inotify/a", IN_ATTRIB | IN_MOVE_SELF |
+                                                            IN_DELETE_SELF);
+    if (wf < 1 || wf == wd || chmod("/tmp/musl_inotify/a", 0600) != 0 ||
+        rename("/tmp/musl_inotify/a", "/tmp/musl_inotify/b") != 0 ||
+        unlink("/tmp/musl_inotify/b") != 0)
+        f |= 32;
+    if (inotify_drain(in, got, sizeof(got), ck) != 0) f |= 32;
+    snprintf(want, sizeof(want),
+             "%d:4:a %d:4: %d:40:a %d:80:b %d:800: %d:4: %d:400: %d:8000: %d:200:b ", wd, wf,
+             wd, wd, wf, wf, wf, wf, wd);
+    if (strcmp(got, want) != 0 || ck[0] == 0 || ck[0] != ck[1]) f |= 32;
+
+    /* Directories carry IN_ISDIR. */
+    if (mkdir("/tmp/musl_inotify/sub", 0755) != 0 || rmdir("/tmp/musl_inotify/sub") != 0)
+        f |= 64;
+    if (inotify_drain(in, got, sizeof(got), ck) != 0) f |= 64;
+    snprintf(want, sizeof(want), "%d:40000100:sub %d:40000200:sub ", wd, wd);
+    if (strcmp(got, want) != 0) f |= 64;
+
+    /* IN_ONESHOT reports once; inotify_rm_watch queues IN_IGNORED. */
+    int wo = inotify_add_watch(in, d, IN_CREATE | IN_ONESHOT);
+    w = open("/tmp/musl_inotify/a", O_CREAT | O_WRONLY, 0644);
+    close(w);
+    unlink("/tmp/musl_inotify/a");
+    if (wo != wd || inotify_drain(in, got, sizeof(got), ck) != 0) f |= 128;
+    snprintf(want, sizeof(want), "%d:100:a %d:8000: ", wd, wd);
+    if (strcmp(got, want) != 0) f |= 128;
+    int wr = inotify_add_watch(in, d, IN_CREATE);
+    if (wr < 1 || wr == wd || inotify_rm_watch(in, wr) != 0 ||
+        !(inotify_rm_watch(in, wr) == -1 && errno == EINVAL) ||
+        inotify_drain(in, got, sizeof(got), ck) != 0)
+        f |= 256;
+    snprintf(want, sizeof(want), "%d:8000: ", wr);
+    if (strcmp(got, want) != 0) f |= 256;
+
+    /* An attribute set through a symlink changes the target, so the event
+     * is the target's directory's, not the link's (PR #35 review). */
+    int ix = inotify_init1(IN_NONBLOCK);
+    mkdir("/tmp/musl_inotify/data", 0755);
+    mkdir("/tmp/musl_inotify/links", 0755);
+    w = open("/tmp/musl_inotify/data/file", O_CREAT | O_WRONLY, 0644);
+    close(w);
+    symlink("../data/file", "/tmp/musl_inotify/links/alias");
+    int wda = inotify_add_watch(ix, "/tmp/musl_inotify/data", IN_ATTRIB);
+    int wdl = inotify_add_watch(ix, "/tmp/musl_inotify/links", IN_ATTRIB);
+    if (ix < 0 || wda < 1 || wdl < 1 ||
+        setxattr("/tmp/musl_inotify/links/alias", "user.t", "1", 1, 0) != 0 ||
+        inotify_drain(ix, got, sizeof(got), ck) != 0)
+        f |= 1024;
+    snprintf(want, sizeof(want), "%d:4:file ", wda);
+    if (strcmp(got, want) != 0) f |= 1024;
+    close(ix);
+    unlink("/tmp/musl_inotify/links/alias");
+    unlink("/tmp/musl_inotify/data/file");
+    rmdir("/tmp/musl_inotify/links");
+    rmdir("/tmp/musl_inotify/data");
+    inotify_drain(in, got, sizeof(got), ck);
+
+    /* The limits are where Linux keeps them. */
+    char lim[32] = "";
+    int l = open("/proc/sys/fs/inotify/max_queued_events", O_RDONLY);
+    if (l < 0 || read(l, lim, sizeof(lim) - 1) <= 0 || strcmp(lim, "16384\n") != 0) f |= 512;
+    close(l);
+    l = open("/proc/sys/fs/inotify/max_user_instances", O_RDONLY);
+    if (l < 0) f |= 512;
+    close(l);
+
+    close(in);
+    rmdir(d);
+    snprintf(why, sizeof(why), "f=%#x errno=%d got=%.100s", f, errno, got);
+    report("inotify_events", f == 0, why);
+}
+
+/* pidfd_open, pidfd_send_signal, pidfd_getfd, waitid(P_PIDFD) and
+ * clone(CLONE_PIDFD), as Linux 7.3: a pidfd is close-on-exec, polls
+ * readable once its process has exited, signals and waits for that process
+ * only, and copies a descriptor from a process the caller may trace. */
+#ifndef P_PIDFD
+#define P_PIDFD 3
+#endif
+#ifndef PIDFD_NONBLOCK
+#define PIDFD_NONBLOCK O_NONBLOCK
+#endif
+#ifndef PIDFD_THREAD
+#define PIDFD_THREAD O_EXCL
+#endif
+#ifndef CLONE_PIDFD
+#define CLONE_PIDFD 0x1000
+#endif
+static int sys_pidfd_open(pid_t pid, unsigned flags)
+{
+    return (int)syscall(SYS_pidfd_open, pid, flags);
+}
+
+static int sys_pidfd_send_signal(int pidfd, int sig, siginfo_t *info, unsigned flags)
+{
+    return (int)syscall(SYS_pidfd_send_signal, pidfd, sig, info, flags);
+}
+
+static int sys_pidfd_getfd(int pidfd, int fd, unsigned flags)
+{
+    return (int)syscall(SYS_pidfd_getfd, pidfd, fd, flags);
+}
+
+static void test_pidfd(void)
+{
+    char why[160];
+    int f = 0;
+
+    /* Arguments. */
+    if (!(sys_pidfd_open(getpid(), 0x4) == -1 && errno == EINVAL) ||
+        !(sys_pidfd_open(0, 0) == -1 && errno == EINVAL) ||
+        !(sys_pidfd_open(-1, 0) == -1 && errno == EINVAL) ||
+        !(sys_pidfd_open(0x3ffffff0, 0) == -1 && errno == ESRCH))
+        f |= 1;
+    int self = sys_pidfd_open(getpid(), 0);
+    if (self < 0 || fcntl(self, F_GETFD) != FD_CLOEXEC || (fcntl(self, F_GETFL) & O_ACCMODE) != O_RDWR)
+        f |= 2;
+    char c;
+    if (!(read(self, &c, 1) == -1 && errno == EINVAL)) f |= 2;
+    if (!(sys_pidfd_send_signal(self, 0, NULL, 0x8) == -1 && errno == EINVAL) ||
+        !(sys_pidfd_send_signal(self, 0, NULL, 0x3) == -1 && errno == EINVAL) ||
+        !(sys_pidfd_send_signal(0x7fff, 0, NULL, 0) == -1 && errno == EBADF) ||
+        !(sys_pidfd_send_signal(1, 0, NULL, 0) == -1 && errno == EBADF) ||
+        sys_pidfd_send_signal(self, 0, NULL, 0) != 0)
+        f |= 4;
+    struct pollfd pfd = {self, POLLIN, 0};
+    if (poll(&pfd, 1, 0) != 0) f |= 8;
+
+    /* A child that waits for a signal: it is signalled through its pidfd,
+     * which then polls readable, and waitid reaps it through the pidfd. */
+    int pipefd[2];
+    if (pipe(pipefd) != 0) f |= 16;
+    pid_t pid = fork();
+    if (pid == 0) {
+        close(pipefd[0]);
+        pause();
+        _exit(1);
+    }
+    close(pipefd[1]);
+    int pfd_child = sys_pidfd_open(pid, PIDFD_NONBLOCK);
+    if (pfd_child < 0 || !(fcntl(pfd_child, F_GETFL) & O_NONBLOCK)) f |= 32;
+    /* Copy its write end of the pipe: the copy is close-on-exec. */
+    int got = sys_pidfd_getfd(pfd_child, pipefd[1], 0);
+    if (got < 0 || fcntl(got, F_GETFD) != FD_CLOEXEC) f |= 64;
+    if (!(sys_pidfd_getfd(pfd_child, pipefd[1], 1) == -1 && errno == EINVAL) ||
+        !(sys_pidfd_getfd(pfd_child, 0x7ffe, 0) == -1 && errno == EBADF))
+        f |= 64;
+    if (got >= 0) {
+        if (write(got, "x", 1) != 1) f |= 64;
+        close(got);
+        if (read(pipefd[0], &c, 1) != 1 || c != 'x') f |= 64;
+    }
+    siginfo_t si;
+    memset(&si, 0, sizeof(si));
+    /* Nothing to report yet on a nonblocking pidfd: EAGAIN. */
+    if (!(waitid(P_PIDFD, pfd_child, &si, WEXITED) == -1 && errno == EAGAIN)) f |= 128;
+    if (sys_pidfd_send_signal(pfd_child, SIGTERM, NULL, 0) != 0) f |= 256;
+    pfd.fd = pfd_child;
+    pfd.revents = 0;
+    if (poll(&pfd, 1, 5000) != 1 || !(pfd.revents & POLLIN)) f |= 512;
+    memset(&si, 0, sizeof(si));
+    if (waitid(P_PIDFD, pfd_child, &si, WEXITED) != 0 || si.si_pid != pid ||
+        si.si_code != CLD_KILLED || si.si_status != SIGTERM)
+        f |= 1024;
+    /* Reaped: polls readable and hung up; signals are ESRCH. */
+    pfd.revents = 0;
+    if (poll(&pfd, 1, 0) != 1 || !(pfd.revents & POLLHUP)) f |= 2048;
+    if (!(sys_pidfd_send_signal(pfd_child, SIGTERM, NULL, 0) == -1 && errno == ESRCH)) f |= 2048;
+    close(pfd_child);
+    close(pipefd[0]);
+
+    /* clone(CLONE_PIDFD): the pidfd comes back through parent_tid. */
+    int cfd = -1;
+    long cpid = syscall(SYS_clone, CLONE_PIDFD | SIGCHLD, 0, &cfd, 0, 0);
+    if (cpid == 0)
+        _exit(7);
+    if (cpid < 0 || cfd < 0 || fcntl(cfd, F_GETFD) != FD_CLOEXEC) f |= 4096;
+    memset(&si, 0, sizeof(si));
+    if (cfd >= 0 && (waitid(P_PIDFD, cfd, &si, WEXITED) != 0 || si.si_pid != cpid ||
+                     si.si_code != CLD_EXITED || si.si_status != 7))
+        f |= 4096;
+    if (cfd >= 0) close(cfd);
+    if (cpid > 0) waitpid((pid_t)cpid, NULL, WNOHANG);
+    close(self);
+
+    snprintf(why, sizeof(why), "f=%#x errno=%d", f, errno);
+    report("pidfd", f == 0, why);
+}
+
+/* clone3, as Linux 7.3: struct clone_args read as an extensible struct and
+ * checked in Linux's order, the pidfd stored through its own pointer, and
+ * CLONE_CLEAR_SIGHAND, CLONE_NNP, CLONE_AUTOREAP, CLONE_PIDFD_AUTOKILL,
+ * set_tid and CLONE_INTO_CGROUP as Linux takes them. */
+#ifndef SYS_clone3
+#define SYS_clone3 435
+#endif
+#ifndef SYS_pidfd_open
+#define SYS_pidfd_open 434
+#endif
+#ifndef CLONE_PIDFD
+#define CLONE_PIDFD 0x1000
+#endif
+#ifndef P_PIDFD
+#define P_PIDFD 3
+#endif
+#define T_CLONE_CLEAR_SIGHAND (1ULL << 32)
+#define T_CLONE_INTO_CGROUP (1ULL << 33)
+#define T_CLONE_AUTOREAP (1ULL << 34)
+#define T_CLONE_NNP (1ULL << 35)
+#define T_CLONE_PIDFD_AUTOKILL (1ULL << 36)
+struct t_clone_args {
+    uint64_t flags, pidfd, child_tid, parent_tid, exit_signal, stack, stack_size, tls,
+        set_tid, set_tid_size, cgroup;
+};
+
+static long t_clone3(struct t_clone_args *a, size_t size)
+{
+    return syscall(SYS_clone3, a, size);
+}
+
+/* Reap `pid` and give its exit status (-1 if it did not exit normally). */
+static int t_exit_status(pid_t pid)
+{
+    int st;
+    if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st))
+        return -1;
+    return WEXITSTATUS(st);
+}
+
+static void t_handler(int sig) { (void)sig; }
+
+static void test_clone3(void)
+{
+    char why[160];
+    int f = 0;
+    struct t_clone_args a;
+    unsigned char big[96];
+    long r;
+
+    /* The struct's size: below its first version EINVAL, above a page or
+     * with nonzero bytes past the known fields E2BIG. */
+    memset(&a, 0, sizeof(a));
+    a.exit_signal = SIGCHLD;
+    if (!(t_clone3(&a, 0) == -1 && errno == EINVAL) ||
+        !(t_clone3(&a, 63) == -1 && errno == EINVAL) ||
+        !(t_clone3(&a, 4097) == -1 && errno == E2BIG))
+        f |= 1;
+    memset(big, 0, sizeof(big));
+    memcpy(big, &a, sizeof(a));
+    big[90] = 1;
+    if (!(t_clone3((struct t_clone_args *)big, sizeof(big)) == -1 && errno == E2BIG))
+        f |= 1;
+    big[90] = 0;
+    r = t_clone3((struct t_clone_args *)big, sizeof(big));
+    if (r == 0)
+        _exit(5);
+    if (r < 0 || t_exit_status((pid_t)r) != 5)
+        f |= 1;
+
+    /* Flags and fields clone3 refuses. */
+    memset(&a, 0, sizeof(a));
+    a.flags = 1ULL << 40;
+    if (!(t_clone3(&a, sizeof(a)) == -1 && errno == EINVAL)) f |= 2;
+    a.flags = 0x00400000; /* CLONE_DETACHED */
+    if (!(t_clone3(&a, sizeof(a)) == -1 && errno == EINVAL)) f |= 2;
+    a.flags = 0;
+    a.exit_signal = 0x100;
+    if (!(t_clone3(&a, sizeof(a)) == -1 && errno == EINVAL)) f |= 2;
+    a.exit_signal = 65;
+    if (!(t_clone3(&a, sizeof(a)) == -1 && errno == EINVAL)) f |= 2;
+    a.exit_signal = SIGCHLD;
+    a.stack_size = 4096;
+    if (!(t_clone3(&a, sizeof(a)) == -1 && errno == EINVAL)) f |= 2;
+    a.stack_size = 0;
+    a.flags = CLONE_THREAD | CLONE_SIGHAND | CLONE_VM;
+    if (!(t_clone3(&a, sizeof(a)) == -1 && errno == EINVAL)) f |= 2;
+    a.flags = CLONE_SIGHAND;
+    a.exit_signal = 0;
+    if (!(t_clone3(&a, sizeof(a)) == -1 && errno == EINVAL)) f |= 2;
+
+    /* CLONE_PIDFD stores through `pidfd`, CLONE_PARENT_SETTID through
+     * `parent_tid`; one address for both is EINVAL. */
+    int pidfd = -1, ptid = 0;
+    memset(&a, 0, sizeof(a));
+    a.flags = CLONE_PIDFD | CLONE_PARENT_SETTID;
+    a.pidfd = (uintptr_t)&pidfd;
+    a.parent_tid = (uintptr_t)&pidfd;
+    a.exit_signal = SIGCHLD;
+    if (!(t_clone3(&a, sizeof(a)) == -1 && errno == EINVAL)) f |= 4;
+    a.parent_tid = (uintptr_t)&ptid;
+    r = t_clone3(&a, sizeof(a));
+    if (r == 0)
+        _exit(6);
+    if (r < 0 || ptid != r || pidfd < 0 || fcntl(pidfd, F_GETFD) != FD_CLOEXEC)
+        f |= 4;
+    siginfo_t si;
+    memset(&si, 0, sizeof(si));
+    if (pidfd >= 0 && (waitid(P_PIDFD, pidfd, &si, WEXITED) != 0 || si.si_pid != r ||
+                       si.si_status != 6))
+        f |= 4;
+    if (pidfd >= 0) close(pidfd);
+
+    /* CLONE_CLEAR_SIGHAND: a handler goes back to SIG_DFL, SIG_IGN stays;
+     * not with CLONE_SIGHAND. CLONE_NNP: the child alone has
+     * no_new_privs. */
+    struct sigaction sa, old1, old2;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = t_handler;
+    sigaction(SIGUSR1, &sa, &old1);
+    sa.sa_handler = SIG_IGN;
+    sigaction(SIGUSR2, &sa, &old2);
+    memset(&a, 0, sizeof(a));
+    a.flags = T_CLONE_CLEAR_SIGHAND | T_CLONE_NNP;
+    a.exit_signal = SIGCHLD;
+    r = t_clone3(&a, sizeof(a));
+    if (r == 0) {
+        struct sigaction c1, c2;
+        sigaction(SIGUSR1, NULL, &c1);
+        sigaction(SIGUSR2, NULL, &c2);
+        _exit((c1.sa_handler == SIG_DFL ? 0 : 1) | (c2.sa_handler == SIG_IGN ? 0 : 2) |
+              (prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) == 1 ? 0 : 4));
+    }
+    if (r < 0 || t_exit_status((pid_t)r) != 0 || prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 0)
+        f |= 8;
+    sigaction(SIGUSR1, &old1, NULL);
+    sigaction(SIGUSR2, &old2, NULL);
+
+    /* CLONE_AUTOREAP: no exit signal allowed, and the child is gone once
+     * it exits -- its pidfd hangs up and there is nothing to wait for. */
+    memset(&a, 0, sizeof(a));
+    a.flags = T_CLONE_AUTOREAP;
+    a.exit_signal = SIGCHLD;
+    if (!(t_clone3(&a, sizeof(a)) == -1 && errno == EINVAL)) f |= 16;
+    pidfd = -1;
+    a.flags = T_CLONE_AUTOREAP | CLONE_PIDFD;
+    a.pidfd = (uintptr_t)&pidfd;
+    a.exit_signal = 0;
+    r = t_clone3(&a, sizeof(a));
+    if (r == 0)
+        _exit(0);
+    struct pollfd p = {pidfd, POLLIN, 0};
+    if (r < 0 || pidfd < 0 || poll(&p, 1, 5000) != 1)
+        f |= 16;
+    /* Reaped: no zombie is left to wait for. */
+    for (int i = 0; i < 100 && !(p.revents & POLLHUP); i++) {
+        usleep(10000);
+        p.revents = 0;
+        poll(&p, 1, 0);
+    }
+    if (!(p.revents & POLLHUP) || !(waitpid((pid_t)r, NULL, WNOHANG) == -1 && errno == ECHILD))
+        f |= 16;
+    if (pidfd >= 0) close(pidfd);
+
+    /* CLONE_PIDFD_AUTOKILL: the last close of the clone pidfd SIGKILLs the
+     * child; it needs CLONE_PIDFD and CLONE_AUTOREAP, and CLONE_NNP or
+     * CAP_SYS_ADMIN. */
+    memset(&a, 0, sizeof(a));
+    a.flags = T_CLONE_AUTOREAP | T_CLONE_PIDFD_AUTOKILL;
+    if (!(t_clone3(&a, sizeof(a)) == -1 && errno == EINVAL)) f |= 32;
+    pidfd = -1;
+    a.flags = CLONE_PIDFD | T_CLONE_AUTOREAP | T_CLONE_PIDFD_AUTOKILL | T_CLONE_NNP;
+    a.pidfd = (uintptr_t)&pidfd;
+    r = t_clone3(&a, sizeof(a));
+    if (r == 0) {
+        pause();
+        _exit(1);
+    }
+    int watch = r > 0 ? (int)syscall(SYS_pidfd_open, (pid_t)r, 0) : -1;
+    if (r < 0 || pidfd < 0 || watch < 0)
+        f |= 32;
+    if (pidfd >= 0) close(pidfd);
+    p.fd = watch;
+    p.revents = 0;
+    if (watch >= 0 && poll(&p, 1, 5000) != 1)
+        f |= 32;
+    if (watch >= 0) close(watch);
+
+    /* set_tid: one entry (one PID namespace), from 1 below pid_max, and
+     * only with CAP_CHECKPOINT_RESTORE or CAP_SYS_ADMIN; a taken ID is
+     * EEXIST. */
+    pid_t ids[2] = {0, 0};
+    memset(&a, 0, sizeof(a));
+    a.exit_signal = SIGCHLD;
+    a.set_tid = (uintptr_t)ids;
+    a.set_tid_size = 1;
+    if (!(t_clone3(&a, sizeof(a)) == -1 && errno == EINVAL)) f |= 64;
+    ids[0] = getpid() + 7000;
+    a.set_tid_size = 2;
+    if (!(t_clone3(&a, sizeof(a)) == -1 && errno == EINVAL)) f |= 64;
+    a.set_tid_size = 1;
+    if (geteuid() != 0) {
+        if (!(t_clone3(&a, sizeof(a)) == -1 && errno == EPERM)) f |= 64;
+    } else {
+        ids[0] = getpid();
+        if (!(t_clone3(&a, sizeof(a)) == -1 && errno == EEXIST)) f |= 64;
+        ids[0] = getpid() + 7000;
+        r = t_clone3(&a, sizeof(a));
+        if (r == 0)
+            _exit(getpid() == ids[0] ? 0 : 1);
+        if (r != ids[0] || t_exit_status((pid_t)r) != 0)
+            f |= 64;
+    }
+
+    /* CLONE_INTO_CGROUP: a descriptor past INT_MAX or a struct too short
+     * to have one is EINVAL; a descriptor that is not a cgroup EBADF. */
+    memset(&a, 0, sizeof(a));
+    a.flags = T_CLONE_INTO_CGROUP;
+    a.exit_signal = SIGCHLD;
+    a.cgroup = 1ULL << 31;
+    if (!(t_clone3(&a, sizeof(a)) == -1 && errno == EINVAL)) f |= 128;
+    int devnull = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    a.cgroup = devnull;
+    if (!(t_clone3(&a, 80) == -1 && errno == EINVAL)) f |= 128;
+    if (!(t_clone3(&a, sizeof(a)) == -1 && errno == EBADF)) f |= 128;
+    if (devnull >= 0) close(devnull);
+
+    snprintf(why, sizeof(why), "f=%#x errno=%d", f, errno);
+    report("clone3", f == 0, why);
+}
+
+/* kcmp and process_vm_readv/writev, as Linux 7.3: kcmp says 0 for a shared
+ * object and 1 or 2 otherwise, by an order the two arguments reverse;
+ * process_vm_* copy between this process and one it may ptrace, page by
+ * page, returning what was copied before a fault. */
+#ifndef SYS_kcmp
+#define SYS_kcmp 312
+#endif
+static long t_kcmp(pid_t a, pid_t b, int type, unsigned long i1, unsigned long i2)
+{
+    return syscall(SYS_kcmp, a, b, type, i1, i2);
+}
+static char t_pvm_buf[8192];
+
+/* G2b: a process clone may share the file table (CLONE_FILES) and, with
+ * the memory, the signal actions (CLONE_SIGHAND), and may be its caller's
+ * sibling (CLONE_PARENT). musl's clone() runs a CLONE_VM child on the given
+ * stack as vfork would (it refuses only the thread flags: LTP clone10's
+ * EINVAL is musl's); CLONE_VFORK keeps the caller stopped until the child
+ * exits or execs. */
+static char t_share_stack[65536] __attribute__((aligned(16)));
+static volatile long t_share_out[3];
+static int t_share_fd;
+static void t_share_handler(int sig) { (void)sig; }
+
+/* Report whether kcmp finds the file table and the signal actions shared
+ * with the caller, then close the descriptor and catch SIGUSR1. */
+static int t_share_child(void *arg)
+{
+    (void)arg;
+    pid_t me = (pid_t)syscall(SYS_getpid), parent = (pid_t)syscall(SYS_getppid);
+    t_share_out[0] = t_kcmp(me, parent, 2 /* KCMP_FILES */, 0, 0);
+    t_share_out[1] = t_kcmp(me, parent, 4 /* KCMP_SIGHAND */, 0, 0);
+    syscall(SYS_close, t_share_fd);
+    struct sigaction sa = {.sa_handler = t_share_handler};
+    sigaction(SIGUSR1, &sa, 0);
+    return 0;
+}
+
+static int t_share_exec(void *arg)
+{
+    (void)arg;
+    char *argv[] = {"true", 0};
+    execve("/bin/true", argv, 0);
+    return 127;
+}
+
+static int t_share_sibling(void *arg)
+{
+    (void)arg;
+    t_share_out[2] = syscall(SYS_getppid);
+    return 7;
+}
+
+/* Run `fn` in a clone with `flags`; its exit code, or -1. */
+static int t_share_run(int (*fn)(void *), int flags)
+{
+    pid_t pid = clone(fn, t_share_stack + sizeof(t_share_stack), flags, 0);
+    int st = 0;
+    if (pid < 0 || waitpid(pid, &st, 0) != pid || !WIFEXITED(st))
+        return -1;
+    return WEXITSTATUS(st);
+}
+
+static void test_clone_share(void)
+{
+    char why[96];
+    int f = 0;
+    struct sigaction dfl = {.sa_handler = SIG_DFL}, old;
+    sigaction(SIGUSR1, &dfl, 0);
+
+    /* Shared: the child's close and handler are the caller's. */
+    t_share_fd = open("/dev/null", O_RDONLY);
+    t_share_out[0] = t_share_out[1] = -1;
+    if (t_share_run(t_share_child, CLONE_VM | CLONE_FILES | CLONE_SIGHAND | CLONE_VFORK | SIGCHLD) != 0)
+        f |= 1;
+    if (t_share_out[0] != 0 || t_share_out[1] != 0)
+        f |= 2;
+    if (!(fcntl(t_share_fd, F_GETFD) == -1 && errno == EBADF))
+        f |= 4;
+    if (sigaction(SIGUSR1, 0, &old) != 0 || old.sa_handler != t_share_handler)
+        f |= 8;
+    sigaction(SIGUSR1, &dfl, 0);
+
+    /* Copies: the caller keeps its own. */
+    t_share_fd = open("/dev/null", O_RDONLY);
+    if (t_share_run(t_share_child, CLONE_VM | CLONE_VFORK | SIGCHLD) != 0)
+        f |= 16;
+    if (t_share_out[0] <= 0 || t_share_out[1] <= 0)
+        f |= 32;
+    if (fcntl(t_share_fd, F_GETFD) != 0)
+        f |= 64;
+    if (sigaction(SIGUSR1, 0, &old) != 0 || old.sa_handler != SIG_DFL)
+        f |= 128;
+    close(t_share_fd);
+
+    /* exec in a sharer copies both first: the caller's close-on-exec
+     * descriptor and its handler stay. */
+    int cloexec = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    struct sigaction sa = {.sa_handler = t_share_handler};
+    sigaction(SIGUSR1, &sa, 0);
+    if (t_share_run(t_share_exec, CLONE_VM | CLONE_FILES | CLONE_SIGHAND | CLONE_VFORK | SIGCHLD) != 0)
+        f |= 256;
+    if (fcntl(cloexec, F_GETFD) != FD_CLOEXEC)
+        f |= 512;
+    if (sigaction(SIGUSR1, 0, &old) != 0 || old.sa_handler != t_share_handler)
+        f |= 1024;
+    close(cloexec);
+    sigaction(SIGUSR1, &dfl, 0);
+
+    /* CLONE_PARENT: a middle process's clone is this process's child, with
+     * the middle one's exit signal, and the middle one has no child. */
+    pid_t me = getpid();
+    int pfd[2];
+    if (pipe(pfd) != 0)
+        f |= 2048;
+    pid_t mid = fork();
+    if (mid == 0) {
+        close(pfd[0]);
+        t_share_out[2] = 0;
+        pid_t sib = clone(t_share_sibling, t_share_stack + sizeof(t_share_stack),
+                          CLONE_VM | CLONE_PARENT | CLONE_VFORK | SIGCHLD, 0);
+        int code = 0;
+        if (sib < 0)
+            code |= 1;
+        if (t_share_out[2] != me)
+            code |= 2;
+        errno = 0;
+        if (!(waitpid(-1, 0, WNOHANG) == -1 && errno == ECHILD))
+            code |= 4;
+        if (write(pfd[1], &sib, sizeof(sib)) != (ssize_t)sizeof(sib))
+            code |= 8;
+        _exit(code);
+    }
+    close(pfd[1]);
+    pid_t sib = -1;
+    int st = 0, sst = 0;
+    if (mid < 0 || waitpid(mid, &st, 0) != mid || !WIFEXITED(st) || WEXITSTATUS(st) != 0)
+        f |= 4096;
+    if (read(pfd[0], &sib, sizeof(sib)) != (ssize_t)sizeof(sib) || sib <= 0 ||
+        waitpid(sib, &sst, 0) != sib || !WIFEXITED(sst) || WEXITSTATUS(sst) != 7)
+        f |= 8192;
+    close(pfd[0]);
+
+    snprintf(why, sizeof(why), "f=%#x kcmp=%ld/%ld mid=%#x", f, t_share_out[0], t_share_out[1], st);
+    report("clone_share", f == 0, why);
+}
+
+static void test_kcmp_process_vm(void)
+{
+    char why[160];
+    int f = 0;
+    pid_t me = getpid();
+    enum { FILE_ = 0, VM = 1, FILES = 2, FS = 3, SIGHAND = 4, IO = 5, EPOLL_TFD = 7 };
+
+    /* One process shares everything with itself; dup shares the file. */
+    int a = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    int b = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    int c = dup(a);
+    if (t_kcmp(me, me, VM, 0, 0) != 0 || t_kcmp(me, me, FILES, 0, 0) != 0 ||
+        t_kcmp(me, me, FS, 0, 0) != 0 || t_kcmp(me, me, SIGHAND, 0, 0) != 0 ||
+        t_kcmp(me, me, IO, 0, 0) != 0 || t_kcmp(me, me, FILE_, a, c) != 0)
+        f |= 1;
+    long ab = t_kcmp(me, me, FILE_, a, b), ba = t_kcmp(me, me, FILE_, b, a);
+    if (!((ab == 1 && ba == 2) || (ab == 2 && ba == 1)))
+        f |= 2;
+    if (!(t_kcmp(me, me, 99, 0, 0) == -1 && errno == EINVAL) ||
+        !(t_kcmp(me, 0x3ffffff0, VM, 0, 0) == -1 && errno == ESRCH) ||
+        !(t_kcmp(me, me, FILE_, a, 0x7ffe) == -1 && errno == EBADF))
+        f |= 4;
+    /* An epoll instance's registration of a pipe is the file its
+     * descriptor names. */
+    int ep = epoll_create1(EPOLL_CLOEXEC), pp[2] = {-1, -1};
+    struct epoll_event ev = {EPOLLIN, {0}};
+    if (pipe(pp) != 0 || epoll_ctl(ep, EPOLL_CTL_ADD, pp[0], &ev) != 0) f |= 8;
+    uint32_t slot[3] = {(uint32_t)ep, (uint32_t)pp[0], 0};
+    if (t_kcmp(me, me, EPOLL_TFD, pp[0], (unsigned long)slot) != 0 ||
+        t_kcmp(me, me, EPOLL_TFD, pp[1], (unsigned long)slot) == 0)
+        f |= 8;
+    slot[2] = 1;
+    if (!(t_kcmp(me, me, EPOLL_TFD, pp[0], (unsigned long)slot) == -1 && errno == ENOENT)) f |= 8;
+    slot[0] = (uint32_t)b;
+    slot[2] = 0;
+    if (!(t_kcmp(me, me, EPOLL_TFD, pp[0], (unsigned long)slot) == -1 && errno == EINVAL)) f |= 8;
+    close(ep);
+    close(pp[0]);
+    close(pp[1]);
+
+    /* A fork child: its own memory, files and handlers, the same open file
+     * behind an inherited descriptor; its memory read and written here. */
+    memset(t_pvm_buf, 'p', sizeof(t_pvm_buf));
+    memcpy(t_pvm_buf + 4090, "boundary", 8);
+    int go[2], back[2];
+    if (pipe(go) != 0 || pipe(back) != 0) f |= 16;
+    pid_t pid = fork();
+    if (pid == 0) {
+        char x;
+        memset(t_pvm_buf, 'c', 16);
+        if (write(back[1], "r", 1) != 1) _exit(2);
+        if (read(go[0], &x, 1) != 1) _exit(3);
+        _exit(memcmp(t_pvm_buf + 100, "written", 7) == 0 ? 0 : 1);
+    }
+    char x;
+    if (read(back[0], &x, 1) != 1) f |= 16;
+    if (t_kcmp(me, pid, VM, 0, 0) == 0 || t_kcmp(me, pid, FILES, 0, 0) == 0 ||
+        t_kcmp(me, pid, SIGHAND, 0, 0) == 0 || t_kcmp(me, pid, FILE_, a, a) != 0)
+        f |= 16;
+    char got[32];
+    struct iovec l = {got, 24}, r = {t_pvm_buf + 4086, 24};
+    memset(got, 0, sizeof(got));
+    /* Across a page boundary of the child's memory. */
+    if (process_vm_readv(pid, &l, 1, &r, 1, 0) != 24 || memcmp(got + 4, "boundary", 8) != 0)
+        f |= 32;
+    r.iov_base = t_pvm_buf;
+    r.iov_len = 16;
+    if (process_vm_readv(pid, &l, 1, &r, 1, 0) != 16 || got[0] != 'c') f |= 32;
+    /* What was copied before a fault, or EFAULT if nothing was. */
+    struct iovec rr[2] = {{t_pvm_buf, 8}, {(void *)16, 8}};
+    if (process_vm_readv(pid, &l, 1, rr, 2, 0) != 8) f |= 64;
+    if (!(process_vm_readv(pid, &l, 1, rr + 1, 1, 0) == -1 && errno == EFAULT)) f |= 64;
+    if (!(process_vm_readv(pid, &l, 1, &r, 1, 1) == -1 && errno == EINVAL) ||
+        !(process_vm_readv(0x3ffffff0, &l, 1, &r, 1, 0) == -1 && errno == ESRCH) ||
+        process_vm_readv(pid, &l, 0, &r, 1, 0) != 0)
+        f |= 64;
+    struct iovec wl = {(void *)"written", 7}, wr = {t_pvm_buf + 100, 7};
+    if (process_vm_writev(pid, &wl, 1, &wr, 1, 0) != 7) f |= 128;
+    if (write(go[1], "g", 1) != 1) f |= 128;
+    int st;
+    if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 0) f |= 128;
+    /* The parent's copy was not touched. */
+    if (t_pvm_buf[0] != 'p' || memcmp(t_pvm_buf + 100, "pppp", 4) != 0) f |= 128;
+    close(go[0]);
+    close(go[1]);
+    close(back[0]);
+    close(back[1]);
+    close(a);
+    close(b);
+    close(c);
+
+    snprintf(why, sizeof(why), "f=%#x errno=%d", f, errno);
+    report("kcmp_process_vm", f == 0, why);
+}
+
+/* personality, as Linux 7.3: any value is stored and the old one returned
+ * (0xffffffff only asks), STICKY_TIMEOUTS leaves select's timeout alone,
+ * UNAME26 makes the release 2.6.x, and the value is inherited by a fork
+ * child. Also kill of a zombie succeeds (only a reaped process is ESRCH)
+ * and waitpid(INT_MIN) is ESRCH. */
+static void test_personality(void)
+{
+    char why[160];
+    int f = 0;
+    int old = personality(0xffffffff);
+
+    if (old != 0) f |= 1;
+    if (personality(PER_LINUX | STICKY_TIMEOUTS) != 0 ||
+        personality(0xffffffff) != (PER_LINUX | STICKY_TIMEOUTS))
+        f |= 1;
+    /* pselect6 itself: musl's select and pselect pass the kernel a copy of
+     * the timeout, so only the system call shows what it writes back. */
+    struct timespec ts = {0, 10000};
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    if (syscall(SYS_pselect6, 0, &rfds, NULL, NULL, &ts, NULL) != 0 || ts.tv_nsec != 10000)
+        f |= 2;
+    personality(PER_LINUX);
+    ts.tv_nsec = 10000;
+    if (syscall(SYS_pselect6, 0, &rfds, NULL, NULL, &ts, NULL) != 0 || ts.tv_nsec != 0) f |= 2;
+
+    struct utsname u;
+    personality(PER_LINUX | UNAME26);
+    if (uname(&u) != 0 || strncmp(u.release, "2.6.", 4) != 0) f |= 4;
+    pid_t pid = fork();
+    if (pid == 0)
+        _exit(personality(0xffffffff) == (PER_LINUX | UNAME26) ? 0 : 1);
+    int st;
+    if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 0) f |= 8;
+    personality(PER_LINUX);
+    if (uname(&u) != 0 || strncmp(u.release, "2.6.", 4) == 0) f |= 4;
+
+    /* A zombie takes a signal; a reaped process does not exist. */
+    pid = fork();
+    if (pid == 0)
+        _exit(0);
+    siginfo_t si;
+    if (waitid(P_PID, pid, &si, WEXITED | WNOWAIT) != 0 || kill(pid, SIGTERM) != 0 ||
+        kill(pid, 0) != 0)
+        f |= 16;
+    if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st)) f |= 16;
+    if (!(kill(pid, 0) == -1 && errno == ESRCH)) f |= 16;
+    if (!(waitpid(INT_MIN, NULL, 0) == -1 && errno == ESRCH) ||
+        !(kill(INT_MIN, 0) == -1 && errno == ESRCH))
+        f |= 32;
+
+    snprintf(why, sizeof(why), "f=%#x errno=%d", f, errno);
+    report("personality", f == 0, why);
+}
+
+/* Namespaces, as Linux 7.3 (ADR 0022 H1): /proc/<pid>/ns links read
+ * "type:[inode]" and open an nsfs file with that inode, its ioctls
+ * describe it, unshare(CLONE_NEWUTS) gives a host name of its own, and
+ * setns joins another process's UTS namespace, from an nsfs file or a
+ * pidfd. */
+#ifndef SYS_pidfd_open
+#define SYS_pidfd_open 434
+#endif
+#define T_NS_GET_PARENT 0xb702
+#define T_NS_GET_NSTYPE 0xb703
+#define T_NS_GET_OWNER_UID 0xb704
+#define T_NS_GET_ID 0x8008b70d
+#define T_NSFS_MAGIC 0x6e736673
+
+static unsigned long t_ns_ino(pid_t pid, const char *name)
+{
+    char path[64];
+    struct stat st;
+    snprintf(path, sizeof(path), "/proc/%d/ns/%s", (int)pid, name);
+    return stat(path, &st) == 0 ? (unsigned long)st.st_ino : 0;
+}
+
+static void test_namespaces_uts(void)
+{
+    char why[160], buf[64], path[64];
+    int f = 0;
+    static const char *names[] = {"cgroup", "ipc", "mnt", "net", "pid", "pid_for_children",
+                                  "time", "time_for_children", "user", "uts"};
+
+    /* Every link reads type:[inode], the inode stat finds behind it. */
+    for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        char want[64];
+        snprintf(path, sizeof(path), "/proc/self/ns/%s", names[i]);
+        ssize_t n = readlink(path, buf, sizeof(buf) - 1);
+        if (n <= 0) {
+            f |= 1;
+            continue;
+        }
+        buf[n] = 0;
+        const char *type = names[i];
+        if (strncmp(type, "pid_for", 7) == 0) type = "pid";
+        if (strncmp(type, "time_for", 8) == 0) type = "time";
+        snprintf(want, sizeof(want), "%s:[%lu]", type, t_ns_ino(getpid(), names[i]));
+        if (strcmp(buf, want) != 0) f |= 1;
+    }
+
+    /* The nsfs file: its type, a 64-bit id, EINVAL for other types' ioctls
+     * and for reads, ENOTTY for an unknown ioctl, NSFS_MAGIC. */
+    int uts = open("/proc/self/ns/uts", O_RDONLY | O_CLOEXEC);
+    struct stat st;
+    struct statfs sfs;
+    uint64_t id = 0;
+    char c;
+    if (uts < 0 || fstat(uts, &st) != 0 || st.st_ino != t_ns_ino(getpid(), "uts") ||
+        ioctl(uts, T_NS_GET_NSTYPE) != CLONE_NEWUTS || ioctl(uts, T_NS_GET_ID, &id) != 0 ||
+        id == 0)
+        f |= 2;
+    unsigned uid;
+    if (!(ioctl(uts, T_NS_GET_PARENT) == -1 && errno == EINVAL) ||
+        !(ioctl(uts, T_NS_GET_OWNER_UID, &uid) == -1 && errno == EINVAL) ||
+        !(ioctl(uts, 0xb7ff) == -1 && errno == ENOTTY) ||
+        !(read(uts, &c, 1) == -1 && errno == EINVAL) ||
+        fstatfs(uts, &sfs) != 0 || sfs.f_type != T_NSFS_MAGIC)
+        f |= 4;
+    /* setns checks the type it is given against the file's. */
+    if (!(setns(uts, CLONE_NEWIPC) == -1 && errno == EINVAL)) f |= 8;
+    if (!(unshare(0x8000) == -1 && errno == EINVAL)) f |= 8;
+    static char longname[80];
+    memset(longname, 'a', sizeof(longname));
+    if (!(sethostname(longname, 65) == -1 && errno == EINVAL)) f |= 8;
+
+    /* A child with a UTS namespace and host name of its own. */
+    struct utsname before, u;
+    uname(&before);
+    int go[2], ready[2];
+    if (pipe(go) != 0 || pipe(ready) != 0) f |= 16;
+    pid_t child = fork();
+    if (child == 0) {
+        if (unshare(CLONE_NEWUTS) != 0 || sethostname("ns-h1-test", 10) != 0) _exit(2);
+        if (write(ready[1], "r", 1) != 1) _exit(3);
+        if (read(go[0], &c, 1) != 1) _exit(4);
+        struct utsname cu;
+        uname(&cu);
+        _exit(strcmp(cu.nodename, "ns-h1-test") == 0 ? 0 : 1);
+    }
+    close(ready[1]);
+    close(go[0]);
+    if (read(ready[0], &c, 1) != 1) f |= 16;
+    uname(&u);
+    if (strcmp(u.nodename, before.nodename) != 0 ||
+        t_ns_ino(child, "uts") == t_ns_ino(getpid(), "uts") ||
+        t_ns_ino(child, "ipc") != t_ns_ino(getpid(), "ipc"))
+        f |= 16;
+
+    /* Two more children join it: one through its nsfs file, one through a
+     * pidfd for it. */
+    snprintf(path, sizeof(path), "/proc/%d/ns/uts", (int)child);
+    int theirs = open(path, O_RDONLY | O_CLOEXEC);
+    int pidfd = (int)syscall(SYS_pidfd_open, child, 0);
+    for (int way = 0; way < 2; way++) {
+        pid_t j = fork();
+        if (j == 0) {
+            int r = way == 0 ? setns(theirs, 0) : setns(pidfd, CLONE_NEWUTS | CLONE_NEWIPC);
+            struct utsname ju;
+            uname(&ju);
+            _exit(r == 0 && strcmp(ju.nodename, "ns-h1-test") == 0 ? 0 : 1);
+        }
+        int st2;
+        if (waitpid(j, &st2, 0) != j || !WIFEXITED(st2) || WEXITSTATUS(st2) != 0) f |= 32;
+    }
+    if (write(go[1], "g", 1) != 1) f |= 64;
+    int st3;
+    if (waitpid(child, &st3, 0) != child || !WIFEXITED(st3) || WEXITSTATUS(st3) != 0) f |= 64;
+    uname(&u);
+    if (strcmp(u.nodename, before.nodename) != 0) f |= 64;
+
+    /* Without CAP_SYS_ADMIN: EPERM. */
+    pid_t un = fork();
+    if (un == 0) {
+        if (setgid(65534) != 0 || setuid(65534) != 0) _exit(0); /* not root: nothing to test */
+        _exit(unshare(CLONE_NEWUTS) == -1 && errno == EPERM &&
+                      sethostname("x", 1) == -1 && errno == EPERM
+                  ? 0
+                  : 1);
+    }
+    int st4;
+    if (waitpid(un, &st4, 0) != un || !WIFEXITED(st4) || WEXITSTATUS(st4) != 0) f |= 128;
+
+    close(uts);
+    close(theirs);
+    close(pidfd);
+    close(go[1]);
+    close(ready[0]);
+    snprintf(why, sizeof(why), "f=%#x errno=%d", f, errno);
+    report("namespaces_uts", f == 0, why);
+}
+
+/* Time namespaces, as Linux 7.3 (ADR 0022 H2): unshare(CLONE_NEWTIME)
+ * makes a namespace for children whose offsets /proc/self/timens_offsets
+ * sets until a process enters it; a child (fork or exec) then reads
+ * CLOCK_MONOTONIC and CLOCK_BOOTTIME that far ahead, in clock_gettime,
+ * /proc/uptime and sysinfo, and its absolute deadlines (clock_nanosleep,
+ * timerfd, POSIX timers, futex) are taken back to the host's clock. All
+ * of it runs in a child, so the rest of the suite keeps its namespace. */
+#ifndef CLONE_NEWTIME
+#define CLONE_NEWTIME 0x80
+#endif
+
+static int64_t t_ns_now(clockid_t c)
+{
+    struct timespec ts;
+    clock_gettime(c, &ts);
+    return (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
+}
+
+static unsigned long t_time_ino(const char *link)
+{
+    char path[64];
+    struct stat st;
+    snprintf(path, sizeof(path), "/proc/self/ns/%s", link);
+    return stat(path, &st) == 0 ? (unsigned long)st.st_ino : 0;
+}
+
+static int t_write_offsets(const char *text)
+{
+    /* O_TRUNC, as fopen("w") and so LTP's SAFE_FILE_PRINTF. */
+    int fd = open("/proc/self/timens_offsets", O_WRONLY | O_TRUNC | O_CLOEXEC);
+    if (fd < 0) return -1;
+    ssize_t n = write(fd, text, strlen(text));
+    int saved = errno;
+    close(fd);
+    errno = saved;
+    return n == (ssize_t)strlen(text) ? 0 : -1;
+}
+
+static struct timespec t_ts(int64_t ns)
+{
+    struct timespec ts = {ns / 1000000000, ns % 1000000000};
+    return ts;
+}
+
+/* In the child that entered the namespace: what it sees (bits 1..7 of
+ * the exit status). */
+static int t_time_child(int64_t parent_mono, int64_t parent_boot)
+{
+    int f = 0;
+    int64_t sec = 1000000000;
+    int64_t mono = t_ns_now(CLOCK_MONOTONIC), boot = t_ns_now(CLOCK_BOOTTIME);
+    if (mono - parent_mono < 1000 * sec || mono - parent_mono > 1010 * sec) f |= 1;
+    if (boot - parent_boot < 2000 * sec || boot - parent_boot > 2010 * sec) f |= 1;
+    if (t_ns_now(CLOCK_MONOTONIC_COARSE) - parent_mono < 999 * sec) f |= 1;
+
+    char buf[64] = {0};
+    int fd = open("/proc/uptime", O_RDONLY);
+    if (fd < 0 || read(fd, buf, sizeof(buf) - 1) <= 0 || atol(buf) < 2000) f |= 2;
+    if (fd >= 0) close(fd);
+    struct sysinfo si;
+    if (sysinfo(&si) != 0 || si.uptime < 2000) f |= 2;
+
+    /* Absolute deadlines 20 ms ahead return about then, not 1000 s on. */
+    int64_t wall = t_ns_now(CLOCK_REALTIME);
+    struct timespec at = t_ts(t_ns_now(CLOCK_MONOTONIC) + 20000000);
+    if (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &at, NULL) != 0) f |= 4;
+    at = t_ts(t_ns_now(CLOCK_BOOTTIME) + 20000000);
+    if (clock_nanosleep(CLOCK_BOOTTIME, TIMER_ABSTIME, &at, NULL) != 0) f |= 4;
+    uint32_t word = 0;
+    at = t_ts(t_ns_now(CLOCK_MONOTONIC) + 20000000);
+    if (!(syscall(SYS_futex, &word, FUTEX_WAIT_BITSET, 0, &at, NULL, ~0u) == -1 &&
+          errno == ETIMEDOUT))
+        f |= 4;
+    if (t_ns_now(CLOCK_REALTIME) - wall > 5 * sec) f |= 4;
+
+    /* A timer set to an absolute time 1 s ahead has about 1 s left. */
+    struct itimerspec its = {{0, 0}, t_ts(t_ns_now(CLOCK_MONOTONIC) + sec)}, cur;
+    int tfd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC);
+    if (tfd < 0 || timerfd_settime(tfd, TFD_TIMER_ABSTIME, &its, NULL) != 0 ||
+        timerfd_gettime(tfd, &cur) != 0 || cur.it_value.tv_sec != 0 ||
+        cur.it_value.tv_nsec < 500000000)
+        f |= 8;
+    if (tfd >= 0) close(tfd);
+    timer_t timer;
+    struct sigevent sev = {0};
+    sev.sigev_notify = SIGEV_NONE;
+    its.it_value = t_ts(t_ns_now(CLOCK_BOOTTIME) + sec);
+    if (timer_create(CLOCK_BOOTTIME, &sev, &timer) != 0 ||
+        timer_settime(timer, TIMER_ABSTIME, &its, NULL) != 0 ||
+        timer_gettime(timer, &cur) != 0 || cur.it_value.tv_sec != 0 ||
+        cur.it_value.tv_nsec < 500000000)
+        f |= 8;
+
+    /* It runs in its parent's namespace for children. */
+    if (t_time_ino("time") != t_time_ino("time_for_children")) f |= 16;
+    return f;
+}
+
+static void test_namespaces_time(void)
+{
+    char why[160];
+    int f = 0;
+    pid_t top = fork();
+    if (top == 0) {
+        int g = 0;
+        unsigned long before = t_time_ino("time");
+        if (before == 0 || before != t_time_ino("time_for_children")) g |= 1;
+        int64_t mono0 = t_ns_now(CLOCK_MONOTONIC);
+        if (unshare(CLONE_NEWTIME) != 0) _exit(0x7f);
+        /* The caller stays where it was; its children will not. */
+        if (t_time_ino("time") != before || t_time_ino("time_for_children") == before) g |= 1;
+        if (t_ns_now(CLOCK_MONOTONIC) - mono0 > 5000000000LL) g |= 1;
+
+        char buf[128] = {0};
+        long s1 = -1, n1 = -1, s2 = -1, n2 = -1;
+        char c1[16], c2[16];
+        int fd = open("/proc/self/timens_offsets", O_RDONLY);
+        if (fd < 0 || read(fd, buf, sizeof(buf) - 1) <= 0 ||
+            sscanf(buf, "%15s %ld %ld %15s %ld %ld", c1, &s1, &n1, c2, &s2, &n2) != 6 ||
+            strcmp(c1, "monotonic") || strcmp(c2, "boottime") || s1 || n1 || s2 || n2)
+            g |= 2;
+        if (fd >= 0) close(fd);
+        if (!(t_write_offsets("realtime 1 0\n") == -1 && errno == EINVAL) ||
+            !(t_write_offsets("monotonic 1 1000000000\n") == -1 && errno == EINVAL) ||
+            !(t_write_offsets("monotonic 9223372037 0\n") == -1 && errno == ERANGE) ||
+            t_write_offsets("monotonic 1000 0\nboottime 2000 0\n") != 0)
+            g |= 2;
+
+        int64_t mono = t_ns_now(CLOCK_MONOTONIC), boot = t_ns_now(CLOCK_BOOTTIME);
+        if (mono - mono0 > 5000000000LL) g |= 4; /* not the caller's */
+        pid_t child = fork();
+        if (child == 0) _exit(t_time_child(mono, boot));
+        int st;
+        if (waitpid(child, &st, 0) != child || !WIFEXITED(st)) g |= 8;
+        else g |= WEXITSTATUS(st) << 8;
+        /* Entered: the offsets are fixed. */
+        if (!(t_write_offsets("monotonic 5 0\n") == -1 && errno == EACCES)) g |= 4;
+
+        /* setns into it from a nsfs file. */
+        child = fork();
+        if (child == 0) {
+            int ns = open("/proc/self/ns/time_for_children", O_RDONLY | O_CLOEXEC);
+            _exit(ns >= 0 && setns(ns, CLONE_NEWTIME) == 0 &&
+                          t_ns_now(CLOCK_MONOTONIC) - mono > 999000000000LL
+                      ? 0
+                      : 1);
+        }
+        if (waitpid(child, &st, 0) != child || !WIFEXITED(st) || WEXITSTATUS(st) != 0)
+            g |= 16;
+
+        /* Exec enters it too: a new program's /proc/uptime is ahead. */
+        int pfd[2];
+        if (pipe(pfd) != 0) g |= 32;
+        child = fork();
+        if (child == 0) {
+            if (unshare(CLONE_NEWTIME) != 0 || t_write_offsets("boottime 3000 0\n") != 0)
+                _exit(1);
+            dup2(pfd[1], 1);
+            execl("/bin/cat", "cat", "/proc/uptime", (char *)NULL);
+            _exit(1);
+        }
+        close(pfd[1]);
+        memset(buf, 0, sizeof(buf));
+        if (read(pfd[0], buf, sizeof(buf) - 1) <= 0 || atol(buf) < 3000) g |= 32;
+        close(pfd[0]);
+        waitpid(child, &st, 0);
+
+        /* Without CAP_SYS_ADMIN: EPERM. */
+        child = fork();
+        if (child == 0) {
+            if (setgid(65534) != 0 || setuid(65534) != 0) _exit(0);
+            _exit(unshare(CLONE_NEWTIME) == -1 && errno == EPERM ? 0 : 1);
+        }
+        if (waitpid(child, &st, 0) != child || !WIFEXITED(st) || WEXITSTATUS(st) != 0)
+            g |= 64;
+        printf("time-ns g=%#x\n", g);
+        fflush(stdout);
+        _exit(g == 0 ? 0 : 1);
+    }
+    int st;
+    if (waitpid(top, &st, 0) != top || !WIFEXITED(st)) f |= 1;
+    else if (WEXITSTATUS(st) == 0x7f) f |= 2; /* unshare refused */
+    else if (WEXITSTATUS(st) != 0) f |= 4;
+    snprintf(why, sizeof(why), "f=%#x", f);
+    report("namespaces_time", f == 0, why);
+}
+
+/* Mount namespaces, as Linux 7.3 (ADR 0022 H3): /proc/<pid>/mounts and
+ * mountinfo list the process's namespace (/proc/mounts is a link to
+ * self/mounts), the namespace root being its own parent; unshare(CLONE_NEWNS)
+ * gives a copy of the tree with new mount ids and the same devices, and
+ * UNSHARE_EMPTY_MNTNS one with the root mount only, moving the root and
+ * working directory to it; setns returns to the first. All of it runs in
+ * a child, so the rest of the suite keeps its namespace. */
+#define T_UNSHARE_EMPTY_MNTNS 0x00100000
+
+/* Up to `len - 1` bytes of `path`, NUL-terminated; the length or -1. */
+static ssize_t t_slurp(const char *path, char *buf, size_t len)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    size_t n = 0;
+    ssize_t r;
+    while (n + 1 < len && (r = read(fd, buf + n, len - 1 - n)) > 0)
+        n += (size_t)r;
+    close(fd);
+    buf[n] = 0;
+    return (ssize_t)n;
+}
+
+/* The mount ids in a mountinfo text, in order; how many. */
+static int t_mount_ids(const char *info, int *ids, int max)
+{
+    int n = 0;
+    for (const char *line = info; *line && n < max;) {
+        ids[n++] = atoi(line);
+        const char *nl = strchr(line, '\n');
+        if (!nl) break;
+        line = nl + 1;
+    }
+    return n;
+}
+
+static void test_namespaces_mnt(void)
+{
+    char why[160];
+    int f = 0;
+    pid_t top = fork();
+    if (top == 0) {
+        static char before[4096], after[4096], info[4096], pinfo[4096], buf[64];
+        int g = 0;
+        struct stat root_before, root_after;
+        unsigned long first = t_ns_ino(getpid(), "mnt");
+
+        /* The initial namespace: /proc/mounts is self/mounts, the root
+         * comes first and is its own parent, /proc is there. */
+        ssize_t n = readlink("/proc/mounts", buf, sizeof(buf) - 1);
+        if (n != 11 || memcmp(buf, "self/mounts", 11) != 0) g |= 1;
+        if (t_slurp("/proc/self/mounts", before, sizeof(before)) <= 0 ||
+            t_slurp("/proc/mounts", after, sizeof(after)) <= 0 || strcmp(before, after) != 0 ||
+            !strstr(before, " /proc proc rw,relatime 0 0\n"))
+            g |= 1;
+        int id, parent;
+        if (t_slurp("/proc/self/mountinfo", pinfo, sizeof(pinfo)) <= 0 ||
+            sscanf(pinfo, "%d %d", &id, &parent) != 2 || id != parent ||
+            !strstr(pinfo, " / / "))
+            g |= 2;
+
+        /* A copy: another namespace, the same mount points, new ids, the
+         * same device for the root. */
+        if (stat("/", &root_before) != 0 || unshare(CLONE_NEWNS) != 0) {
+            printf("mnt-ns unshare errno=%d\n", errno);
+            fflush(stdout);
+            _exit(0x7f);
+        }
+        if (t_ns_ino(getpid(), "mnt") == first) g |= 4;
+        if (t_slurp("/proc/self/mounts", after, sizeof(after)) <= 0 || strcmp(before, after) != 0)
+            g |= 8;
+        int old_ids[64], new_ids[64];
+        int old_n = t_mount_ids(pinfo, old_ids, 64);
+        if (t_slurp("/proc/self/mountinfo", info, sizeof(info)) <= 0 ||
+            t_mount_ids(info, new_ids, 64) != old_n)
+            g |= 16;
+        for (int i = 0; i < old_n; i++)
+            for (int j = 0; j < old_n; j++)
+                if (old_ids[i] == new_ids[j]) g |= 16;
+        if (stat("/", &root_after) != 0 || root_after.st_dev != root_before.st_dev) g |= 32;
+
+        /* An empty one, from /proc: the root mount only, root and working
+         * directory at it. */
+        pid_t e = fork();
+        if (e == 0) {
+            char cwd[64];
+            if (chdir("/proc") != 0 || unshare(T_UNSHARE_EMPTY_MNTNS) != 0) _exit(1);
+            /* /proc is no longer a mount: its directory on the root is empty. */
+            int fd = open("/proc/self/mounts", O_RDONLY);
+            if (fd >= 0) _exit(2);
+            _exit(getcwd(cwd, sizeof(cwd)) && strcmp(cwd, "/") == 0 ? 0 : 3);
+        }
+        int st;
+        if (waitpid(e, &st, 0) != e || !WIFEXITED(st) || WEXITSTATUS(st) != 0) g |= 64;
+        /* The same from clone3's CLONE_EMPTY_MNTNS, which implies
+         * CLONE_NEWNS: the child starts at the root, without /proc. */
+        struct t_clone_args ca;
+        memset(&ca, 0, sizeof(ca));
+        ca.flags = 1ULL << 37;
+        ca.exit_signal = SIGCHLD;
+        if (chdir("/proc") != 0) g |= 64;
+        long c = t_clone3(&ca, sizeof(ca));
+        if (c == 0) {
+            char cwd[64];
+            int fd = open("/proc/self/mounts", O_RDONLY);
+            if (fd >= 0) _exit(2);
+            _exit(getcwd(cwd, sizeof(cwd)) && strcmp(cwd, "/") == 0 ? 0 : 3);
+        }
+        if (c < 0 || t_exit_status((pid_t)c) != 0) g |= 64;
+        if (chdir("/") != 0) g |= 64;
+
+        /* setns back to the parent's namespace. */
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/%d/ns/mnt", (int)getppid());
+        int theirs = open(path, O_RDONLY | O_CLOEXEC);
+        if (theirs < 0 || setns(theirs, CLONE_NEWNS) != 0 || t_ns_ino(getpid(), "mnt") != first)
+            g |= 128;
+        if (theirs >= 0) close(theirs);
+
+        /* Without CAP_SYS_ADMIN: EPERM. */
+        pid_t un = fork();
+        if (un == 0) {
+            if (setgid(65534) != 0 || setuid(65534) != 0) _exit(0);
+            _exit(unshare(CLONE_NEWNS) == -1 && errno == EPERM ? 0 : 1);
+        }
+        if (waitpid(un, &st, 0) != un || !WIFEXITED(st) || WEXITSTATUS(st) != 0) g |= 256;
+        printf("mnt-ns g=%#x\n", g);
+        fflush(stdout);
+        _exit(g == 0 ? 0 : 1);
+    }
+    int st;
+    if (waitpid(top, &st, 0) != top || !WIFEXITED(st)) f |= 1;
+    else if (WEXITSTATUS(st) == 0x7f) f |= 2; /* unshare refused */
+    else if (WEXITSTATUS(st) != 0) f |= 4;
+    snprintf(why, sizeof(why), "f=%#x", f);
+    report("namespaces_mnt", f == 0, why);
+}
+
+/* mount(2) and umount2, as Linux 7.3 (ADR 0022 H3b), in a mount namespace
+ * of a child's own: a new tmpfs with options and per-mount flags, which
+ * the parent's namespace does not show; a bind mount of a directory in it
+ * and a read-only remount of that; MS_MOVE; propagation changes (private
+ * and slave accepted, shared refused); umount2 EBUSY while the working
+ * directory is in the mount, MNT_DETACH, bad flags, not a mount point;
+ * ENODEV for an unknown type, EPERM without CAP_SYS_ADMIN; and
+ * /proc/filesystems. */
+static int t_info_has(const char *needle)
+{
+    static char info[8192];
+    return t_slurp("/proc/self/mountinfo", info, sizeof(info)) > 0 && strstr(info, needle);
+}
+
+static void test_mount_calls(void)
+{
+    char why[160];
+    int f = 0, go[2], done[2];
+    mkdir("/tmp", 01777);
+    rmdir("/tmp/mc-a");
+    rmdir("/tmp/mc-b");
+    rmdir("/tmp/mc-c");
+    if (mkdir("/tmp/mc-a", 0755) != 0 || mkdir("/tmp/mc-b", 0755) != 0 ||
+        mkdir("/tmp/mc-c", 0755) != 0 || pipe(go) != 0 || pipe(done) != 0) {
+        report("mount_calls", 0, "setup");
+        return;
+    }
+    pid_t child = fork();
+    if (child == 0) {
+        int g = 0;
+        char c = 0;
+        struct stat st;
+        if (unshare(CLONE_NEWNS) != 0) _exit(0x7f);
+        if (mount("none", "/tmp/mc-a", "tmpfs", MS_NOSUID | MS_NODEV, "size=1m,mode=700") != 0)
+            g |= 1;
+        if (stat("/tmp/mc-a", &st) != 0 || (st.st_mode & 07777) != 0700) g |= 1;
+        if (!t_info_has(" /tmp/mc-a rw,nosuid,nodev,relatime - tmpfs none rw")) g |= 2;
+        /* A bind mount of a directory in it, then read-only. */
+        int fd;
+        if (mkdir("/tmp/mc-a/d", 0755) != 0 ||
+            (fd = open("/tmp/mc-a/d/x", O_CREAT | O_WRONLY, 0644)) < 0)
+            g |= 4;
+        else
+            close(fd);
+        if (mount("/tmp/mc-a/d", "/tmp/mc-b", NULL, MS_BIND, NULL) != 0 ||
+            access("/tmp/mc-b/x", F_OK) != 0 || !t_info_has(" /d /tmp/mc-b rw,nosuid,nodev"))
+            g |= 4;
+        if (mount(NULL, "/tmp/mc-b", NULL, MS_REMOUNT | MS_BIND | MS_RDONLY, NULL) != 0 ||
+            !t_info_has(" /d /tmp/mc-b ro,relatime - tmpfs none rw"))
+            g |= 8;
+        /* Propagation: private and slave are fine, shared is refused,
+         * two at once is EINVAL. */
+        if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0 ||
+            mount(NULL, "/tmp/mc-a", NULL, MS_SLAVE, NULL) != 0 ||
+            !(mount(NULL, "/tmp/mc-a", NULL, MS_SHARED, NULL) == -1 && errno == EINVAL) ||
+            !(mount(NULL, "/tmp/mc-a", NULL, MS_PRIVATE | MS_SLAVE, NULL) == -1 &&
+              errno == EINVAL))
+            g |= 16;
+        /* umount2: busy while the working directory is in it. */
+        if (chdir("/tmp/mc-b") != 0 || !(umount2("/tmp/mc-b", 0) == -1 && errno == EBUSY) ||
+            chdir("/") != 0 || umount2("/tmp/mc-b", 0) != 0 || access("/tmp/mc-b/x", F_OK) == 0)
+            g |= 32;
+        /* MS_MOVE: the tmpfs moves to mc-c. */
+        if (mount("/tmp/mc-a", "/tmp/mc-c", NULL, MS_MOVE, NULL) != 0 ||
+            access("/tmp/mc-c/d/x", F_OK) != 0 || access("/tmp/mc-a/d", F_OK) == 0)
+            g |= 64;
+        /* Errors. */
+        if (!(mount("none", "/tmp/mc-a", "nosuchfs", 0, NULL) == -1 && errno == ENODEV) ||
+            !(mount("none", "/tmp/mc-a", "tmpfs", 0, "bogus") == -1 && errno == EINVAL) ||
+            !(mount("none", "/tmp/nonexistent", "tmpfs", 0, NULL) == -1 && errno == ENOENT) ||
+            !(umount2("/tmp/mc-c", 0x100) == -1 && errno == EINVAL) ||
+            !(umount2("/tmp/mc-a", 0) == -1 && errno == EINVAL))
+            g |= 128;
+        /* The parent's namespace does not have these mounts. */
+        if (write(go[1], "m", 1) != 1 || read(done[0], &c, 1) != 1 || c != 'y') g |= 256;
+        if (umount2("/tmp/mc-c", MNT_DETACH) != 0 || t_info_has("/tmp/mc-c")) g |= 512;
+        /* Without CAP_SYS_ADMIN: EPERM. */
+        pid_t un = fork();
+        if (un == 0) {
+            if (setgid(65534) != 0 || setuid(65534) != 0) _exit(0);
+            _exit(mount("none", "/tmp/mc-a", "tmpfs", 0, NULL) == -1 && errno == EPERM &&
+                          umount2("/", 0) == -1 && errno == EPERM
+                      ? 0
+                      : 1);
+        }
+        if (t_exit_status(un) != 0) g |= 1024;
+        printf("mount-calls g=%#x\n", g);
+        fflush(stdout);
+        _exit(g == 0 ? 0 : 1);
+    }
+    char c = 0;
+    if (child < 0 || read(go[0], &c, 1) != 1) f |= 1;
+    /* Here the directories are empty and nothing is mounted on them. */
+    if (t_info_has("/tmp/mc-") || access("/tmp/mc-c/d", F_OK) == 0) f |= 2;
+    static char fsl[512];
+    if (t_slurp("/proc/filesystems", fsl, sizeof(fsl)) <= 0 || !strstr(fsl, "nodev\ttmpfs\n"))
+        f |= 4;
+    if (write(done[1], "y", 1) != 1) f |= 1;
+    int code = t_exit_status(child);
+    if (code == 0x7f) f |= 8;
+    else if (code != 0) f |= 16;
+    close(go[0]);
+    close(go[1]);
+    close(done[0]);
+    close(done[1]);
+    rmdir("/tmp/mc-a");
+    rmdir("/tmp/mc-b");
+    rmdir("/tmp/mc-c");
+    snprintf(why, sizeof(why), "f=%#x", f);
+    report("mount_calls", f == 0, why);
+}
+
+/* Copy `from` to a new file `to` with mode `mode` (chmod'ed, so the
+ * umask does not apply); 0 on success. */
+static int t_copy(const char *from, const char *to, mode_t mode)
+{
+    int in = open(from, O_RDONLY), out = open(to, O_WRONLY | O_CREAT | O_TRUNC, 0700);
+    int ok = in >= 0 && out >= 0;
+    char buf[4096];
+    ssize_t n;
+    while (ok && (n = read(in, buf, sizeof(buf))) > 0)
+        ok = write(out, buf, (size_t)n) == n;
+    if (in >= 0)
+        close(in);
+    if (out >= 0)
+        close(out);
+    return ok && chmod(to, mode) == 0 ? 0 : -1;
+}
+
+/* What a mount's flags refuse (ADR 0022 H3c), on a tmpfs mounted in a
+ * mount namespace of its own: ro (EROFS at every change, EEXIST first,
+ * devices still written; EBUSY to make it ro while a file is open for
+ * writing), noexec (exec and access X_OK EACCES, mmap PROT_EXEC EPERM,
+ * mprotect to executable EACCES), nodev (opening a device EACCES),
+ * nosymfollow (ELOOP) and nosuid (a set-user-ID program gains nothing),
+ * each reported in statfs's f_flags. */
+static void test_mount_flags(void)
+{
+#ifndef MS_NOSYMFOLLOW
+#define MS_NOSYMFOLLOW 256
+#endif
+    enum { RDONLY = 1, NOSUID = 2, NODEV = 4, NOEXEC = 8, NOSYMFOLLOW = 0x2000 };
+    char why[160];
+    int f = 0;
+    mkdir("/tmp", 01777);
+    rmdir("/tmp/mf");
+    if (mkdir("/tmp/mf", 0755) != 0) {
+        report("mount_flags", 0, "setup");
+        return;
+    }
+    pid_t child = fork();
+    if (child == 0) {
+        int g = 0, fd;
+        struct statfs sfs;
+        if (unshare(CLONE_NEWNS) != 0)
+            _exit(0x7f);
+        if (mount("none", "/tmp/mf", "tmpfs", 0, "size=4m,mode=755") != 0)
+            _exit(0x7e);
+        fd = open("/tmp/mf/f", O_CREAT | O_WRONLY, 0644);
+        if (fd < 0 || write(fd, "x", 1) != 1)
+            g |= 1;
+        if (fd >= 0)
+            close(fd);
+        if (mkdir("/tmp/mf/d", 0755) != 0 || symlink("f", "/tmp/mf/l") != 0 ||
+            mknod("/tmp/mf/null", S_IFCHR | 0666, makedev(1, 3)) != 0 ||
+            t_copy("/bin/musl_runtime_test", "/tmp/mf/prog", 04755) != 0)
+            g |= 1;
+        /* Read-only: not while a file is open for writing. */
+        fd = open("/tmp/mf/f", O_WRONLY);
+        if (fd < 0 || !(mount(NULL, "/tmp/mf", NULL, MS_REMOUNT | MS_RDONLY, NULL) == -1 &&
+                        errno == EBUSY))
+            g |= 2;
+        if (fd >= 0)
+            close(fd);
+        if (mount(NULL, "/tmp/mf", NULL, MS_REMOUNT | MS_RDONLY, NULL) != 0)
+            g |= 2;
+#define T_EROFS(call) (!((call) == -1 && errno == EROFS))
+        if (T_EROFS(open("/tmp/mf/f", O_WRONLY)) ||
+            T_EROFS(open("/tmp/mf/f", O_RDONLY | O_TRUNC)) ||
+            T_EROFS(open("/tmp/mf/new", O_CREAT | O_WRONLY, 0644)) ||
+            T_EROFS(mkdir("/tmp/mf/e", 0755)) || T_EROFS(unlink("/tmp/mf/f")) ||
+            T_EROFS(unlink("/tmp/mf/none")) || T_EROFS(rmdir("/tmp/mf/d")) ||
+            T_EROFS(rename("/tmp/mf/f", "/tmp/mf/g")))
+            g |= 4;
+        if (T_EROFS(chmod("/tmp/mf/f", 0600)) || T_EROFS(chown("/tmp/mf/f", 1, 1)) ||
+            T_EROFS(truncate("/tmp/mf/f", 0)) || T_EROFS(utimes("/tmp/mf/f", NULL)) ||
+            T_EROFS(symlink("f", "/tmp/mf/m")) || T_EROFS(link("/tmp/mf/f", "/tmp/mf/h")) ||
+            T_EROFS(access("/tmp/mf/f", W_OK)) ||
+            T_EROFS(setxattr("/tmp/mf/f", "user.a", "1", 1, 0)) ||
+            T_EROFS(mknod("/tmp/mf/p", S_IFIFO | 0644, 0)))
+            g |= 8;
+#undef T_EROFS
+        /* EEXIST before EROFS; reading, and writing a device, still work. */
+        if (!(mkdir("/tmp/mf/d", 0755) == -1 && errno == EEXIST))
+            g |= 16;
+        if ((fd = open("/tmp/mf/f", O_RDONLY)) < 0)
+            g |= 16;
+        else
+            close(fd);
+        if ((fd = open("/tmp/mf/null", O_WRONLY)) < 0 || write(fd, "x", 1) != 1)
+            g |= 16;
+        if (fd >= 0)
+            close(fd);
+        if (statfs("/tmp/mf", &sfs) != 0 || !(sfs.f_flags & RDONLY))
+            g |= 32;
+        /* Writable again. */
+        if (mount(NULL, "/tmp/mf", NULL, MS_REMOUNT, NULL) != 0 ||
+            (fd = open("/tmp/mf/f", O_WRONLY)) < 0)
+            g |= 64;
+        else
+            close(fd);
+        /* noexec, nodev, nosymfollow. */
+        if (mount(NULL, "/tmp/mf", NULL, MS_REMOUNT | MS_NOEXEC | MS_NODEV | MS_NOSYMFOLLOW,
+                  NULL) != 0) {
+            g |= 128;
+        } else {
+            pid_t e = fork();
+            if (e == 0) {
+                execl("/tmp/mf/prog", "prog", "--ids", (char *)0);
+                _exit(errno == EACCES ? 0 : 1);
+            }
+            if (t_exit_status(e) != 0 || !(access("/tmp/mf/prog", X_OK) == -1 && errno == EACCES))
+                g |= 128;
+            fd = open("/tmp/mf/prog", O_RDONLY);
+            void *m = fd >= 0 ? mmap(NULL, 4096, PROT_READ | PROT_EXEC, MAP_PRIVATE, fd, 0)
+                              : MAP_FAILED;
+            if (!(m == MAP_FAILED && errno == EPERM))
+                g |= 256;
+            m = fd >= 0 ? mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, fd, 0) : MAP_FAILED;
+            if (m == MAP_FAILED ||
+                !(mprotect(m, 4096, PROT_READ | PROT_EXEC) == -1 && errno == EACCES))
+                g |= 256;
+            if (m != MAP_FAILED)
+                munmap(m, 4096);
+            if (fd >= 0)
+                close(fd);
+            if (!(open("/tmp/mf/null", O_WRONLY) == -1 && errno == EACCES))
+                g |= 512;
+            if (!(open("/tmp/mf/l", O_RDONLY) == -1 && errno == ELOOP))
+                g |= 1024;
+            if (statfs("/tmp/mf", &sfs) != 0 ||
+                (sfs.f_flags & (RDONLY | NOEXEC | NODEV | NOSYMFOLLOW)) !=
+                    (NOEXEC | NODEV | NOSYMFOLLOW))
+                g |= 2048;
+        }
+        /* nosuid: the set-user-ID program gains root without it, not
+         * with it. */
+        static char ids[64], nosuid_ids[64];
+        int st = -1, nosuid_st = -1;
+        if (mount(NULL, "/tmp/mf", NULL, MS_REMOUNT, NULL) != 0 ||
+            (st = run_ids_as_user("/tmp/mf/prog", IDS_PLAIN, ids, sizeof(ids))) != 0 ||
+            strcmp(ids, "1000 0 0 1 0 prog") != 0)
+            g |= 4096;
+        if (mount(NULL, "/tmp/mf", NULL, MS_REMOUNT | MS_NOSUID, NULL) != 0 ||
+            (nosuid_st = run_ids_as_user("/tmp/mf/prog", IDS_PLAIN, nosuid_ids,
+                                         sizeof(nosuid_ids))) != 0 ||
+            strcmp(nosuid_ids, "1000 1000 1000 0 1 prog") != 0 ||
+            statfs("/tmp/mf", &sfs) != 0 || !(sfs.f_flags & NOSUID))
+            g |= 8192;
+        printf("mount-flags g=%#x ids='%s'/%d nosuid='%s'/%d\n", g, ids, st, nosuid_ids,
+               nosuid_st);
+        fflush(stdout);
+        _exit(g == 0 ? 0 : 1);
+    }
+    int code = t_exit_status(child);
+    if (code == 0x7f || code == 0x7e)
+        f |= 1;
+    else if (code != 0)
+        f |= 2;
+    rmdir("/tmp/mf");
+    snprintf(why, sizeof(why), "f=%#x code=%d", f, code);
+    report("mount_flags", f == 0, why);
+}
+
+/* A file does not leave a read-only bind mount by another name: a hard
+ * link to another mount of the same filesystem is EXDEV, and a directory
+ * with a mount under it cannot be renamed (mounts stay where they are, so
+ * the moved tree would lose the mount's flags: EBUSY). A descriptor with no
+ * name on any mount (a pipe) gets none: EXDEV, as Linux's pipefs. PR #35
+ * review. */
+static void test_mount_no_escape(void)
+{
+    char why[96];
+    rmdir("/tmp/me");
+    if (mkdir("/tmp/me", 0755) != 0) {
+        report("mount_no_escape", 0, "setup");
+        return;
+    }
+    pid_t child = fork();
+    if (child == 0) {
+        int g = 0;
+        if (unshare(CLONE_NEWNS) != 0 || mount("none", "/tmp/me", "tmpfs", 0, "size=1m") != 0)
+            _exit(0x7f);
+        int fd = -1;
+        if (mkdir("/tmp/me/top", 0755) != 0 || mkdir("/tmp/me/top/a", 0755) != 0 ||
+            mkdir("/tmp/me/top/ro", 0755) != 0 || mkdir("/tmp/me/top/b", 0755) != 0 ||
+            (fd = open("/tmp/me/top/a/f", O_CREAT | O_WRONLY, 0644)) < 0 ||
+            mount("/tmp/me/top/a", "/tmp/me/top/ro", NULL, MS_BIND, NULL) != 0 ||
+            mount(NULL, "/tmp/me/top/ro", NULL, MS_REMOUNT | MS_BIND | MS_RDONLY, NULL) != 0)
+            _exit(0x7e);
+        close(fd);
+        errno = 0;
+        if (!(link("/tmp/me/top/ro/f", "/tmp/me/top/b/g") == -1 && errno == EXDEV)) g |= 1;
+        if (link("/tmp/me/top/a/f", "/tmp/me/top/b/g") != 0) g |= 2;
+        errno = 0;
+        if (!(rename("/tmp/me/top", "/tmp/me/moved") == -1 && errno == EBUSY)) g |= 4;
+        errno = 0;
+        if (!(open("/tmp/me/top/ro/f", O_WRONLY) == -1 && errno == EROFS)) g |= 8;
+        if (umount("/tmp/me/top/ro") != 0 || rename("/tmp/me/top", "/tmp/me/moved") != 0)
+            g |= 16;
+        int p[2];
+        if (pipe(p) != 0) {
+            g |= 32;
+        } else {
+            errno = 0;
+            if (!(linkat(p[0], "", AT_FDCWD, "/tmp/me/pipe", AT_EMPTY_PATH) == -1 &&
+                  errno == EXDEV))
+                g |= 32;
+            close(p[0]);
+            close(p[1]);
+        }
+        _exit(g);
+    }
+    int code = t_exit_status(child);
+    rmdir("/tmp/me");
+    snprintf(why, sizeof(why), "code=%#x", code);
+    report("mount_no_escape", code == 0, why);
+}
+
+/* How many mounts /proc/self/mountinfo shows at mount point `point`. */
+static int t_mounts_at(const char *point)
+{
+    static char info[8192];
+    char needle[96];
+    int n = 0;
+    snprintf(needle, sizeof(needle), " %s ", point);
+    if (t_slurp("/proc/self/mountinfo", info, sizeof(info)) <= 0) return -1;
+    for (char *line = info; *line;) {
+        char *end = strchr(line, '\n');
+        if (end) *end = 0;
+        /* id parent dev root point ...: the fifth field. */
+        char *f = line;
+        for (int i = 0; i < 4 && f; i++) {
+            f = strchr(f, ' ');
+            if (f) f++;
+        }
+        if (f && strncmp(f - 1, needle, strlen(needle)) == 0) n++;
+        if (!end) break;
+        line = end + 1;
+    }
+    return n;
+}
+
+/* pivot_root (ADR 0022 H3d): LTP pivot_root01's steps, in a mount
+ * namespace of its own chrooted into a tmpfs. The errors (EBUSY when
+ * new_root is on the root's mount, EINVAL when put_old is not under it,
+ * ENOTDIR, ENOENT, EPERM), the pivot (the new root at /, the old one at
+ * put_old with its mounts, the working directory moved), then
+ * pivot_root(".", ".") and umount2(".", MNT_DETACH) as container
+ * runtimes do it. */
+static void test_pivot_root(void)
+{
+    char why[160];
+    mkdir("/tmp", 01777);
+    rmdir("/tmp/pr");
+    if (mkdir("/tmp/pr", 0755) != 0) {
+        report("pivot_root", 0, "setup");
+        return;
+    }
+    pid_t child = fork();
+    if (child == 0) {
+        int g = 0, fd;
+        char cwd[64];
+        if (unshare(CLONE_NEWNS | CLONE_FS) != 0) _exit(0x7f);
+        if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0 ||
+            mount("none", "/tmp/pr", "tmpfs", 0, NULL) != 0 || chroot("/tmp/pr") != 0 ||
+            chdir("/") != 0)
+            _exit(0x7e);
+        /* new_root not a mount point is on the root's mount: EBUSY. */
+        if (mkdir("/new", 0755) != 0 ||
+            !(syscall(SYS_pivot_root, "/new", "/new") == -1 && errno == EBUSY))
+            g |= 1;
+        if (mount("none", "/new", "tmpfs", 0, NULL) != 0 || mkdir("/new/old", 0755) != 0 ||
+            mkdir("/new/proc", 0755) != 0 || mount("proc", "/new/proc", "proc", 0, NULL) != 0 ||
+            (fd = open("/new/marker", O_CREAT | O_WRONLY, 0644)) < 0)
+            g |= 2;
+        else
+            close(fd);
+        /* put_old not under new_root: EINVAL; a file: ENOTDIR; missing:
+         * ENOENT; put_old on the root's mount: EBUSY. */
+        if (mkdir("/other", 0755) != 0 || mount("none", "/other", "tmpfs", 0, NULL) != 0 ||
+            mkdir("/other/old", 0755) != 0 ||
+            !(syscall(SYS_pivot_root, "/new", "/other/old") == -1 && errno == EINVAL) ||
+            !(syscall(SYS_pivot_root, "/new", "/new/marker") == -1 && errno == ENOTDIR) ||
+            !(syscall(SYS_pivot_root, "/new", "/new/none") == -1 && errno == ENOENT) ||
+            !(syscall(SYS_pivot_root, "/new", "/") == -1 && errno == EBUSY))
+            g |= 4;
+        /* Without CAP_SYS_ADMIN: EPERM (after the lookups). */
+        pid_t un = fork();
+        if (un == 0) {
+            if (setgid(65534) != 0 || setuid(65534) != 0) _exit(0);
+            _exit(syscall(SYS_pivot_root, "/new", "/new/old") == -1 && errno == EPERM &&
+                          syscall(SYS_pivot_root, "/new", "/new/marker") == -1 &&
+                          errno == ENOTDIR
+                      ? 0
+                      : 1);
+        }
+        if (t_exit_status(un) != 0) g |= 8;
+        /* The pivot: the new root and its /proc at /, the old root at
+         * /old with /other, the working directory (the old root) at the
+         * new root. */
+        if (syscall(SYS_pivot_root, "/new", "/new/old") != 0 || access("/marker", F_OK) != 0 ||
+            access("/old/new", F_OK) != 0 || access("/old/other/old", F_OK) != 0 ||
+            access("/proc/self/mountinfo", R_OK) != 0)
+            g |= 16;
+        if (!getcwd(cwd, sizeof(cwd)) || strcmp(cwd, "/") != 0 || t_mounts_at("/") != 1 ||
+            t_mounts_at("/old") != 1 || t_mounts_at("/old/other") != 1)
+            g |= 32;
+        /* The old root goes. */
+        if (umount2("/old", MNT_DETACH) != 0 || access("/old/other", F_OK) == 0 ||
+            t_mounts_at("/old") != 0)
+            g |= 64;
+        /* pivot_root(".", "."): the old root over the new one, reached by
+         * no path, until umount2(".") takes it off. */
+        if (mkdir("/n2", 0755) != 0 || mount("none", "/n2", "tmpfs", 0, NULL) != 0 ||
+            mkdir("/n2/proc", 0755) != 0 || mount("proc", "/n2/proc", "proc", 0, NULL) != 0 ||
+            (fd = open("/n2/m2", O_CREAT | O_WRONLY, 0644)) < 0)
+            g |= 128;
+        else
+            close(fd);
+        if (chdir("/n2") != 0 || syscall(SYS_pivot_root, ".", ".") != 0 ||
+            access("/m2", F_OK) != 0 || access("/marker", F_OK) == 0 || t_mounts_at("/") != 2 ||
+            !getcwd(cwd, sizeof(cwd)) || strcmp(cwd, "/") != 0)
+            g |= 256;
+        if (umount2(".", MNT_DETACH) != 0 || t_mounts_at("/") != 1 || access("/m2", F_OK) != 0)
+            g |= 512;
+        if (g != 0) {
+            printf("pivot-root g=%#x\n", g);
+            fflush(stdout);
+        }
+        _exit(g == 0 ? 0 : 1);
+    }
+    int f = 0, code = t_exit_status(child);
+    if (code == 0x7f || code == 0x7e)
+        f |= 1;
+    else if (code != 0)
+        f |= 2;
+    /* The parent's namespace is untouched. */
+    if (t_info_has("/tmp/pr")) f |= 4;
+    rmdir("/tmp/pr");
+    snprintf(why, sizeof(why), "f=%#x code=%d", f, code);
+    report("pivot_root", f == 0, why);
+}
+
+/* Write `text` to `path`; 0 or the errno. */
+static int t_write_text(const char *path, const char *text)
+{
+    int fd = open(path, O_WRONLY);
+    if (fd < 0) return errno;
+    ssize_t n = write(fd, text, strlen(text));
+    int e = n == (ssize_t)strlen(text) ? 0 : (n < 0 ? errno : EIO);
+    close(fd);
+    return e;
+}
+
+/* Read up to `len - 1` bytes of `path` into `buf`; the count, or -1. */
+static ssize_t t_read_text(const char *path, char *buf, size_t len)
+{
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return -1;
+    ssize_t n = read(fd, buf, len - 1);
+    close(fd);
+    buf[n < 0 ? 0 : n] = 0;
+    return n;
+}
+
+#ifndef NS_GET_USERNS
+#define NS_GET_USERNS 0xb701
+#define NS_GET_PARENT 0xb702
+#define NS_GET_OWNER_UID 0xb704
+#endif
+
+/* User namespaces (ADR 0022 H4a): the map files and their write rules, the
+ * unprivileged_userns_clone switch (off by default), the nsfs ioctls, and
+ * that every capability in a new namespace counts for nothing outside it. */
+static void test_user_ns(void)
+{
+    char why[200];
+    const char *sw = "/proc/sys/kernel/unprivileged_userns_clone";
+    pid_t child = fork();
+    if (child == 0) {
+        int g = 0;
+        char buf[128];
+        struct stat st;
+        /* The initial namespace maps every ID to itself. */
+        if (t_read_text("/proc/self/uid_map", buf, sizeof(buf)) < 0 ||
+            strcmp(buf, "         0          0 4294967295\n") != 0)
+            g |= 1;
+        pid_t b = fork();
+        if (b == 0) {
+            int h = 0, fd;
+            unsigned owner = 99;
+            if (unshare(CLONE_NEWUSER) != 0) _exit(0x7f);
+            if (t_read_text("/proc/self/uid_map", buf, sizeof(buf)) != 0) h |= 1;
+            /* One write; the second EPERM. */
+            if (t_write_text("/proc/self/uid_map", "0 0 1") != 0 ||
+                t_write_text("/proc/self/uid_map", "0 0 1") != EPERM)
+                h |= 2;
+            if (t_write_text("/proc/self/setgroups", "deny") != 0 ||
+                t_write_text("/proc/self/gid_map", "0 0 1\n") != 0 ||
+                t_write_text("/proc/self/setgroups", "allow") != EPERM)
+                h |= 4;
+            if (t_read_text("/proc/self/uid_map", buf, sizeof(buf)) < 0 ||
+                strcmp(buf, "         0          0          1\n") != 0)
+                h |= 8;
+            /* Every capability here, none over the initial namespace's
+             * UTS namespace. */
+            if (!(sethostname("x", 1) == -1 && errno == EPERM)) h |= 16;
+            /* Its UTS namespace's owner is above this one: EPERM; so is
+             * this namespace's parent. Its own owner reads as uid 0. */
+            fd = open("/proc/self/ns/uts", O_RDONLY);
+            if (fd < 0 || !(ioctl(fd, NS_GET_USERNS) == -1 && errno == EPERM)) h |= 32;
+            if (fd >= 0) close(fd);
+            fd = open("/proc/self/ns/user", O_RDONLY);
+            if (fd < 0 || !(ioctl(fd, NS_GET_PARENT) == -1 && errno == EPERM) ||
+                ioctl(fd, NS_GET_OWNER_UID, &owner) != 0 || owner != 0)
+                h |= 64;
+            if (fd >= 0) close(fd);
+            _exit(h);
+        }
+        int code = t_exit_status(b);
+        if (code != 0) g |= code == 0x7f ? 2 : code << 8;
+        /* From the initial namespace: NS_GET_USERNS opens it (inode
+         * 4026531837); it has no parent. */
+        int fd = open("/proc/self/ns/uts", O_RDONLY), u = -1;
+        if (fd < 0 || (u = ioctl(fd, NS_GET_USERNS)) < 0 || fstat(u, &st) != 0 ||
+            st.st_ino != 4026531837u || !(ioctl(u, NS_GET_PARENT) == -1 && errno == EPERM))
+            g |= 4;
+        if (fd >= 0) close(fd);
+        if (u >= 0) close(u);
+        /* Unprivileged, while the switch is 0: EPERM. */
+        if (t_read_text(sw, buf, sizeof(buf)) < 0 || strcmp(buf, "0\n") != 0) g |= 8;
+        pid_t c = fork();
+        if (c == 0) {
+            if (setgid(65534) != 0 || setuid(65534) != 0) _exit(1);
+            _exit(unshare(CLONE_NEWUSER) == -1 && errno == EPERM ? 0 : 1);
+        }
+        if (t_exit_status(c) != 0) g |= 16;
+        /* With it 1: an unprivileged user maps itself, the gid only after
+         * denying setgroups, and cannot go back to the parent. */
+        if (t_write_text(sw, "1") != 0) g |= 32;
+        /* A directory the namespace's root may write: it holds no
+         * capability over root's /tmp, whose owner it does not map. */
+        unlink("/tmp/userns-d/f");
+        mkdir("/tmp/userns-d", 0777);
+        chmod("/tmp/userns-d", 0777);
+        c = fork();
+        if (c == 0) {
+            int k = 0, init_ns = open("/proc/self/ns/user", O_RDONLY);
+            if (setgid(65534) != 0 || setuid(65534) != 0 || init_ns < 0) _exit(0x7f);
+            /* The ID change made the process non-dumpable, which makes
+             * root own its /proc files; an exec would undo that. */
+            if (prctl(PR_SET_DUMPABLE, 1, 0, 0, 0) != 0) _exit(0x7d);
+            if (unshare(CLONE_NEWUSER) != 0) _exit(0x7e);
+            if (t_write_text("/proc/self/uid_map", "0 65533 1") != EPERM ||
+                t_write_text("/proc/self/uid_map", "0 65534 1") != 0)
+                k |= 1;
+            if (t_write_text("/proc/self/gid_map", "0 65534 1") != EPERM ||
+                t_write_text("/proc/self/setgroups", "deny") != 0 ||
+                t_write_text("/proc/self/gid_map", "0 65534 1") != 0)
+                k |= 2;
+            /* IDs as this namespace sees them (ADR 0022 H4b): its own
+             * are 0; root's files, unmapped, show the overflow IDs; an
+             * unmapped ID is EINVAL; setgroups stays denied. */
+            struct stat rs;
+            char text[1024];
+            if (getuid() != 0 || geteuid() != 0 || getgid() != 0 || getegid() != 0) k |= 8;
+            if (stat("/", &rs) != 0 || rs.st_uid != 65534 || rs.st_gid != 65534) k |= 16;
+            if (!(setuid(5) == -1 && errno == EINVAL) ||
+                !(setgroups(0, NULL) == -1 && errno == EPERM))
+                k |= 32;
+            if (t_read_text("/proc/self/status", text, sizeof(text)) <= 0 ||
+                !strstr(text, "Uid:\t0\t0\t0\t0\n"))
+                k |= 64;
+            /* Its root keeps its capabilities across exec. */
+            int pfd[2];
+            if (pipe(pfd) != 0) _exit(0x7c);
+            pid_t e = fork();
+            if (e == 0) {
+                dup2(pfd[1], 1);
+                execl("/bin/cat", "cat", "/proc/self/status", (char *)NULL);
+                _exit(1);
+            }
+            close(pfd[1]);
+            ssize_t got = 0, n;
+            while (got < (ssize_t)sizeof(text) - 1 &&
+                   (n = read(pfd[0], text + got, sizeof(text) - 1 - got)) > 0)
+                got += n;
+            text[got] = 0;
+            close(pfd[0]);
+            waitpid(e, NULL, 0);
+            const char *eff = strstr(text, "CapEff:\t");
+            if (!eff || strncmp(eff + 8, "0000000000000000", 16) == 0) k |= 128;
+            /* What its root may do over what the namespace owns (ADR 0022
+             * H4c): make a UTS namespace and name it, and give its own file
+             * a capability, stored as v3 naming it (checked outside). */
+            pid_t h = fork();
+            if (h == 0) {
+                int m = 0;
+                struct utsname un;
+                static const unsigned char v2[20] = {1, 0, 0, 2, 0, 4};
+                unsigned char back[32];
+                if (unshare(CLONE_NEWUTS) != 0 || sethostname("inner", 5) != 0 ||
+                    uname(&un) != 0 || strcmp(un.nodename, "inner") != 0)
+                    m |= 1;
+                int fd = open("/tmp/userns-d/f", O_CREAT | O_WRONLY | O_EXCL, 0755);
+                if (fd < 0)
+                    m |= 8;
+                else if (setxattr("/tmp/userns-d/f", "security.capability", v2, sizeof(v2),
+                                  0) != 0)
+                    m |= 2;
+                if (m & 10) {
+                    printf("user-ns fcap errno=%d\n", errno);
+                    fflush(stdout);
+                }
+                if (fd >= 0) close(fd);
+                if (getxattr("/tmp/userns-d/f", "security.capability", back,
+                             sizeof(back)) != 20 || memcmp(back, v2, 20) != 0)
+                    m |= 4;
+                _exit(m);
+            }
+            int hcode = t_exit_status(h);
+            if (hcode != 0) {
+                printf("user-ns h4c=%#x\n", hcode);
+                fflush(stdout);
+                k |= 4;
+            }
+            if (!(setns(init_ns, CLONE_NEWUSER) == -1 && errno == EPERM)) k |= 4;
+            /* Its capabilities here set no ids outside: an unmapped id
+             * fails (Linux EINVAL; EPERM until ids are translated). */
+            if (setuid(1) != -1 || setgid(1) != -1) k |= 8;
+            _exit(k);
+        }
+        code = t_exit_status(c);
+        if (code != 0) g |= code << 16;
+        /* Outside, the capability the namespace's root set is v3, naming
+         * that root (kernel uid 65534): it is no capability of ours. */
+        unsigned char fcap[32];
+        if (getxattr("/tmp/userns-d/f", "security.capability", fcap, sizeof(fcap)) != 24 ||
+            memcmp(fcap, "\x01\0\0\x03", 4) != 0 || memcmp(fcap + 20, "\xfe\xff\0\0", 4) != 0)
+            g |= 512;
+        unlink("/tmp/userns-d/f");
+        rmdir("/tmp/userns-d");
+        if (t_write_text(sw, "0") != 0) g |= 64;
+        if (t_read_text("/proc/sys/user/max_user_namespaces", buf, sizeof(buf)) <= 0 ||
+            atoi(buf) <= 0)
+            g |= 128;
+        /* waitid reports the child's real uid. */
+        c = fork();
+        if (c == 0) _exit(0);
+        siginfo_t si;
+        memset(&si, 0, sizeof(si));
+        if (waitid(P_PID, c, &si, WEXITED) != 0 || si.si_pid != c || si.si_uid != getuid())
+            g |= 256;
+        if (g != 0) {
+            printf("user-ns g=%#x\n", g);
+            fflush(stdout);
+        }
+        _exit(g == 0 ? 0 : 1);
+    }
+    int code = t_exit_status(child);
+    /* Never leave the switch on. */
+    t_write_text(sw, "0");
+    snprintf(why, sizeof(why), "code=%d", code);
+    report("user_ns", code == 0, why);
+}
+
+/* PID namespaces, as Linux 7.3 (ADR 0022 H5). A child unshares
+ * CLONE_NEWPID; its next child is the new namespace's init, 1 there with
+ * no parent it can see, whose own child is 2. Inside, the init takes only
+ * the signals it handles, a procfs mounted there lists 1 and 2, and status
+ * shows NSpid from that mount's view; outside, the init is seen by its
+ * kernel pid, NSpid shows both levels and the nsfs ioctls translate. When
+ * the init exits the rest of the namespace goes with it and no process can
+ * be made there any more (ENOMEM). */
+#ifndef CLONE_NEWPID
+#define CLONE_NEWPID 0x20000000
+#endif
+#define T_NS_GET_PID_FROM_PIDNS 0x8004b706
+#define T_NS_GET_PID_IN_PIDNS 0x8004b708
+
+/* How many process directories a procfs at `dir` lists, and whether they
+ * are exactly "1" and "2". */
+static int t_pidns_listing(const char *dir)
+{
+    DIR *d = opendir(dir);
+    if (!d) return -1;
+    int n = 0, one = 0, two = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
+        n++;
+        one |= strcmp(e->d_name, "1") == 0;
+        two |= strcmp(e->d_name, "2") == 0;
+    }
+    closedir(d);
+    return n == 2 && one && two ? 0 : n + 100;
+}
+
+/* Whether the status file at `path` has the line `want`. */
+static int t_status_has(const char *path, const char *want)
+{
+    char text[2048];
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 0;
+    ssize_t n = read(fd, text, sizeof(text) - 1);
+    close(fd);
+    if (n <= 0) return 0;
+    text[n] = 0;
+    return strstr(text, want) != NULL;
+}
+
+#define T_KCMP_VM 1
+
+/* Process `pid`'s CPU-time clock (Linux's MAKE_PROCESS_CPUCLOCK with
+ * CPUCLOCK_SCHED). */
+static clockid_t t_cpuclock(pid_t pid)
+{
+    return (clockid_t)((~(unsigned)pid << 3) | 2u);
+}
+
+/* The pid crossings from inside (ADR 0022 H5b), in the init while its
+ * child 2 lives: every pid it passes is a number of its own namespace, so
+ * `outside` (the maker's pid) names nothing, and what it is told about the
+ * maker (a socket peer, a lock holder) is 0. Bits printed as pid-ns h5b. */
+static int t_pidns_crossings(pid_t outside, int peer, int lockfd)
+{
+    int f = 0;
+    struct rlimit rl;
+    cpu_set_t set;
+    /* Scheduling, priority, prlimit, ptrace, robust lists (musl's
+     * sched_getscheduler is ENOSYS by design: the raw call). */
+    if (syscall(SYS_sched_getscheduler, 1) < 0 || syscall(SYS_sched_getscheduler, 2) < 0)
+        f |= 1;
+    if (!(syscall(SYS_sched_getscheduler, outside) == -1 && errno == ESRCH)) f |= 1;
+    if (!(sched_getaffinity(outside, sizeof(set), &set) == -1 && errno == ESRCH)) f |= 1;
+    errno = 0;
+    if (getpriority(PRIO_PROCESS, 2) == -1 && errno != 0) f |= 2;
+    if (!(getpriority(PRIO_PROCESS, outside) == -1 && errno == ESRCH)) f |= 2;
+    if (prlimit(1, RLIMIT_NOFILE, NULL, &rl) != 0) f |= 4;
+    if (!(prlimit(outside, RLIMIT_NOFILE, NULL, &rl) == -1 && errno == ESRCH)) f |= 4;
+    if (!(syscall(SYS_ptrace, 16 /* PTRACE_ATTACH */, outside, 0, 0) == -1 && errno == ESRCH))
+        f |= 4;
+    void *head;
+    size_t hlen;
+    if (syscall(SYS_get_robust_list, 1, &head, &hlen) != 0) f |= 4;
+    if (!(syscall(SYS_get_robust_list, outside, &head, &hlen) == -1 && errno == ESRCH))
+        f |= 4;
+    /* PRIO_USER reaches only processes this namespace numbers: 1 and 2
+     * here, never the maker (which checks its own nice). */
+    if (setpriority(PRIO_USER, 0, 7) != 0 || getpriority(PRIO_PROCESS, 2) != 7) f |= 8;
+    /* pidfds, kcmp, process_vm, capget. */
+    int pfd = (int)syscall(SYS_pidfd_open, 2, 0);
+    if (pfd < 0) f |= 16;
+    else close(pfd);
+    if (!(syscall(SYS_pidfd_open, outside, 0) == -1 && errno == ESRCH)) f |= 16;
+    if (t_kcmp(1, 1, T_KCMP_VM, 0, 0) != 0 || t_kcmp(1, 2, T_KCMP_VM, 0, 0) <= 0 ||
+        !(t_kcmp(1, outside, T_KCMP_VM, 0, 0) == -1 && errno == ESRCH))
+        f |= 32;
+    char byte;
+    struct iovec l = {&byte, 1}, r = {&byte, 1};
+    if (!(process_vm_readv(outside, &l, 1, &r, 1, 0) == -1 && errno == ESRCH)) f |= 32;
+    struct {
+        uint32_t version;
+        int pid;
+    } hdr = {0x20080522, 1};
+    uint32_t data[6];
+    if (syscall(SYS_capget, &hdr, data) != 0) f |= 64;
+    hdr.pid = outside;
+    if (!(syscall(SYS_capget, &hdr, data) == -1 && errno == ESRCH)) f |= 64;
+    /* CPU clocks and SIGEV_THREAD_ID name numbers here too. */
+    struct timespec ts;
+    if (syscall(SYS_clock_gettime, t_cpuclock(2), &ts) != 0) f |= 128;
+    if (!(syscall(SYS_clock_gettime, t_cpuclock(outside), &ts) == -1 && errno == EINVAL))
+        f |= 128;
+    struct {
+        uint64_t value;
+        int signo, notify, tid, pad[11];
+    } ev = {0, SIGUSR1, 4 /* SIGEV_THREAD_ID */, 1, {0}};
+    int timer;
+    if (syscall(SYS_timer_create, CLOCK_MONOTONIC, &ev, &timer) != 0) f |= 256;
+    else syscall(SYS_timer_delete, timer);
+    ev.tid = outside;
+    if (!(syscall(SYS_timer_create, CLOCK_MONOTONIC, &ev, &timer) == -1 && errno == EINVAL))
+        f |= 256;
+    /* A PI futex word holds this namespace's numbers: 1 for the init. */
+    static uint32_t word;
+    word = 0;
+    if (syscall(SYS_futex, &word, FUTEX_LOCK_PI_PRIVATE, 0, NULL, NULL, 0) != 0 ||
+        (word & FUTEX_TID_MASK) != 1 ||
+        syscall(SYS_futex, &word, FUTEX_UNLOCK_PI_PRIVATE, 0, NULL, NULL, 0) != 0 || word != 0)
+        f |= 512;
+    /* The maker, as a socket peer and as a lock holder, is process 0. */
+    struct ucred c;
+    socklen_t len = sizeof(c);
+    if (getsockopt(peer, SOL_SOCKET, SO_PEERCRED, &c, &len) != 0 || c.pid != 0) f |= 1024;
+    struct flock fl = {.l_type = F_WRLCK, .l_whence = SEEK_SET, .l_start = 0, .l_len = 0};
+    if (fcntl(lockfd, F_GETLK, &fl) != 0 || fl.l_type != F_WRLCK || fl.l_pid != 0) f |= 2048;
+    /* So is the terminal's group, led from outside. */
+    pid_t pg = -1;
+    if (ioctl(0, TIOCGPGRP, &pg) == 0 && pg != 0) f |= 4096;
+    if (f != 0) {
+        printf("pid-ns h5b=%#x\n", f);
+        fflush(stdout);
+    }
+    return f;
+}
+
+/* The namespace's init: its own child, a procfs of its own, then it
+ * waits for the go-ahead and exits, taking the child with it. */
+static int t_pidns_init(int ready, int go, pid_t outside, int peer, int lockfd)
+{
+    int f = 0;
+    char c;
+    if (getpid() != 1 || getppid() != 0) f |= 1;
+    /* Its group and session are led from outside the namespace. */
+    if (getpgid(0) != 0 || getsid(0) != 0) f |= 2;
+    int sync[2];
+    if (pipe(sync) != 0) return 64;
+    pid_t g = fork();
+    if (g == 0) {
+        int bad = getpid() != 2 || getppid() != 1;
+        /* From inside, the init's default actions are not taken. */
+        bad |= kill(1, SIGTERM) != 0 || kill(1, SIGKILL) != 0;
+        if (write(sync[1], bad ? "b" : "o", 1) != 1) _exit(1);
+        for (;;) pause();
+    }
+    if (g != 2) f |= 4;
+    if (read(sync[0], &c, 1) != 1 || c != 'o') f |= 8;
+    /* A reaped child's number reads as the namespace numbers it: its
+     * number is freed by the reap, which must not make waitpid and waitid
+     * report 0 (PR #35 review). */
+    pid_t h = fork();
+    if (h == 0) _exit(7);
+    int st = 0;
+    if (h <= 0 || waitpid(h, &st, 0) != h || !WIFEXITED(st) || WEXITSTATUS(st) != 7) f |= 4;
+    pid_t k = fork();
+    if (k == 0) _exit(8);
+    siginfo_t si;
+    memset(&si, 0, sizeof(si));
+    if (k <= 0 || waitid(P_PID, k, &si, WEXITED) != 0 || si.si_pid != k || si.si_status != 8)
+        f |= 4;
+    if (t_pidns_crossings(outside, peer, lockfd) != 0) f |= 128;
+    /* A procfs mounted here shows this namespace (in a mount namespace of
+     * its own, so nothing is left behind). */
+    if (unshare(CLONE_NEWNS) != 0 ||
+        mount("proc", "/tmp/pidns-proc", "proc", 0, NULL) != 0 ||
+        t_pidns_listing("/tmp/pidns-proc") != 0 ||
+        !t_status_has("/tmp/pidns-proc/self/status", "NSpid:\t1\n") ||
+        !t_status_has("/tmp/pidns-proc/2/status", "PPid:\t1\n"))
+        f |= 16;
+    if (write(ready, "r", 1) != 1) f |= 32;
+    if (read(go, &c, 1) != 1) f |= 32;
+    return f;
+}
+
+/* The process that made the namespace: it sees the init from outside. */
+static int t_pidns_maker(void)
+{
+    int f = 0;
+    char c, buf[128];
+    if (unshare(CLONE_NEWPID) != 0) return 1;
+    /* A second one before the first is entered (copy_pid_ns), and the
+     * namespace for children has no init yet. */
+    if (!(unshare(CLONE_NEWPID) == -1 && errno == EINVAL)) f |= 2;
+    if (!(readlink("/proc/self/ns/pid_for_children", buf, sizeof(buf)) == -1 &&
+          errno == ENOENT))
+        f |= 1 << 16;
+    int ready[2], go[2], sv[2];
+    if (pipe(ready) != 0 || pipe(go) != 0) return 4;
+    /* For the init to look at: a socket pair this process made (its peer)
+     * and a lock it holds; its own nice, which the init's PRIO_USER must
+     * not reach. */
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) return 4;
+    int lockfd = open("/tmp/pidns-lock", O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    struct flock fl = {.l_type = F_WRLCK, .l_whence = SEEK_SET, .l_start = 0, .l_len = 0};
+    if (lockfd < 0 || fcntl(lockfd, F_SETLK, &fl) != 0) return 4;
+    errno = 0;
+    int nice0 = getpriority(PRIO_PROCESS, 0);
+    pid_t me = getpid();
+    pid_t init = fork();
+    if (init == 0) {
+        int lfd = open("/tmp/pidns-lock", O_RDWR | O_CLOEXEC);
+        _exit(t_pidns_init(ready[1], go[0], me, sv[1], lfd));
+    }
+    if (init < 0 || read(ready[0], &c, 1) != 1) return 8;
+    if (getpriority(PRIO_PROCESS, 0) != nice0) f |= 1 << 17;
+    struct ucred cred;
+    socklen_t clen = sizeof(cred);
+    if (getsockopt(sv[0], SOL_SOCKET, SO_PEERCRED, &cred, &clen) != 0 || cred.pid != me)
+        f |= 1 << 17;
+    close(sv[0]);
+    close(sv[1]);
+    close(lockfd);
+    unlink("/tmp/pidns-lock");
+    /* Our own namespace is unchanged; its init is ours to see. */
+    if (getpid() == 1 || init == 1) f |= 16;
+    char path[64], want[64];
+    snprintf(path, sizeof(path), "/proc/%d/status", (int)init);
+    snprintf(want, sizeof(want), "NSpid:\t%d\t1\n", (int)init);
+    if (!t_status_has(path, want)) f |= 32;
+    if (readlink("/proc/self/ns/pid_for_children", buf, sizeof(buf)) <= 0) f |= 32;
+    snprintf(path, sizeof(path), "/proc/%d/ns/pid", (int)init);
+    int nsfd = open(path, O_RDONLY | O_CLOEXEC);
+    pid_t grandchild = nsfd < 0 ? -1 : ioctl(nsfd, T_NS_GET_PID_FROM_PIDNS, 2);
+    if (nsfd < 0 || ioctl(nsfd, T_NS_GET_PID_FROM_PIDNS, 1) != init ||
+        ioctl(nsfd, T_NS_GET_PID_IN_PIDNS, init) != 1 || grandchild <= 0 ||
+        !(ioctl(nsfd, T_NS_GET_PID_IN_PIDNS, getpid()) == -1 && errno == ESRCH))
+        f |= 64;
+    int parent = nsfd < 0 ? -1 : ioctl(nsfd, T_NS_GET_PARENT);
+    if (parent < 0) f |= 64;
+    else close(parent);
+    if (nsfd >= 0) close(nsfd);
+    /* The init exits, and its child with it. */
+    if (write(go[1], "g", 1) != 1) f |= 128;
+    int st;
+    if (waitpid(init, &st, 0) != init || !WIFEXITED(st)) f |= 128;
+    else f |= WEXITSTATUS(st) << 8;
+    if (grandchild > 0 && !(kill(grandchild, 0) == -1 && errno == ESRCH)) f |= 128;
+    /* No process can be made there any more. */
+    pid_t late = fork();
+    if (late == 0) _exit(0);
+    if (late >= 0) {
+        waitpid(late, NULL, 0);
+        f |= 1 << 15;
+    } else if (errno != ENOMEM) {
+        f |= 1 << 15;
+    }
+    return f;
+}
+
+static void test_pid_ns(void)
+{
+    char why[96];
+    mkdir("/tmp/pidns-proc", 0755);
+    int code = -1;
+    pid_t maker = fork();
+    if (maker == 0) {
+        int f = t_pidns_maker();
+        printf("pid-ns maker f=%#x\n", f);
+        fflush(stdout);
+        _exit(f == 0 ? 0 : 1);
+    }
+    int st;
+    if (maker > 0 && waitpid(maker, &st, 0) == maker && WIFEXITED(st)) code = WEXITSTATUS(st);
+    rmdir("/tmp/pidns-proc");
+    snprintf(why, sizeof(why), "code=%d", code);
+    report("pid_ns", code == 0, why);
+}
+
+/* ADR 0022 H6: network namespaces. */
+#define T_NETNS_PORT 47123
+
+/* A TCP socket bound to the wildcard address on `port` (a new socket, or
+ * `s` when not negative) and listening: its fd, or -errno. */
+static int t_netns_listen(int s, int port)
+{
+    if (s < 0) s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) return -errno;
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_port = htons(port);
+    a.sin_addr.s_addr = htonl(INADDR_ANY);
+    if (bind(s, (struct sockaddr *)&a, sizeof(a)) != 0 || listen(s, 4) != 0) {
+        int e = errno;
+        close(s);
+        return -e;
+    }
+    return s;
+}
+
+/* The interface lines of /proc/net/dev (after its two header lines), up to
+ * `max` names into `names`: how many, or -1. */
+static int t_netns_devices(char names[][16], int max)
+{
+    FILE *fp = fopen("/proc/net/dev", "r");
+    if (!fp) return -1;
+    char line[256];
+    int n = 0, row = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        if (row++ < 2) continue;
+        char *colon = strchr(line, ':');
+        if (!colon) continue;
+        *colon = 0;
+        char *name = line;
+        while (*name == ' ') name++;
+        if (n < max) snprintf(names[n], 16, "%.15s", name);
+        n++;
+    }
+    fclose(fp);
+    return n;
+}
+
+/* In a child: a new network namespace has its own identity and ports, only
+ * a loopback interface, and reaches nothing (its loopback is down); a
+ * socket made before keeps the old one's ports; setns goes back. */
+static int t_netns_child(int initial_fd, unsigned long initial_ino)
+{
+    int f = 0;
+    char names[4][16];
+    int before = socket(AF_INET, SOCK_STREAM, 0);
+    if (unshare(CLONE_NEWNET) != 0) return 1;
+    if (t_ns_ino(getpid(), "net") == initial_ino) f |= 2;
+    if (!(t_netns_devices(names, 4) == 1 && strcmp(names[0], "lo") == 0)) f |= 4;
+    /* The port the parent listens on is free here, once. */
+    int l = t_netns_listen(-1, T_NETNS_PORT);
+    if (l < 0) f |= 8;
+    if (t_netns_listen(-1, T_NETNS_PORT) != -EADDRINUSE) f |= 16;
+    /* The socket made before the unshare is in the parent's namespace. */
+    if (before < 0 || t_netns_listen(before, T_NETNS_PORT) != -EADDRINUSE) f |= 32;
+    /* Nothing is reachable: not the host, not even 127.0.0.1. */
+    struct sockaddr_in to;
+    memset(&to, 0, sizeof(to));
+    to.sin_family = AF_INET;
+    to.sin_port = htons(9);
+    to.sin_addr.s_addr = htonl(0x0A000202); /* 10.0.2.2 */
+    int u = socket(AF_INET, SOCK_DGRAM, 0);
+    if (u < 0 || !(sendto(u, "x", 1, 0, (struct sockaddr *)&to, sizeof(to)) == -1 &&
+                   errno == ENETUNREACH))
+        f |= 64;
+    int c = socket(AF_INET, SOCK_STREAM, 0);
+    to.sin_port = htons(T_NETNS_PORT);
+    to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (c < 0 ||
+        !(connect(c, (struct sockaddr *)&to, sizeof(to)) == -1 && errno == ENETUNREACH))
+        f |= 128;
+    /* A sockaddr shorter than sockaddr_in is EINVAL, another family
+     * EAFNOSUPPORT (N-64). */
+    to.sin_family = AF_INET6;
+    if (!(bind(c, (struct sockaddr *)&to, sizeof(to)) == -1 && errno == EAFNOSUPPORT) ||
+        !(bind(c, (struct sockaddr *)&to, 8) == -1 && errno == EINVAL))
+        f |= 256;
+    /* setns back to the initial one, with its devices. */
+    if (setns(initial_fd, CLONE_NEWNET) != 0 || t_ns_ino(getpid(), "net") != initial_ino ||
+        t_netns_devices(names, 4) < 1 || strcmp(names[0], "lo") == 0)
+        f |= 512;
+    if (u >= 0) close(u);
+    if (c >= 0) close(c);
+    if (l >= 0) close(l);
+    return f;
+}
+
+static void test_net_ns(void)
+{
+    char why[96], names[4][16], buf[32];
+    int f = 0;
+    unsigned long ino = t_ns_ino(getpid(), "net");
+    int nsfd = open("/proc/self/ns/net", O_RDONLY | O_CLOEXEC);
+    if (nsfd < 0 || ioctl(nsfd, T_NS_GET_NSTYPE) != CLONE_NEWNET) f |= 1;
+    /* The initial namespace has the devices, and the limit its default. */
+    if (t_netns_devices(names, 4) < 1) f |= 2;
+    int lim = open("/proc/sys/user/max_net_namespaces", O_RDONLY);
+    ssize_t n = lim < 0 ? -1 : read(lim, buf, sizeof(buf) - 1);
+    if (n <= 0 || (buf[n] = 0, strcmp(buf, "15000\n") != 0)) f |= 4;
+    if (lim >= 0) close(lim);
+    int l = t_netns_listen(-1, T_NETNS_PORT);
+    if (l < 0) f |= 8;
+    int code = -1;
+    pid_t child = fork();
+    if (child == 0) {
+        int r = t_netns_child(nsfd, ino);
+        printf("net-ns child f=%#x\n", r);
+        fflush(stdout);
+        _exit(r == 0 ? 0 : 1);
+    }
+    int st;
+    if (child > 0 && waitpid(child, &st, 0) == child && WIFEXITED(st)) code = WEXITSTATUS(st);
+    if (code != 0) f |= 16;
+    /* The parent's namespace and listener are unchanged. */
+    if (t_ns_ino(getpid(), "net") != ino || t_netns_listen(-1, T_NETNS_PORT) != -EADDRINUSE)
+        f |= 32;
+    if (l >= 0) close(l);
+    if (nsfd >= 0) close(nsfd);
+    snprintf(why, sizeof(why), "f=%#x child=%d", f, code);
+    report("net_ns", f == 0, why);
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
         return print_ids();
+    if (argc >= 4 && strcmp(argv[1], "--exe") == 0)
+        return print_exe_check(argv[2], argv[3]);
     if (argc >= 3 && strcmp(argv[1], "--only") == 0) {
         /* `--only NAME [N]`: run it N times (default once), to catch a
          * test that fails only sometimes. */
@@ -5491,6 +10382,47 @@ int main(int argc, char **argv)
     test_priority_inheritance();
     test_dev_shm();
     test_statfs();
+    test_fallocate();
+    test_utimes();
+    test_itimers();
+    test_posix_timers();
+    test_restart_syscall();
+    test_adjtimex();
+    test_preadv_pwritev();
+    test_creat_lchown_fchmodat2();
+    test_close_range_and_advice();
+    test_splice_family();
+    test_statx();
+    test_openat2();
+    test_execveat();
+    test_fhandle();
+    test_ioctl();
+    test_record_locks();
+    test_fcntl_flags();
+    test_vectored_io();
+    test_link_errors();
+    test_stat_numbers();
+    test_open_flags();
+    test_text_busy();
+    test_inotify_events();
+    test_pidfd();
+    test_clone3();
+    test_kcmp_process_vm();
+    test_clone_share();
+    test_personality();
+    test_namespaces_uts();
+    test_namespaces_time();
+    test_namespaces_mnt();
+    test_mount_calls();
+    test_mount_flags();
+    test_mount_no_escape();
+    test_pivot_root();
+    test_user_ns();
+    test_pid_ns();
+    test_net_ns();
+#if defined(__x86_64__)
+    test_ustat_sysfs();
+#endif
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

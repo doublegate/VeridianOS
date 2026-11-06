@@ -11,8 +11,12 @@ use crate::process::{
 /// Whether `caller` may read or change the limits of a process with
 /// credentials `target` (Linux's check_prlimit_permission): the caller's
 /// real user and group are all of the target's IDs, or it holds
-/// CAP_SYS_RESOURCE.
-pub(crate) fn may_prlimit(caller: &Caller, target: &Credentials) -> bool {
+/// CAP_SYS_RESOURCE over the target's user namespace `target_ns`.
+pub(crate) fn may_prlimit(
+    caller: &Caller,
+    target: &Credentials,
+    target_ns: &crate::process::userns::UserNs,
+) -> bool {
     let c = &caller.creds;
     ([target.ruid, target.euid, target.suid]
         .iter()
@@ -20,14 +24,15 @@ pub(crate) fn may_prlimit(caller: &Caller, target: &Credentials) -> bool {
         && [target.rgid, target.egid, target.sgid]
             .iter()
             .all(|&id| id == c.rgid))
-        || caller.capable(CAP_SYS_RESOURCE)
+        || caller.ns_capable(target_ns, CAP_SYS_RESOURCE)
 }
 
 /// prlimit64(pid, resource, new, old): the limit of process `pid` (0: the
-/// caller) goes to `old` and, if `new` is given, is replaced by it. ESRCH
-/// for no such process, EPERM without permission (`may_prlimit`), the
-/// `Limits::set` errors otherwise (raising a hard limit needs
-/// CAP_SYS_RESOURCE); `new` is read before anything changes.
+/// caller; otherwise a number in the caller's PID namespace) goes to `old` and,
+/// if `new` is given, is replaced by it. ESRCH for no such process, EPERM
+/// without permission (`may_prlimit`), the `Limits::set` errors otherwise
+/// (raising a hard limit needs CAP_SYS_RESOURCE); `new` is read before anything
+/// changes.
 #[cfg(feature = "alloc")]
 pub fn sys_prlimit64(pid: usize, resource: usize, new_ptr: usize, old_ptr: usize) -> SyscallResult {
     let caller = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
@@ -36,9 +41,13 @@ pub fn sys_prlimit64(pid: usize, resource: usize, new_ptr: usize, old_ptr: usize
     let target = match pid {
         0 => caller.clone(),
         p if p > 0 => {
-            let target = crate::process::find_process(crate::process::ProcessId(p as u64))
+            let kid =
+                crate::process::pidns::from_vnr(p as i64).ok_or(SyscallError::ProcessNotFound)?;
+            let target = crate::process::find_process(crate::process::ProcessId(kid))
                 .ok_or(SyscallError::ProcessNotFound)?;
-            if target.pid != caller.pid && !may_prlimit(&me, &target.credentials()) {
+            if target.pid != caller.pid
+                && !may_prlimit(&me, &target.credentials(), &target.user_ns())
+            {
                 return Err(SyscallError::OperationNotPermitted);
             }
             target
@@ -86,17 +95,31 @@ mod tests {
         let caller = |uid, gid, caps: LinuxCaps| Caller {
             creds: Credentials::new(uid, gid),
             caps,
+            userns: crate::process::userns::initial(),
         };
+        let init = crate::process::userns::initial();
         let user = caller(1000, 100, LinuxCaps::EMPTY);
-        assert!(may_prlimit(&user, &Credentials::new(1000, 100)));
-        assert!(!may_prlimit(&user, &Credentials::new(1001, 100)));
-        assert!(!may_prlimit(&user, &Credentials::new(1000, 101)));
+        assert!(may_prlimit(&user, &Credentials::new(1000, 100), &init));
+        assert!(!may_prlimit(&user, &Credentials::new(1001, 100), &init));
+        assert!(!may_prlimit(&user, &Credentials::new(1000, 101), &init));
         let mut setuid_root = Credentials::new(1000, 100);
         setuid_root.euid = 0;
-        assert!(!may_prlimit(&user, &setuid_root));
-        assert!(may_prlimit(&Caller::KERNEL, &setuid_root));
+        assert!(!may_prlimit(&user, &setuid_root, &init));
+        assert!(may_prlimit(&Caller::kernel(), &setuid_root, &init));
         let resource = caller(1000, 100, LinuxCaps::EMPTY.with(CAP_SYS_RESOURCE));
-        assert!(may_prlimit(&resource, &setuid_root));
-        assert!(!may_prlimit(&caller(0, 0, LinuxCaps::EMPTY), &setuid_root));
+        assert!(may_prlimit(&resource, &setuid_root, &init));
+        assert!(!may_prlimit(
+            &caller(0, 0, LinuxCaps::EMPTY),
+            &setuid_root,
+            &init
+        ));
+        // Over a process in a namespace, its root's CAP_SYS_RESOURCE.
+        let ns = crate::process::userns::test_child(b"0 1000 1", b"0 100 1");
+        let ns_root = Caller {
+            userns: ns.clone(),
+            ..caller(1000, 100, LinuxCaps::FULL)
+        };
+        assert!(may_prlimit(&ns_root, &setuid_root, &ns));
+        assert!(!may_prlimit(&ns_root, &setuid_root, &init));
     }
 }

@@ -325,7 +325,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     coverage reports in `docs/compat/LINUX-SYSCALL-COVERAGE{,-AARCH64,-RISCV64}.md`, checked for
     staleness by the gate and CI; then group by group (process, signals, time, files, memory, ipc, events, network, sched,
     mount, system) with fail-first tests; LTP and musl libc-test in the rootfs suite; rewrite
-    `docs/PORTING-GUIDE.md` (it still lists the pre-ADR-0009 native numbers). Done: W^X
+    `docs/PORTING-GUIDE.md` (done 2026-11-04). Done: W^X
     per-program opt-in (ELF note) and prctl PR_SET_MDWE/PR_GET_MDWE (ADR 0017); mknod and
     mknodat (FIFOs with Linux's open/read/write/poll rules, device nodes opening their device by
     number, socket files; special files on RamFS, tmpfs and BlockFS and in mkfs-blockfs images;
@@ -362,23 +362,101 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
      - [x] statfs and fstatfs per filesystem type (`fs::statfs`)
   3. [ ] The remaining syscall groups: personality (READ_IMPLIES_EXEC with the W^X opt-in only),
      unshare/setns with every namespace type and `/proc/<pid>/ns`, then the process, signal, time
-     and file tiers with ABI-review findings N-194 to N-247 (with ETXTBSY: no writing a running
-     program, no exec of a file open for writing; a status-change time field on ramfs and tmpfs,
-     moved by writes, chmod and chown, which move mtime today); the `docs/PORTING-GUIDE.md` rewrite.
-  4. [ ] ABI-review items N-190 to N-193, N-207, N-209 to N-211, N-217, N-221, N-222, N-225, N-231,
-     N-235 to N-238.
-  5. [ ] D leftovers: N-115, N-260, N-52/N-261, N-282; the native thread call (private 1064),
+     and file tiers with ABI-review findings N-194 to N-247 (ETXTBSY, the ramfs and tmpfs
+     status-change time, inotify, the pidfd calls, clone3, kcmp, process_vm_* and personality
+     are done, rseq stays ENOSYS; fanotify stays ENOSYS, as
+     without CONFIG_FANOTIFY); the `docs/PORTING-GUIDE.md` rewrite (done 2026-11-04). Namespaces follow ADR 0022,
+     one commit per step: H1 (the framework, nsfs, `/proc/<pid>/ns`, unshare, setns, clone; UTS,
+     IPC and cgroup) and H2 (time) are done; of H3 (mount), H3a (the namespaces and
+     `/proc/<pid>/{mounts,mountinfo}`), H3b (mount(2) and umount2), H3c (per-mount flags) and
+     H3d (pivot_root) are done; of H4 (user), H4a (the namespace, its creation, maps and setns)
+     H4b (ids at the boundaries) and H4c (privilege checks per namespace) are done; of H5 (PID),
+     H5a (the namespaces, init and the main interfaces) and H5b (the remaining pid crossings)
+     are done; H6 (network: the namespaces, per-namespace ports, `/proc/net/dev`) is done.
+     Process clones that share the descriptor table or signal actions, and CLONE_PARENT (G2b),
+     are done. The expected lists are refreshed from full runs (2026-11-05: LTP 741/730/726 of
+     1,552 on x86_64/AArch64/RISC-V, from 524/519/519).
+  4. [ ] Architecture: the Linux ABI as a personality on the microkernel (decided 2026-11-03:
+     option (b), over keeping Linux compatibility in the kernel for good), with one security
+     model. ADR 0024, written after group 3 and before item 5 (the maintainer's order,
+     2026-11-03), so the calls still missing are built for the move:
+     - [ ] The Linux system calls are served by a user-space Linux runtime on native IPC and
+       capabilities (the model of Fuchsia's Starnix; gVisor's Sentry is similar), and the kernel
+       keeps memory, scheduling, IPC, capabilities and the hardware abstraction. The in-kernel
+       compatibility code (`kernel/src/syscall`, the Linux parts of `fs` and `process`, the
+       namespaces) is the reference implementation and moves out in pieces, each move keeping the
+       LTP, Open POSIX and libc-test expected lists. The ADR decides how a Linux call reaches the
+       runtime, and orders the moves with the IPC redesign (N-79 to N-91, which it depends on) and
+       C6 (drivers, filesystems and network protocols out of ring 0).
+     - [ ] One security model: every Linux privilege check (the POSIX capabilities of ADR 0020,
+       uid and permission checks) also requires the object capability for the resource it acts
+       on, as `sys_mount` already requires a Memory capability with WRITE and CREATE, so the native
+       model governs Linux programs too rather than running beside them. The ADR lists each check
+       with the object type and right it needs, says how a Linux process gets its first
+       capabilities (inherited at fork and exec, granted at launch) and how namespaces relate to
+       them; the checks change one subsystem per commit, as in ADR 0020 step 6. First:
+       mount(2), umount2 and pivot_root (group 3 H3), which check only CAP_SYS_ADMIN, while the
+       private FsMount/FsUnmount also want a Memory capability that no user process is given;
+       the right object there is the mount namespace, so both get the same rule.
+     - [ ] Until the moves: new compatibility code keeps Linux semantics behind module interfaces
+       (no new reach-ins across subsystems), so it can move; README and the design documents
+       state the current state (everything in ring 0) and the target.
+  5. [ ] The Linux system calls still missing after group 3 (added 2026-11-03; 108 of the 111 in
+     `docs/compat/LINUX-SYSCALL-COVERAGE.md`, group 3 adds mount, umount2 and pivot_root). One
+     branch and pull request, a commit per family below, each with its LTP cases and its
+     `abi/kconfig.map` options set (ADR 0023). A call is either implemented with Linux semantics
+     or answers what Linux built without the feature answers (ENOSYS, EPERM or EOPNOTSUPP, as its
+     `kernel/sys_ni.c` or stub says), with the option left unset; each such choice is recorded in an
+     ADR for the group, not made silently.
+     - [ ] System V IPC: shmget, shmat, shmdt, shmctl (on `fs::shmem` pages), semget, semop,
+       semtimedop, semctl (with SEM_UNDO), msgget, msgsnd, msgrcv, msgctl; per IPC namespace (ADR
+       0022 H1), `/proc/sysvipc/*` and the `/proc/sys/kernel` limits; CONFIG_SYSVIPC.
+     - [ ] POSIX message queues: mq_open, mq_unlink, mq_timedsend, mq_timedreceive, mq_notify,
+       mq_getsetattr on an mqueue filesystem, per IPC namespace; CONFIG_POSIX_MQUEUE.
+     - [ ] futex2: futex_waitv, futex_wake, futex_wait, futex_requeue on the existing futex table.
+     - [ ] Memory: msync, mincore, the mlock family (mlock, mlock2, munlock, mlockall, munlockall;
+       RLIMIT_MEMLOCK and CAP_IPC_LOCK), membarrier, mseal, remap_file_pages, process_madvise,
+       process_mrelease; decided per call: the NUMA calls (mbind, set_mempolicy, get_mempolicy,
+       set_mempolicy_home_node, migrate_pages, move_pages), the pkey calls, userfaultfd and
+       map_shadow_stack.
+     - [ ] The new mount API on H3's mount objects: open_tree, open_tree_attr, move_mount, fsopen,
+       fsconfig, fsmount, fspick, mount_setattr, statmount, listmount, listns; decided:
+       quotactl and quotactl_fd.
+     - [ ] Sockets: shutdown, recvmmsg, sendmmsg.
+     - [ ] Files and scheduling: cachestat, file_getattr, file_setattr, ioprio_get, ioprio_set;
+       decided: memfd_secret. fanotify and rseq (with rseq_slice_yield) stay ENOSYS, as decided
+       in group 3.
+     - [ ] The system tier, decided per call: syslog, vhangup, acct, reboot, swapon, swapoff,
+       seccomp (filter mode), the landlock and lsm calls, add_key, request_key, keyctl,
+       perf_event_open, bpf, uprobe, uretprobe, and the calls a microkernel does not honour
+       (init_module, finit_module, delete_module, kexec_load, kexec_file_load, iopl, ioperm,
+       modify_ldt; `_sysctl`, which Linux removed).
+     - [ ] Linux AIO (io_setup, io_destroy, io_submit, io_cancel, io_getevents, io_pgetevents) and
+       io_uring (io_uring_setup, io_uring_enter, io_uring_register) move to v0.29: they need an
+       asynchronous completion path in the kernel.
+  6. [ ] ABI-review items N-190 to N-193, N-207, N-209 to N-211, N-217, N-221, N-222, N-225, N-231,
+     N-235 to N-238. With them, before the release (found reviewing PR #35, 2026-11-05): open
+     files and mappings keep the `Mount` they were reached through and the mount flags are checked
+     on it, not on a path looked up again in the caller's namespace; mounts follow a renamed
+     directory in every namespace; a remount read-only sees every writer of the superblock
+     (KNOWN-LIMITATIONS "Namespaces are partial").
+  7. [ ] D leftovers: N-115, N-260, N-52/N-261, N-282; the native thread call (private 1064),
      whose thread is never started and keeps its process from finishing its exit: start it as
      `clone` does, with a runtime test that the process exits, or retire it (found in PR #33).
-  6. [ ] Decision point: cut v0.28.0 here (moving 7 to 13 to v0.29) or continue.
-  7. [ ] Sprint F (networking, storage), with `knetd` (N-69) and INET socket readiness.
-  8. [ ] Sprint G (hardening).
-  9. [ ] Sprint H (real hardware, the parts QEMU can check).
-  10. [ ] RISC-V boot: HR-02, HR-04 to HR-06, HR-11.
-  11. [ ] DL: KDE with shared libraries and its media backend.
-  12. [ ] MFA through PAM.
-  13. [ ] IPC redesign (N-79 to N-91); package signing keys (N-55 follow-up).
-  14. [ ] Release v0.28.0 (the tag and GitHub release need the maintainer's confirmation).
+  8. [ ] adjtimex frequency steering, before the cut decision (set 2026-11-01): ADJ_FREQUENCY and
+     the adjtime() slew change how fast CLOCK_REALTIME and CLOCK_MONOTONIC advance (as Linux's
+     `ntp_tick_length`), and STA_INS/STA_DEL insert or delete a leap second (LTP leapsec01); its own
+     commit or PR after group 3. KNOWN-LIMITATIONS "adjtimex and clock_adjtime".
+  9. [x] Decision point (decided 2026-11-05): v0.28.0 is cut here, after items 4 to 8, and
+     released (item 17); items 10 to 16 are the v0.29 queue, worked straight after the release.
+  10. [ ] (v0.29) Sprint F (networking, storage), with `knetd` (N-69) and INET socket readiness.
+  11. [ ] (v0.29) Sprint G (hardening).
+  12. [ ] (v0.29) Sprint H (real hardware, the parts QEMU can check).
+  13. [ ] (v0.29) RISC-V boot: HR-02, HR-04 to HR-06, HR-11.
+  14. [ ] (v0.29) DL: KDE with shared libraries and its media backend.
+  15. [ ] (v0.29) MFA through PAM.
+  16. [ ] (v0.29) IPC redesign (N-79 to N-91); package signing keys (N-55 follow-up).
+  17. [ ] Release v0.28.0, after item 8 (the tag and GitHub release need the maintainer's confirmation).
   - Outside the groups: pin every workflow `uses:` to a commit SHA with Dependabot (one ci: pull
     request); delete merged branches once the maintainer agrees.
 - [ ] **v0.28.0:** first the items carried over from v0.27.0, which was cut early (2026-10-18):

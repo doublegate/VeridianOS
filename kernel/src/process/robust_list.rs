@@ -140,14 +140,17 @@ impl RobustMemory for CurrentMemory {
 }
 
 /// Run by an exiting thread in its own address space, before
-/// CLONE_CHILD_CLEARTID is handled (as Linux orders them).
+/// CLONE_CHILD_CLEARTID is handled (as Linux orders them). The owner a
+/// futex word names is the thread's number in its own PID namespace, the
+/// one its threads store (task_pid_vnr).
 #[cfg(feature = "alloc")]
 pub fn exit_thread(thread: &super::Thread) {
     let head = thread
         .robust_list
         .swap(0, core::sync::atomic::Ordering::AcqRel);
     if head != 0 {
-        exit_robust_list(&mut CurrentMemory, head, thread.tid.0 as u32);
+        let tid = super::pidns::vnr(thread.tid.0);
+        exit_robust_list(&mut CurrentMemory, head, tid as u32);
     }
 }
 

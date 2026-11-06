@@ -41,16 +41,65 @@ exposed were fixed (N-182 to N-189); the rest are listed, with their targets, in
   their pages (N-230); the rest needs the v0.29 page cache.
 - **clone across processes.** A `clone` without CLONE_THREAD makes a process (fork, vfork,
   `posix_spawn`); with CLONE_VM it shares the parent's memory page by page as it is at the
-  clone, so a mapping either side adds or removes afterwards is its own (enough for vfork and
-  `posix_spawn`, whose child only execs or exits). CLONE_FILES and CLONE_SIGHAND between
-  processes (a shared fd or signal-handler table) are refused (N-210).
+  clone, so a mapping either side adds or removes afterwards is its own, and so is a page that
+  had no frame yet: whichever side touches it first gets a frame the other does not see (enough
+  for vfork and `posix_spawn`, whose child only execs or exits; LTP clone08's
+  CLONE_PARENT_SETTID case reads 0 from such a page). CLONE_FILES shares the descriptor
+  table and CLONE_SIGHAND the signal actions with the new process (G2b); the descriptor limit
+  belongs to the table, so two processes sharing one share their RLIMIT_NOFILE too, where Linux
+  checks each one's own.
 - **Time.** Every Linux clock exists and CLOCK_REALTIME counts from 1970 (N-218, N-219), with
   these differences: a sleep or futex wait until an absolute CLOCK_REALTIME time does not move
   when the clock is set afterwards (timerfds do); sleeping on a process CPU clock is ENOTSUP;
-  there is no leap-second offset, so CLOCK_TAI reads as UTC; BOOTTIME equals MONOTONIC, as there
-  is no suspend; and on AArch64 and RISC-V the wall clock comes from a device-tree PL031 or
-  Goldfish RTC, read once at boot (without one it counts from the epoch). adjtimex and
-  clock_adjtime do not exist.
+  CLOCK_TAI reads UTC plus the offset adjtimex sets, but timers and timerfds on CLOCK_TAI run as
+  on CLOCK_REALTIME, without it; BOOTTIME equals MONOTONIC, as there is no suspend; and on
+  AArch64 and RISC-V the wall clock comes from a device-tree PL031 or Goldfish RTC, read once at
+  boot (without one it counts from the epoch).
+- **adjtimex and clock_adjtime** keep Linux's NTP state and validate, store and report it as
+  Linux does (`timer::ntp`), but only ADJ_SETOFFSET (a step of CLOCK_REALTIME) and ADJ_TAI act on
+  a clock. The frequency, the phase offset the PLL computes, the tick length and an adjtime()
+  slew are kept and read back without changing how fast the clock runs; the phase offset does not
+  decay each second, the clock never leaves TIME_OK on its own, and STA_INS/STA_DEL are stored
+  but no leap second is inserted or deleted (LTP leapsec01 still fails). There is no PPS, and no
+  auxiliary clocks.
+- **File calls without a page cache.** readahead and posix_fadvise check their arguments and
+  change nothing; syncfs and sync_file_range sync every filesystem, as fsync does. RWF_NOWAIT
+  is taken on regular files, whose reads and writes never wait, and refused with EOPNOTSUPP on a
+  pipe or socket, where Linux returns EAGAIN instead of waiting; RWF_ATOMIC and RWF_DONTCACHE
+  are EOPNOTSUPP. close_range with CLOSE_RANGE_UNSHARE is EINVAL in a process with more than one
+  thread, whose threads share one descriptor table that cannot be split yet (with one thread
+  there is nothing to unshare). `st_dev` is an anonymous device per mount (0:1 for the root),
+  as Linux numbers ramfs and tmpfs; a disk filesystem reports that too, not its block device.
+  Pipes, sockets and memfds report 0:0.
+- **statx reports what stat reports.** No birth time (STATX_BTIME is never set: no filesystem
+  records one), the same device, link count and block numbers as stat, and no attributes but
+  STATX_ATTR_MOUNT_ROOT. The sync types are accepted and change nothing (every filesystem is
+  local). Mount ids are the ones `/proc/self/mountinfo` lists.
+- **openat2's resolve flags have no cache to work with.** RESOLVE_CACHED refuses what it must
+  (a creation or truncation is EAGAIN) but otherwise runs the whole walk, since there is no dentry
+  cache whose miss it could report. /proc/self/exe is the only magic link (there is no
+  /proc/<pid>/fd yet), so RESOLVE_NO_MAGICLINKS has one link to refuse. O_EMPTYPATH reopens
+  what a descriptor names, but not a pipe or socket, which records no path (ENXIO).
+- **O_TMPFILE needs ramfs or tmpfs** (/dev/shm). BlockFS, the root filesystem, has no unnamed
+  files and answers EOPNOTSUPP, as Linux does for a filesystem without `tmpfile`; callers fall
+  back to a named temporary file.
+- **There is no /dev/fd.** execveat of a descriptor names the program `/dev/fd/N` (or
+  `/dev/fd/N/name`), as Linux does, but nothing serves that path, since /proc/self/fd does not
+  exist yet; a script run from a descriptor that stays open across the exec therefore starts an
+  interpreter that cannot open its script.
+- **File handles are found by a walk.** open_by_handle_at looks for the handle's inode number by
+  walking its filesystem's directories, so it is slow on a large filesystem, and it cannot open a
+  file that is open but has no name left (Linux finds it while the inode is cached). Handles carry
+  no generation: BlockFS gives a freed inode number to the next new file, so a handle to a deleted
+  BlockFS file can open the file that took its number. Only ramfs, tmpfs and BlockFS decode
+  handles; there is no relaxed permission rule for a caller who could mount the filesystem (it
+  needs user namespaces), so open_by_handle_at always needs CAP_DAC_READ_SEARCH.
+- **splice and its relatives copy.** sendfile, copy_file_range, splice, tee and vmsplice move
+  data through a kernel buffer, 64 KiB at a time; no page is moved or shared between a pipe and
+  a file, SPLICE_F_MOVE and SPLICE_F_GIFT are accepted and change nothing, and copy_file_range
+  makes no reflink or server-side copy. copy_file_range tells two filesystems apart by the
+  filesystem of their inodes where both report one, else by the mount their opened paths are
+  under (a path through a symlink into another mount can be taken for the same filesystem).
 - **Resource usage.** getrusage, times and wait4 report CPU time (split into user and system
   time by tick samples), peak resident set and context switches; page-fault, block I/O, IPC and
   signal counts are zero.
@@ -105,17 +154,22 @@ their check, for a few shared reasons:
   on ext4, and an ext4 image whose superblock does not record its metadata overhead reports the
   whole volume in `f_blocks`.
 - **No test block device.** Tests that need a block device (about 175) ask LTP for a loop device
-  backed by a 300 MB image in their temporary directory. `fallocate` is ENOSYS, so LTP writes the
-  image instead, and there are no loop devices to attach it to: on x86_64 the write stops short
-  and the test is TBROK; on AArch64 and RISC-V, under emulation, writing it outlasts the
-  180-second limit and the test is a TIMEOUT. `fallocate` belongs to the file tier of the system
-  call groups; loop devices come after it.
-- **No kernel configuration.** Tests that check a `CONFIG_*` option (about 95) find neither
-  `/proc/config.gz` nor `/boot/config-<release>` and are TBROK.
-- **Missing calls.** alarm and the interval and POSIX timers, the System V IPC calls, message
-  queues, mlock, msync, sched_getparam and the other calls the coverage tables list as missing;
+  backed by a 300 MB image in their temporary directory, and there are no loop devices to attach
+  it to, so the test is TBROK. LTP creates the image with `fallocate`, which refuses it at once
+  with ENOSPC when the compat disk has less room (until fallocate existed, LTP wrote the image
+  instead, which outlasted the 180-second limit under emulation). Loop devices come after the
+  system call groups.
+- **Kernel configuration.** `/boot/config-<release>` (ADR 0023) sets an option only where the
+  kernel does what Linux built with it does, so the tests that need an option it leaves unset
+  (network namespaces until an interface can be configured, AIO, io_uring, keys, System V
+  IPC, loop devices, NUMA, swap, seccomp and the rest in `abi/kconfig.map`) are TCONF, as on a
+  Linux kernel built without them.
+- **Missing calls.** The System V IPC calls, message queues, mlock, msync, sched_getparam and
+  the other calls the coverage tables list as missing;
   most of `/proc/sys` (it has `kernel/pid_max`, `kernel/cap_last_cap`, `kernel/core_pattern`,
-  `kernel/ostype`, `kernel/osrelease` and `kernel/version`), `/proc/self/mounts` and parts of `/proc/<pid>/stat` and `status`.
+  `kernel/ostype`, `kernel/osrelease` and `kernel/version`), parts of `/proc/<pid>/stat` and `status`; `/proc/<pid>/exe` (only
+  `/proc/self/exe` exists), and `/proc/<pid>/cmdline` holds the process name rather than its
+  arguments.
 - **Memory exhaustion.** libc-test's `malloc-oom`, `malloc-brk-fail` and `pthread_create-oom`
   run until the time limit on all three architectures after the full LTP and Open POSIX runs in
   the same guest (on RISC-V they stopped the whole guest until the runs of 2026-10-30), but
@@ -184,7 +238,7 @@ work. User code is preempted when its slice ends (D3). What is still missing:
   no dispatcher task and stays in its creating state, so the process's last real thread to exit
   sees it as alive: the process is never torn down, never becomes a zombie and never signals its
   parent, whose wait does not return. Nothing in the C libraries calls it (threads use `clone`
-  since N-102); it is to be started as `clone` starts a thread, or retired (v0.28 queue item 5).
+  since N-102); it is to be started as `clone` starts a thread, or retired (v0.28 queue item 7).
 
 ### x86_64 entry layer remainders (N-167, N-168; sprint D2)
 
@@ -214,11 +268,30 @@ What remains:
   after every thread has stopped. Orphaned process groups are not exempt from SIGTSTP, SIGTTIN
   and SIGTTOU, and background reads and writes on a terminal raise neither (no line discipline
   yet).
+- **Restarting after a stop is not exactly Linux's.** A relative sleep and a timed poll carry on
+  to their deadline through restart_syscall, as on Linux. Other calls a stop interrupts with
+  EINTR run again with their arguments, including the few that Linux ends with EINTR instead
+  (sigtimedwait, epoll_wait; signal(7)); and a thread whose wait ends with no signal left to act
+  on (another thread took it) returns EINTR where Linux would run the call again.
 - **Handlers save x87/SSE state only.** The signal frame holds an FXSAVE image, so the upper
   halves of AVX registers are not preserved across a handler that uses them.
-- **No timer or I/O siginfo.** POSIX timers (timer_create) and SIGIO (F_SETOWN, O_ASYNC) do
-  not exist yet, so no signal arrives with SI_TIMER or POLL_* information; kill, tkill,
-  sigqueue, SIGCHLD and fault signals carry Linux's siginfo (N-259).
+- **PTYs answer only the window-size ioctls.** TCGETS, TCSETS and the rest are ENOTTY on either
+  end of a PTY, so tcgetattr fails there (isatty works: musl asks TIOCGWINSZ). The console is the
+  only terminal with termios calls.
+- **No pipe packet mode.** O_DIRECT on a pipe (pipe2 or F_SETFL) is EINVAL, not Linux's
+  packet mode; on a regular file F_SETFL keeps it and reads and writes are unchanged.
+- **Record locks are advisory only.** fcntl's POSIX and OFD locks work, but leases (F_SETLEASE,
+  F_GETLEASE) and F_NOTIFY are EINVAL and nothing enforces a lock on read or write (Linux dropped
+  mandatory locking too). As on Linux, deadlock detection follows at most ten waiting owners and
+  ignores OFD waiters.
+- **No I/O siginfo.** SIGIO (F_SETOWN, O_ASYNC) does not exist yet, so no signal arrives with
+  POLL_* information, and FIOASYNC refuses to turn it on (ENOTTY, Linux's answer for a file
+  that cannot send it); F_SETFL keeps O_ASYNC, as Linux does for a file that cannot send it, so
+  F_GETFL shows it but no signal follows on a pipe, socket or terminal either; kill, tkill,
+  sigqueue, POSIX timers, SIGCHLD and fault signals carry Linux's siginfo (N-259).
+- **POSIX timers on another process's CPU clock.** timer_create on a clock from
+  clock_getcpuclockid for another process is EOPNOTSUPP; Linux allows it. CPU-clock timers
+  fire on the next return to user mode after their clock passes the expiry, not at the tick.
 
 ### Processes, exec and credentials
 
@@ -245,7 +318,128 @@ What remains:
   1 and are never reused, where Linux wraps at `pid_max` and reuses freed ids. A system that
   creates more than 4194303 processes and threads gets ids above `pid_max`, and an id past
   2147483647 no longer fits in `pid_t`. Programs that read `pid_max` to size a table, or that use
-  it as an id no process has (LTP's `tst_get_unused_pid`), work until then.
+  it as an id no process has (LTP's `tst_get_unused_pid`), work until then. A PID namespace
+  below the initial one numbers its processes the same way, and one that has handed out every
+  number below `pid_max` makes no more (EAGAIN).
+- **pidfds have no ioctls and no fdinfo.** pidfd_open, pidfd_send_signal, pidfd_getfd,
+  waitid(P_PIDFD) and clone(CLONE_PIDFD) work as on Linux, but PIDFD_GET_INFO and the namespace
+  ioctls are not implemented and `/proc/<pid>/fdinfo` (where Linux shows a pidfd's pid) does not exist.
+  An open `/proc/self` stands for
+  whichever process uses it, not the one that opened it, so pidfd_send_signal on one passed to
+  another process signals that process.
+- **clone3 has one PID namespace level and no cgroups.** set_tid takes one ID (more are EINVAL,
+  as on Linux without nested PID namespaces), and CLONE_INTO_CGROUP is EBADF, since no
+  descriptor can name a cgroup. CLONE_PTRACE and CLONE_UNTRACED are EINVAL from clone and
+  clone3 alike (there is no ptrace auto-attach). An ID that a fork or
+  clone still under way has just been given can be chosen again through set_tid before that
+  child is in the process table; the table then refuses the second process, but a second thread
+  with the ID is not refused. Only a caller with CAP_CHECKPOINT_RESTORE or CAP_SYS_ADMIN can
+  choose an ID.
+- **kcmp.** KCMP_FILES and KCMP_SIGHAND see the tables a CLONE_FILES or CLONE_SIGHAND clone
+  shares, and a table's identity can be reused once its last user is gone, as on Linux. A
+  CLONE_VM child counts as sharing its parent's
+  address space until either execs, though each maps the memory through an address space of its
+  own (a mapping one makes later the other does not see). No task has an I/O context or a System V
+  semaphore undo list, so KCMP_IO and KCMP_SYSVSEM always answer 0, as Linux does for two tasks
+  with none.
+- **Namespaces are partial (ADR 0022).** UTS namespaces are complete. IPC and cgroup
+  namespaces can be created and joined but isolate nothing, as there is no System V IPC, message
+  queue or cgroup hierarchy. Time namespaces are complete but for the two points below. Mount
+  namespaces can be created, emptied and joined, and Linux mount(2) and umount2 work in them
+  (ADR 0022 H3b: new tmpfs, ramfs, proc and devtmpfs mounts, bind mounts with or without
+  MS_REC, MS_MOVE, remounts, MS_UNBINDABLE; ro, nosuid, nodev, noexec and nosymfollow
+  enforced, H3c; pivot_root, H3d), with these gaps: the atime flags are recorded and
+  reported but change nothing, as atime is not kept; a call on a descriptor checks the mount
+  serving the path it was opened at, so one opened before a mount covered that path checks the
+  covering mount; making a mount read-only is EBUSY while a process of the namespace has a file
+  open for writing under its mount point (Linux counts the writers of the mount itself, or of
+  every mount of a superblock made read-only); mounts never propagate, so
+  MS_SHARED is EINVAL and MS_SLAVE is the same as MS_PRIVATE; there are no filesystems on block
+  devices to mount; tmpfs takes only `size`, `mode`, `uid` and `gid`, proc and devtmpfs no
+  options, a remount applies none of the options in its data (a new tmpfs `size` is ignored),
+  and `/proc` lists no filesystem-specific options; a mount on a mount point covers it, but
+  does not hide the mounts below that place, and moving or detaching it takes them along;
+  umount2's EBUSY counts the namespace's working directories, roots and open files but not
+  memory mappings, and nothing clears the MNT_EXPIRE mark; each devtmpfs mount is a new
+  instance. pivot_root moves roots and working directories but not the paths of files already
+  open, so they are looked up by their old paths; after `pivot_root(".", ".")` a working
+  directory inside the parked old root resolves in the new root, and a parked tree is EBUSY to
+  umount2 without MNT_DETACH only while mounts are under it; mounts left under put_old's place
+  in the new root stay visible there (the tree is keyed by path); MS_BIND with MS_REC does not
+  copy parked trees; at most 16 parked roots stack (`MAX_PARKED_DEPTH`; the next pivot_root(".",
+  ".") is ENOSPC), where Linux keeps one flat list bounded only by fs.mount-max, which is not
+  implemented. mount(2), umount2 and pivot_root check CAP_SYS_ADMIN only, not an object
+  capability (ADR 0024 will give them one); the private mount call keeps its own rules. The VFS
+  finds open files by path, so a descriptor opened in another mount namespace is looked up by
+  its path in the caller's (for fstat's mount id, fchdir and the like) once the two trees
+  differ, and sync(2) flushes the filesystems of the initial namespace only. The mount flags are
+  checked the same way, by the path in the caller's namespace: a descriptor passed into another
+  mount namespace (SCM_RIGHTS, pidfd_getfd) where that path is on a writable or executable mount
+  can be reopened for writing through O_EMPTYPATH, fchmod'ed, linked by linkat with
+  AT_EMPTY_PATH into that mount, run by execveat with AT_EMPTY_PATH or mapped executable,
+  although its own mount is read-only or noexec. Mounts are
+  kept by path, so a directory with a mount under it cannot be renamed (EBUSY; Linux moves the
+  mounts with it), but only the caller's namespace is looked at: renaming a directory under which
+  another mount namespace has a mount leaves that mount at the old path there, uncovering what
+  it covered. A remount read-only counts the files open for writing under the mount point in the
+  caller's namespace only: writers through another bind mount of the same filesystem, in another
+  namespace, in flight in an SCM_RIGHTS message or kept by a writable shared mapping keep
+  writing after it succeeds (Linux refuses with EBUSY). All four end when files and mappings
+  keep the mount they were reached through (to-dos/MASTER_TODO.md, item 6). Network namespaces
+  can be made and joined (ADR 0022 H6), but only the initial one has devices, routes and a
+  working stack: a new one has a loopback interface that is down, and nothing (netlink, the
+  SIOCSIF* ioctls) can bring it up or add an interface, so every send and connect from it is
+  ENETUNREACH; there are no veth pairs or device moves. Each has its own ports. Unix sockets
+  are found by path, which crosses network namespaces as on Linux; abstract names do not exist
+  (below). `/proc/net` is a directory with `dev` only, for the reader's namespace, not a link to
+  `self/net`. PID namespaces can be made and
+  joined, and the main interfaces translate pids through the caller's (ADR 0022 H5a): getpid
+  and its family, fork, clone and clone3 (with set_tid at each level), wait4, waitid, kill,
+  tkill, tgkill, siginfo, the process group and session calls, set_tid_address, the nsfs
+  translations, and procfs, which shows the namespace it was mounted in; so do (H5b) the
+  scheduling and priority calls (PRIO_USER reaching only processes the caller's namespace
+  numbers), prlimit, ptrace, the pidfd calls (pidfd_send_signal is EINVAL for a process outside
+  the caller's namespace), process_vm_*, kcmp, capget and capset, CPU clock ids,
+  SIGEV_THREAD_ID, get_robust_list and the robust-list and PI futex owner words, SO_PEERCRED,
+  F_GETLK and a terminal's process group. Of Linux's other crossings, pidfd fdinfo, ptrace's
+  event messages, SCM_CREDENTIALS and F_SETOWN are not implemented at all (above). In each namespace numbers count up
+  from 1 and are not handed out again, as in the initial one (above); a group's or session's
+  number is kept while a member lives. An init whose exit takes its namespace down waits, as
+  Linux's, for those of its processes whose parents are outside the namespace to be reaped.
+  User
+  namespaces can be created, mapped and joined, ids are translated where they cross the
+  system-call boundary, and each privilege check asks about the user namespace Linux names (ADR
+  0022 H4a to H4c), with these gaps: mount(2), umount2 and pivot_root still need CAP_SYS_ADMIN
+  in the initial namespace (ADR 0024 will give them object capabilities), so a namespace's root
+  can make a mount namespace and join it but not mount in it; a setns through a pidfd that
+  joins a user namespace checks the namespaces after it with the caller's credentials from
+  before, where Linux uses the new ones; the priority and scheduling calls lack cap_safe_nice's
+  rule that a caller hold the target's permitted capabilities. Of the ids: SCM_CREDENTIALS is
+  not modelled; every filesystem belongs to the initial namespace, so Linux's EOVERFLOW for creating
+  a file with an fsuid its filesystem's namespace does not map cannot arise; the per-user counts
+  (queued signals, inotify watches, epoll watches, POSIX timers) are per kernel uid across all
+  namespaces, where Linux counts per user in each namespace; a map file finds its namespace by the pid
+  at each write, where Linux binds it at open (the opener's credentials are still the ones
+  checked); max_user_namespaces counts each user's namespaces system-wide, where Linux keeps
+  a count per user in each namespace, and max_pid_namespaces likewise; `/proc/sys/user` has
+  only those two limits. Creating a user namespace needs
+  CAP_SYS_ADMIN unless root sets `/proc/sys/kernel/unprivileged_userns_clone` to 1 (it is 0 by
+  default, by the maintainer's choice; Linux allows it to everyone).
+  unshare(CLONE_FILES) in a multithreaded process is
+  EINVAL, since the descriptor table belongs to the process, not the thread. The nsfs file's
+  st_dev is procfs's, not an nsfs device's, and `/proc/sys/kernel/hostname` cannot be written
+  (sethostname can). NS_MNT_GET_*, listns, statns and the `/proc/sys/user/max_*_namespaces` limits
+  other than max_user_namespaces and max_pid_namespaces do not exist. No vDSO
+  reads the offsets, as there is no vDSO at all (below).
+- **personality changes little.** Every value is stored and reported, but only PER_LINUX
+  exists, and only STICKY_TIMEOUTS, UNAME26 and READ_IMPLIES_EXEC change anything.
+  READ_IMPLIES_EXEC is honoured only for a program with the W^X opt-in (ADR 0017), since adding
+  PROT_EXEC to writable memory would otherwise make every such mapping EACCES;
+  ADDR_NO_RANDOMIZE has nothing to turn off (no address-space randomization), and there is no
+  `/proc/<pid>/personality`.
+- **rseq is ENOSYS**, as on Linux built without CONFIG_RSEQ. glibc treats a failed rseq
+  registration as no rseq (sched_getcpu then uses getcpu) and musl does not use it; programs that
+  require restartable sequences do not run.
 - **chroot (N-250):** a working directory outside the new root is moved to the root, where Linux
   would leave it outside.
 - **uname says `VeridianOS`, not `Linux`, by default (ADR 0021).** Programs that test the
@@ -344,6 +538,10 @@ filesystem.
 - **Directory listing (N-124).** `getdents64` re-reads the directory and seeks by index, so
   removing entries while listing (`rm -r`) skips entries; listing is O(n^2).
 - **`O_APPEND` (N-126)** is not atomic across separate opens of a file.
+- **linkat with AT_EMPTY_PATH** links a descriptor for a caller with CAP_DAC_READ_SEARCH or with
+  the credentials it was opened with. Linux compares the credential object itself, so a process
+  that received the descriptor from another with identical credentials and capabilities gets
+  ENOENT there and the link here.
 - **Directories and paths (N-130).** No dentry cache (`..` and symlinks re-walk from the root),
   BlockFS directories are scanned linearly and limited to 12 blocks.
 - **On-disk structures are not validated (N-123).** BlockFS checks only the magic number; the ext4
@@ -351,15 +549,22 @@ filesystem.
   Only mount images you trust.
 - **mount (N-129)** is allowed to any process holding a memory capability, and type `blockfs`
   mounts an empty RAM filesystem.
-- **No ETXTBSY.** Linux refuses to open for writing a file that a process is running (and refuses
-  to exec a file open for writing). Here such a write succeeds, and processes running the program
-  from BlockFS see it through the shared page cache. An exec that grants privilege (file
-  capabilities, set-user-ID or set-group-ID) maps a private copy of the bytes it checked, so the
-  write cannot change what runs privileged (v0.28 queue item 3, file tier).
-- **Status-change time on ramfs and tmpfs.** Their nodes have no ctime field: `stat` reports the
-  creation time as `st_ctime`. Extended-attribute changes move it, but chmod and chown move the
-  modification time instead (Linux moves ctime, not mtime) and writes do not move it. BlockFS
-  inodes keep a real ctime (v0.28 queue item 3, file tier).
+- **ETXTBSY counts files opened by name.** A running program cannot be opened for writing or
+  truncated, and a file open for writing cannot be executed, as on Linux; but a memfd's own
+  descriptor does not count as a writer, so a memfd open for writing can be executed with
+  fexecve, which Linux refuses. An exec that grants privilege (file capabilities, set-user-ID or
+  set-group-ID) still maps a private copy of the bytes it checked.
+- **inotify follows paths, not dentries.** An event on an open file (a read, a write, its close,
+  fchmod) reaches the watches on the directory of the path it was opened with, looked up again,
+  so after a rename it goes to whatever directory has that path now, or none. A file's
+  IN_DELETE_SELF comes when its last name goes, not at its last close; IN_UNMOUNT is never sent
+  and IN_EXCL_UNLINK suppresses nothing; sendfile, splice, copy_file_range and exec report no
+  access. `max_user_watches` starts at 65536, where Linux scales it with memory, and
+  `/proc/<pid>/fdinfo`, where Linux lists an instance's watches, does not exist.
+- **No fanotify.** fanotify_init and fanotify_mark are ENOSYS, as on a Linux kernel built without
+  CONFIG_FANOTIFY; LTP's fanotify tests report TCONF.
+- **Timestamps have one-second resolution** (`st_*tim.tv_nsec` is 0), and reads move a
+  file's access time on ramfs and tmpfs every time (Linux's relatime moves it at most daily).
 
 ### Shared IPC regions are never reclaimed
 
@@ -451,7 +656,7 @@ Present as code but not in effect, despite older documentation:
 
 ### Network sockets do not work from user programs (N-64 to N-69; planned v0.28, sprint F)
 
-`bind` and `connect` misread `struct sockaddr_in`, UDP datagrams are neither sent nor received
+UDP datagrams are neither sent nor received
 through the socket layer, TCP `connect` reports success without a handshake, and received packets
 are processed only while the kernel shell waits for input. Loopback and Unix sockets are not
 affected. Below the socket layer:
@@ -507,6 +712,10 @@ Page protections now follow `prot` (fixed in v0.27, N-132 to N-137). What remain
 - **A memfd or tmpfs file cannot shrink under a shared mapping:** `ftruncate` that would drop a page still
   mapped `MAP_SHARED` fails with EBUSY. Linux shrinks it and unmaps those pages (access raises
   SIGBUS); mappings cannot be invalidated here yet (v0.29 memory work).
+- **fallocate on a memfd or tmpfs file reserves nothing past the end:** a file holds exactly the
+  pages its size covers, so `FALLOC_FL_KEEP_SIZE` beyond the end succeeds without reserving the
+  memory (a later write can still find none), and a punched hole is zeroed in place rather than
+  given back (Linux frees its pages). Zero range is EOPNOTSUPP there, as on Linux.
 - **A shared mapping of a memfd or tmpfs file must lie within the file:** `mmap(MAP_SHARED)`
   of pages past the file's last page fails with EINVAL. Linux maps them and raises SIGBUS when a
   page wholly beyond the end is touched; that needs the same mapping invalidation. (Before

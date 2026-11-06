@@ -114,6 +114,11 @@ pub fn wait_process_with_options(
 #[derive(Debug, Clone, Copy)]
 pub struct Waited {
     pub pid: ProcessId,
+    /// The child's number in the waiter's PID namespace, taken before the
+    /// reap frees it (0 with `pid`).
+    pub nr: u64,
+    /// The child's real uid (a kernel ID).
+    pub uid: u32,
     pub status: i32,
     /// The child's CPU time and its waited-for children's (wait4 and
     /// waitid's rusage, as Linux's getrusage(RUSAGE_BOTH) of the child).
@@ -127,6 +132,8 @@ impl Waited {
     fn of(child: &super::Process, status: i32) -> Self {
         Self {
             pid: child.pid,
+            nr: super::pidns::vnr(child.pid.0),
+            uid: child.credentials().ruid,
             status,
             usage: child.cpu_times().plus(child.children_cpu_times()),
             maxrss_pages: child.peak_rss_pages().max(child.children_peak_rss_pages()),
@@ -135,6 +142,8 @@ impl Waited {
 
     const NOTHING: Self = Self {
         pid: ProcessId(0),
+        nr: 0,
+        uid: 0,
         status: 0,
         usage: crate::sched::cputime::CpuTimes::ZERO,
         maxrss_pages: 0,
@@ -178,7 +187,10 @@ pub fn wait_children(filter: WaitFilter, options: WaitOptions) -> Result<Waited,
                 let child_state = child.get_state();
 
                 // Check for zombie (exited)
-                if child_state == ProcessState::Zombie && !options.skip_exited {
+                if child_state == ProcessState::Zombie
+                    && !options.skip_exited
+                    && !child.autoreap.load(Ordering::Acquire)
+                {
                     if options.keep {
                         return Ok(Waited::of(&child, child.wait_status()));
                     }
@@ -585,21 +597,92 @@ pub fn exit_dispatched(exit_code: i32, group: bool) -> ! {
             })
         };
         if !others_alive {
+            // The init of a PID namespace takes the rest of it along first.
+            if process.is_ns_init() {
+                zap_pid_ns(&process);
+            }
             cleanup_process(&process);
             process.set_state(ProcessState::Zombie);
             notify_parent_sigchld(
                 &process,
                 SigInfo::child_exited(exit_signal(&process), &process),
             );
+            autoreap(&process);
         }
         dispatch::PROCESS_EVENTS.wake_all();
+        // A pidfd for the thread, or for the process now a zombie, polls
+        // readable.
+        dispatch::io_event();
     }
     dispatch::exit_current_task()
+}
+
+/// The init of a PID namespace below the initial one is exiting (Linux's
+/// zap_pid_ns_processes): no process can be made in the namespace any
+/// more, every other process numbered in it -- in it or in one below it --
+/// gets SIGKILL, and init waits, reaping those that are its children, until
+/// none is left, so that its own parent sees it exit last. One whose parent
+/// is outside the namespace waits for that parent's reap, as on Linux.
+#[cfg(feature = "alloc")]
+fn zap_pid_ns(init: &Process) {
+    let ns = init.pid_ns();
+    ns.stop_adding();
+    let others = || {
+        let mut left = Vec::new();
+        table::PROCESS_TABLE.for_each(|p| {
+            if p.pid != init.pid && super::pidns::nr_in(p.pid.0, &ns) != 0 {
+                left.push(p.pid);
+            }
+        });
+        left
+    };
+    for pid in others() {
+        let _ = kill_process_info(
+            pid,
+            signals::SIGKILL,
+            SigInfo::kernel(signals::SIGKILL as usize),
+        );
+    }
+    // A zombie child whose last task is off the CPU is reaped here.
+    let reapable = || {
+        init.children.lock().iter().copied().find(|c| {
+            table::get_process(*c).is_some_and(|p| {
+                p.get_state() == ProcessState::Zombie && sched::dispatch::tasks_of(c.0).is_empty()
+            })
+        })
+    };
+    loop {
+        while let Some(child) = reapable() {
+            init.children.lock().retain(|&p| p != child);
+            super::remove_waited(child);
+        }
+        if others().is_empty() {
+            return;
+        }
+        sched::dispatch::PROCESS_EVENTS.wait_until(|| reapable().is_some() || others().is_empty());
+    }
 }
 
 // ============================================================================
 // SIGCHLD notification helper
 // ============================================================================
+
+/// CLONE_AUTOREAP: a process that has exited leaves its parent's children
+/// and the process table at once, as Linux's exit_notify releases it;
+/// nothing waits for it (its exit signal is 0). Its last task's reap frees
+/// the page tables (`remove_waited`).
+#[cfg(feature = "alloc")]
+fn autoreap(process: &Process) {
+    if !process.autoreap.load(Ordering::Acquire) {
+        return;
+    }
+    if let Some(parent) = process.parent().and_then(table::get_process) {
+        parent.children.lock().retain(|&p| p != process.pid);
+    }
+    super::remove_waited(process.pid);
+    #[cfg(feature = "alloc")]
+    sched::dispatch::PROCESS_EVENTS.wake_all();
+}
 
 /// The signal a parent gets when `process` exits: SIGCHLD, or what clone
 /// asked for (its low byte; 0 for none, N-210).
@@ -673,6 +756,11 @@ fn force_terminate_process(process: &Process, signal: i32) -> Result<(), KernelE
     // Clean up and mark as zombie
     cleanup_process(process);
     process.set_state(ProcessState::Zombie);
+    #[cfg(feature = "alloc")]
+    autoreap(process);
+    // Its pidfds poll readable.
+    #[cfg(feature = "alloc")]
+    sched::dispatch::io_event();
 
     // Wake up parent if waiting
     if let Some(parent_pid) = process.parent() {
@@ -708,6 +796,10 @@ pub fn cleanup_process(process: &Process) {
     // A parent waiting in vfork for this child may resume.
     process.release_vfork_parent();
 
+    // Its ITIMER_REAL fires no more.
+    crate::timer::ktimerd::cancel_owner(process.pid.0);
+    super::posix_timer::delete_all(process);
+
     // SCHED_DEADLINE reservations of every thread go back, whatever path
     // ended them (each thread's own exit already did; idempotent), so a
     // lost one can never hold admission control's bandwidth for good.
@@ -729,6 +821,10 @@ pub fn cleanup_process(process: &Process) {
         // Clear all mappings
         memory_space.clear();
     }
+    // The program may be written again once no process runs it (Linux's
+    // mmput dropping mm->exe_file).
+    #[cfg(feature = "alloc")]
+    process.exe_denial.lock().take();
 
     // Free kernel stack frames for all threads.
     //
@@ -815,16 +911,23 @@ pub fn cleanup_process(process: &Process) {
     // Log a warning if the process has more than 3 fds open (stdin/stdout/stderr).
     // This helps identify fd leaks during heavy workloads like BusyBox compilation
     // where 213+ sequential processes must not leak fds.
+    // A table another process shares (CLONE_FILES) stays open for it: the
+    // last of them closes it (Linux's put_files_struct).
     {
-        let file_table = process.file_table.lock();
-        let open_fds = file_table.count_open();
-        if open_fds > 3 {
-            println!(
-                "[PROCESS] Warning: process {} exiting with {} open fds (expected <= 3)",
-                process.pid.0, open_fds
-            );
+        let file_table = core::mem::replace(
+            &mut *process.file_table.lock(),
+            alloc::sync::Arc::new(crate::fs::file::FileTable::new()),
+        );
+        if let Some(file_table) = alloc::sync::Arc::into_inner(file_table) {
+            let open_fds = file_table.count_open();
+            if open_fds > 3 {
+                println!(
+                    "[PROCESS] Warning: process {} exiting with {} open fds (expected <= 3)",
+                    process.pid.0, open_fds
+                );
+            }
+            file_table.close_all();
         }
-        file_table.close_all();
         // flock/fcntl locks die with their owner (N-120).
         crate::fs::flock::cleanup_process_locks(process.pid.0);
     }
@@ -841,21 +944,35 @@ pub fn cleanup_process(process: &Process) {
         );
     });
 
-    // Reparent children to init if not zombie
+    // Reparent children to the init of the process's PID namespace (Linux's
+    // find_child_reaper; 1 in the initial one) if not zombie. An init
+    // exiting has reaped its own already (`zap_pid_ns`).
     #[cfg(feature = "alloc")]
     {
-        let children: Vec<ProcessId> = process.children.lock().clone();
-        if !children.is_empty() && process.get_state() != ProcessState::Zombie {
-            if let Some(init_process) = table::get_process(ProcessId(1)) {
+        let children: Vec<ProcessId> = {
+            let mut list = process.children.lock();
+            process
+                .children_closed
+                .store(true, core::sync::atomic::Ordering::Release);
+            if process.get_state() != ProcessState::Zombie {
+                core::mem::take(&mut *list)
+            } else {
+                Vec::new()
+            }
+        };
+        if !children.is_empty() {
+            if let Some(reaper) = child_reaper(process) {
                 for child_pid in children {
                     if let Some(child) = table::get_process(child_pid) {
-                        child.set_parent(Some(ProcessId(1)));
-                        init_process.children.lock().push(child_pid);
-                        println!("[PROCESS] Reparented process {} to init", child_pid);
+                        child.set_parent(Some(reaper.pid));
+                        reaper.children.lock().push(child_pid);
+                        println!(
+                            "[PROCESS] Reparented process {} to {}",
+                            child_pid, reaper.pid.0
+                        );
                     }
                 }
             }
-            process.children.lock().clear();
         }
     }
 
@@ -893,6 +1010,18 @@ fn forget_shared_regions(process: &Process) {
 /// (N-46). Its mappings, frames, page tables, kernel stacks, capabilities
 /// and files are released, and it leaves its parent's children and the
 /// process table. Nothing may be running in it.
+/// Where `process`'s children go when it exits: the init of its PID
+/// namespace (Linux's find_child_reaper), 1 in the initial one.
+#[cfg(feature = "alloc")]
+pub(crate) fn child_reaper(process: &Process) -> Option<alloc::sync::Arc<Process>> {
+    process
+        .pid_ns()
+        .reaper()
+        .filter(|&r| r != process.pid.0)
+        .and_then(|r| table::get_process(ProcessId(r)))
+        .or_else(|| table::get_process(ProcessId(1)))
+}
+
 #[cfg(feature = "alloc")]
 pub(crate) fn discard_unstarted(process: &Process) {
     cleanup_process(process);
@@ -901,6 +1030,7 @@ pub(crate) fn discard_unstarted(process: &Process) {
         parent.children.lock().retain(|&p| p != process.pid);
     }
     let _ = table::remove_process(process.pid);
+    super::pidns::release(process.pid.0);
 }
 
 // ============================================================================
@@ -915,6 +1045,11 @@ pub fn cleanup_thread(process: &Process, tid: ThreadId) -> Result<(), KernelErro
     // spinning on this lock with interrupts off could never answer, so both
     // would wait forever (N-139).
     let removed = process.threads.lock().remove(&tid);
+    // Its numbers in PID namespaces below the initial one are free; the
+    // first thread's are the process's, released when it is reaped.
+    if removed.is_some() && tid.0 != process.pid.0 {
+        super::pidns::release(tid.0);
+    }
     if let Some(thread) = removed {
         // Per-thread progress lines only with the `trace` feature: every
         // exited thread comes through here, and each console byte is a VM

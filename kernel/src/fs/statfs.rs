@@ -15,6 +15,10 @@ pub const EXT4_SUPER_MAGIC: u64 = 0xEF53;
 pub const MSDOS_SUPER_MAGIC: u64 = 0x4d44;
 pub const DEVPTS_SUPER_MAGIC: u64 = 0x1cd1;
 pub const PIPEFS_MAGIC: u64 = 0x5049_5045;
+/// pidfs, the filesystem of pidfds ("PIDF").
+pub const PID_FS_MAGIC: u64 = 0x5049_4446;
+/// nsfs (namespace files).
+pub const NSFS_MAGIC: u64 = 0x6e73_6673;
 pub const SOCKFS_MAGIC: u64 = 0x534F_434B;
 /// eventfd, signalfd, timerfd and epoll: Linux's anonymous inodes.
 pub const ANON_INODE_FS_MAGIC: u64 = 0x0904_1934;
@@ -25,6 +29,30 @@ pub const BLOCKFS_MAGIC: u64 = 0x424C_4B46;
 pub const ST_RDONLY: u64 = 1;
 /// `f_flags` is filled in (Linux sets it on every statfs since 2.6.36).
 pub const ST_VALID: u64 = 0x20;
+
+/// The `f_flags` a mount with flags `mnt` (`fs::mount::flags`) and a
+/// superblock read-only or not adds, as Linux's calculate_f_flags: ST_RDONLY
+/// 1, ST_NOSUID 2, ST_NODEV 4, ST_NOEXEC 8, ST_NOATIME 1024, ST_NODIRATIME
+/// 2048, ST_RELATIME 4096 and ST_NOSYMFOLLOW 0x2000.
+pub fn mount_flags(mnt: u32, sb_readonly: bool) -> u64 {
+    use super::mount::flags as m;
+    let mut out = if sb_readonly { ST_RDONLY } else { 0 };
+    for (flag, st) in [
+        (m::READONLY, ST_RDONLY),
+        (m::NOSUID, 2),
+        (m::NODEV, 4),
+        (m::NOEXEC, 8),
+        (m::NOATIME, 1024),
+        (m::NODIRATIME, 2048),
+        (m::RELATIME, 4096),
+        (m::NOSYMFOLLOW, 0x2000),
+    ] {
+        if mnt & flag != 0 {
+            out |= st;
+        }
+    }
+    out
+}
 
 /// Longest file name, for filesystems with no limit of their own
 /// (Linux's `NAME_MAX`).
@@ -153,6 +181,21 @@ mod tests {
         assert_eq!(word(&b, 72), 4096);
         assert_eq!(word(&b, 80), ST_RDONLY | ST_VALID);
         assert!(b[88..].iter().all(|&x| x == 0));
+    }
+
+    #[test]
+    fn mount_flags_are_linux_st_flags() {
+        use crate::fs::mount::flags as m;
+        assert_eq!(mount_flags(m::RELATIME, false), 4096);
+        assert_eq!(mount_flags(0, true), ST_RDONLY);
+        assert_eq!(
+            mount_flags(m::READONLY | m::NOSUID | m::NODEV | m::NOEXEC, false),
+            ST_RDONLY | 2 | 4 | 8
+        );
+        assert_eq!(
+            mount_flags(m::NOATIME | m::NODIRATIME | m::NOSYMFOLLOW, false),
+            1024 | 2048 | 0x2000
+        );
     }
 
     #[test]

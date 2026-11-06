@@ -28,20 +28,27 @@ pub mod creds;
 pub mod cwd;
 pub mod exit;
 pub mod fork;
+pub mod itimer;
 pub mod lifecycle;
 pub mod linux_caps;
 pub mod memory;
+#[cfg(feature = "alloc")]
+pub mod ns;
 pub mod pcb;
+pub mod personality;
+pub mod pidns;
+pub mod posix_timer;
 pub mod rlimit;
 pub mod robust_list;
 pub mod session;
 pub mod signals;
 pub mod table;
 pub mod thread;
+pub mod userns;
 
 // Re-export common types
 pub use lifecycle::{exec_process, fork_process, wait_process as wait_for_child};
-pub use pcb::{Process, ProcessId, ProcessPriority, ProcessState};
+pub use pcb::{Process, ProcessId, ProcessPriority, ProcessState, TracerCred};
 pub use table::get_process;
 pub use thread::{Thread, ThreadId, ThreadState};
 
@@ -74,13 +81,96 @@ pub const PID_MAX: u64 = 4_194_304;
 
 /// Allocate a new process ID
 pub fn alloc_pid() -> ProcessId {
-    ProcessId(NEXT_ID.fetch_add(1, Ordering::Relaxed))
+    ProcessId(alloc_id())
 }
 
 /// Allocate a new thread ID for a thread other than a process's first
 /// (from the same space as process IDs).
 pub fn alloc_tid() -> ThreadId {
-    ThreadId(NEXT_ID.fetch_add(1, Ordering::Relaxed))
+    ThreadId(alloc_id())
+}
+
+/// The next ID, marked pending until its process or thread is visible
+/// ([`published`]), so that clone3's set_tid cannot claim it meanwhile.
+fn alloc_id() -> u64 {
+    #[cfg(feature = "alloc")]
+    {
+        let mut pending = PENDING_IDS.lock();
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        pending.insert(id);
+        id
+    }
+    #[cfg(not(feature = "alloc"))]
+    NEXT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// `id`'s process is in the table, or its thread in its (listed) process,
+/// so [`id_in_use`] sees it from now on; or the process or thread of a
+/// fork or clone that failed is dropped. Either way it is not pending.
+#[cfg(feature = "alloc")]
+pub(crate) fn published(id: u64) {
+    PENDING_IDS.lock().remove(&id);
+}
+
+/// IDs allocated whose process or thread is not yet visible: a claim
+/// refuses them, so an allocation and a claim never hand out one ID twice
+/// (PR #35 review). A claim looks here before it looks at the table, and a
+/// publication puts the process or thread there before it leaves here.
+/// Its own lock, which nothing holds while a process is dropped (whose
+/// drop takes it).
+#[cfg(feature = "alloc")]
+static PENDING_IDS: spin::Mutex<alloc::collections::BTreeSet<u64>> =
+    spin::Mutex::new(alloc::collections::BTreeSet::new());
+
+/// IDs clone3's set_tid has claimed for a process or thread not yet in the
+/// process table.
+#[cfg(feature = "alloc")]
+static CLAIMED_IDS: spin::Mutex<alloc::vec::Vec<u64>> = spin::Mutex::new(alloc::vec::Vec::new());
+
+/// An ID clone3's set_tid chose, held until its process or thread is in
+/// the table, or the clone has failed.
+#[cfg(feature = "alloc")]
+pub struct IdClaim(u64);
+
+#[cfg(feature = "alloc")]
+impl IdClaim {
+    /// Claim `id` unless a process, a zombie awaiting its reap, a thread, an
+    /// open pidfd, another clone, or a fork or clone still under way has it
+    /// (None: Linux's EEXIST). `NEXT_ID` moves past it first, so no later
+    /// allocation hands it out.
+    pub fn new(id: u64) -> Option<Self> {
+        let mut claimed = CLAIMED_IDS.lock();
+        let before = NEXT_ID.fetch_max(id + 1, Ordering::AcqRel);
+        let pending = PENDING_IDS.lock().contains(&id);
+        if claimed.contains(&id) || pending || (id < before && id_in_use(id)) {
+            return None;
+        }
+        claimed.push(id);
+        Some(Self(id))
+    }
+
+    pub fn id(&self) -> u64 {
+        self.0
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl Drop for IdClaim {
+    fn drop(&mut self) {
+        CLAIMED_IDS.lock().retain(|&id| id != self.0);
+    }
+}
+
+/// Whether a process (in the table or awaiting its reap) or a thread has
+/// the ID `id`.
+#[cfg(feature = "alloc")]
+fn id_in_use(id: u64) -> bool {
+    if process_for_reap(id).is_some() || crate::fs::pidfd::holds(id) {
+        return true;
+    }
+    let mut used = false;
+    table::PROCESS_TABLE.for_each(|p| used |= p.get_thread(ThreadId(id)).is_some());
+    used
 }
 
 /// Initialize process management subsystem without creating init process
@@ -500,6 +590,57 @@ pub(crate) fn remove_waited(pid: ProcessId) {
     if process.memory_space.lock().get_page_table() == 0 {
         release_reaped(pid.0);
     }
+    release_numbers(&process);
+    // An init waiting for its namespace to empty (`exit::zap_pid_ns`) looks
+    // again.
+    crate::sched::dispatch::PROCESS_EVENTS.wake_all();
+}
+
+/// A reaped process's numbers in PID namespaces below the initial one are
+/// free, and its threads' (Linux's release_task freeing their struct pid):
+/// its own once no live process has it as its process group or session,
+/// as a group's id stays its leader's while the group lives. Its group and
+/// session ids are looked at again too, for a leader reaped before them.
+#[cfg(feature = "alloc")]
+fn release_numbers(process: &Process) {
+    let tids: alloc::vec::Vec<u64> = process
+        .threads
+        .lock()
+        .keys()
+        .map(|t| t.0)
+        .filter(|&t| t != process.pid.0)
+        .collect();
+    for tid in tids {
+        pidns::release(tid);
+    }
+    let pgid = process.pgid.load(Ordering::Acquire);
+    let sid = process.sid.load(Ordering::Acquire);
+    for kid in [process.pid.0, pgid, sid] {
+        release_if_unused(kid);
+    }
+}
+
+/// Free `kid`'s PID namespace numbers if it no longer names a live
+/// process, process group or session: after a reap, and after setpgid or
+/// setsid leaves a group or session whose leader is gone.
+#[cfg(feature = "alloc")]
+pub(crate) fn release_if_unused(kid: u64) {
+    if pidns::is_registered(kid) && !names_live(kid) {
+        pidns::release(kid);
+    }
+}
+
+/// Whether `kid` is a live process's id, process group or session.
+#[cfg(feature = "alloc")]
+fn names_live(kid: u64) -> bool {
+    if table::get_process(ProcessId(kid)).is_some() {
+        return true;
+    }
+    let mut used = false;
+    table::PROCESS_TABLE.for_each(|p| {
+        used |= p.pgid.load(Ordering::Acquire) == kid || p.sid.load(Ordering::Acquire) == kid
+    });
+    used
 }
 
 /// The page tables of `pid` are freed: nothing of it is waited for.
@@ -589,6 +730,10 @@ pub extern "C" fn user_return_check() {
             // RLIMIT_CPU: SIGXCPU or SIGKILL, acted on just below or by
             // the signal delivery that follows.
             rlimit::check_cpu(&process);
+            // ITIMER_VIRTUAL and ITIMER_PROF: SIGVTALRM, SIGPROF.
+            itimer::check_cpu(&process);
+            // POSIX timers on CPU clocks.
+            posix_timer::check_cpu(&process);
             let sig = process.kill_pending.load(Ordering::Acquire);
             if sig == exit::GROUP_EXIT_PENDING {
                 drop(process);
@@ -773,3 +918,24 @@ pub fn get_process_list() -> Option<alloc::vec::Vec<u64>> {
 }
 
 // get_process is already re-exported at the top of the module
+
+#[cfg(all(test, feature = "alloc"))]
+mod id_tests {
+    use super::*;
+
+    /// An ID a fork or clone has allocated but not yet made visible cannot
+    /// be claimed by clone3's set_tid: two processes or threads never get
+    /// one ID (PR #35 review). Once it is published, or its process or
+    /// thread dropped, only the table decides.
+    #[test]
+    fn allocated_ids_are_not_claimable_until_published() {
+        let id = alloc_tid().0;
+        assert!(IdClaim::new(id).is_none(), "pending: refused");
+        published(id);
+        // Not in any table (this test made nothing), so free to claim.
+        let claim = IdClaim::new(id).expect("published and unused");
+        assert!(IdClaim::new(id).is_none(), "claimed once");
+        drop(claim);
+        assert!(IdClaim::new(id).is_some());
+    }
+}

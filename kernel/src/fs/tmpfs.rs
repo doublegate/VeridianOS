@@ -39,6 +39,12 @@ struct TmpNode {
     bytes_used: Arc<AtomicUsize>,
     /// Shared reference to the filesystem's size limit
     size_limit: usize,
+    /// How many directory entries name this node (1 for the root); see
+    /// [`VfsNode::link_count`].
+    links: core::sync::atomic::AtomicU32,
+    /// An O_TMPFILE file that linkat may still name
+    /// ([`VfsNode::tmpfile_linkable`]).
+    linkable: core::sync::atomic::AtomicBool,
 }
 
 impl TmpNode {
@@ -61,11 +67,27 @@ impl TmpNode {
             // The bytes go back to the size budget when the node itself is
             // dropped (see `Drop for TmpNode`), not here: another hard link
             // or an open file can still hold the data.
-            children.remove(name);
+            if let Some(node) = children.remove(name) {
+                node.drop_link();
+            }
+            super::note_change(&mut self.metadata.write(), true);
             Ok(())
         } else {
             Err(KernelError::FsError(FsError::NotFound))
         }
+    }
+
+    /// One name of this node went: one link fewer, and a status change.
+    fn drop_link(&self) {
+        let _ = self
+            .links
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));
+        super::note_change(&mut self.metadata.write(), false);
+    }
+
+    /// An entry was added to or replaced in this directory.
+    fn entry_added(&self) {
+        super::note_change(&mut self.metadata.write(), true);
     }
 
     fn new_file(
@@ -97,6 +119,8 @@ impl TmpNode {
             parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
             bytes_used,
             size_limit,
+            links: core::sync::atomic::AtomicU32::new(1),
+            linkable: core::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -129,6 +153,8 @@ impl TmpNode {
             parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
             bytes_used,
             size_limit,
+            links: core::sync::atomic::AtomicU32::new(1),
+            linkable: core::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -163,6 +189,8 @@ impl TmpNode {
             parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
             bytes_used,
             size_limit,
+            links: core::sync::atomic::AtomicU32::new(1),
+            linkable: core::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -200,6 +228,34 @@ impl TmpNode {
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
                 Some(cur.saturating_sub(bytes))
             });
+    }
+
+    /// Resize the file to `size`, charging or releasing its pages
+    /// (truncate, and a growing fallocate), with its pages locked.
+    fn resize_charged(&self, pages: &mut ShmemPages, size: usize) -> Result<(), KernelError> {
+        // Charged in whole pages, as in `write`.
+        let held = pages.allocated_bytes();
+        let need = ShmemPages::bytes_for(size);
+
+        if need > held {
+            // Growing: check space
+            self.reserve_space(need - held)?;
+            if let Err(e) = pages.resize(size) {
+                self.release_space(need - held);
+                return Err(e);
+            }
+        } else {
+            // Same pages or fewer: reclaim what goes (EBUSY while a
+            // dropped page is still mapped, `ShmemPages::resize`)
+            pages.resize(size)?;
+            self.release_space(held - need);
+        }
+
+        let mut metadata = self.metadata.write();
+        metadata.size = size;
+        super::note_change(&mut metadata, true);
+
+        Ok(())
     }
 }
 
@@ -270,8 +326,7 @@ impl VfsNode for TmpNode {
             self.release_space(old_charge - new_charge);
         }
         *set = new;
-        // The status-change time, which stat reports from `created`.
-        self.metadata.write().created = crate::arch::timer::get_timestamp_secs();
+        super::note_change(&mut self.metadata.write(), false);
         Ok(())
     }
 
@@ -310,7 +365,7 @@ impl VfsNode for TmpNode {
 
         let mut metadata = self.metadata.write();
         metadata.size = pages.size();
-        metadata.modified = crate::arch::timer::get_timestamp_secs();
+        super::note_change(&mut metadata, true);
 
         Ok(data.len())
     }
@@ -386,6 +441,7 @@ impl VfsNode for TmpNode {
             self.size_limit,
         ));
         children.insert(String::from(name), new_file.clone());
+        self.entry_added();
 
         Ok(new_file as Arc<dyn VfsNode>)
     }
@@ -409,6 +465,7 @@ impl VfsNode for TmpNode {
             self.size_limit,
         ));
         children.insert(String::from(name), new_dir.clone());
+        self.entry_added();
 
         Ok(new_dir as Arc<dyn VfsNode>)
     }
@@ -434,28 +491,30 @@ impl VfsNode for TmpNode {
         }
 
         let mut pages = self.pages.write();
-        // Charged in whole pages, as in `write`.
-        let held = pages.allocated_bytes();
-        let need = ShmemPages::bytes_for(size);
+        self.resize_charged(&mut pages, size)
+    }
 
-        if need > held {
-            // Growing: check space
-            self.reserve_space(need - held)?;
-            if let Err(e) = pages.resize(size) {
-                self.release_space(need - held);
-                return Err(e);
-            }
-        } else {
-            // Same pages or fewer: reclaim what goes (EBUSY while a
-            // dropped page is still mapped, `ShmemPages::resize`)
-            pages.resize(size)?;
-            self.release_space(held - need);
+    /// fallocate as Linux's `shmem_fallocate`: allocate (growing the file
+    /// unless KEEP_SIZE) and punch holes; anything else is EOPNOTSUPP. The
+    /// pages are the file's size (`ShmemPages`), so KEEP_SIZE reserves
+    /// nothing past the end and a punched hole is zeroed in place
+    /// (docs/KNOWN-LIMITATIONS.md).
+    fn fallocate(&self, request: super::falloc::Request) -> Result<(), KernelError> {
+        use super::falloc::Op;
+        if self.node_type != NodeType::File {
+            return Err(KernelError::FsError(FsError::NotAFile));
         }
-
-        let mut metadata = self.metadata.write();
-        metadata.size = size;
-        metadata.modified = crate::arch::timer::get_timestamp_secs();
-
+        if !matches!(request.op, Op::Allocate | Op::PunchHole) {
+            return Err(super::falloc::unsupported());
+        }
+        super::falloc::begin(self, &request)?;
+        let mut pages = self.pages.write();
+        if request.op == Op::PunchHole {
+            pages.zero(request.offset, request.len);
+        } else if request.new_size(pages.size()) > pages.size() {
+            return self.resize_charged(&mut pages, request.end());
+        }
+        super::note_change(&mut self.metadata.write(), true);
         Ok(())
     }
 
@@ -549,13 +608,23 @@ impl VfsNode for TmpNode {
         }
 
         src.remove(old_name);
-        match dst.as_mut() {
+        let replaced = match dst.as_mut() {
             Some(d) => d.insert(String::from(new_name), node.clone()),
             None => src.insert(String::from(new_name), node.clone()),
         };
+        if let Some(replaced) = replaced {
+            replaced.drop_link();
+        }
         if node.node_type == NodeType::Directory {
             node.parent_inode
                 .store(np.inode, core::sync::atomic::Ordering::Relaxed);
+        }
+        // Both directories changed, and the node moved (Linux's
+        // simple_rename_timestamp).
+        super::note_change(&mut node.metadata.write(), false);
+        self.entry_added();
+        if !same_dir {
+            np.entry_added();
         }
         Ok(())
     }
@@ -599,6 +668,7 @@ impl VfsNode for TmpNode {
         }
         let node = Arc::new(node);
         children.insert(String::from(name), node.clone());
+        self.entry_added();
         Ok(node as Arc<dyn VfsNode>)
     }
 
@@ -629,22 +699,56 @@ impl VfsNode for TmpNode {
             return Err(KernelError::FsError(FsError::NotADirectory));
         }
 
-        if target.node_type() == NodeType::Directory {
-            return Err(KernelError::FsError(FsError::IsADirectory));
-        }
-
         // Same node, same tmpfs instance only (N-45): a copy drifted apart
         // from the original and was charged twice against the size limit.
         let target = as_tmp_arc(target)
             .filter(|t| Arc::ptr_eq(&t.bytes_used, &self.bytes_used))
             .ok_or(KernelError::FsError(FsError::CrossDevice))?;
 
+        // A directory, after EXDEV as on Linux.
+        if target.node_type() == NodeType::Directory {
+            return Err(KernelError::FsError(FsError::IsADirectory));
+        }
+
         let mut children = self.children.write();
         if children.contains_key(name) {
             return Err(KernelError::FsError(FsError::AlreadyExists));
         }
+        target.links.fetch_add(1, Ordering::AcqRel);
+        super::note_change(&mut target.metadata.write(), false);
+        // Named now: once unlinked again it stays unnamed.
+        target
+            .linkable
+            .store(false, core::sync::atomic::Ordering::Release);
         children.insert(String::from(name), target);
+        self.entry_added();
         Ok(())
+    }
+
+    fn tmpfile(
+        &self,
+        permissions: Permissions,
+        linkable: bool,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        if self.node_type != NodeType::Directory {
+            return Err(KernelError::FsError(FsError::NotADirectory));
+        }
+        let inode = TMPFS_NEXT_INODE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let node = TmpNode::new_file(
+            inode,
+            self.inode,
+            permissions,
+            self.bytes_used.clone(),
+            self.size_limit,
+        );
+        node.links.store(0, core::sync::atomic::Ordering::Release);
+        node.linkable
+            .store(linkable, core::sync::atomic::Ordering::Release);
+        Ok(Arc::new(node))
+    }
+
+    fn tmpfile_linkable(&self) -> bool {
+        self.linkable.load(core::sync::atomic::Ordering::Acquire)
     }
 
     fn symlink(&self, name: &str, target: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
@@ -671,8 +775,23 @@ impl VfsNode for TmpNode {
             self.size_limit,
         ));
         children.insert(String::from(name), new_symlink.clone());
+        self.entry_added();
 
         Ok(new_symlink as Arc<dyn VfsNode>)
+    }
+
+    fn link_count(&self) -> u32 {
+        let links = self.links.load(Ordering::Acquire);
+        if self.node_type != NodeType::Directory || links == 0 {
+            return links;
+        }
+        let subdirs = self
+            .children
+            .read()
+            .values()
+            .filter(|c| c.node_type == NodeType::Directory)
+            .count();
+        2 + subdirs as u32
     }
 
     fn readlink(&self) -> Result<String, KernelError> {
@@ -689,7 +808,7 @@ impl VfsNode for TmpNode {
     fn chmod(&self, permissions: Permissions) -> Result<(), KernelError> {
         let mut metadata = self.metadata.write();
         metadata.permissions = permissions;
-        metadata.modified = crate::arch::timer::get_timestamp_secs();
+        super::note_change(&mut metadata, false);
         Ok(())
     }
 
@@ -701,6 +820,8 @@ impl VfsNode for TmpNode {
         if let Some(mtime) = mtime {
             metadata.modified = mtime;
         }
+        // Setting the times is a status change (Linux's notify_change).
+        super::note_change(&mut metadata, false);
         Ok(())
     }
 
@@ -712,7 +833,7 @@ impl VfsNode for TmpNode {
         if let Some(gid) = gid {
             metadata.gid = gid;
         }
-        metadata.modified = crate::arch::timer::get_timestamp_secs();
+        super::note_change(&mut metadata, false);
         Ok(())
     }
 }
@@ -787,6 +908,11 @@ impl Filesystem for TmpFs {
         false
     }
 
+    /// Inode numbers come from one counter and are never reused.
+    fn exportable(&self) -> bool {
+        true
+    }
+
     fn sync(&self) -> Result<(), KernelError> {
         // tmpfs is memory-backed, nothing to sync
         Ok(())
@@ -801,6 +927,40 @@ mod tests {
 
     /// tmpfs charges whole pages, as Linux's does.
     const P: usize = 4096;
+
+    fn falloc(mode: u32, offset: usize, len: usize) -> super::super::falloc::Request {
+        super::super::falloc::Request::parse(mode, offset as i64, len as i64).unwrap()
+    }
+
+    /// fallocate as Linux's tmpfs: allocating grows the file, charged to the
+    /// size limit (ENOSPC past it, the file unchanged); KEEP_SIZE leaves the
+    /// size; a punched hole reads as zero; zero range is EOPNOTSUPP.
+    #[test]
+    fn fallocate_allocates_and_punches_as_shmem_does() {
+        use super::super::falloc::{KEEP_SIZE, PUNCH_HOLE, ZERO_RANGE};
+        let fs = TmpFs::new(4 * P);
+        let a = fs.root().create("a", Permissions::default()).unwrap();
+        a.write(0, &[7u8; 10]).unwrap();
+        a.fallocate(falloc(0, 0, 2 * P)).unwrap();
+        assert_eq!(a.metadata().unwrap().size, 2 * P);
+        assert_eq!(a.statfs().unwrap().blocks_free, 2);
+        a.fallocate(falloc(KEEP_SIZE, P, 3 * P)).unwrap();
+        assert_eq!(a.metadata().unwrap().size, 2 * P);
+        assert_eq!(
+            a.fallocate(falloc(0, 0, 5 * P)),
+            Err(KernelError::FsError(FsError::NoSpace))
+        );
+        assert_eq!(a.metadata().unwrap().size, 2 * P);
+        assert_eq!(a.statfs().unwrap().blocks_free, 2);
+        a.fallocate(falloc(PUNCH_HOLE | KEEP_SIZE, 2, 4)).unwrap();
+        let mut buf = [0xAAu8; 10];
+        a.read(0, &mut buf).unwrap();
+        assert_eq!(buf, [7, 7, 0, 0, 0, 0, 7, 7, 7, 7]);
+        assert_eq!(
+            a.fallocate(falloc(ZERO_RANGE, 0, 1)),
+            Err(KernelError::FsError(FsError::NotSupported))
+        );
+    }
 
     #[test]
     fn statfs_counts_pages_against_the_size_limit() {
@@ -956,6 +1116,50 @@ mod tests {
 
         // Still one page used
         assert_eq!(fs.bytes_used(), P);
+    }
+
+    /// chmod, chown and setting the times move only the status-change
+    /// time; a write moves both; a new name moves the directory's times
+    /// and the node's ctime (N-205; chmod and chown used to move mtime).
+    #[test]
+    fn changes_move_ctime_as_linux_does() {
+        use crate::fs::Filesystem;
+        let fs = TmpFs::new(0);
+        let root = fs.root();
+        let f = root.create("f", Permissions::default()).unwrap();
+        let both = |n: &Arc<dyn VfsNode>| {
+            let m = n.metadata().unwrap();
+            (m.modified, m.created)
+        };
+        let set = |n: &Arc<dyn VfsNode>| {
+            let node = n.as_any().unwrap().downcast_ref::<TmpNode>().unwrap();
+            let mut m = node.metadata.write();
+            m.modified = u64::MAX;
+            m.created = u64::MAX;
+        };
+        set(&f);
+        f.chmod(Permissions::from_mode(0o600)).unwrap();
+        let (m, c) = both(&f);
+        assert!(m == u64::MAX && c != u64::MAX);
+        set(&f);
+        f.chown(Some(5), None).unwrap();
+        let (m, c) = both(&f);
+        assert!(m == u64::MAX && c != u64::MAX);
+        set(&f);
+        f.set_times(Some(1), None).unwrap();
+        let (m, c) = both(&f);
+        assert!(m == u64::MAX && c != u64::MAX);
+        set(&f);
+        f.write(0, b"x").unwrap();
+        let (m, c) = both(&f);
+        assert!(m != u64::MAX && c != u64::MAX);
+        set(&f);
+        set(&root);
+        root.link("g", f.clone()).unwrap();
+        let (m, c) = both(&f);
+        assert!(m == u64::MAX && c != u64::MAX);
+        let (m, c) = both(&root);
+        assert!(m != u64::MAX && c != u64::MAX);
     }
 
     /// A committed attribute change moves the status-change time (stat's

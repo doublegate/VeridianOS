@@ -107,6 +107,9 @@ pub struct Socket {
     pub local_addr: Option<SocketAddr>,
     pub remote_addr: Option<SocketAddr>,
     pub options: SocketOptions,
+    /// The network namespace it was made in (its id): its ports are that
+    /// namespace's.
+    pub net: u64,
     /// Receive buffer
     recv_buffer: Vec<u8>,
     /// Send buffer
@@ -151,6 +154,7 @@ impl Socket {
             local_addr: None,
             remote_addr: None,
             options: SocketOptions::default(),
+            net: crate::process::ns::INITIAL_NET,
             recv_buffer: Vec::new(),
             send_buffer: Vec::new(),
             backlog: 0,
@@ -167,7 +171,7 @@ impl Socket {
         }
 
         // Check if address is already in use (unless SO_REUSEADDR)
-        if !self.options.reuse_addr && is_address_in_use(&addr) {
+        if !self.options.reuse_addr && is_address_in_use(self.net, &addr) {
             return Err(KernelError::ResourceExhausted {
                 resource: "socket_address",
             });
@@ -199,7 +203,7 @@ impl Socket {
 
         // Register in the listen queue manager
         if let Some(addr) = self.local_addr {
-            register_listening_socket(self.id, addr, self.backlog);
+            register_listening_socket(self.id, self.net, addr, self.backlog);
         }
 
         self.state = SocketState::Listening;
@@ -283,6 +287,7 @@ impl Socket {
                 .send_buffer
                 .reserve(self.options.send_buffer_size);
             new_socket.options = self.options;
+            new_socket.net = self.net;
 
             Ok((new_socket, pending.remote_addr))
         } else {
@@ -484,6 +489,7 @@ pub fn create_socket(
 
     let id = NEXT_SOCKET_ID.fetch_add(1, Ordering::Relaxed);
     socket.id = id;
+    socket.net = crate::process::ns::current_net();
 
     let mut table = SOCKET_TABLE.lock();
     if let Some(ref mut sockets) = *table {
@@ -540,27 +546,31 @@ pub fn with_socket_mut<R, F: FnOnce(&mut Socket) -> R>(id: usize, f: F) -> Resul
 /// Listening socket registry for tracking bound addresses and accept queues
 struct ListeningSocketEntry {
     socket_id: usize,
+    /// Its network namespace's id.
+    net: u64,
     addr: SocketAddr,
     backlog: usize,
     pending_connections: VecDeque<PendingConnection>,
 }
 
 static LISTENING_SOCKETS: Mutex<Vec<ListeningSocketEntry>> = Mutex::new(Vec::new());
-static BOUND_ADDRESSES: Mutex<Vec<SocketAddr>> = Mutex::new(Vec::new());
+/// Addresses in use, each with its network namespace's id: every
+/// namespace has its own ports (Linux hashes ports by `struct net`).
+static BOUND_ADDRESSES: Mutex<Vec<(u64, SocketAddr)>> = Mutex::new(Vec::new());
 
-/// Check if an address is already in use
-fn is_address_in_use(addr: &SocketAddr) -> bool {
+/// Check if an address is already in use in network namespace `net`
+fn is_address_in_use(net: u64, addr: &SocketAddr) -> bool {
     let bound = BOUND_ADDRESSES.lock();
-    bound.iter().any(|a| a == addr)
+    bound.iter().any(|(n, a)| *n == net && a == addr)
 }
 
 /// Register a listening socket in the global registry
-fn register_listening_socket(socket_id: usize, addr: SocketAddr, backlog: usize) {
+fn register_listening_socket(socket_id: usize, net: u64, addr: SocketAddr, backlog: usize) {
     // Add to bound addresses
     {
         let mut bound = BOUND_ADDRESSES.lock();
-        if !bound.iter().any(|a| a == &addr) {
-            bound.push(addr);
+        if !bound.iter().any(|(n, a)| *n == net && a == &addr) {
+            bound.push((net, addr));
         }
     }
 
@@ -568,6 +578,7 @@ fn register_listening_socket(socket_id: usize, addr: SocketAddr, backlog: usize)
     let mut listeners = LISTENING_SOCKETS.lock();
     listeners.push(ListeningSocketEntry {
         socket_id,
+        net,
         addr,
         backlog,
         pending_connections: VecDeque::with_capacity(backlog),
@@ -582,7 +593,10 @@ fn unregister_listening_socket(socket_id: usize) {
 
         // Remove from bound addresses
         let mut bound = BOUND_ADDRESSES.lock();
-        if let Some(pos) = bound.iter().position(|a| a == &entry.addr) {
+        if let Some(pos) = bound
+            .iter()
+            .position(|(n, a)| *n == entry.net && a == &entry.addr)
+        {
             bound.remove(pos);
         }
     }
@@ -599,7 +613,9 @@ fn dequeue_pending_connection(socket_id: usize) -> Option<PendingConnection> {
     None
 }
 
-/// Queue a new connection to a listening socket (called by TCP layer)
+/// Queue a new connection to a listening socket (called by TCP layer).
+/// Packets arrive on the devices, which are all the initial network
+/// namespace's, so only its listeners get them.
 pub fn queue_pending_connection(
     addr: SocketAddr,
     remote: SocketAddr,
@@ -607,7 +623,7 @@ pub fn queue_pending_connection(
 ) -> Result<(), KernelError> {
     let mut listeners = LISTENING_SOCKETS.lock();
     for entry in listeners.iter_mut() {
-        if entry.addr == addr {
+        if entry.net == crate::process::ns::INITIAL_NET && entry.addr == addr {
             if entry.pending_connections.len() < entry.backlog {
                 entry.pending_connections.push_back(PendingConnection {
                     remote_addr: remote,
@@ -625,6 +641,14 @@ pub fn queue_pending_connection(
         name: "listen_addr",
         value: "not_listening",
     })
+}
+
+/// Whether socket `id` can send anywhere: from the initial network
+/// namespace wherever its routes go; from a new one nowhere, as its only
+/// interface, its loopback, is down (Linux's ENETUNREACH from a namespace
+/// nobody has configured; nothing here can bring an interface up).
+pub fn reachable(id: usize) -> bool {
+    with_socket(id, |s| s.net == crate::process::ns::INITIAL_NET).unwrap_or(true)
 }
 
 /// Close a socket by ID
@@ -738,6 +762,45 @@ pub fn getsockopt(
 mod tests {
     use super::*;
     use crate::net::{Ipv4Address, Ipv6Address};
+
+    #[test]
+    fn every_network_namespace_has_its_own_ports() {
+        let addr = SocketAddr::v4(Ipv4Address::UNSPECIFIED, 47_611);
+        let listener = |net| {
+            let mut s =
+                Socket::new(SocketDomain::Inet, SocketType::Stream, SocketProtocol::Tcp).unwrap();
+            s.id = NEXT_SOCKET_ID.fetch_add(1, Ordering::Relaxed);
+            s.net = net;
+            s
+        };
+        let other = crate::process::ns::INITIAL_NET + 1_000_000;
+        let mut first = listener(crate::process::ns::INITIAL_NET);
+        first.bind(addr).unwrap();
+        first.listen(4).unwrap();
+        // The same port in another namespace is free.
+        let mut second = listener(other);
+        second.bind(addr).unwrap();
+        second.listen(4).unwrap();
+        // A third in that namespace finds it taken.
+        let mut third = listener(other);
+        assert!(matches!(
+            third.bind(addr),
+            Err(KernelError::ResourceExhausted {
+                resource: "socket_address"
+            })
+        ));
+        // Arriving connections reach the initial namespace's listener only.
+        let remote = SocketAddr::v4(Ipv4Address([10, 0, 2, 2]), 40_000);
+        queue_pending_connection(addr, remote, 1).unwrap();
+        assert!(dequeue_pending_connection(first.id).is_some());
+        assert!(dequeue_pending_connection(second.id).is_none());
+        // Closing frees the port in its own namespace only.
+        second.close().unwrap();
+        assert!(!is_address_in_use(other, &addr));
+        assert!(is_address_in_use(crate::process::ns::INITIAL_NET, &addr));
+        first.close().unwrap();
+        assert!(!is_address_in_use(crate::process::ns::INITIAL_NET, &addr));
+    }
 
     #[test]
     fn test_socket_creation() {

@@ -64,6 +64,8 @@ pub fn load_user_program(
             resource: "program file",
             id: 0,
         })?;
+    // Its writes are denied while it runs, as for an exec (ETXTBSY).
+    let denial = crate::fs::write_access::WriteDenial::deny(&file_node)?;
 
     // Get file size
     let metadata = file_node
@@ -117,6 +119,7 @@ pub fn load_user_program(
     let pid = lifecycle::create_process_with_options(options)?;
     if let Some(process) = crate::process::get_process(pid) {
         *process.exe_path.lock() = String::from(path);
+        *process.exe_denial.lock() = Some(denial);
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -212,12 +215,15 @@ fn load_image(
         };
         let plan = crate::elf::image::plan(binary, buffer.len(), crate::elf::image::PIE_BASE)
             .map_err(not_elf)?;
+        // The interpreter's writes are denied while it is loaded.
+        let mut _interp_denial = None;
         let interp = match &binary.interpreter {
             Some(interp_path) => {
-                let (node, data) = lifecycle::read_executable(
+                let (node, (data, denial)) = lifecycle::read_executable(
                     interp_path,
                     &crate::process::creds::Caller::current(),
                 )?;
+                _interp_denial = Some(denial);
                 let parsed = ElfLoader::new().parse(&data).map_err(not_elf)?;
                 Some((node, data, parsed))
             }
@@ -400,6 +406,15 @@ impl crate::fs::VfsNode for SerialConsoleNode {
 
     fn poll_readiness(&self) -> u16 {
         crate::drivers::console_input::tty_readiness()
+    }
+
+    fn bytes_readable(&self) -> Option<usize> {
+        Some(crate::drivers::console_input::bytes_readable())
+    }
+
+    /// /dev/console's number, so ioctl sees a terminal.
+    fn device_id(&self) -> Option<(u32, u32)> {
+        Some((5, 1))
     }
 
     fn wakes_io_waiters(&self) -> bool {

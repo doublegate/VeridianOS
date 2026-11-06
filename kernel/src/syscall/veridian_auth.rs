@@ -187,12 +187,13 @@ mod tests {
     #[test]
     fn only_cap_dac_override_or_the_owner_may_act() {
         use crate::process::{creds::Credentials, linux_caps::LinuxCaps};
-        let root = Caller::KERNEL;
+        let root = Caller::kernel();
         assert!(may_act_on(&root, Some(1000)));
         assert!(may_act_on(&root, None));
         let mut user = Caller {
             creds: Credentials::new(1000, 100),
             caps: LinuxCaps::EMPTY,
+            userns: crate::process::userns::initial(),
         };
         assert!(may_act_on(&user, Some(1000)));
         assert!(!may_act_on(&user, Some(0)));
@@ -208,6 +209,7 @@ mod tests {
         let bare_root = Caller {
             creds: Credentials::new(0, 0),
             caps: LinuxCaps::EMPTY,
+            userns: crate::process::userns::initial(),
         };
         assert!(!may_act_on(&bare_root, Some(1000)));
     }

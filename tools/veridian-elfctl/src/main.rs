@@ -5,9 +5,9 @@
 //! - `wxneeded` (ADR 0017): the program may map memory that is writable and
 //!   executable at once;
 //! - `linux-uname` (ADR 0021): uname reports the system name "Linux" to the
-//!   program; a program it runs gets Linux mode only from its own note or
-//!   GNU ABI tag (only the prctl, which the `linux-uname` command uses,
-//!   carries the mode through exec).
+//!   program; a program it runs gets Linux mode only from its own note or GNU
+//!   ABI tag (only the prctl, which the `linux-uname` command uses, carries the
+//!   mode through exec).
 //!
 //! ```text
 //! veridian-elfctl show FILE
@@ -167,7 +167,14 @@ fn find_feature_words(data: &[u8], elf: &Elf) -> Result<Vec<usize>, String> {
             .checked_add(len)
             .filter(|&e| e <= data.len())
             .ok_or_else(bad)?;
+        // As the kernel reads them: 8-byte padding only for a p_align of
+        // 8, else 4, counted from the start of the segment.
         let align = if p.align == 8 { 8 } else { 4 };
+        let pad = |e: usize| {
+            (e - start)
+                .checked_next_multiple_of(align)
+                .and_then(|r| r.checked_add(start))
+        };
         let mut at = start;
         while at < end {
             if end - at < 12 {
@@ -177,14 +184,8 @@ fn find_feature_words(data: &[u8], elf: &Elf) -> Result<Vec<usize>, String> {
             let descsz = u32_at(data, at + 4) as usize;
             let kind = u32_at(data, at + 8);
             let name_at = at + 12;
-            let desc_at = name_at
-                .checked_add(namesz)
-                .and_then(|e| e.checked_next_multiple_of(align))
-                .ok_or_else(bad)?;
-            let next = desc_at
-                .checked_add(descsz)
-                .and_then(|e| e.checked_next_multiple_of(align))
-                .ok_or_else(bad)?;
+            let desc_at = name_at.checked_add(namesz).and_then(pad).ok_or_else(bad)?;
+            let next = desc_at.checked_add(descsz).and_then(pad).ok_or_else(bad)?;
             if desc_at + descsz > end {
                 return Err(bad());
             }
@@ -638,6 +639,51 @@ mod tests {
         let cleared = apply(&two, false, UNAME).unwrap().0.unwrap();
         assert_eq!(feature_bits(&cleared), Some(FCTL_WXNEEDED));
         assert!(show(&cleared).unwrap().ends_with("linux-uname: no"));
+    }
+
+    /// One note with its name and descriptor padded to `align`.
+    fn padded_note(name: &[u8], kind: u32, desc: &[u8], align: usize) -> Vec<u8> {
+        let mut n = Vec::new();
+        n.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        n.extend_from_slice(&(desc.len() as u32).to_le_bytes());
+        n.extend_from_slice(&kind.to_le_bytes());
+        n.extend_from_slice(name);
+        n.resize(n.len().next_multiple_of(align), 0);
+        n.extend_from_slice(desc);
+        n.resize(n.len().next_multiple_of(align), 0);
+        n
+    }
+
+    /// Notes are read as the kernel reads them (`elf::image::note_features`):
+    /// 8-byte padding only for a p_align of 8, else 4 (so 16 is 4), and
+    /// counted from the start of the segment, not the file, so a segment
+    /// at an offset that is not a multiple of 8 still reads right.
+    #[test]
+    fn notes_are_walked_as_the_kernel_walks_them() {
+        let notes_at = 64 + 2 * 56 + 4; // 4 mod 8
+        for (align, pad) in [(8u64, 8usize), (16, 4), (4, 4), (0, 4)] {
+            let mut notes = padded_note(b"GNU\0", 5, &[0; 4], pad);
+            notes.extend(padded_note(
+                NOTE_NAME,
+                NT_VERIDIAN_FEATURE_CTL,
+                &0x3u32.to_le_bytes(),
+                pad,
+            ));
+            let nphdr = Phdr {
+                kind: PT_NOTE,
+                flags: PF_R,
+                offset: notes_at as u64,
+                vaddr: notes_at as u64,
+                paddr: 0,
+                filesz: notes.len() as u64,
+                memsz: notes.len() as u64,
+                align,
+            };
+            let mut body = vec![0u8; 4];
+            body.extend_from_slice(&notes);
+            let file = elf(&[load(0, 0, 0x1000, 0x1000), nphdr], &body);
+            assert_eq!(feature_bits(&file), Some(0x3), "p_align {align}");
+        }
     }
 
     /// The note this tool writes is the one `<veridian/wxneeded.h>` emits.

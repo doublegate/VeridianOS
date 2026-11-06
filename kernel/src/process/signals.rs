@@ -102,7 +102,7 @@ static QUEUED_BY_USER: spin::Mutex<alloc::collections::BTreeMap<u32, u64>> =
     spin::Mutex::new(alloc::collections::BTreeMap::new());
 
 /// Charge one queued signal to `charge.uid` if it stays within the limit.
-fn charge_user(charge: Charge) -> bool {
+pub(super) fn charge_user(charge: Charge) -> bool {
     #[cfg(feature = "alloc")]
     {
         let mut queued = QUEUED_BY_USER.lock();
@@ -117,7 +117,7 @@ fn charge_user(charge: Charge) -> bool {
 }
 
 /// Give back `n` queued signals charged to `uid`.
-fn uncharge_user(uid: u32, n: u64) {
+pub(super) fn uncharge_user(uid: u32, n: u64) {
     #[cfg(feature = "alloc")]
     if n > 0 {
         let mut queued = QUEUED_BY_USER.lock();
@@ -146,6 +146,10 @@ pub fn queued_by_user(uid: u32) -> u64 {
 pub const SI_USER: i32 = 0;
 pub const SI_KERNEL: i32 = 0x80;
 pub const SI_QUEUE: i32 = -1;
+/// A POSIX timer expired (`process::posix_timer`).
+pub const SI_TIMER: i32 = -2;
+/// SIGIO from a file descriptor (SIL_POLL).
+pub const SI_SIGIO: i32 = -5;
 pub const SI_TKILL: i32 = -6;
 /// SIGCHLD `si_code`: how the child changed state.
 pub const CLD_EXITED: i32 = 1;
@@ -206,13 +210,52 @@ impl SigInfo {
         info
     }
 
+    /// Sent by `sender`, the calling process: its pid as its own PID
+    /// namespace numbers it and its real uid as its own user namespace sees
+    /// it (prepare_kill_siginfo). Queueing translates them for the
+    /// receiver ([`Self::for_receiver`]).
+    pub fn from_sender(sig: usize, code: i32, sender: &Process) -> Self {
+        let uid = sender.user_ns().uid_munged(sender.credentials().ruid);
+        let pid = super::pidns::nr_in(sender.pid.0, &sender.pid_ns());
+        Self::from_process(sig, code, pid, uid)
+    }
+
     /// Sent by the calling process to itself or another (SI_USER), as
     /// Linux's kill and its kernel-internal send_sig(sig, task, 0) do.
     pub fn from_current(sig: usize, code: i32) -> Self {
         match super::current_process() {
-            Some(p) => Self::from_process(sig, code, p.pid.0, p.credentials().ruid),
+            Some(p) => Self::from_sender(sig, code, &p),
             None => Self::kernel(sig),
         }
+    }
+
+    /// `self` as queued for `receiver` (send_signal_locked with
+    /// has_si_pid_and_uid): a signal from a process (si_code 0 or below,
+    /// in the kill and queued layouts) carries the sender's uid as the
+    /// sender's user namespace, the caller's, sees it; the receiver reads
+    /// it as its own namespace sees it, the overflow uid if unmapped. The
+    /// SI_TIMER and SI_SIGIO layouts hold no uid there and stay as they
+    /// are. A kernel siginfo (si_code above 0) is left alone too: SIGCHLD
+    /// already carries the uid as the parent sees it ([`Self::child`]),
+    /// where Linux 7.3 also passes it through the sender's namespace. A
+    /// sender the receiver's PID namespace does not number (one above it)
+    /// shows as pid 0.
+    pub fn for_receiver(mut self, receiver: &Process) -> Self {
+        if self.si_code > 0 || self.si_code == SI_TIMER || self.si_code == SI_SIGIO {
+            return self;
+        }
+        if sender_outside(receiver) {
+            self.fields[0] &= !0xffff_ffff;
+        }
+        let from = super::userns::current();
+        let to = receiver.user_ns();
+        if from.ident.id != to.ident.id {
+            let uid = from
+                .uid_down(self.uid())
+                .map_or(super::userns::OVERFLOW_ID, |kuid| to.uid_munged(kuid));
+            self.fields[0] = self.fields[0] as u32 as u64 | (uid as u64) << 32;
+        }
+        self
     }
 
     /// Sent by the kernel itself (SI_KERNEL).
@@ -220,10 +263,20 @@ impl SigInfo {
         Self::with(sig, SI_KERNEL)
     }
 
-    /// A child's state change (`code` is a CLD_ value): its pid, real user,
-    /// status (exit code, or the signal) and CPU times in clock ticks.
+    /// A child's state change (`code` is a CLD_ value): its pid, real user
+    /// (as its parent's user namespace sees it: do_notify_parent), status
+    /// (exit code, or the signal) and CPU times in clock ticks.
     pub fn child(sig: usize, code: i32, child: &Process, status: i32) -> Self {
-        let mut info = Self::from_process(sig, code, child.pid.0, child.credentials().ruid);
+        let parent = child.parent().and_then(super::table::get_process);
+        let ns = parent
+            .as_ref()
+            .map_or_else(super::userns::initial, |p| p.user_ns());
+        let uid = ns.uid_munged(child.credentials().ruid);
+        // The child's pid as the parent's PID namespace numbers it.
+        let pid = parent.as_ref().map_or(child.pid.0, |p| {
+            super::pidns::nr_in(child.pid.0, &p.pid_ns())
+        });
+        let mut info = Self::from_process(sig, code, pid, uid);
         info.fields[1] = status as u32 as u64;
         let (user, system) = child.cpu_split().1;
         // clock_t in USER_HZ (100) ticks, as times() reports them.
@@ -245,6 +298,38 @@ impl SigInfo {
             (CLD_KILLED, term as i32)
         };
         Self::child(sig, code, child, status)
+    }
+
+    /// POSIX timer `id` expired (SI_TIMER): `si_tid` the id, `si_overrun`
+    /// filled in when it is taken, `si_value` the timer's value. `serial`
+    /// (where Linux keeps si_sys_private) tells it from a signal of an
+    /// earlier timer with the same id, and is cleared before user space
+    /// sees it.
+    pub fn timer(sig: usize, id: i32, value: u64, serial: u64) -> Self {
+        let mut info = Self::with(sig, SI_TIMER);
+        info.fields[0] = id as u32 as u64;
+        info.fields[1] = value;
+        info.fields[2] = serial;
+        info
+    }
+
+    /// A timer signal's timer id (si_tid).
+    pub fn timer_id(&self) -> i32 {
+        self.fields[0] as u32 as i32
+    }
+
+    /// A timer signal's overrun (si_overrun).
+    pub fn overrun(&self) -> i32 {
+        (self.fields[0] >> 32) as u32 as i32
+    }
+
+    pub fn set_overrun(&mut self, overrun: i32) {
+        self.fields[0] = self.fields[0] as u32 as u64 | (overrun as u32 as u64) << 32;
+    }
+
+    /// Whether a timer queued it (it then carries the timer's serial).
+    fn is_timer(&self) -> bool {
+        self.si_code == SI_TIMER
     }
 
     /// A hardware fault at `addr` (`code` is a SEGV_, FPE_, ILL_, BUS_ or
@@ -300,7 +385,8 @@ struct Queued {
     /// The siginfo of every pending signal instance, oldest first: one per
     /// pending standard signal (the first sender's: a standard signal sent
     /// again while pending is not queued twice), one per queued instance of
-    /// a real-time signal.
+    /// a real-time signal, and one per POSIX timer whose signal is pending
+    /// (beside any other instance, standard signal or not, as on Linux).
     /// Each with the user a real-time instance is charged to: the
     /// receiver's real user when it was queued, given back to that user
     /// when it is taken, cleared or dropped, whatever the process's real
@@ -308,6 +394,53 @@ struct Queued {
     /// user for the whole queue charged new signals after a setuid to the
     /// old user while one was still queued (PR #22 review).
     infos: alloc::collections::VecDeque<(SigInfo, Option<u32>)>,
+}
+
+/// A process's signal actions, Linux's sighand_struct. Everything that
+/// needs both tables locks them in this order, handlers then the rest, so
+/// no reader sees one action's handler with another's flags.
+pub struct SigHand {
+    /// Handler per signal: 0 = default, 1 = ignore, other = its address.
+    pub handlers: spin::Mutex<[u64; NSIG + 1]>,
+    /// The rest of each action: (sa_flags, sa_restorer, sa_mask), kept so
+    /// sigaction returns what was set (N-95) and for delivery.
+    pub extra: spin::Mutex<[(u64, u64, u64); NSIG + 1]>,
+}
+
+impl Default for SigHand {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SigHand {
+    /// Every action the default.
+    pub const fn new() -> Self {
+        Self {
+            handlers: spin::Mutex::new([0; NSIG + 1]),
+            extra: spin::Mutex::new([(0, 0, 0); NSIG + 1]),
+        }
+    }
+
+    /// A copy of these actions. With `clear` (CLONE_CLEAR_SIGHAND), handlers
+    /// other than SIG_IGN start as SIG_DFL and every action's flags and
+    /// mask are cleared (Linux's flush_signal_handlers).
+    pub fn copy(&self, clear: bool) -> Self {
+        const SIG_IGN: u64 = 1;
+        let handlers = self.handlers.lock();
+        let extra = self.extra.lock();
+        let (mut new_handlers, mut new_extra) = (*handlers, *extra);
+        if clear {
+            for handler in new_handlers.iter_mut().filter(|h| **h != SIG_IGN) {
+                *handler = 0;
+            }
+            new_extra = [(0, 0, 0); NSIG + 1];
+        }
+        Self {
+            handlers: spin::Mutex::new(new_handlers),
+            extra: spin::Mutex::new(new_extra),
+        }
+    }
 }
 
 /// Pending signal instances with their siginfo, beside the pending set's
@@ -345,7 +478,7 @@ impl RtQueue {
             if pending.load(Ordering::Acquire) & bit == 0 {
                 // A pending bit cleared without the queue (job control)
                 // leaves its record behind: drop it for the new one.
-                q.infos.retain(|(i, _)| i.signo() != sig);
+                q.infos.retain(|(i, _)| i.signo() != sig || i.is_timer());
                 q.infos.push_back((info, None));
                 pending.fetch_or(bit, Ordering::AcqRel);
             }
@@ -360,11 +493,50 @@ impl RtQueue {
         Ok(())
     }
 
+    /// Queue timer signal `info` (SI_TIMER) in `pending`, unless that timer's
+    /// signal is queued already (Linux queues each timer's own preallocated
+    /// sigqueue at most once). Uncharged: the timer was charged when it was
+    /// made. Returns whether it was queued.
+    pub fn push_timer(&self, pending: &core::sync::atomic::AtomicU64, info: SigInfo) -> bool {
+        let mut q = self.0.lock();
+        let queued = q.infos.iter().any(|(i, _)| {
+            i.is_timer()
+                && i.signo() == info.signo()
+                && i.timer_id() == info.timer_id()
+                && i.fields[2] == info.fields[2]
+        });
+        if queued {
+            return false;
+        }
+        q.infos.push_back((info, None));
+        pending.fetch_or(sig_bit(info.signo()), Ordering::AcqRel);
+        true
+    }
+
+    /// Drop every queued timer signal (exec: Linux's flush_itimer_signals).
+    /// A signal stays pending if another instance of it is queued, or if it
+    /// was pending without a record.
+    pub fn clear_timers(&self, pending: &core::sync::atomic::AtomicU64) {
+        let mut q = self.0.lock();
+        let mut dropped = 0u64;
+        q.infos.retain(|(i, _)| {
+            if i.is_timer() {
+                dropped |= sig_bit(i.signo());
+            }
+            !i.is_timer()
+        });
+        let kept = q
+            .infos
+            .iter()
+            .fold(0, |bits, (i, _)| bits | sig_bit(i.signo()));
+        pending.fetch_and(!(dropped & !kept), Ordering::AcqRel);
+    }
+
     /// Take one instance of `sig` off `pending`, with its siginfo; None if
-    /// it is not pending. A real-time signal's bit stays while instances
-    /// remain. A signal pending without a record (one merged past the
-    /// queue limit) comes with an SI_USER siginfo that names no sender, as
-    /// on Linux.
+    /// it is not pending. The bit stays while instances remain (real-time
+    /// signals, a timer's signal beside another). A signal pending without
+    /// a record (one merged past the queue limit) comes with an SI_USER
+    /// siginfo that names no sender, as on Linux.
     pub fn take(&self, pending: &core::sync::atomic::AtomicU64, sig: usize) -> Option<SigInfo> {
         let bit = sig_bit(sig);
         let mut q = self.0.lock();
@@ -381,7 +553,7 @@ impl RtQueue {
             }
             None => SigInfo::with(sig, SI_USER),
         };
-        if sig < SIGRTMIN || !q.infos.iter().any(|(i, _)| i.signo() == sig) {
+        if !q.infos.iter().any(|(i, _)| i.signo() == sig) {
             pending.fetch_and(!bit, Ordering::AcqRel);
         }
         Some(info)
@@ -583,6 +755,56 @@ impl SigAltStack {
 /// Linux EINTR, as a system call returns it (rax, x0, a0).
 const EINTR_RAX: u64 = (-4i64) as u64;
 
+/// Linux -ERESTART_RESTARTBLOCK, as a system call returns it: the call
+/// left a restart block (`syscall::restart`). User space never sees it.
+const RESTART_BLOCK_RAX: u64 = (-516i64) as u64;
+
+/// restart_syscall's number, which a call with a restart block becomes.
+#[cfg(target_arch = "x86_64")]
+const RESTART_SYSCALL_NR: u64 = 219;
+#[cfg(not(target_arch = "x86_64"))]
+const RESTART_SYSCALL_NR: u64 = 128;
+
+/// How a system call's return to user mode goes on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Return {
+    /// Into a handler; `restart` is its SA_RESTART.
+    Handler { restart: bool },
+    /// After a stop, once the process continues.
+    Stop,
+    /// With no signal to act on (one acted on by another thread, or the
+    /// stop of a process another thread stopped).
+    NoSignal,
+}
+
+/// What the return does with the call's result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OnReturn {
+    Keep,
+    /// Run the call again with its arguments.
+    Rerun,
+    /// Return EINTR.
+    Eintr,
+    /// Run restart_syscall instead.
+    RestartCall,
+}
+
+/// Linux's choice for a system call that returns `ret` (handle_signal and
+/// arch_do_signal_or_restart): EINTR is run again under a handler with
+/// SA_RESTART, unless the call is one that returns EINTR after a handler
+/// regardless (`no_restart`), and after a stop; a restart block is EINTR
+/// under a handler and restart_syscall otherwise. EINTR with no signal
+/// left stays EINTR here.
+fn on_return(ret: u64, how: Return, no_restart: bool) -> OnReturn {
+    match (ret, how) {
+        (EINTR_RAX, Return::Handler { restart }) if restart && !no_restart => OnReturn::Rerun,
+        (EINTR_RAX, Return::Stop) => OnReturn::Rerun,
+        (RESTART_BLOCK_RAX, Return::Handler { .. }) => OnReturn::Eintr,
+        (RESTART_BLOCK_RAX, Return::Stop | Return::NoSignal) => OnReturn::RestartCall,
+        _ => OnReturn::Keep,
+    }
+}
+
 /// What a signal does when it is not caught.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DefaultAction {
@@ -607,6 +829,48 @@ pub const fn default_action(sig: usize) -> DefaultAction {
         3 | 4 | 5 | 6 | 7 | 8 | 11 | 24 | 25 | 31 => DefaultAction::CoreDump,
         _ => DefaultAction::Terminate,
     }
+}
+
+/// Whether the sender of a signal to `target` -- the calling process -- is
+/// outside `target`'s PID namespace (in one above it, or the kernel's own
+/// context), as send_signal_locked's `!task_pid_nr_ns(current, ...)`.
+fn sender_outside(target: &Process) -> bool {
+    let ns = target.pid_ns();
+    match super::current_process() {
+        Some(sender) => super::pidns::nr_in(sender.pid.0, &ns) == 0,
+        None => !ns.is_initial(),
+    }
+}
+
+/// Linux's SIGNAL_UNKILLABLE rule (sig_task_ignored): the init of a PID
+/// namespace below the initial one takes only the signals it has a handler
+/// for, except that SIGKILL and SIGSTOP still reach it from the kernel
+/// (SI_KERNEL) or from an ancestor namespace. Such a signal is dropped
+/// when generated, unless the target thread (`thread`, or the process's
+/// first) blocks it: then it waits, and delivery drops it if the action
+/// is still the default ([`init_skips`]), as Linux's sig_ignored and
+/// get_signal.
+pub fn init_ignores(process: &Process, thread: Option<&Thread>, info: &SigInfo) -> bool {
+    let sig = info.signo();
+    if !process.is_ns_init() || process.get_signal_handler(sig).unwrap_or(SIG_DFL) != SIG_DFL {
+        return false;
+    }
+    let first = process.get_thread(crate::process::ThreadId(process.pid.0));
+    let blocked = thread
+        .or(first.as_deref())
+        .is_some_and(|t| t.sigmask.load(Ordering::Acquire) & sig_bit(sig) != 0);
+    if blocked && sig != SIGKILL {
+        return false;
+    }
+    let force = info.si_code == SI_KERNEL || sender_outside(process);
+    !(force && (sig == SIGKILL || sig == SIGSTOP))
+}
+
+/// At delivery, a signal with the default action that the init of a PID
+/// namespace takes no default action on (all but SIGKILL and SIGSTOP,
+/// get_signal's SIGNAL_UNKILLABLE check).
+fn init_skips(process: &Process, sig: usize) -> bool {
+    sig != SIGKILL && sig != SIGSTOP && process.is_ns_init()
 }
 
 /// Whether sending `sig` to `process` would only be ignored (SIG_IGN, or
@@ -660,7 +924,7 @@ fn job_control_on_send(process: &Process, sig: usize) {
 #[cfg(feature = "alloc")]
 fn notify_parent_job(process: &Process, code: i32, status: i32) {
     if let Some(parent) = process.parent().and_then(super::table::get_process) {
-        let nocldstop = parent.signal_action_extra.lock()[SIGCHLD].0 & SA_NOCLDSTOP != 0;
+        let nocldstop = parent.sigchld_flags() & SA_NOCLDSTOP != 0;
         if !nocldstop {
             notify_info(&parent, SigInfo::child(SIGCHLD, code, process, status));
         }
@@ -743,11 +1007,15 @@ pub fn send_info_to_process(
         return Ok(false);
     }
     job_control_on_send(process, sig);
+    if init_ignores(process, None, &info) {
+        return Ok(true);
+    }
     if sig == SIGKILL {
         super::exit::set_kill_pending(process, SIGKILL as u32);
     } else if ignored(process, sig) {
         return Ok(true);
     } else {
+        let info = info.for_receiver(process);
         process
             .rt_queue
             .push(
@@ -793,7 +1061,7 @@ pub fn send_to_current(sig: usize) {
     let (Some(process), Some(thread)) = (super::current_process(), super::current_thread()) else {
         return;
     };
-    let info = SigInfo::from_process(sig, SI_USER, process.pid.0, process.credentials().ruid);
+    let info = SigInfo::from_sender(sig, SI_USER, &process);
     #[cfg(feature = "alloc")]
     if process.dispatched.load(Ordering::Acquire) {
         let _ = send_to_thread(&process, &thread, info);
@@ -818,9 +1086,10 @@ pub fn send_to_thread(
         return Ok(());
     }
     job_control_on_send(process, sig);
-    if ignored(process, sig) {
+    if ignored(process, sig) || init_ignores(process, Some(thread), &info) {
         return Ok(());
     }
+    let info = info.for_receiver(process);
     thread
         .rt_queue
         .push(
@@ -837,6 +1106,68 @@ pub fn send_to_thread(
         }
     }
     Ok(())
+}
+
+/// What sending a timer's signal did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimerSend {
+    Queued,
+    /// That timer's signal was queued already.
+    AlreadyQueued,
+    /// The signal is ignored: nothing was queued.
+    Ignored,
+}
+
+/// Send POSIX timer signal `info` to `process`, or to its thread `thread`
+/// (SIGEV_THREAD_ID): as [`send_info_to_process`], but queued even beside a
+/// pending instance of the same standard signal, and at most once per
+/// timer (Linux's posixtimer_send_sigqueue).
+#[cfg(feature = "alloc")]
+pub fn send_timer(process: &Process, thread: Option<&Thread>, info: SigInfo) -> TimerSend {
+    use crate::sched::dispatch;
+
+    let sig = info.signo();
+    job_control_on_send(process, sig);
+    if sig == SIGKILL {
+        super::exit::set_kill_pending(process, SIGKILL as u32);
+    } else if ignored(process, sig) {
+        return TimerSend::Ignored;
+    } else {
+        let queued = match thread {
+            Some(t) => t.rt_queue.push_timer(&t.sigpending, info),
+            None => process.rt_queue.push_timer(&process.pending_signals, info),
+        };
+        if !queued {
+            return TimerSend::AlreadyQueued;
+        }
+        crate::fs::signalfd::signal_generated();
+    }
+    for task in dispatch::tasks_of(process.pid.0) {
+        let mine = thread.is_none_or(|t| task.owner() == Some((process.pid.0, t.tid.0)));
+        if mine || sig == SIGKILL {
+            dispatch::notify(&task);
+        }
+    }
+    dispatch::PROCESS_EVENTS.wake_all();
+    TimerSend::Queued
+}
+
+/// `sig`'s action was changed, from one that ignored it if `was_ignored`
+/// (sigaction; Linux's do_sigaction): an action that ignores it discards
+/// its pending instances, blocked or not, parking the periodic timers that
+/// queued it; one that no longer does queues their signals again.
+#[cfg(feature = "alloc")]
+pub fn action_changed(process: &Process, sig: usize, was_ignored: bool) {
+    if ignored(process, sig) {
+        let bit = sig_bit(sig);
+        process.rt_queue.clear(&process.pending_signals, bit);
+        for thread in process.threads.lock().values() {
+            thread.rt_queue.clear(&thread.sigpending, bit);
+        }
+        super::posix_timer::park(process, sig);
+    } else if was_ignored {
+        super::posix_timer::unpark(process, sig);
+    }
 }
 
 /// Signals `thread` of `process` could take now (pending, not blocked).
@@ -860,16 +1191,33 @@ pub fn pending_in(mask: u64) -> bool {
 /// Take the lowest signal of `ready` pending for `thread` -- its own
 /// instance first, then its process's -- with its siginfo. A real-time
 /// signal's instances come one at a time, oldest first (N-209). None if
-/// another thread took it first.
-fn take_lowest(process: &Process, thread: &Thread, ready: u64) -> Option<SigInfo> {
-    if ready == 0 {
-        return None;
+/// another thread took it first. A stale POSIX timer signal is dropped and
+/// the next one taken (Linux's dequeue_signal).
+fn take_lowest(process: &Process, thread: &Thread, mut ready: u64) -> Option<SigInfo> {
+    loop {
+        if ready == 0 {
+            return None;
+        }
+        let sig = ready.trailing_zeros() as usize + 1;
+        let mut info = match thread.rt_queue.take(&thread.sigpending, sig) {
+            Some(info) => info,
+            None => {
+                let info = process.rt_queue.take(&process.pending_signals, sig)?;
+                // An interval ITIMER_REAL waits again once its SIGALRM is
+                // taken.
+                if sig == super::itimer::SIGALRM {
+                    super::itimer::sigalrm_taken(process);
+                }
+                info
+            }
+        };
+        // Its timer is looked at with the queues unlocked (lock order).
+        if !info.is_timer() || super::posix_timer::deliver(process, &mut info) {
+            return Some(info);
+        }
+        ready &= thread.sigpending.load(Ordering::Acquire)
+            | process.pending_signals.load(Ordering::Acquire);
     }
-    let sig = ready.trailing_zeros() as usize + 1;
-    thread
-        .rt_queue
-        .take(&thread.sigpending, sig)
-        .or_else(|| process.rt_queue.take(&process.pending_signals, sig))
 }
 
 /// Take the calling thread's lowest pending signal in `mask`, blocked or
@@ -1092,6 +1440,34 @@ mod generic {
     const RET: usize = 0;
     #[cfg(target_arch = "riscv64")]
     const RET: usize = 10;
+    /// The register holding the system call number.
+    #[cfg(target_arch = "aarch64")]
+    const NR: usize = UserFrame::X8;
+    #[cfg(target_arch = "riscv64")]
+    const NR: usize = UserFrame::A7;
+
+    /// Carry out `on_return`'s choice for the return `how` of the system
+    /// call whose first argument was `syscall` (None: not a system call
+    /// return, or one already acted on). Running a call again puts its
+    /// first argument back (the result overwrote it) and rewinds the
+    /// 4-byte `svc`/`ecall`.
+    fn act(f: &mut UserFrame, syscall: Option<u64>, how: Return, no_restart: bool) {
+        let Some(arg0) = syscall else {
+            return;
+        };
+        match on_return(f.x[RET], how, no_restart) {
+            OnReturn::Keep => {}
+            OnReturn::Eintr => f.x[RET] = EINTR_RAX,
+            OnReturn::Rerun => {
+                f.x[RET] = arg0;
+                set_pc(f, pc(f).wrapping_sub(4));
+            }
+            OnReturn::RestartCall => {
+                f.x[NR] = RESTART_SYSCALL_NR;
+                set_pc(f, pc(f).wrapping_sub(4));
+            }
+        }
+    }
 
     /// A zeroed frame on the heap (4.7 KiB on AArch64: too much for a
     /// kernel stack).
@@ -1200,16 +1576,18 @@ mod generic {
             }
         };
 
-        // SA_RESTART: run the interrupted call again, with its first
-        // argument back in place of the EINTR it returned, unless it is one
-        // that returns EINTR after a handler regardless (`no_restart`).
+        // SA_RESTART: run the interrupted call again, unless it is one that
+        // returns EINTR after a handler regardless (`no_restart`); a call
+        // with a restart block returns EINTR (`on_return`).
         let no_restart = thread.no_restart.swap(false, Ordering::AcqRel);
-        if let Some(arg0) = syscall {
-            if f.x[RET] == EINTR_RAX && flags & SA_RESTART != 0 && !no_restart {
-                f.x[RET] = arg0;
-                set_pc(f, pc(f).wrapping_sub(4));
-            }
-        }
+        act(
+            f,
+            syscall,
+            Return::Handler {
+                restart: flags & SA_RESTART != 0,
+            },
+            no_restart,
+        );
 
         // The stack: with SA_ONSTACK the alternate one, from its top, if it
         // is armed and the thread is not already on it; otherwise the
@@ -1357,6 +1735,7 @@ mod generic {
                 let seq = process.cont_seq.load(Ordering::SeqCst);
                 let Some(info) = dequeue(&process, &thread) else {
                     thread.no_restart.store(false, Ordering::Release);
+                    act(f, syscall, Return::NoSignal, false);
                     if thread.has_saved_sigmask.swap(false, Ordering::AcqRel) {
                         set_mask(
                             &process,
@@ -1372,18 +1751,15 @@ mod generic {
                     process.signal_action(sig).unwrap_or((SIG_DFL, (0, 0, 0)));
                 match handler {
                     SIG_IGN => None,
+                    SIG_DFL if init_skips(&process, sig) => None,
                     SIG_DFL => match default_action(sig) {
                         DefaultAction::Terminate | DefaultAction::CoreDump => Some(sig),
                         DefaultAction::Stop => {
                             // The interrupted call runs again once the
-                            // process continues, as on Linux.
+                            // process continues, as on Linux (or carries
+                            // on, with a restart block).
                             thread.no_restart.store(false, Ordering::Release);
-                            if let Some(arg0) = syscall.take() {
-                                if f.x[RET] == EINTR_RAX {
-                                    f.x[RET] = arg0;
-                                    set_pc(f, pc(f).wrapping_sub(4));
-                                }
-                            }
+                            act(f, syscall.take(), Return::Stop, false);
                             stop_process(&process, sig, seq);
                             None
                         }
@@ -1607,20 +1983,18 @@ mod frame {
             return false;
         }
 
-        // A system call the signal interrupted is restarted with SA_RESTART
-        // (rewind over the 2-byte `syscall`, put the number back in rax),
+        // A system call the signal interrupted is restarted with SA_RESTART,
         // unless it is one that returns EINTR after a handler regardless
-        // (`no_restart`); otherwise it returns EINTR. The context saved
-        // below must be the one the handler returns to.
+        // (`no_restart`); otherwise it returns EINTR (`on_return`). The
+        // context saved below must be the one the handler returns to.
         let no_restart = thread.no_restart.swap(false, Ordering::AcqRel);
-        if f.vector == SYSCALL_VECTOR
-            && f.rax == EINTR_RAX
-            && flags & SA_RESTART != 0
-            && !no_restart
-        {
-            f.rax = f.error_code;
-            f.rip = f.rip.wrapping_sub(2);
-        }
+        act(
+            f,
+            Return::Handler {
+                restart: flags & SA_RESTART != 0,
+            },
+            no_restart,
+        );
 
         // The stack: with SA_ONSTACK the alternate one, from its top, if it
         // is armed and the thread is not already on it (N-222); otherwise
@@ -1757,6 +2131,27 @@ mod frame {
         true
     }
 
+    /// Carry out `on_return`'s choice for the return `how` of `f`, if it
+    /// is a system call frame. Running a call again rewinds over the 2-byte
+    /// `syscall` and puts the number (saved in `error_code`) back in rax.
+    fn act(f: &mut TrapFrame, how: Return, no_restart: bool) {
+        if f.vector != SYSCALL_VECTOR {
+            return;
+        }
+        match on_return(f.rax, how, no_restart) {
+            OnReturn::Keep => {}
+            OnReturn::Eintr => f.rax = EINTR_RAX,
+            OnReturn::Rerun => {
+                f.rax = f.error_code;
+                f.rip = f.rip.wrapping_sub(2);
+            }
+            OnReturn::RestartCall => {
+                f.rax = RESTART_SYSCALL_NR;
+                f.rip = f.rip.wrapping_sub(2);
+            }
+        }
+    }
+
     /// Act on pending signals on the way back to user mode (syscall exit
     /// and trap exit): a fatal one ends the thread's process, a caught one
     /// gets a handler frame. One handler per return; the next pending
@@ -1779,6 +2174,7 @@ mod frame {
                 let seq = process.cont_seq.load(Ordering::SeqCst);
                 let Some(info) = dequeue(&process, &thread) else {
                     thread.no_restart.store(false, Ordering::Release);
+                    act(f, Return::NoSignal, false);
                     // sigsuspend ended without a handler to restore its
                     // mask: put the saved one back now.
                     if thread.has_saved_sigmask.swap(false, Ordering::AcqRel) {
@@ -1796,16 +2192,14 @@ mod frame {
                     process.signal_action(sig).unwrap_or((SIG_DFL, (0, 0, 0)));
                 match handler {
                     SIG_IGN => None,
+                    SIG_DFL if init_skips(&process, sig) => None,
                     SIG_DFL => match default_action(sig) {
                         DefaultAction::Terminate | DefaultAction::CoreDump => Some(sig),
                         DefaultAction::Stop => {
                             // A system call the stop interrupted runs again
                             // once the process continues, as on Linux.
                             thread.no_restart.store(false, Ordering::Release);
-                            if f.vector == SYSCALL_VECTOR && f.rax == EINTR_RAX {
-                                f.rax = f.error_code;
-                                f.rip = f.rip.wrapping_sub(2);
-                            }
+                            act(f, Return::Stop, false);
                             stop_process(&process, sig, seq);
                             None
                         }
@@ -1915,6 +2309,46 @@ mod frame {
 mod tests {
     use super::*;
 
+    /// EINTR is run again under an SA_RESTART handler (unless the call
+    /// never is) and after a stop, and stays EINTR otherwise; a restart
+    /// block is EINTR under any handler and restart_syscall after a stop
+    /// or with no signal left; any other result is left alone.
+    #[test]
+    fn on_return_restarts_as_linux() {
+        let restart = Return::Handler { restart: true };
+        let plain = Return::Handler { restart: false };
+        assert_eq!(on_return(EINTR_RAX, restart, false), OnReturn::Rerun);
+        assert_eq!(on_return(EINTR_RAX, restart, true), OnReturn::Keep);
+        assert_eq!(on_return(EINTR_RAX, plain, false), OnReturn::Keep);
+        assert_eq!(on_return(EINTR_RAX, Return::Stop, true), OnReturn::Rerun);
+        assert_eq!(
+            on_return(EINTR_RAX, Return::NoSignal, false),
+            OnReturn::Keep
+        );
+        assert_eq!(
+            on_return(RESTART_BLOCK_RAX, restart, false),
+            OnReturn::Eintr
+        );
+        assert_eq!(on_return(RESTART_BLOCK_RAX, plain, false), OnReturn::Eintr);
+        assert_eq!(
+            on_return(RESTART_BLOCK_RAX, Return::Stop, false),
+            OnReturn::RestartCall
+        );
+        assert_eq!(
+            on_return(RESTART_BLOCK_RAX, Return::NoSignal, false),
+            OnReturn::RestartCall
+        );
+        for how in [restart, plain, Return::Stop, Return::NoSignal] {
+            assert_eq!(on_return(0, how, false), OnReturn::Keep);
+            assert_eq!(on_return((-11i64) as u64, how, false), OnReturn::Keep);
+        }
+        assert_eq!(
+            crate::syscall::linux_compat::to_linux_errno(crate::syscall::SyscallError::RestartBlock)
+                as u64,
+            RESTART_BLOCK_RAX
+        );
+    }
+
     #[test]
     fn set_layout_is_linux() {
         assert_eq!(sig_bit(1), 1);
@@ -1941,6 +2375,63 @@ mod tests {
         let mut info = SigInfo::from_process(sig, SI_QUEUE, 7, 1000);
         info.fields[1] = value;
         info
+    }
+
+    /// A timer's signal is queued once however often it fires, beside a
+    /// pending instance of the same standard signal; the bit stays until
+    /// both are taken; an earlier timer with the same id is told apart.
+    #[test]
+    fn timer_signals_queue_once_per_timer() {
+        let q = RtQueue::new();
+        let pending = core::sync::atomic::AtomicU64::new(0);
+        let kill = SigInfo::from_process(14, SI_USER, 42, 0);
+        q.push(&pending, kill, Charge::UNLIMITED, Overflow::Merge)
+            .unwrap();
+        assert!(q.push_timer(&pending, SigInfo::timer(14, 3, 9, 1)));
+        assert!(!q.push_timer(&pending, SigInfo::timer(14, 3, 9, 1)));
+        assert!(q.push_timer(&pending, SigInfo::timer(14, 3, 9, 2)));
+        // A standard signal sent again while pending is still not queued.
+        q.push(&pending, kill, Charge::UNLIMITED, Overflow::Merge)
+            .unwrap();
+        assert_eq!(q.take(&pending, 14), Some(kill));
+        let first = q.take(&pending, 14).unwrap();
+        assert_eq!(
+            (first.si_code, first.timer_id(), first.value()),
+            (SI_TIMER, 3, 9)
+        );
+        assert_ne!(pending.load(Ordering::Acquire) & sig_bit(14), 0);
+        assert_eq!(q.take(&pending, 14).unwrap().fields[2], 2);
+        assert_eq!(pending.load(Ordering::Acquire), 0);
+        assert_eq!(q.take(&pending, 14), None);
+    }
+
+    /// exec drops timer signals only: another instance of the signal, or
+    /// the signal without a record, stays pending.
+    #[test]
+    fn clear_timers_keeps_other_instances() {
+        let q = RtQueue::new();
+        let pending = core::sync::atomic::AtomicU64::new(0);
+        q.push(&pending, queued(40, 1), Charge::UNLIMITED, Overflow::Fail)
+            .unwrap();
+        q.push_timer(&pending, SigInfo::timer(40, 0, 0, 1));
+        q.push_timer(&pending, SigInfo::timer(41, 1, 0, 2));
+        pending.fetch_or(sig_bit(50), Ordering::AcqRel);
+        q.clear_timers(&pending);
+        assert_eq!(pending.load(Ordering::Acquire), sig_bit(40) | sig_bit(50));
+        assert_eq!(q.take(&pending, 40).unwrap().value(), 1);
+        assert_eq!(q.take(&pending, 40), None);
+    }
+
+    /// The overrun shares a word with the timer id, as Linux's si_tid and
+    /// si_overrun share it.
+    #[test]
+    fn timer_siginfo_layout() {
+        let mut info = SigInfo::timer(34, 5, 0xabcd, 9);
+        info.set_overrun(-1);
+        assert_eq!((info.timer_id(), info.overrun()), (5, -1));
+        info.set_overrun(7);
+        assert_eq!(info.fields[0], 5 | 7 << 32);
+        assert_eq!((info.si_code, info.value()), (-2, 0xabcd));
     }
 
     /// Each queued real-time instance keeps its own siginfo, oldest first

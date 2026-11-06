@@ -157,11 +157,12 @@ fn take_top(state: &mut PiState) -> Option<Waiter> {
     Some(state.waiters.remove(i))
 }
 
-/// The user thread whose thread id is `tid`, if it has a task.
+/// The user thread whose thread id is `tid` (a number in the caller's PID
+/// namespace, as attach_to_pi_owner's find_get_task_by_vpid), if it has a
+/// task.
 fn owner_of_tid(tid: u32) -> Option<Owner> {
-    dispatch::owners()
-        .into_iter()
-        .find(|&(_, t)| t == tid as u64)
+    let kid = crate::process::pidns::from_vnr(i64::from(tid))?;
+    dispatch::owners().into_iter().find(|&(_, t)| t == kid)
 }
 
 /// Give the lock at `uaddr` (key `key`) to the top waiter of `state`, with
@@ -184,7 +185,8 @@ fn hand_off(
     } else {
         FUTEX_WAITERS
     };
-    let word = (next.owner.1 as u32 & FUTEX_TID_MASK) | more | extra;
+    // The new owner as the caller's PID namespace numbers it (wake_futex_pi).
+    let word = (crate::process::pidns::vnr(next.owner.1) as u32 & FUTEX_TID_MASK) | more | extra;
     // The word is ours (or the dead owner's); only user space racing
     // against its own lock could change it, and the kernel's word wins.
     // If the word cannot be reached (another thread unmapped it), the
@@ -240,7 +242,7 @@ pub(crate) fn lock_pi(
     }
     validate_user_ptr(uaddr as *const u32, core::mem::size_of::<u32>())?;
     let me = dispatch::current_owner().ok_or(SyscallError::InvalidState)?;
-    let my_tid = me.1 as u32 & FUTEX_TID_MASK;
+    let my_tid = crate::process::pidns::vnr(me.1) as u32 & FUTEX_TID_MASK;
     let key = futex_key(uaddr)?;
 
     loop {
@@ -345,7 +347,7 @@ pub(crate) fn unlock_pi(uaddr: usize) -> Result<usize, SyscallError> {
     }
     validate_user_ptr(uaddr as *const u32, core::mem::size_of::<u32>())?;
     let me = dispatch::current_owner().ok_or(SyscallError::InvalidState)?;
-    let my_tid = me.1 as u32 & FUTEX_TID_MASK;
+    let my_tid = crate::process::pidns::vnr(me.1) as u32 & FUTEX_TID_MASK;
     let key = futex_key(uaddr)?;
 
     prefault(uaddr)?;

@@ -369,4 +369,4 @@ For running out of data blocks, increase the image size with `--size`.
 
 - [BUILD-INSTRUCTIONS.md](BUILD-INSTRUCTIONS.md) -- Full build workflow including persistent storage
 - [SELF-HOSTING-STATUS.md](SELF-HOSTING-STATUS.md) -- Self-hosting toolchain tiers
-- [SOFTWARE-PORTING-GUIDE.md](SOFTWARE-PORTING-GUIDE.md) -- Porting software to VeridianOS
+- [PORTING-GUIDE.md](PORTING-GUIDE.md) -- Porting software to VeridianOS

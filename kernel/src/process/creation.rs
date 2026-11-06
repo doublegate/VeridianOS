@@ -256,58 +256,71 @@ pub fn parse_shebang(data: &[u8]) -> Option<(String, Option<String>)> {
     }
 }
 
-/// Search for an executable by name in PATH directories
-///
-/// If `name` contains a `/`, it is treated as an explicit path and returned
-/// as-is (if it exists in the VFS). Otherwise, the function first checks the
-/// current process's `env_vars` for a `PATH` entry (colon-separated list of
-/// directories). If no `PATH` environment variable is set, it falls back to
-/// the default search directories: `/bin`, `/usr/bin`, `/usr/local/bin`.
+/// What an exec runs (Linux's `linux_binprm` file and names): the node,
+/// looked up once so that what is checked is what runs (N-101), and the
+/// names it goes by.
 #[cfg(feature = "alloc")]
-pub fn search_path(name: &str) -> Option<String> {
-    // In the caller's view: under its root, from its working directory.
-    let file_exists = |path: &str| {
-        crate::fs::try_get_vfs().is_some_and(|vfs| vfs.as_caller().resolve_path(path).is_ok())
-    };
+pub struct ExecFile {
+    /// The program file.
+    pub node: alloc::sync::Arc<dyn crate::fs::VfsNode>,
+    /// The name the program is given (`bprm->filename`): AT_EXECFN, and the
+    /// path a script's interpreter is passed. As written, or `/dev/fd/N`
+    /// (`/dev/fd/N/name`) for execveat relative to a descriptor.
+    pub filename: String,
+    /// The file's path from the caller's root: /proc/self/exe.
+    pub exe_path: String,
+    /// The command name: the base name of `filename`, or of the file itself
+    /// when the name was made up from a descriptor (`comm_from_dentry`).
+    pub comm: String,
+    /// `filename` names a close-on-exec descriptor, which is gone once the
+    /// exec happens, so a script cannot be run from it (ENOENT, Linux's
+    /// BINPRM_FLAGS_PATH_INACCESSIBLE).
+    pub path_inaccessible: bool,
+    /// The flags of the mount it is on (`fs::mount::flags`): noexec
+    /// refuses it, nosuid ignores its set-ID bits and capabilities (ADR
+    /// 0022 H3c).
+    pub mnt_flags: u32,
+}
 
-    // If name already contains a slash, treat it as a path
-    if name.contains('/') {
-        if file_exists(name) {
-            return Some(String::from(name));
-        }
-        return None;
+#[cfg(feature = "alloc")]
+impl ExecFile {
+    /// `path` as Linux's open_exec looks it up: in the caller's view, a
+    /// relative path from the working directory (there is no PATH search;
+    /// libc's execvp does that), symlinks followed.
+    pub fn open(path: &str) -> Result<Self, KernelError> {
+        let vfs = crate::fs::get_vfs().as_caller();
+        let (node, canonical) = vfs.resolve_path_canonical(path)?;
+        Ok(Self {
+            node,
+            exe_path: crate::fs::root_relative(&canonical, &vfs.get_root()),
+            comm: String::from(basename(path)),
+            filename: String::from(path),
+            path_inaccessible: false,
+            mnt_flags: mount_flags(&vfs, &canonical),
+        })
     }
 
-    // Try to read PATH from the current process's environment variables.
-    let path_env: Option<String> = super::current_process().and_then(|proc| {
-        let env = proc.env_vars.lock();
-        env.get("PATH").cloned()
-    });
-
-    if let Some(ref path_val) = path_env {
-        // Search each colon-separated directory in PATH.
-        for dir in path_val.split(':') {
-            if dir.is_empty() {
-                continue;
-            }
-            let full_path = format!("{}/{}", dir, name);
-            if file_exists(&full_path) {
-                return Some(full_path);
-            }
-        }
-    } else {
-        // Fallback: standard search directories when no PATH env is set.
-        const DEFAULT_SEARCH_DIRS: &[&str] = &["/bin", "/usr/bin", "/usr/local/bin"];
-
-        for dir in DEFAULT_SEARCH_DIRS {
-            let full_path = format!("{}/{}", dir, name);
-            if file_exists(&full_path) {
-                return Some(full_path);
-            }
-        }
+    /// EACCES for a file on a noexec mount, before the permission check
+    /// (Linux's may_open, MAY_EXEC on a regular file).
+    pub fn check_mount(&self) -> Result<(), KernelError> {
+        refuse_noexec(self.mnt_flags)
     }
+}
 
-    None
+/// The flags of the mount serving canonical `path` in `vfs` (0 where no
+/// mount serves it).
+#[cfg(feature = "alloc")]
+pub(crate) fn mount_flags(vfs: &crate::fs::CallerView<'_>, path: &str) -> u32 {
+    vfs.mount_serving(path).map_or(0, |m| m.flags())
+}
+
+/// EACCES when mount flags `mnt` include noexec.
+#[cfg(feature = "alloc")]
+fn refuse_noexec(mnt: u32) -> Result<(), KernelError> {
+    if mnt & crate::fs::mount::flags::NOEXEC != 0 {
+        return Err(KernelError::PermissionDenied { operation: "exec" });
+    }
+    Ok(())
 }
 
 /// What exec learned from the program file about the credentials and
@@ -320,6 +333,11 @@ struct ExecIds {
     set_gid: Option<u32>,
     /// The caller may read the program (and its loader).
     readable: bool,
+    /// The user namespace the new image's memory belongs to: the
+    /// process's, or for a program or loader it may not read the nearest
+    /// one above that maps that file's owner and group (would_dump), so a
+    /// namespace that could not read the file cannot trace the image.
+    mm_userns: alloc::sync::Arc<super::userns::UserNs>,
     /// The process was traced, by a tracer without CAP_SYS_PTRACE, when
     /// the exec started.
     unprivileged_tracer_at_start: bool,
@@ -327,12 +345,18 @@ struct ExecIds {
     file_caps: Option<super::linux_caps::FileCaps>,
 }
 
-/// Whether `process` is traced by a tracer that lacked CAP_SYS_PTRACE when
-/// it attached. Read under `cred_guard`, which attach holds.
+/// Whether `process` is traced by a tracer whose credentials when it
+/// attached lack CAP_SYS_PTRACE over the process's user namespace (Linux's
+/// ptracer_capable). Read under `cred_guard`, which attach holds.
 #[cfg(feature = "alloc")]
 fn unprivileged_tracer(process: &super::Process) -> bool {
     use core::sync::atomic::Ordering;
-    process.tracer.load(Ordering::Acquire) != 0 && !process.tracer_capable.load(Ordering::Acquire)
+    process.tracer.load(Ordering::Acquire) != 0
+        && !process
+            .tracer_cred
+            .lock()
+            .as_ref()
+            .is_some_and(|t| t.capable_over(&process.user_ns()))
 }
 
 /// Install the credentials and capability sets a program runs with
@@ -373,11 +397,16 @@ fn install_exec_credentials(
         (ids.set_uid, ids.set_gid)
     };
     let (new_euid, new_egid) = (set_uid.unwrap_or(old.euid), set_gid.unwrap_or(old.egid));
+    // CAP_SETUID in the process's own user namespace: set-ID bits counted
+    // above only if it maps the file's owner and group.
+    let may_setuid = thread.caps.lock().capable(super::linux_caps::CAP_SETUID);
     let ctx = super::linux_caps::ExecContext {
         file: ids.file_caps,
         no_new_privs,
         unsafe_exec: traced_unprivileged || fs_shared,
+        may_setuid,
         egid_in_groups: old.in_group(new_egid),
+        root_uid: process.user_ns().root_uid(),
     };
     // A copy: exec runs single-threaded, so nothing else changes this
     // thread's sets, and no thread's sets lock is held while the
@@ -401,6 +430,9 @@ fn install_exec_credentials(
     *thread.caps.lock() = outcome.caps;
     let dumpable = ids.readable && old.exec_keeps_dumpable(&creds) && !grew;
     process.dumpable.store(dumpable, Ordering::Release);
+    // The new memory belongs to the namespace exec ran in (mm_alloc), or
+    // one above it that maps a file the caller could not read (would_dump).
+    process.set_mm_user_ns(ids.mm_userns.clone());
     Ok(outcome.secure)
 }
 
@@ -410,29 +442,57 @@ fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
-/// Read the file at `path` for exec: it must be a regular file `caller`
-/// may execute (`fs::permission`: CAP_DAC_OVERRIDE needs at least one
-/// execute bit, as on Linux), or the result is `PermissionDenied` (EACCES). The
-/// check and the read use the same resolved node, so the file cannot be swapped
-/// between them (N-101). The node comes back too: the loader maps the file's
-/// pages from its page cache (ADR 0010).
+/// Read the file at `path` for exec (`read_exec_node`). A failed lookup
+/// is its own error (ENOTDIR, ELOOP, EACCES), not always ENOENT. The node
+/// comes back too: the loader maps the file's pages from its page cache
+/// (ADR 0010).
 #[cfg(feature = "alloc")]
 pub(crate) fn read_executable(
     path: &str,
     caller: &super::creds::Caller,
-) -> Result<(alloc::sync::Arc<dyn crate::fs::VfsNode>, Vec<u8>), KernelError> {
-    let node = crate::fs::get_vfs()
-        .as_caller()
-        .resolve_path(path)
-        .map_err(|_| KernelError::FsError(crate::error::FsError::NotFound))?;
-    let meta = node.metadata()?;
-    if !may_execute(&meta, caller) {
+) -> Result<(alloc::sync::Arc<dyn crate::fs::VfsNode>, ExecRead), KernelError> {
+    let vfs = crate::fs::get_vfs().as_caller();
+    let (node, canonical) = vfs.resolve_path_canonical(path)?;
+    refuse_noexec(mount_flags(&vfs, &canonical))?;
+    let read = read_exec_node(&node, caller)?;
+    Ok((node, read))
+}
+
+/// What exec read of a file: its contents, and the denial of writes to it
+/// that lasts while it is being executed (ETXTBSY, `fs::write_access`).
+#[cfg(feature = "alloc")]
+pub(crate) type ExecRead = (Vec<u8>, crate::fs::write_access::WriteDenial);
+
+/// Whether `caller` may execute `node`: a regular file with permission to
+/// execute it (`fs::permission`: CAP_DAC_OVERRIDE needs at least one
+/// execute bit, as on Linux), or `PermissionDenied` (EACCES).
+#[cfg(feature = "alloc")]
+pub fn check_executable(
+    node: &dyn crate::fs::VfsNode,
+    caller: &super::creds::Caller,
+) -> Result<(), KernelError> {
+    if !may_execute(&node.metadata()?, caller) {
         return Err(KernelError::PermissionDenied { operation: "exec" });
     }
-    let mut data = alloc::vec![0u8; meta.size];
+    Ok(())
+}
+
+/// `node`'s contents, once `check_executable` passed on the same node, so
+/// the file cannot be swapped between the check and the read (N-101).
+/// Writes to it are denied first, after the permission check as in
+/// Linux's do_open_execat: a file open for writing is ETXTBSY, and none
+/// can change it under the read or while the denial is held.
+#[cfg(feature = "alloc")]
+fn read_exec_node(
+    node: &alloc::sync::Arc<dyn crate::fs::VfsNode>,
+    caller: &super::creds::Caller,
+) -> Result<ExecRead, KernelError> {
+    check_executable(&**node, caller)?;
+    let denial = crate::fs::write_access::WriteDenial::deny(node)?;
+    let mut data = alloc::vec![0u8; node.metadata()?.size];
     let n = node.read(0, &mut data)?;
     data.truncate(n);
-    Ok((node, data))
+    Ok((data, denial))
 }
 
 /// Whether `caller` may execute a node with metadata `meta`: a regular
@@ -450,22 +510,21 @@ fn may_execute(meta: &crate::fs::Metadata, caller: &super::creds::Caller) -> boo
 ///
 /// Supports shebang (`#!`) scripts: if the file starts with `#!`, the
 /// interpreter specified on the shebang line is executed instead, with the
-/// script path prepended to the argument list. Also supports PATH search --
-/// if the path does not start with `/`, standard directories are searched.
+/// script's name prepended to the argument list.
 ///
 /// `before_commit` runs just before the point of no return, once the
 /// program (and its interpreter and set-ID bits) checked out: the system
 /// call ends the process's other threads there (Linux's de_thread in
-/// begin_new_exec), so an exec that fails -- a PATH search meeting ENOENT
-/// -- leaves them running (PR #23 review).
+/// begin_new_exec), so an exec that fails -- a script whose interpreter is
+/// missing -- leaves them running (PR #23 review).
 #[cfg(feature = "alloc")]
 pub fn exec_process(
-    path: &str,
+    file: ExecFile,
     argv: &[&str],
     envp: &[&str],
     before_commit: &dyn Fn() -> Result<(), KernelError>,
 ) -> Result<(), KernelError> {
-    exec_at_depth(path, argv, envp, before_commit, 0)
+    exec_at_depth(file, argv, envp, before_commit, 0)
 }
 
 /// How many `#!` interpreters an exec follows (Linux's
@@ -481,7 +540,7 @@ pub fn may_follow_interpreter(depth: usize) -> bool {
 
 #[cfg(feature = "alloc")]
 fn exec_at_depth(
-    path: &str,
+    file: ExecFile,
     argv: &[&str],
     envp: &[&str],
     before_commit: &dyn Fn() -> Result<(), KernelError>,
@@ -490,35 +549,28 @@ fn exec_at_depth(
     let process = super::current_process().ok_or(KernelError::ProcessNotFound { pid: 0 })?;
     let current_thread = super::current_thread().ok_or(KernelError::ThreadNotFound { tid: 0 })?;
 
-    // Resolve path via PATH search if it doesn't start with '/'
-    let resolved_path = if !path.starts_with('/') {
-        search_path(path).ok_or(KernelError::FsError(crate::error::FsError::NotFound))?
-    } else {
-        String::from(path)
-    };
+    // Step 1: read the program, checking execute permission on the node
+    // that is read (N-101). A script's denial lasts while its interpreter
+    // is set up, the program's is the process's once the exec commits.
+    file.check_mount()?;
+    let (file_data, denial) = read_exec_node(&file.node, &super::creds::Caller::current())?;
 
-    // Step 1: Load new program from filesystem, checking execute
-    // permission on the node that is read (N-101).
-    let (file_node, file_data) = read_executable(&resolved_path, &super::creds::Caller::current())?;
-
-    // Step 1b: Check for shebang (#!) and delegate to interpreter if found
+    // Step 1b: a script runs its interpreter with [interpreter, opt_arg?,
+    // the script's name, argv[1..]] (argv[0], the script as the caller
+    // named it, is dropped).
     if let Some((interpreter, opt_arg)) = parse_shebang(&file_data) {
-        // Build new argv: [interpreter, opt_arg?, script_path, original_argv[1..]]
-        let mut new_argv: Vec<&str> = Vec::new();
-        let interp_ref: &str = &interpreter;
-        new_argv.push(interp_ref);
-
-        // Borrow opt_arg for the lifetime of this block
-        let opt_arg_string;
-        if let Some(ref arg) = opt_arg {
-            opt_arg_string = arg.clone();
-            new_argv.push(&opt_arg_string);
+        // The interpreter opens the script by name, which a close-on-exec
+        // descriptor's /dev/fd/N will not be after the exec (Linux's
+        // binfmt_script).
+        if file.path_inaccessible {
+            return Err(KernelError::FsError(crate::error::FsError::NotFound));
         }
-
-        let resolved_ref: &str = &resolved_path;
-        new_argv.push(resolved_ref);
-
-        // Append original argv[1..] (skip argv[0] which was the script name)
+        let mut new_argv: Vec<&str> = Vec::new();
+        new_argv.push(interpreter.as_str());
+        if let Some(arg) = &opt_arg {
+            new_argv.push(arg.as_str());
+        }
+        new_argv.push(file.filename.as_str());
         if argv.len() > 1 {
             new_argv.extend_from_slice(&argv[1..]);
         }
@@ -529,17 +581,22 @@ fn exec_at_depth(
         if !may_follow_interpreter(depth) {
             return Err(KernelError::FsError(crate::error::FsError::SymlinkLoop));
         }
-        exec_at_depth(&interpreter, &new_argv, envp, before_commit, depth + 1)?;
-        *current_thread.comm.lock() = super::thread::comm_from(basename(&resolved_path).as_bytes());
+        exec_at_depth(
+            ExecFile::open(&interpreter)?,
+            &new_argv,
+            envp,
+            before_commit,
+            depth + 1,
+        )?;
+        *current_thread.comm.lock() = super::thread::comm_from(file.comm.as_bytes());
         return Ok(());
     }
 
     exec_image(
         process,
         current_thread,
-        resolved_path,
-        file_node,
-        file_data,
+        file,
+        (file_data, denial),
         argv,
         envp,
         before_commit,
@@ -557,14 +614,22 @@ fn exec_at_depth(
 fn exec_image(
     process: alloc::sync::Arc<super::Process>,
     current_thread: alloc::sync::Arc<super::Thread>,
-    resolved_path: String,
-    file_node: alloc::sync::Arc<dyn crate::fs::VfsNode>,
-    file_data: Vec<u8>,
+    file: ExecFile,
+    (file_data, denial): ExecRead,
     argv: &[&str],
     envp: &[&str],
     before_commit: &dyn Fn() -> Result<(), KernelError>,
 ) -> Result<(), KernelError> {
     use crate::elf::ElfLoader;
+
+    let ExecFile {
+        node: file_node,
+        filename,
+        exe_path,
+        comm,
+        mnt_flags,
+        ..
+    } = file;
 
     // Validate and plan the image before touching the current address
     // space (ADR 0010). exec must leave the caller intact when it fails;
@@ -589,15 +654,19 @@ fn exec_image(
 
     // The interpreter (PT_INTERP) is opened, permission-checked and checked
     // before the point of no return as well, as Linux does: a missing or
-    // non-executable loader fails the exec with the old image intact.
+    // non-executable loader fails the exec with the old image intact. Its
+    // writes are denied for the exec only (`_interp_denial`), as Linux's.
     type Interp = (
         alloc::sync::Arc<dyn crate::fs::VfsNode>,
         Vec<u8>,
         crate::elf::ElfBinary,
     );
+    let mut _interp_denial = None;
     let interp: Option<Interp> = match &elf_binary.interpreter {
         Some(path) => {
-            let (node, data) = read_executable(path, &super::creds::Caller::current())?;
+            let (node, (data, interp_denial)) =
+                read_executable(path, &super::creds::Caller::current())?;
+            _interp_denial = Some(interp_denial);
             let bad = |_| KernelError::InvalidArgument {
                 name: "interpreter",
                 value: "not a loadable ELF image",
@@ -620,15 +689,37 @@ fn exec_image(
             |meta: &crate::fs::Metadata| crate::fs::permission(&caller, meta, crate::fs::MAY_READ);
         let meta = file_node.metadata()?;
         let perms = meta.permissions;
-        let interp_readable = match &interp {
-            Some((node, ..)) => readable(&node.metadata()?),
-            None => true,
+        let interp_meta = match &interp {
+            Some((node, ..)) => Some(node.metadata()?),
+            None => None,
         };
-        let file_caps = exec_file_caps(&*file_node)?;
+        let interp_readable = interp_meta.as_ref().is_none_or(readable);
+        let mut mm_userns = process.user_ns();
+        for m in core::iter::once(&meta).chain(interp_meta.as_ref()) {
+            if !readable(m) {
+                mm_userns = mm_userns.ancestor_mapping(m.uid, m.gid);
+            }
+        }
+        // A nosuid mount offers neither (Linux's mnt_may_suid, in
+        // bprm_fill_uid and get_file_caps).
+        let suid = mnt_flags & crate::fs::mount::flags::NOSUID == 0;
+        let file_caps = if suid {
+            exec_file_caps(&*file_node, &process.user_ns())?
+        } else {
+            None
+        };
+        // Neither when the caller's user namespace does not map both the
+        // owner and the group (bprm_fill_uid's vfsuid_has_mapping): root
+        // of a namespace of one's own gets nothing from a program it
+        // could not have made set-ID itself.
+        let ns = process.user_ns();
+        let mapped = ns.uid_up(meta.uid).is_some() && ns.gid_up(meta.gid).is_some();
+        let suid_ids = suid && mapped;
         ExecIds {
-            set_uid: perms.set_uid.then_some(meta.uid),
-            set_gid: (perms.set_gid && perms.group_exec).then_some(meta.gid),
+            set_uid: (suid_ids && perms.set_uid).then_some(meta.uid),
+            set_gid: (suid_ids && perms.set_gid && perms.group_exec).then_some(meta.gid),
             readable: readable(&meta) && interp_readable,
+            mm_userns,
             unprivileged_tracer_at_start: false,
             file_caps,
         }
@@ -642,6 +733,7 @@ fn exec_image(
         let old = process.credentials();
         let ctx = super::linux_caps::ExecContext {
             file: Some(file),
+            root_uid: process.user_ns().root_uid(),
             ..Default::default()
         };
         current_thread
@@ -703,7 +795,10 @@ fn exec_image(
         // Step 2: Clear current address space and load new program; the
         // old image's size stays in the peak resident set, as on Linux.
         process.note_rss();
-        *process.exe_path.lock() = resolved_path.clone();
+        *process.exe_path.lock() = exe_path.clone();
+        // The new program's writes stay denied while it runs (Linux's
+        // set_mm_exe_file); the old program's are allowed again.
+        *process.exe_denial.lock() = Some(denial);
         let loaded = {
             let mut memory_space = process.memory_space.lock();
 
@@ -777,10 +872,28 @@ fn exec_image(
         // the loader's refusal of LD_PRELOAD and LD_LIBRARY_PATH) follows
         // from them.
         let secure = install_exec_credentials(&process, &current_thread, set_ids)?;
+        // personality: READ_IMPLIES_EXEC goes, and with a secure exec
+        // PER_CLEAR_ON_SETID too (Linux's bprm->per_clear).
+        let persona = current_thread
+            .personality
+            .load(core::sync::atomic::Ordering::Acquire);
+        current_thread.personality.store(
+            super::personality::after_exec(persona, secure),
+            core::sync::atomic::Ordering::Release,
+        );
+        // A new address space as far as kcmp(KCMP_VM) can tell.
+        process.vm_id.store(
+            super::pcb::new_vm_id(),
+            core::sync::atomic::Ordering::Release,
+        );
+        // After unshare(CLONE_NEWTIME) the new program runs in the time
+        // namespace for children (Linux's exec_task_namespaces).
+        if let Some(set) = current_thread.namespaces().after_exec() {
+            current_thread.set_namespaces(alloc::sync::Arc::new(set));
+        }
 
         // Step 3: Setup new stack with arguments, environment, and aux vector
-        let stack_top =
-            setup_exec_stack(&process, argv, envp, &resolved_path, &loaded.aux, secure)?;
+        let stack_top = setup_exec_stack(&process, argv, envp, &filename, &loaded.aux, secure)?;
         Ok((loaded.start, stack_top))
     })();
     process
@@ -796,7 +909,7 @@ fn exec_image(
 
     // Step 3b: Populate the process's env_vars BTreeMap from envp.
     // This makes environment variables available to kernel-side lookups
-    // (e.g. PATH resolution in search_path()) without reading user memory.
+    // without reading user memory.
     {
         let mut env_map = process.env_vars.lock();
         env_map.clear();
@@ -832,12 +945,12 @@ fn exec_image(
         .did_exec
         .store(true, core::sync::atomic::Ordering::Release);
 
-    // Step 5: Close file descriptors marked close-on-exec
-    {
-        let file_table = process.file_table.lock();
-
-        file_table.close_on_exec();
-    }
+    // Step 5: Close file descriptors marked close-on-exec, in a table of
+    // the process's own: one it shares with another process (CLONE_FILES)
+    // is copied first, so the other keeps its descriptors (Linux's
+    // unshare_files in begin_new_exec).
+    process.unshare_files();
+    process.file_table.lock().close_on_exec();
 
     // Step 5b: Only capabilities marked PRESERVE_EXEC survive exec (N-30).
     // The filtered space used to be built in sys_exec and then dropped, so
@@ -856,15 +969,25 @@ fn exec_image(
     }
 
     // Step 6: Reset signal handlers to defaults, and the alternate signal
-    // stack (it was in the old image), as Linux does.
+    // stack (it was in the old image), as Linux does. POSIX timers are
+    // deleted and their pending signals dropped (exit_itimers and
+    // flush_itimer_signals); the interval timers stay.
+    // Shared actions (CLONE_SIGHAND) are copied first, as de_thread's
+    // unshare_sighand.
+    process.unshare_sighand();
     process.reset_signal_handlers();
+    super::posix_timer::delete_all(&process);
+    process.rt_queue.clear_timers(&process.pending_signals);
+    current_thread
+        .rt_queue
+        .clear_timers(&current_thread.sigpending);
     *current_thread.altstack.lock() = super::signals::SigAltStack::default();
     // The robust list was in the old image too (N-225).
     current_thread
         .robust_list
         .store(0, core::sync::atomic::Ordering::Release);
     // The command name is the program's file name (N-227).
-    *current_thread.comm.lock() = super::thread::comm_from(basename(&resolved_path).as_bytes());
+    *current_thread.comm.lock() = super::thread::comm_from(comm.as_bytes());
 
     // The image is replaced: a parent waiting in vfork may run again; the
     // memory it shared with this process is no longer this process's.
@@ -1096,11 +1219,13 @@ pub(crate) fn setup_exec_stack(
     secure: bool,
 ) -> Result<usize, KernelError> {
     let creds = process.credentials();
+    // As the process's own user namespace sees them (create_elf_tables).
+    let ns = process.user_ns();
     let process_aux = crate::elf::dynamic::ProcessAux {
-        uid: creds.ruid,
-        euid: creds.euid,
-        gid: creds.rgid,
-        egid: creds.egid,
+        uid: ns.uid_munged(creds.ruid),
+        euid: ns.uid_munged(creds.euid),
+        gid: ns.gid_munged(creds.rgid),
+        egid: ns.gid_munged(creds.egid),
         // Linux's secureexec, as exec decided it (`ExecOutcome::secure`).
         secure,
     };
@@ -1244,10 +1369,11 @@ pub(crate) fn exec_stack_layout<'a>(
 #[cfg(feature = "alloc")]
 fn exec_file_caps(
     node: &dyn crate::fs::VfsNode,
+    ns: &super::userns::UserNs,
 ) -> Result<Option<super::linux_caps::FileCaps>, KernelError> {
     match node.xattrs() {
         Ok(attrs) => match attrs.get(crate::fs::xattr::XATTR_NAME_CAPS) {
-            Some(value) => super::linux_caps::FileCaps::from_xattr(value).map_err(|_| {
+            Some(value) => super::linux_caps::FileCaps::from_xattr(value, ns).map_err(|_| {
                 KernelError::InvalidArgument {
                     name: "security.capability",
                     value: "not a file capability",
@@ -1278,9 +1404,12 @@ mod tests {
         let vfs = make_vfs_with_root();
         let root = vfs.root_fs().unwrap().root();
         let inner = root.create("prog", Permissions::from_mode(0o4755)).unwrap();
-        assert!(matches!(exec_file_caps(&*inner), Ok(None)));
+        assert!(matches!(
+            exec_file_caps(&*inner, &crate::process::userns::initial()),
+            Ok(None)
+        ));
         let stuck = Arc::new(StuckCaps(inner, true));
-        assert!(exec_file_caps(&*stuck).is_err());
+        assert!(exec_file_caps(&*stuck, &crate::process::userns::initial()).is_err());
     }
 
     /// An exec follows at most four `#!` interpreters, as Linux, and then
@@ -1426,10 +1555,11 @@ mod tests {
             process::creds::{Caller, Credentials},
         };
         let file = NodeType::File;
-        let root = Caller::KERNEL;
+        let root = Caller::kernel();
         let user = |uid: u32, gid: u32| Caller {
             creds: Credentials::new(uid, gid),
             caps: crate::process::linux_caps::LinuxCaps::EMPTY,
+            userns: crate::process::userns::initial(),
         };
         // Root: any execute bit, but at least one.
         assert!(!may_execute(&meta(file, 0o644, 0, 0), &root));
@@ -1448,5 +1578,26 @@ mod tests {
         // Uid 0 without CAP_DAC_OVERRIDE is held to the mode bits.
         assert!(!may_execute(&meta(file, 0o100, 5, 5), &user(0, 0)));
         assert!(may_execute(&meta(file, 0o100, 5, 5), &root));
+    }
+
+    /// execveat checks the node it looked up before copying argv, and an
+    /// exec that fails the check is EACCES, not ENOENT as every exec error
+    /// used to be (group 3 step D3c).
+    #[test]
+    fn check_executable_refuses_directories_and_plain_files() {
+        use crate::{
+            fs::{tests::make_vfs_with_root, Permissions},
+            process::creds::Caller,
+        };
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        let dir = root.mkdir("d", Permissions::from_mode(0o755)).unwrap();
+        let plain = root.create("plain", Permissions::from_mode(0o644)).unwrap();
+        let prog = root.create("prog", Permissions::from_mode(0o755)).unwrap();
+        let denied =
+            |r: Result<(), KernelError>| matches!(r, Err(KernelError::PermissionDenied { .. }));
+        assert!(denied(check_executable(&*dir, &Caller::kernel())));
+        assert!(denied(check_executable(&*plain, &Caller::kernel())));
+        assert!(check_executable(&*prog, &Caller::kernel()).is_ok());
     }
 }

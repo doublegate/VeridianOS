@@ -480,6 +480,52 @@ fn raw_readable(vmin: u8, vtime: u8, avail: usize) -> bool {
     avail >= amt
 }
 
+/// FIONREAD (TIOCINQ) on the console, as n_tty counts it: in canonical
+/// mode the bytes of complete lines only (the line being edited is not
+/// readable yet), in raw mode every byte received.
+pub fn bytes_readable() -> usize {
+    use crate::drivers::terminal;
+    poll_hardware();
+    let canonical = terminal::is_canonical_mode();
+    let verase = terminal::get_verase();
+    let line = LINE.lock();
+    with_ring(|r| readable_count(canonical, verase, &line, r))
+}
+
+/// [`bytes_readable`] for given line and ring states. In canonical mode the
+/// ring's bytes are edited as [`read_tty`] edits them (VERASE or ^H take
+/// back a byte of the line being typed, CR is NL, ^D ends a line and is not
+/// data, a full line drops what follows), and every complete line counts,
+/// as Linux's inq_canon counts up to the last line end; the line still
+/// being typed does not.
+fn readable_count(canonical: bool, verase: u8, line: &Line, ring: &Ring) -> usize {
+    if !canonical {
+        return line.len + ring.len;
+    }
+    let (mut total, mut typing) = if line.complete {
+        (line.len, 0)
+    } else {
+        (0, line.len)
+    };
+    for byte in (0..ring.len).map(|i| ring.buf[(ring.head + i) % CAPACITY]) {
+        if byte == verase || byte == 8 {
+            typing = typing.saturating_sub(1);
+        } else if byte == EOF_CHAR {
+            total += typing;
+            typing = 0;
+        } else {
+            if typing < CAPACITY {
+                typing += 1;
+            }
+            if matches!(byte, b'\n' | b'\r') {
+                total += typing;
+                typing = 0;
+            }
+        }
+    }
+    total
+}
+
 /// Whether the ring holds what ends a canonical line.
 fn ring_has_line_end(r: &Ring) -> bool {
     (0..r.len).any(|i| matches!(r.buf[(r.head + i) % CAPACITY], b'\n' | b'\r' | EOF_CHAR))
@@ -510,6 +556,50 @@ mod tests {
         assert!(r.push(1));
         assert!(r.push(2));
         assert_eq!((r.pop(), r.pop()), (Some(1), Some(2)));
+    }
+
+    /// FIONREAD counts what a read would hand out: nothing of a canonical
+    /// line still being typed, a finished line with its newline but not
+    /// the ^D that ends one, everything in raw mode.
+    #[test]
+    fn readable_count_follows_the_line_discipline() {
+        let line = |text: &[u8], complete| {
+            let mut l = Line {
+                buf: [0; CAPACITY],
+                len: text.len(),
+                complete,
+            };
+            l.buf[..text.len()].copy_from_slice(text);
+            l
+        };
+        let ring = |bytes: &[u8]| {
+            let mut r = Ring::new();
+            for &b in bytes {
+                r.push(b);
+            }
+            r
+        };
+        let count = |l: &Line, r: &Ring| readable_count(true, 0x7f, l, r);
+        assert_eq!(count(&line(b"", false), &ring(b"abc")), 0);
+        assert_eq!(count(&line(b"", false), &ring(b"ab\ncd")), 3);
+        assert_eq!(count(&line(b"xy", false), &ring(b"z\r")), 4);
+        assert_eq!(count(&line(b"ab", false), &ring(&[EOF_CHAR])), 2);
+        // Every complete line counts (PR #35 review), and erases are
+        // applied, as a read would apply them: VERASE and ^H, not past the
+        // start of the line.
+        assert_eq!(count(&line(b"done\n", true), &ring(b"more\n")), 10);
+        assert_eq!(count(&line(b"", false), &ring(b"ab\x7f\n")), 2);
+        assert_eq!(count(&line(b"x", false), &ring(b"\x08\x08\x08y\n")), 2);
+        assert_eq!(count(&line(b"", false), &ring(b"a\nb\nc")), 4);
+        // Another VERASE: 0x7f is then data.
+        assert_eq!(
+            readable_count(true, 0x15, &line(b"", false), &ring(b"a\x7f\x15\n")),
+            2
+        );
+        assert_eq!(
+            readable_count(false, 0x7f, &line(b"ab", false), &ring(b"cd")),
+            4
+        );
     }
 
     /// The ring and the line buffer are global: tests that use them run

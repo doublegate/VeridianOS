@@ -342,6 +342,9 @@ mod limits;
 
 // poll, ppoll, select, pselect6
 mod multiplex;
+
+// restart_syscall and the restart block
+pub(crate) mod restart;
 use self::multiplex::{sys_poll, sys_ppoll, sys_pselect6, sys_select};
 
 // Import user space utilities
@@ -362,6 +365,31 @@ mod linux_caps;
 mod thread_clone;
 pub(crate) mod userspace;
 mod xattr;
+// Simple file calls (creat, preadv2, close_range, sync_file_range, ...)
+mod file_calls;
+// sendfile, copy_file_range, splice, tee and vmsplice
+mod splice;
+// name_to_handle_at and open_by_handle_at
+mod fhandle;
+// inotify_init, inotify_init1, inotify_add_watch and inotify_rm_watch
+#[cfg(feature = "alloc")]
+mod notify;
+#[cfg(feature = "alloc")]
+mod pidfd;
+// kcmp
+#[cfg(feature = "alloc")]
+mod kcmp;
+// process_vm_readv and process_vm_writev
+#[cfg(feature = "alloc")]
+mod process_vm;
+// unshare, setns, sethostname, setdomainname and the nsfs ioctls (ADR 0022)
+#[cfg(feature = "alloc")]
+mod namespaces;
+// mount(2) and umount2 (ADR 0022 H3b)
+#[cfg(feature = "alloc")]
+mod mount;
+#[cfg(feature = "alloc")]
+pub(crate) use debug::may_read_process;
 pub(crate) use filesystem::rename_paths;
 pub use futex::sys_futex_wake;
 
@@ -492,6 +520,25 @@ pub enum SyscallError {
     ReadOnlyFilesystem = -134,
     /// No such extended attribute (ENODATA, errno 61).
     NoData = -135,
+    /// The wrong type of file for the operation, e.g. a directory for
+    /// openat2's OPENAT2_REGULAR (EFTYPE, errno 134, new in Linux 7.3).
+    WrongFileType = -136,
+    /// A file handle names no file any more, or not on that filesystem
+    /// (ESTALE, errno 116; open_by_handle_at).
+    Stale = -137,
+    /// A running program opened for writing or truncated, or a file open
+    /// for writing executed (ETXTBSY, errno 26).
+    TextBusy = -138,
+    /// No route to the destination's network, e.g. from a network
+    /// namespace whose interfaces are down (ENETUNREACH, errno 101).
+    NetworkUnreachable = -140,
+    /// Too many users: joining a time namespace from a multi-threaded
+    /// process (EUSERS, errno 87).
+    TooManyUsers = -139,
+    /// The call was interrupted and left a restart block (`restart`):
+    /// Linux -ERESTART_RESTARTBLOCK, turned into EINTR or restart_syscall
+    /// on the way back to user mode and never seen there.
+    RestartBlock = -516,
 }
 
 impl From<IpcError> for SyscallError {
@@ -565,7 +612,10 @@ pub fn map_kernel_error(err: crate::error::KernelError) -> SyscallError {
             FsError::OperationNotPermitted => SyscallError::OperationNotPermitted,
             FsError::Busy => SyscallError::Busy,
             FsError::NoData => SyscallError::NoData,
+            FsError::TextBusy => SyscallError::TextBusy,
             FsError::Canceled => SyscallError::Canceled,
+            FsError::OutOfRange => SyscallError::RangeError,
+            FsError::NoProcess => SyscallError::ProcessNotFound,
         },
         KernelError::OutOfMemory { .. } => SyscallError::OutOfMemory,
         KernelError::InvalidArgument { .. } => SyscallError::InvalidArgument,
@@ -820,11 +870,21 @@ fn dispatch(
 /// Whether EPIPE from `syscall` comes with SIGPIPE for the caller, as on
 /// Linux: from a write always (pipe_write; a socket written with write),
 /// from a send unless its flags (`arg3` for sendmsg, `arg4` for sendto)
-/// carry MSG_NOSIGNAL.
+/// carry MSG_NOSIGNAL, from pwritev2 unless its flags carry RWF_NOSIGNAL.
 fn raises_sigpipe(syscall: Syscall, arg3: usize, arg4: usize) -> bool {
     const MSG_NOSIGNAL: usize = 0x4000;
+    const RWF_NOSIGNAL: usize = 0x100;
     match syscall {
-        Syscall::Write | Syscall::Writev | Syscall::SocketSend => true,
+        Syscall::Write
+        | Syscall::Writev
+        | Syscall::SocketSend
+        | Syscall::Sendfile
+        | Syscall::Splice
+        | Syscall::Tee
+        | Syscall::Vmsplice => true,
+        // At the file position (an offset is ESPIPE on a pipe or socket),
+        // unless its flags carry RWF_NOSIGNAL.
+        Syscall::Pwritev2 => syscall_arg6().map_or(true, |f| f as u32 as usize & RWF_NOSIGNAL == 0),
         Syscall::Sendto => arg4 & MSG_NOSIGNAL == 0,
         Syscall::Sendmsg => arg3 & MSG_NOSIGNAL == 0,
         _ => false,
@@ -884,6 +944,7 @@ fn handle_syscall(
         Syscall::Fork => sys_fork(),
         Syscall::Vfork => process::sys_vfork(),
         Syscall::Execve => sys_exec(arg1, arg2, arg3),
+        Syscall::Execveat => sys_execveat(arg1, arg2, arg3, arg4, arg5),
         Syscall::Wait4 => sys_wait4(arg1 as isize, arg2, arg3, arg4),
         Syscall::Getpid => sys_getpid(),
         Syscall::Getppid => sys_getppid(),
@@ -966,6 +1027,7 @@ fn handle_syscall(
         // pause(): what musl does on the generic table, which has no pause.
         Syscall::Pause => sys_ppoll(0, 0, 0, 0, 0),
         Syscall::RtSigreturn => sys_sigreturn(arg1),
+        Syscall::RestartSyscall => restart::sys_restart_syscall(),
 
         // POSIX time syscalls
         Syscall::ClockGettime => sys_clock_gettime(arg1, arg2),
@@ -974,6 +1036,8 @@ fn handle_syscall(
         Syscall::Gettimeofday => sys_gettimeofday(arg1, arg2),
         Syscall::Settimeofday => sys_settimeofday(arg1, arg2),
         Syscall::ClockSettime => sys_clock_settime(arg1, arg2),
+        Syscall::Adjtimex => sys_adjtimex(arg1),
+        Syscall::ClockAdjtime => sys_clock_adjtime(arg1, arg2),
         Syscall::Time => sys_time(arg1),
 
         // Identity syscalls
@@ -998,6 +1062,9 @@ fn handle_syscall(
         Syscall::Fchdir => sys_fchdir(arg1),
         Syscall::Chroot => sys_chroot(arg1),
         Syscall::Utimensat => sys_utimensat(arg1, arg2, arg3, arg4),
+        Syscall::Utimes => sys_utimes(arg1, arg2),
+        Syscall::Futimesat => sys_futimesat(arg1, arg2, arg3),
+        Syscall::Utime => sys_utime(arg1, arg2),
 
         // Process group / session syscalls
         Syscall::Setpgid => sys_setpgid(arg1, arg2),
@@ -1047,6 +1114,9 @@ fn handle_syscall(
         Syscall::Truncate => sys_truncate(arg1, arg2),
         Syscall::Poll => sys_poll(arg1, arg2, arg3),
         Syscall::Openat => sys_openat(arg1, arg2, arg3, arg4),
+        Syscall::Openat2 => sys_openat2(arg1, arg2, arg3, arg4),
+        Syscall::NameToHandleAt => fhandle::sys_name_to_handle_at(arg1, arg2, arg3, arg4, arg5),
+        Syscall::OpenByHandleAt => fhandle::sys_open_by_handle_at(arg1, arg2, arg3),
         Syscall::Newfstatat => sys_fstatat(arg1, arg2, arg3, arg4),
         Syscall::Unlinkat => sys_unlinkat(arg1, arg2, arg3),
         Syscall::Mkdirat => sys_mkdirat(arg1, arg2, arg3),
@@ -1419,11 +1489,68 @@ fn handle_syscall(
 
         // musl libc compatibility syscalls
         Syscall::Getdents64 => sys_getdents64(arg1, arg2, arg3),
+        Syscall::Getdents => file_calls::sys_getdents(arg1, arg2, arg3),
+        Syscall::Creat => file_calls::sys_creat(arg1, arg2),
+        Syscall::Lchown => file_calls::sys_lchown(arg1, arg2, arg3),
+        Syscall::Fchmodat2 => file_calls::sys_fchmodat2(arg1, arg2, arg3, arg4),
+        Syscall::Preadv => file_calls::sys_preadv(arg1, arg2, arg3, arg4),
+        Syscall::Pwritev => file_calls::sys_pwritev(arg1, arg2, arg3, arg4),
+        Syscall::Preadv2 => file_calls::sys_preadv2(arg1, arg2, arg3, arg4, syscall_arg6()?),
+        Syscall::Pwritev2 => file_calls::sys_pwritev2(arg1, arg2, arg3, arg4, syscall_arg6()?),
+        Syscall::CloseRange => file_calls::sys_close_range(arg1, arg2, arg3),
+        Syscall::Sendfile => splice::sys_sendfile(arg1, arg2, arg3, arg4),
+        Syscall::CopyFileRange => {
+            splice::sys_copy_file_range(arg1, arg2, arg3, arg4, arg5, syscall_arg6()?)
+        }
+        Syscall::Splice => splice::sys_splice(arg1, arg2, arg3, arg4, arg5, syscall_arg6()?),
+        Syscall::Tee => splice::sys_tee(arg1, arg2, arg3, arg4),
+        Syscall::Vmsplice => splice::sys_vmsplice(arg1, arg2, arg3, arg4),
+        Syscall::Syncfs => file_calls::sys_syncfs(arg1),
+        Syscall::SyncFileRange => file_calls::sys_sync_file_range(arg1, arg2, arg3, arg4),
+        Syscall::Readahead => file_calls::sys_readahead(arg1, arg2, arg3),
+        Syscall::Fadvise64 => file_calls::sys_fadvise64(arg1, arg2, arg3, arg4),
+        Syscall::Ustat => file_calls::sys_ustat(arg1, arg2),
+        Syscall::Sysfs => file_calls::sys_sysfs(arg1, arg2, arg3),
         #[cfg(feature = "alloc")]
         Syscall::Prlimit64 => limits::sys_prlimit64(arg1, arg2, arg3, arg4),
-        Syscall::InotifyInit1 => Err(SyscallError::NotImplemented),
-        Syscall::InotifyAddWatch => Err(SyscallError::NotImplemented),
-        Syscall::InotifyRmWatch => Err(SyscallError::NotImplemented),
+        #[cfg(feature = "alloc")]
+        Syscall::InotifyInit => notify::sys_inotify_init1(0),
+        #[cfg(feature = "alloc")]
+        Syscall::InotifyInit1 => notify::sys_inotify_init1(arg1),
+        #[cfg(feature = "alloc")]
+        Syscall::InotifyAddWatch => notify::sys_inotify_add_watch(arg1, arg2, arg3),
+        #[cfg(feature = "alloc")]
+        Syscall::InotifyRmWatch => notify::sys_inotify_rm_watch(arg1, arg2),
+        #[cfg(feature = "alloc")]
+        Syscall::PidfdOpen => pidfd::sys_pidfd_open(arg1, arg2),
+        #[cfg(feature = "alloc")]
+        Syscall::PidfdSendSignal => pidfd::sys_pidfd_send_signal(arg1, arg2, arg3, arg4),
+        #[cfg(feature = "alloc")]
+        Syscall::PidfdGetfd => pidfd::sys_pidfd_getfd(arg1, arg2, arg3),
+        Syscall::Personality => process::sys_personality(arg1),
+        #[cfg(feature = "alloc")]
+        Syscall::Kcmp => kcmp::sys_kcmp(arg1, arg2, arg3, arg4, arg5),
+        #[cfg(feature = "alloc")]
+        Syscall::Unshare => namespaces::sys_unshare(arg1),
+        #[cfg(feature = "alloc")]
+        Syscall::Setns => namespaces::sys_setns(arg1, arg2),
+        #[cfg(feature = "alloc")]
+        Syscall::Mount => mount::sys_mount(arg1, arg2, arg3, arg4, arg5),
+        #[cfg(feature = "alloc")]
+        Syscall::Umount2 => mount::sys_umount2(arg1, arg2),
+        Syscall::PivotRoot => mount::sys_pivot_root(arg1, arg2),
+        #[cfg(feature = "alloc")]
+        Syscall::Sethostname => namespaces::sys_sethostname(arg1, arg2),
+        #[cfg(feature = "alloc")]
+        Syscall::Setdomainname => namespaces::sys_setdomainname(arg1, arg2),
+        #[cfg(feature = "alloc")]
+        Syscall::ProcessVmReadv => {
+            process_vm::sys_process_vm_readv(arg1, arg2, arg3, arg4, arg5, syscall_arg6()?)
+        }
+        #[cfg(feature = "alloc")]
+        Syscall::ProcessVmWritev => {
+            process_vm::sys_process_vm_writev(arg1, arg2, arg3, arg4, arg5, syscall_arg6()?)
+        }
         #[cfg(feature = "alloc")]
         Syscall::Madvise => memory::sys_madvise(arg1, arg2, arg3),
 
@@ -1463,9 +1590,27 @@ fn handle_syscall(
         Syscall::Sysinfo => usage::sys_sysinfo(arg1),
         #[cfg(feature = "alloc")]
         Syscall::Times => usage::sys_times(arg1),
-        Syscall::Rseq | Syscall::Statx | Syscall::Clone3 | Syscall::Fallocate => {
-            Err(SyscallError::NotImplemented)
-        }
+        #[cfg(feature = "alloc")]
+        Syscall::Getitimer => time::sys_getitimer(arg1, arg2),
+        #[cfg(feature = "alloc")]
+        Syscall::Setitimer => time::sys_setitimer(arg1, arg2, arg3),
+        #[cfg(feature = "alloc")]
+        Syscall::Alarm => time::sys_alarm(arg1),
+        #[cfg(feature = "alloc")]
+        Syscall::TimerCreate => time::sys_timer_create(arg1, arg2, arg3),
+        #[cfg(feature = "alloc")]
+        Syscall::TimerSettime => time::sys_timer_settime(arg1, arg2, arg3, arg4),
+        #[cfg(feature = "alloc")]
+        Syscall::TimerGettime => time::sys_timer_gettime(arg1, arg2),
+        #[cfg(feature = "alloc")]
+        Syscall::TimerGetoverrun => time::sys_timer_getoverrun(arg1),
+        #[cfg(feature = "alloc")]
+        Syscall::TimerDelete => time::sys_timer_delete(arg1),
+        Syscall::Rseq => Err(SyscallError::NotImplemented),
+        #[cfg(feature = "alloc")]
+        Syscall::Clone3 => thread_clone::sys_clone3(arg1, arg2),
+        Syscall::Statx => sys_statx(arg1, arg2, arg3, arg4, arg5),
+        Syscall::Fallocate => sys_fallocate(arg1, arg2, arg3, arg4),
         Syscall::Statfs => sys_statfs(arg1, arg2),
         Syscall::Fstatfs => sys_fstatfs(arg1, arg2),
         Syscall::Sigaltstack => signal::sys_sigaltstack(arg1, arg2),
@@ -1794,27 +1939,40 @@ fn sys_getrandom(buf_ptr: usize, buflen: usize, flags: usize) -> SyscallResult {
 /// Number of bytes written to buf, or 0 when no more entries. A buffer too
 /// small for the next entry is EINVAL.
 fn sys_getdents64(fd: usize, buf_ptr: usize, buf_size: usize) -> SyscallResult {
-    if buf_size == 0 {
-        return Err(SyscallError::InvalidArgument);
-    }
-    validate_user_buffer(buf_ptr, buf_size)?;
+    getdents(fd, buf_ptr, buf_size, DirentForm::Dirent64)
+}
 
+/// getdents and getdents64: as many records of `form` as fit in
+/// `buf_size` bytes at `buf_ptr`, from the directory position of `fd` on.
+/// In Linux's order (N-206): a bad descriptor is EBADF, one that is not a
+/// directory ENOTDIR (it was EIO), and the directory's own errors are
+/// reported as themselves; at the end of the directory the result is 0
+/// whatever the buffer; then a buffer too small for one record is EINVAL.
+fn getdents(fd: usize, buf_ptr: usize, buf_size: usize, form: DirentForm) -> SyscallResult {
     let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
-    let file_table = proc.file_table.lock();
-    let file_desc = file_table.get(fd).ok_or(SyscallError::BadFileDescriptor)?;
+    // The table lock is not held across the directory read (N-118).
+    let file_desc = proc
+        .file_table
+        .lock()
+        .get(fd)
+        .ok_or(SyscallError::BadFileDescriptor)?;
+    if file_desc.node.node_type() != crate::fs::NodeType::Directory {
+        return Err(SyscallError::NotADirectory);
+    }
 
-    let entries = file_desc
-        .node
-        .readdir()
-        .map_err(|_| SyscallError::IoError)?;
+    let entries = file_desc.node.readdir().map_err(map_kernel_error)?;
 
     let pos = file_desc.tell();
     if pos >= entries.len() {
         return Ok(0);
     }
+    if buf_size == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    validate_user_buffer(buf_ptr, buf_size)?;
 
     // Records are built in a kernel buffer and copied out once (N-43).
-    let (out, idx) = build_dirents64(&entries, pos, buf_size)?;
+    let (out, idx) = build_dirents(&entries, pos, buf_size, form)?;
 
     userspace::write_user_bytes(buf_ptr, &out)?;
 
@@ -1839,14 +1997,37 @@ fn dirent64_type(node_type: crate::fs::NodeType) -> u8 {
     }
 }
 
-/// Build `linux_dirent64` records for `entries[pos..]`, as many as fit in
-/// `buf_size` bytes. Returns the records and the index of the first entry
-/// not included (no records at all past the last entry), or EINVAL if not
-/// even the first remaining record fits.
+/// The directory record a getdents call writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirentForm {
+    /// `struct linux_dirent64`: d_ino, d_off, d_reclen, d_type, d_name.
+    Dirent64,
+    /// `struct linux_dirent` (getdents, x86_64 only): d_ino, d_off,
+    /// d_reclen, d_name, then d_type in the record's last byte, as Linux's
+    /// filldir writes it.
+    Dirent,
+}
+
+/// Build `linux_dirent64` records for `entries[pos..]`: `build_dirents`
+/// for getdents64.
+#[cfg(test)]
 fn build_dirents64(
     entries: &[crate::fs::DirEntry],
     pos: usize,
     buf_size: usize,
+) -> Result<(alloc::vec::Vec<u8>, usize), SyscallError> {
+    build_dirents(entries, pos, buf_size, DirentForm::Dirent64)
+}
+
+/// Build `form` records for `entries[pos..]`, as many as fit in `buf_size`
+/// bytes. Returns the records and the index of the first entry not
+/// included (no records at all past the last entry), or EINVAL if not even
+/// the first remaining record fits.
+fn build_dirents(
+    entries: &[crate::fs::DirEntry],
+    pos: usize,
+    buf_size: usize,
+    form: DirentForm,
 ) -> Result<(alloc::vec::Vec<u8>, usize), SyscallError> {
     let mut offset = 0usize;
     let mut idx = pos;
@@ -1855,7 +2036,8 @@ fn build_dirents64(
     while idx < entries.len() {
         let entry = &entries[idx];
         let name_bytes = entry.name.as_bytes();
-        // d_ino(8) + d_off(8) + d_reclen(2) + d_type(1) + name + NUL
+        // d_ino(8) + d_off(8) + d_reclen(2) + d_type(1) + name + NUL; the
+        // old record has d_type after the NUL, in its last byte.
         let reclen_unaligned = 8 + 8 + 2 + 1 + name_bytes.len() + 1;
         // Align to 8 bytes
         let reclen = (reclen_unaligned + 7) & !7;
@@ -1878,11 +2060,20 @@ fn build_dirents64(
         out.extend_from_slice(&((idx + 1) as u64).to_ne_bytes());
         // d_reclen
         out.extend_from_slice(&(reclen as u16).to_ne_bytes());
-        // d_type
-        out.push(dirent64_type(entry.node_type));
-        // d_name (NUL-terminated), then zero padding to reclen
-        out.extend_from_slice(name_bytes);
-        out.resize(offset + reclen, 0);
+        match form {
+            DirentForm::Dirent64 => {
+                // d_type, d_name (NUL-terminated), zero padding to reclen
+                out.push(dirent64_type(entry.node_type));
+                out.extend_from_slice(name_bytes);
+                out.resize(offset + reclen, 0);
+            }
+            DirentForm::Dirent => {
+                // d_name (NUL-terminated), zero padding, d_type last
+                out.extend_from_slice(name_bytes);
+                out.resize(offset + reclen - 1, 0);
+                out.push(dirent64_type(entry.node_type));
+            }
+        }
 
         offset += reclen;
         idx += 1;
@@ -1907,20 +2098,26 @@ fn sys_fchmodat(dirfd: usize, path_ptr: usize, mode: usize) -> SyscallResult {
     let abs_path = filesystem::resolve_at_path(dirfd, &rel_path)?;
 
     let vfs = filesystem::vfs()?;
-    let node = vfs
-        .resolve_path(&abs_path)
+    let (node, canonical) = vfs
+        .locate(&abs_path, true)
         .map_err(filesystem::map_resolve_err)?;
-    filesystem::chmod_node(&node, mode)
+    filesystem::want_write(&vfs, &canonical)?;
+    filesystem::chmod_node(&node, mode)?;
+    crate::fs::inotify::on_path(&abs_path, &node, crate::fs::inotify::IN_ATTRIB);
+    Ok(0)
 }
 
-/// fchownat syscall -- chown relative to a directory fd.
+/// fchownat syscall -- chown relative to a directory fd, as Linux's
+/// do_fchownat: AT_SYMLINK_NOFOLLOW changes a final symlink itself,
+/// AT_EMPTY_PATH with an empty path changes `dirfd` (or the cwd), and
+/// other flags are EINVAL (they used to be ignored).
 ///
 /// # Arguments
 /// - `dirfd`: Directory fd (AT_FDCWD for CWD-relative).
 /// - `path_ptr`: Path to the file.
 /// - `uid`: User ID.
 /// - `gid`: Group ID.
-/// - `flags`: AT_SYMLINK_NOFOLLOW, etc.
+/// - `flags`: AT_SYMLINK_NOFOLLOW, AT_EMPTY_PATH.
 fn sys_fchownat(
     dirfd: usize,
     path_ptr: usize,
@@ -1928,74 +2125,36 @@ fn sys_fchownat(
     gid: usize,
     flags: usize,
 ) -> SyscallResult {
-    let rel_path = filesystem::read_user_path(path_ptr)?;
-    let abs_path = filesystem::resolve_at_path(dirfd, &rel_path)?;
-    let vfs = filesystem::vfs()?;
-    let node = if flags & filesystem::AT_SYMLINK_NOFOLLOW != 0 {
-        vfs.resolve_path_no_follow(&abs_path)
-    } else {
-        vfs.resolve_path(&abs_path)
-    }
-    .map_err(filesystem::map_resolve_err)?;
+    let (node, at) = xattr::path_target_located(dirfd, path_ptr, flags as u32 as usize)?;
     // Same rules as chown (root only); this used to report success and
     // change nothing.
-    filesystem::chown_node(&node, uid, gid)
+    filesystem::chown_node(&node, uid, gid)?;
+    crate::fs::inotify::on_target(at.as_deref(), &node, crate::fs::inotify::IN_ATTRIB);
+    Ok(0)
 }
 
-/// linkat syscall -- create hard link relative to directory fds.
-///
-/// # Arguments
-/// - `olddirfd`: Directory fd for oldpath.
-/// - `oldpath_ptr`: Source path.
-/// - `newdirfd`: Directory fd for newpath.
-/// - `newpath_ptr`: Link destination path.
-/// - `flags`: AT_SYMLINK_FOLLOW, etc.
+/// linkat syscall -- create a hard link relative to directory fds
+/// ([`filesystem::link_at`]).
 fn sys_linkat(
     olddirfd: usize,
     oldpath_ptr: usize,
     newdirfd: usize,
     newpath_ptr: usize,
-    _flags: usize,
+    flags: usize,
 ) -> SyscallResult {
-    let old_rel = filesystem::read_user_path(oldpath_ptr)?;
-    let new_rel = filesystem::read_user_path(newpath_ptr)?;
-    let old_abs = filesystem::resolve_at_path(olddirfd, &old_rel)?;
-    let new_abs = filesystem::resolve_at_path(newdirfd, &new_rel)?;
-    // Checked and linked in the same directory node (N-51).
-    let (parent, link_name) = filesystem::parent_dir(&new_abs)?;
-    filesystem::check_dir_write(&*parent)?;
-
-    // Resolve old path to get target node
-    let target = filesystem::vfs()?
-        .resolve_path(&old_abs)
-        .map_err(filesystem::map_resolve_err)?;
-    parent
-        .link(&link_name, target)
-        .map_err(|_| SyscallError::InvalidArgument)?;
-    Ok(0)
+    filesystem::link_at(olddirfd, oldpath_ptr, newdirfd, newpath_ptr, flags)
 }
 
-/// symlinkat syscall -- create symlink relative to a directory fd.
-///
-/// # Arguments
-/// - `target_ptr`: Symlink target (what it points to).
-/// - `newdirfd`: Directory fd for linkpath.
-/// - `linkpath_ptr`: Path where symlink is created.
+/// symlinkat syscall -- create a symlink relative to a directory fd
+/// ([`filesystem::symlink_at`]).
 fn sys_symlinkat(target_ptr: usize, newdirfd: usize, linkpath_ptr: usize) -> SyscallResult {
-    let target = filesystem::read_user_path(target_ptr)?;
-    let link_rel = filesystem::read_user_path(linkpath_ptr)?;
-    let link_abs = filesystem::resolve_at_path(newdirfd, &link_rel)?;
-    // Checked and created in the same directory node (N-51).
-    let (parent, link_name) = filesystem::parent_dir(&link_abs)?;
-    filesystem::check_dir_write(&*parent)?;
-    let node = parent
-        .symlink(&link_name, &target)
-        .map_err(|_| SyscallError::InvalidArgument)?;
-    filesystem::own_new_node(&node);
-    Ok(0)
+    filesystem::symlink_at(target_ptr, newdirfd, linkpath_ptr)
 }
 
 /// readlinkat syscall -- read symlink target relative to a directory fd.
+/// An empty path reads the symlink `dirfd` names (an O_PATH|O_NOFOLLOW
+/// descriptor), ENOENT if it is not one, as Linux's do_readlinkat; a
+/// named file that is not a symlink is EINVAL.
 ///
 /// # Arguments
 /// - `dirfd`: Directory fd (AT_FDCWD for CWD-relative).
@@ -2006,17 +2165,24 @@ fn sys_readlinkat(dirfd: usize, path_ptr: usize, buf_ptr: usize, buf_size: usize
     if buf_size == 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    let rel_path = filesystem::read_user_path(path_ptr)?;
-    let abs_path = filesystem::resolve_at_path(dirfd, &rel_path)?;
+    let rel_path = filesystem::read_user_path_or_empty(path_ptr)?;
+    let empty = rel_path.is_empty();
+    let node = if empty {
+        xattr::path_target(dirfd, 0, filesystem::AT_EMPTY_PATH)?
+    } else {
+        let abs_path = filesystem::resolve_at_path(dirfd, &rel_path)?;
+        // readlinkat must not follow the final symlink
+        filesystem::vfs()?
+            .resolve_path_no_follow(&abs_path)
+            .map_err(filesystem::map_resolve_err)?
+    };
     validate_user_buffer(buf_ptr, buf_size)?;
-
-    let vfs = filesystem::vfs()?;
-
-    // readlinkat must not follow the final symlink
-    let node = vfs
-        .resolve_path_no_follow(&abs_path)
-        .map_err(filesystem::map_resolve_err)?;
-    let target = node.readlink().map_err(|_| SyscallError::InvalidArgument)?;
+    let target = node
+        .readlink()
+        .map_err(|e| match filesystem::readlink_error(e) {
+            SyscallError::InvalidArgument if empty => SyscallError::ResourceNotFound,
+            e => e,
+        })?;
 
     let bytes = target.as_bytes();
     let copy_len = bytes.len().min(buf_size);
@@ -2103,12 +2269,9 @@ fn sys_set_tid_address(tidptr: usize) -> SyscallResult {
             .store(tidptr, core::sync::atomic::Ordering::Release);
     }
 
-    // Return the caller's TID (Linux returns the thread's tid, but in
-    // VeridianOS single-threaded processes use pid as tid)
-    let tid = crate::process::current_thread()
-        .map(|t| t.tid.0 as usize)
-        .unwrap_or(proc.pid.0 as usize);
-    Ok(tid)
+    // The caller's TID, as its PID namespace numbers it (task_pid_vnr).
+    let tid = crate::process::current_thread().map_or(proc.pid.0, |t| t.tid.0);
+    Ok(crate::process::pidns::nr_in(tid, &proc.pid_ns()) as usize)
 }
 
 /// set_robust_list(head, len): the calling thread's robust futex list,
@@ -2142,24 +2305,32 @@ fn sys_get_robust_list(tid: usize, head_out: usize, len_out: usize) -> SyscallRe
             return Err(SyscallError::ProcessNotFound);
         }
         crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+        // A thread ID in the caller's PID namespace (find_task_by_vpid).
+        let kid =
+            crate::process::pidns::from_vnr(tid as i64).ok_or(SyscallError::ProcessNotFound)?;
         let mut found = None;
         crate::process::table::PROCESS_TABLE.for_each(|p| {
             if found.is_none() {
-                if let Some(t) = p.get_thread(crate::process::ThreadId(tid as u64)) {
+                if let Some(t) = p.get_thread(crate::process::ThreadId(kid)) {
                     found = Some((
                         p.credentials(),
                         p.dumpable.load(core::sync::atomic::Ordering::Acquire),
                         t,
+                        p.user_ns(),
+                        p.mm_user_ns(),
                     ));
                 }
             }
         });
-        let (creds, dumpable, thread) = found.ok_or(SyscallError::ProcessNotFound)?;
+        let (creds, dumpable, thread, userns, mm_userns) =
+            found.ok_or(SyscallError::ProcessNotFound)?;
         // Linux checks the named task: this thread's permitted set.
         let target = debug::PtraceTarget {
             creds,
             permitted: thread.caps.lock().permitted,
             dumpable,
+            userns,
+            mm_userns,
         };
         let me = crate::process::creds::Caller::current();
         if !debug::may_access(&me, debug::current_permitted(), &target) {
@@ -2244,8 +2415,9 @@ fn files_for_fds(fds: &[i32]) -> Result<crate::net::unix_socket::ScmRights, Sysc
     let files = fds
         .iter()
         .map(|&fd| {
+            // O_PATH descriptors pass too, as Linux's scm_fp_copy.
             table
-                .get(scm_fd_index(fd)?)
+                .get_path(scm_fd_index(fd)?)
                 .ok_or(SyscallError::BadFileDescriptor)
         })
         .collect::<Result<alloc::vec::Vec<_>, _>>()?;
@@ -3189,21 +3361,6 @@ pub(super) fn socket_err(e: crate::error::KernelError) -> SyscallError {
     }
 }
 
-/// Read an INET address passed as (4 address bytes, big-endian port).
-fn read_inet_addr(addr_ptr: usize) -> Result<crate::net::SocketAddr, SyscallError> {
-    let mut raw = [0u8; 6];
-    userspace::read_user_bytes(addr_ptr, &mut raw)?;
-    Ok(inet_addr_from_bytes(&raw))
-}
-
-/// Decode an INET address passed as (4 address bytes, big-endian port).
-fn inet_addr_from_bytes(raw: &[u8; 6]) -> crate::net::SocketAddr {
-    crate::net::SocketAddr::v4(
-        crate::net::Ipv4Address([raw[0], raw[1], raw[2], raw[3]]),
-        u16::from_be_bytes([raw[4], raw[5]]),
-    )
-}
-
 /// The Unix socket type for a base socket type (flags already removed by
 /// `socket_type_flags`).
 fn to_unix_socket_type(
@@ -3298,10 +3455,16 @@ fn sys_socket_create(domain: usize, sock_type: usize, protocol: usize) -> Syscal
 fn sys_socket_bind(fd: usize, addr_ptr: usize, addr_len: usize) -> SyscallResult {
     match with_socket_fd(fd, SocketNode::handle)? {
         SocketHandle::Inet(id) => {
-            let addr = read_inet_addr(addr_ptr)?;
+            let addr = network_ext_syscalls::parse_sockaddr(addr_ptr, addr_len)?;
             crate::net::socket::with_socket_mut(id, |s| s.bind(addr))
                 .map_err(|_| SyscallError::InvalidState)?
-                .map_err(|_| SyscallError::InvalidState)?;
+                .map_err(|e| match e {
+                    // A port taken in the socket's network namespace.
+                    crate::error::KernelError::ResourceExhausted {
+                        resource: "socket_address",
+                    } => SyscallError::AddressInUse,
+                    _ => SyscallError::InvalidArgument,
+                })?;
             Ok(0)
         }
         SocketHandle::Unix(id) => {
@@ -3355,7 +3518,10 @@ fn sys_socket_listen(fd: usize, backlog: usize) -> SyscallResult {
 fn sys_socket_connect(fd: usize, addr_ptr: usize, addr_len: usize) -> SyscallResult {
     match with_socket_fd(fd, SocketNode::handle)? {
         SocketHandle::Inet(id) => {
-            let addr = read_inet_addr(addr_ptr)?;
+            let addr = network_ext_syscalls::parse_sockaddr(addr_ptr, addr_len)?;
+            if !crate::net::socket::reachable(id) {
+                return Err(SyscallError::NetworkUnreachable);
+            }
             crate::net::socket::with_socket_mut(id, |s| s.connect(addr))
                 .map_err(|_| SyscallError::InvalidState)?
                 .map_err(|_| SyscallError::InvalidState)?;
@@ -4472,21 +4638,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn inet_addr_is_address_then_big_endian_port() {
-        let a = inet_addr_from_bytes(&[10, 0, 2, 15, 0x1F, 0x90]);
-        assert_eq!(
-            a,
-            crate::net::SocketAddr::v4(crate::net::Ipv4Address([10, 0, 2, 15]), 8080)
-        );
-        let raw = [192u8, 168, 1, 1, 0, 53];
-        assert_eq!(
-            read_inet_addr(raw.as_ptr() as usize),
-            Ok(inet_addr_from_bytes(&raw))
-        );
-        assert!(read_inet_addr(0).is_err());
-    }
-
     // --- getdents64 records ---
 
     fn dir_entry(name: &str, node_type: crate::fs::NodeType, inode: u64) -> crate::fs::DirEntry {
@@ -4527,6 +4678,35 @@ mod tests {
         assert_eq!(dirent64_type(NodeType::File), 8);
         assert_eq!(dirent64_type(NodeType::Symlink), 10);
         assert_eq!(dirent64_type(NodeType::Socket), 12);
+    }
+
+    /// The old `struct linux_dirent` (getdents): the name at 18, d_type in
+    /// the record's last byte, the same lengths as filldir's
+    /// ALIGN(18 + namlen + 2, 8).
+    #[test]
+    fn old_dirents_put_the_type_last() {
+        use crate::fs::NodeType;
+        let entries = [
+            dir_entry("..", NodeType::Directory, 2),
+            dir_entry("abcdef", NodeType::File, 9),
+        ];
+        let (buf, next) = build_dirents(&entries, 0, 4096, DirentForm::Dirent).unwrap();
+        // 18 + 2 + 2 = 22 -> 24; 18 + 6 + 2 = 26 -> 32.
+        assert_eq!((buf.len(), next), (24 + 32, 2));
+        assert_eq!(u64::from_ne_bytes(buf[0..8].try_into().unwrap()), 2);
+        assert_eq!(u64::from_ne_bytes(buf[8..16].try_into().unwrap()), 1);
+        assert_eq!(u16::from_ne_bytes(buf[16..18].try_into().unwrap()), 24);
+        assert_eq!(&buf[18..21], b"..\0");
+        assert_eq!(buf[23], 4);
+        let rec = &buf[24..];
+        assert_eq!(u16::from_ne_bytes(rec[16..18].try_into().unwrap()), 32);
+        assert_eq!(&rec[18..25], b"abcdef\0");
+        assert!(rec[25..31].iter().all(|&b| b == 0));
+        assert_eq!(rec[31], 8);
+        assert_eq!(
+            build_dirents(&entries, 0, 23, DirentForm::Dirent),
+            Err(SyscallError::InvalidArgument)
+        );
     }
 
     #[test]
@@ -4756,7 +4936,7 @@ mod tests {
         // Linux numbers with no call yet, and the gap below the private
         // range, are not decoded.
         assert!(Syscall::try_from(26).is_err()); // msync
-        assert!(Syscall::try_from(155).is_err()); // pivot_root
+        assert!(Syscall::try_from(153).is_err()); // vhangup
         assert!(Syscall::try_from(500).is_err());
         assert!(Syscall::try_from(1023).is_err());
     }

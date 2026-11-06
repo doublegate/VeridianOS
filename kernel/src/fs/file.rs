@@ -1,7 +1,7 @@
 //! File descriptors and file operations
 
 use alloc::{string::String, sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 use spin::RwLock;
 
@@ -85,6 +85,19 @@ impl OpenFlags {
         }
     }
 
+    /// An O_PATH descriptor's: no access at all.
+    pub fn path_only() -> Self {
+        Self {
+            read: false,
+            write: false,
+            append: false,
+            create: false,
+            truncate: false,
+            exclusive: false,
+            nonblock: false,
+        }
+    }
+
     /// Create from bits (for syscall interface).
     ///
     /// Flag values match the Linux x86_64 ABI (`<fcntl.h>`) so musl-compiled
@@ -115,6 +128,40 @@ impl OpenFlags {
     }
 }
 
+/// The file status flags fcntl(F_SETFL) changes besides O_NONBLOCK, in
+/// Linux's numbering (O_DIRECT differs on arm64), as [`File::status`]
+/// holds them.
+pub mod status {
+    /// Every write goes to the end of the file.
+    pub const APPEND: u32 = 0x400;
+    /// SIGIO on I/O readiness (recorded; nothing sends SIGIO yet).
+    pub const ASYNC: u32 = 0x2000;
+    /// Uncached I/O (recorded: reads and writes are the same either way).
+    #[cfg(target_arch = "aarch64")]
+    pub const DIRECT: u32 = 0x1_0000;
+    /// Uncached I/O (recorded: reads and writes are the same either way).
+    #[cfg(not(target_arch = "aarch64"))]
+    pub const DIRECT: u32 = 0x4000;
+    /// Do not update the access time.
+    pub const NOATIME: u32 = 0x4_0000;
+    /// Writes are synchronous for data (recorded: every write already
+    /// reaches the filesystem before it returns).
+    pub const DSYNC: u32 = 0x1000;
+    /// Writes are synchronous for data and metadata (Linux's O_SYNC,
+    /// __O_SYNC with O_DSYNC; recorded as DSYNC is).
+    pub const SYNC: u32 = 0x10_1000;
+    /// An O_PATH descriptor: it names a file without opening it (Linux's
+    /// FMODE_PATH), so only path operations take it
+    /// ([`super::FileTable::get_path`]).
+    pub const PATH: u32 = 0x20_0000;
+    /// What open records from its flags besides O_APPEND (F_GETFL reports
+    /// them; F_SETFL changes only [`SETFL`]).
+    pub const OPEN: u32 = ASYNC | DIRECT | NOATIME | SYNC | PATH;
+    /// What F_SETFL sets and clears here (Linux's SETFL_MASK less
+    /// O_NONBLOCK, which [`super::File::nonblock`] holds).
+    pub const SETFL: u32 = APPEND | ASYNC | DIRECT | NOATIME;
+}
+
 /// Seek position
 #[derive(Debug, Clone, Copy)]
 pub enum SeekFrom {
@@ -135,6 +182,10 @@ pub struct File {
     /// Stored as AtomicBool because File is behind Arc and F_SETFL needs to
     /// toggle this without mutable access.
     pub nonblock: AtomicBool,
+
+    /// The [`status`] flags: O_APPEND from open, changed by F_SETFL like
+    /// the rest, so writes ask [`File::is_append`] rather than `flags`.
+    pub status: AtomicU32,
 
     /// Current position in file
     pub position: RwLock<usize>,
@@ -158,13 +209,42 @@ pub struct File {
     /// never cleared, so the last close releases whatever the file holds
     /// (review of N-120 and N-207).
     pub flock_owner: AtomicU64,
+
+    /// The file has been given an OFD record lock (F_OFD_SETLK), which its
+    /// last close releases.
+    pub ofd_locked: AtomicBool,
+
+    /// Who opened the file by name (open, openat, openat2), as Linux's
+    /// f_cred: linkat with AT_EMPTY_PATH links it for that caller. `None`
+    /// for files made otherwise (pipes, sockets, memfds).
+    pub opener: Option<alloc::boxed::Box<crate::process::creds::Caller>>,
+
+    /// The write access a file opened for writing holds until its last
+    /// close (Linux's get_write_access in do_dentry_open): a program that
+    /// is running cannot be opened for writing, nor this file executed
+    /// (ETXTBSY, `fs::write_access`). `None` for other files. Shared with
+    /// the file's mappings, which keep it after the close (Linux's
+    /// vm_file).
+    pub write_access: Option<alloc::sync::Arc<crate::fs::write_access::WriteAccess>>,
 }
 
 impl Drop for File {
     fn drop(&mut self) {
+        // The last close (`__fput`): IN_CLOSE_WRITE or IN_CLOSE_NOWRITE.
+        crate::fs::inotify::on_file(
+            self,
+            if self.flags.write {
+                crate::fs::inotify::IN_CLOSE_WRITE
+            } else {
+                crate::fs::inotify::IN_CLOSE_NOWRITE
+            },
+        );
         let owner = *self.flock_owner.get_mut();
         if owner != 0 {
             let _ = crate::fs::flock::flock(self.flock_key(), owner, crate::fs::flock::LOCK_UN);
+        }
+        if *self.ofd_locked.get_mut() {
+            crate::fs::flock::release_owner(self.flock_key(), self as *const File as u64);
         }
     }
 }
@@ -181,11 +261,18 @@ impl File {
     /// is stable while this open file exists, and the lock is released when
     /// it closes.
     pub fn flock_key(&self) -> u64 {
-        match self.node.file_identity() {
-            // Two opens of one BlockFS file get different node objects.
-            Some((fs, ino)) => fs ^ ino.wrapping_mul(0x9E37_79B9_7F4A_7C15),
-            None => Arc::as_ptr(&self.node) as *const () as u64,
-        }
+        crate::fs::write_access::node_key(&self.node)
+    }
+
+    /// Whether this is an O_PATH descriptor ([`status::PATH`]).
+    pub fn is_path(&self) -> bool {
+        self.status.load(Ordering::Acquire) & status::PATH != 0
+    }
+
+    /// Whether writes go to the end of the file (O_APPEND, as open or
+    /// F_SETFL last left it).
+    pub fn is_append(&self) -> bool {
+        self.status.load(Ordering::Acquire) & status::APPEND != 0
     }
 
     /// Create a new file structure
@@ -195,11 +282,15 @@ impl File {
             node,
             flags,
             nonblock: AtomicBool::new(nb),
+            status: AtomicU32::new(if flags.append { status::APPEND } else { 0 }),
             position: RwLock::new(0),
             io_lock: crate::sync::sleep_mutex::SleepMutex::new(()),
             refcount: RwLock::new(1),
             path: None,
             flock_owner: AtomicU64::new(0),
+            ofd_locked: AtomicBool::new(false),
+            opener: None,
+            write_access: None,
         }
     }
 
@@ -210,11 +301,15 @@ impl File {
             node,
             flags,
             nonblock: AtomicBool::new(nb),
+            status: AtomicU32::new(if flags.append { status::APPEND } else { 0 }),
             position: RwLock::new(0),
             io_lock: crate::sync::sleep_mutex::SleepMutex::new(()),
             refcount: RwLock::new(1),
             path: Some(path),
             flock_owner: AtomicU64::new(0),
+            ofd_locked: AtomicBool::new(false),
+            opener: None,
+            write_access: None,
         }
     }
 
@@ -227,10 +322,10 @@ impl File {
         }
 
         if self.is_stream() {
-            return self.node.read(0, buffer);
+            return self.read_node(0, buffer);
         }
         let mut pos = self.position.write();
-        let bytes_read = self.node.read(*pos, buffer)?;
+        let bytes_read = self.read_node(*pos, buffer)?;
         *pos += bytes_read;
         Ok(bytes_read)
     }
@@ -264,11 +359,11 @@ impl File {
         }
 
         if self.is_stream() {
-            return self.node.write(0, data);
+            return self.write_node(0, data);
         }
         let mut pos = self.position.write();
 
-        if self.flags.append {
+        if self.is_append() {
             // For append mode, always write at end
             let metadata = self.node.metadata()?;
             *pos = metadata.size;
@@ -278,9 +373,25 @@ impl File {
         if len != 0 && first {
             super::remove_privs(&*self.node)?;
         }
-        let bytes_written = self.node.write(*pos, &data[..len])?;
+        let bytes_written = self.write_node(*pos, &data[..len])?;
         *pos += bytes_written;
         Ok(bytes_written)
+    }
+
+    /// Read from the node at `offset` with this descriptor's opener
+    /// ([`VfsNode::read_as`]).
+    ///
+    /// [`VfsNode::read_as`]: super::VfsNode::read_as
+    pub fn read_node(&self, offset: usize, buffer: &mut [u8]) -> Result<usize, KernelError> {
+        self.node.read_as(offset, buffer, self.opener.as_deref())
+    }
+
+    /// Write to the node at `offset` with this descriptor's opener
+    /// ([`VfsNode::write_as`]).
+    ///
+    /// [`VfsNode::write_as`]: super::VfsNode::write_as
+    pub fn write_node(&self, offset: usize, data: &[u8]) -> Result<usize, KernelError> {
+        self.node.write_as(offset, data, self.opener.as_deref())
     }
 
     /// How many of `count` bytes written now RLIMIT_FSIZE allows
@@ -291,7 +402,7 @@ impl File {
         if self.is_stream() {
             return Ok(count);
         }
-        let pos = if self.flags.append {
+        let pos = if self.is_append() {
             self.node.metadata()?.size
         } else {
             *self.position.read()
@@ -339,6 +450,13 @@ impl File {
                 }
             }
         };
+        // Linux's vfs_setpos: no position past the largest file offset.
+        if new_pos > i64::MAX as usize {
+            return Err(KernelError::InvalidArgument {
+                name: "offset",
+                value: "seek past the largest file offset",
+            });
+        }
 
         *pos = new_pos;
         Ok(new_pos)
@@ -467,6 +585,23 @@ impl FileTable {
         }
     }
 
+    /// The owner of the POSIX record locks taken through this table (Linux's
+    /// `current->files`, so threads share them and a fork child, with its
+    /// own table, does not): the table's address, stable while its process
+    /// lives.
+    pub fn lock_owner(&self) -> u64 {
+        self as *const Self as u64
+    }
+
+    /// A descriptor of `file` left the table: the table's POSIX record
+    /// locks on the file go, as on Linux, where closing any descriptor of
+    /// the file drops the owner's locks on it, those placed through
+    /// another open of it too (so this asks the lock table, not the open
+    /// file).
+    fn closing(&self, file: &File) {
+        crate::fs::flock::release_owner(file.flock_key(), self.lock_owner());
+    }
+
     /// Install `file` at exactly descriptor `fd`, replacing whatever was
     /// there (including the implicit console). Used to set up a new
     /// process's standard descriptors, which `open` would never hand out
@@ -480,6 +615,7 @@ impl FileTable {
             files.push(None);
         }
         if let Some(existing) = files[fd].take() {
+            self.closing(&existing.file);
             existing.file.dec_ref();
         }
         self.release_console_fd(fd);
@@ -529,13 +665,26 @@ impl FileTable {
         Ok(fd)
     }
 
-    /// Get a file by descriptor
+    /// The file open at `fd` for I/O and the other calls on open files,
+    /// as Linux's fdget: an O_PATH descriptor is not one (the caller
+    /// reports EBADF), so a call that does not ask for O_PATH files
+    /// refuses them.
     pub fn get(&self, fd: FileDescriptor) -> Option<Arc<File>> {
+        self.get_path(fd).filter(|file| !file.is_path())
+    }
+
+    /// The file at `fd`, O_PATH descriptors included (Linux's fdget_raw),
+    /// for the calls that act on what a descriptor names: fstat, fchdir,
+    /// fstatfs, directory descriptors of the `*at` calls and their
+    /// AT_EMPTY_PATH forms, dup, passing descriptors over a socket.
+    pub fn get_path(&self, fd: FileDescriptor) -> Option<Arc<File>> {
         let files = self.files.read();
         files.get(fd)?.as_ref().map(|entry| entry.file.clone())
     }
 
-    /// Get a file entry by descriptor (includes flags)
+    /// Get a file entry by descriptor (includes flags), O_PATH descriptors
+    /// included as [`Self::get_path`] (fcntl answers the commands an
+    /// O_PATH descriptor takes, execveat runs what one names).
     pub fn get_entry(&self, fd: FileDescriptor) -> Option<(Arc<File>, bool)> {
         let files = self.files.read();
         files
@@ -573,6 +722,7 @@ impl FileTable {
 
         if let Some(entry) = files[fd].take() {
             self.note_freed(fd);
+            self.closing(&entry.file);
             // Decrement reference count
             if entry.file.dec_ref() == 0 {
                 // Last reference, file will be dropped
@@ -586,7 +736,7 @@ impl FileTable {
     /// Duplicate a file descriptor
     pub fn dup(&self, fd: FileDescriptor) -> Result<FileDescriptor, KernelError> {
         let file = self
-            .get(fd)
+            .get_path(fd)
             .ok_or(KernelError::FsError(FsError::BadFileDescriptor))?;
         file.inc_ref();
         // Duplicated FDs don't inherit close-on-exec
@@ -596,7 +746,7 @@ impl FileTable {
     /// Duplicate a file descriptor with close-on-exec flag
     pub fn dup_cloexec(&self, fd: FileDescriptor) -> Result<FileDescriptor, KernelError> {
         let file = self
-            .get(fd)
+            .get_path(fd)
             .ok_or(KernelError::FsError(FsError::BadFileDescriptor))?;
         file.inc_ref();
         self.open_with_flags(file, true)
@@ -619,7 +769,7 @@ impl FileTable {
             });
         }
         let file = self
-            .get(fd)
+            .get_path(fd)
             .ok_or(KernelError::FsError(FsError::BadFileDescriptor))?;
         file.inc_ref();
 
@@ -657,7 +807,7 @@ impl FileTable {
         // If old_fd == new_fd, just return success without doing anything
         if old_fd == new_fd {
             // Verify old_fd is valid
-            if self.get(old_fd).is_none() {
+            if self.get_path(old_fd).is_none() {
                 return Err(KernelError::FsError(FsError::BadFileDescriptor));
             }
             return Ok(());
@@ -669,7 +819,7 @@ impl FileTable {
             return Err(KernelError::FsError(FsError::BadFileDescriptor));
         }
         let file = self
-            .get(old_fd)
+            .get_path(old_fd)
             .ok_or(KernelError::FsError(FsError::BadFileDescriptor))?;
         file.inc_ref();
 
@@ -682,6 +832,7 @@ impl FileTable {
 
         // Close existing file at new_fd if any
         if let Some(existing) = files[new_fd].take() {
+            self.closing(&existing.file);
             existing.file.dec_ref();
         }
 
@@ -715,7 +866,7 @@ impl FileTable {
             return Err(KernelError::FsError(FsError::BadFileDescriptor));
         }
         let file = self
-            .get(old_fd)
+            .get_path(old_fd)
             .ok_or(KernelError::FsError(FsError::BadFileDescriptor))?;
         file.inc_ref();
 
@@ -728,6 +879,7 @@ impl FileTable {
 
         // Close existing file at new_fd if any
         if let Some(existing) = files[new_fd].take() {
+            self.closing(&existing.file);
             existing.file.dec_ref();
         }
 
@@ -779,11 +931,44 @@ impl FileTable {
                     // Close this descriptor
                     if let Some(entry) = slot.take() {
                         self.note_freed(fd);
+                        self.closing(&entry.file);
                         entry.file.dec_ref();
                     }
                 }
             }
         }
+    }
+
+    /// The open descriptors from `first` to `last` (inclusive), in order,
+    /// the implicit console among them (close_range).
+    pub fn open_in(&self, first: FileDescriptor, last: FileDescriptor) -> Vec<FileDescriptor> {
+        let files = self.files.read();
+        (first..=last.min(files.len().saturating_sub(1)))
+            .filter(|&fd| files[fd].is_some() || self.is_implicit_console(fd))
+            .collect()
+    }
+
+    /// The canonical paths the open descriptors were opened at (O_PATH
+    /// ones too), for umount's busy check; pipes and sockets have none.
+    pub fn open_paths(&self) -> Vec<String> {
+        let files = self.files.read();
+        files
+            .iter()
+            .flatten()
+            .filter_map(|entry| entry.file.path.clone())
+            .collect()
+    }
+
+    /// [`Self::open_paths`] of the descriptors open for writing, which
+    /// keep a mount from becoming read-only.
+    pub fn writable_paths(&self) -> Vec<String> {
+        let files = self.files.read();
+        files
+            .iter()
+            .flatten()
+            .filter(|entry| entry.file.flags.write)
+            .filter_map(|entry| entry.file.path.clone())
+            .collect()
     }
 
     /// Get the number of open file descriptors
@@ -824,6 +1009,7 @@ impl FileTable {
 
         for slot in files.iter_mut() {
             if let Some(entry) = slot.take() {
+                self.closing(&entry.file);
                 entry.file.dec_ref();
             }
         }
@@ -840,12 +1026,98 @@ mod tests {
         Arc::new(File::new(RamFs::new().root(), OpenFlags::read_only()))
     }
 
+    /// An O_PATH descriptor is not an open file for `get` (EBADF for I/O),
+    /// but `get_path`, `get_entry` and the duplication calls take it (N-206).
+    #[test]
+    fn path_descriptors_serve_only_path_lookups() {
+        let table = FileTable::new();
+        let file = Arc::new(File::new(RamFs::new().root(), OpenFlags::path_only()));
+        file.status.fetch_or(status::PATH, Ordering::AcqRel);
+        assert!(file.is_path() && !some_file().is_path());
+        let fd = table.open(file.clone()).unwrap();
+        assert!(table.get(fd).is_none());
+        assert!(Arc::ptr_eq(&table.get_path(fd).unwrap(), &file));
+        assert!(table.get_entry(fd).is_some());
+        let dup = table.dup(fd).unwrap();
+        assert!(table.get(dup).is_none() && table.get_path(dup).unwrap().is_path());
+        table.dup2(fd, 9).unwrap();
+        assert!(table.get_path(9).is_some());
+        assert!(table.dup_at_least(fd, 20, true).unwrap() >= 20);
+        // An ordinary file is found by both.
+        let other = table.open(some_file()).unwrap();
+        assert!(table.get(other).is_some() && table.get_path(other).is_some());
+    }
+
+    /// A position past i64::MAX is EINVAL, as Linux's vfs_setpos, so no
+    /// later offset arithmetic sees one.
+    #[test]
+    fn seek_stops_at_the_largest_file_offset() {
+        let file = some_file();
+        let max = i64::MAX as usize;
+        assert_eq!(file.seek(SeekFrom::Start(max)).unwrap(), max);
+        assert!(file.seek(SeekFrom::Current(1)).is_err());
+        assert!(file.seek(SeekFrom::Start(max + 1)).is_err());
+        assert!(file.seek(SeekFrom::Current(isize::MAX)).is_err());
+        assert_eq!(file.tell(), max);
+    }
+
+    /// Closing any descriptor of a file drops the table's POSIX record
+    /// locks on it (Linux's locks_remove_posix), and only that table's.
+    #[test]
+    fn closing_a_descriptor_releases_the_tables_record_locks() {
+        use crate::fs::flock::{set_lock, test_lock, RangeLock, F_WRLCK};
+        let file = some_file();
+        // Another open of the same file, through which nothing was locked.
+        let reopened = Arc::new(File::new(file.node.clone(), OpenFlags::read_only()));
+        let key = file.flock_key();
+        assert_eq!(reopened.flock_key(), key);
+        let (mine, other) = (FileTable::new(), FileTable::new());
+        let fd = mine.open(file.clone()).unwrap();
+        let dup = mine.open(reopened).unwrap();
+        let lock = |owner: u64, start: u64| RangeLock {
+            kind: F_WRLCK,
+            start,
+            end: start,
+            owner,
+            pid: 1,
+            ofd: false,
+        };
+        set_lock(key, &lock(mine.lock_owner(), 0), false).unwrap();
+        set_lock(key, &lock(other.lock_owner(), 1), false).unwrap();
+        let probe = lock(0, 0);
+        mine.close(dup).unwrap();
+        assert_eq!(test_lock(key, &probe), None);
+        assert_eq!(
+            test_lock(key, &lock(0, 1)).map(|l| l.owner),
+            Some(other.lock_owner())
+        );
+        crate::fs::flock::release_owner(key, other.lock_owner());
+        mine.close(fd).unwrap();
+    }
+
     /// Reference: the lowest fd that is neither open nor still the console.
     fn lowest_free(table: &FileTable) -> usize {
         let files = table.files.read();
         (0..)
             .find(|&fd| fd >= files.len() || table.is_allocatable(&files, fd))
             .unwrap()
+    }
+
+    /// open_in lists open fds and the implicit console in a range, and
+    /// nothing past the table.
+    #[test]
+    fn open_in_lists_the_range() {
+        let table = FileTable::new();
+        let a = table.open_with_flags(some_file(), false).unwrap();
+        let b = table.open_with_flags(some_file(), false).unwrap();
+        let c = table.open_with_flags(some_file(), false).unwrap();
+        assert_eq!((a, b, c), (3, 4, 5));
+        table.close(b).unwrap();
+        table.close(1).unwrap();
+        assert_eq!(table.open_in(0, usize::MAX), alloc::vec![0, 2, 3, 5]);
+        assert_eq!(table.open_in(3, 4), alloc::vec![3]);
+        assert_eq!(table.open_in(6, usize::MAX), alloc::vec![]);
+        assert_eq!(table.open_in(usize::MAX, usize::MAX), alloc::vec![]);
     }
 
     /// A dup target at or past MAX_FDS fails without growing the table

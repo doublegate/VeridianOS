@@ -18,7 +18,7 @@ pub(crate) use super::creation::{
 pub use super::exit::wait_process;
 pub use super::{
     creation::{
-        create_process, create_process_with_options, exec_process, parse_shebang, search_path,
+        create_process, create_process_with_options, exec_process, parse_shebang, ExecFile,
         ProcessCreateOptions, DEFAULT_KERNEL_STACK_SIZE, DEFAULT_USER_STACK_SIZE,
     },
     exit::{

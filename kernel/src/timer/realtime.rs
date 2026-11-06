@@ -35,6 +35,12 @@ pub fn now_ns() -> i64 {
     wall_ns_at(super::monotonic_ns())
 }
 
+/// Wall time minus monotonic time now, in nanoseconds: what a wall time is
+/// converted with ([`monotonic_at`] is `wall_ns - offset_ns()`, from 0).
+pub fn offset_ns() -> i64 {
+    OFFSET_NS.load(Ordering::Acquire)
+}
+
 /// The monotonic time at which the wall clock will read `wall_ns`, for
 /// absolute sleeps and timers on CLOCK_REALTIME (0 if it has passed or is
 /// before boot).
@@ -53,6 +59,34 @@ pub fn set_now_ns(wall_ns: i64) -> i64 {
     KNOWN.store(true, Ordering::Release);
     SET_COUNT.fetch_add(1, Ordering::AcqRel);
     new.saturating_sub(old)
+}
+
+/// The largest wall time settimeofday accepts, in seconds: Linux's
+/// TIME_SETTOD_SEC_MAX (KTIME_SEC_MAX less 30 years of uptime).
+const SETTOD_SEC_MAX: i64 = i64::MAX / NS_PER_SEC - 30 * 365 * 86_400;
+
+/// Step the wall clock by `delta_ns` (adjtimex ADJ_SETOFFSET), as Linux's
+/// __timekeeping_inject_offset: refused (`None`) if the wall clock would
+/// read earlier than boot or beyond what settimeofday accepts. Returns how
+/// far it moved.
+pub fn inject_offset(delta_ns: i64) -> Option<i64> {
+    let mono = super::monotonic_ns().min(i64::MAX as u64) as i64;
+    OFFSET_NS
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |old| {
+            let new = old.checked_add(delta_ns)?;
+            let wall = mono.checked_add(new)?;
+            (new >= 0 && wall >= 0 && wall / NS_PER_SEC < SETTOD_SEC_MAX).then_some(new)
+        })
+        .ok()?;
+    KNOWN.store(true, Ordering::Release);
+    SET_COUNT.fetch_add(1, Ordering::AcqRel);
+    Some(delta_ns)
+}
+
+/// Count a change of the wall clocks that did not move CLOCK_REALTIME
+/// (a new TAI offset), for TFD_TIMER_CANCEL_ON_SET timers.
+pub fn mark_set() {
+    SET_COUNT.fetch_add(1, Ordering::AcqRel);
 }
 
 /// How many times the wall clock has been set (TFD_TIMER_CANCEL_ON_SET
@@ -103,6 +137,25 @@ mod tests {
         );
         // Before boot: no negative monotonic time.
         assert_eq!(monotonic_at(0), 0);
+        OFFSET_NS.store(saved, Ordering::Release);
+    }
+
+    /// ADJ_SETOFFSET steps the wall clock, but never to before boot or
+    /// beyond what settimeofday could set.
+    #[test]
+    fn inject_offset_is_bounded() {
+        let _clock = TEST_CLOCK_LOCK.lock();
+        let saved = OFFSET_NS.load(Ordering::Acquire);
+        OFFSET_NS.store(10 * NS_PER_SEC, Ordering::Release);
+        let count = set_count();
+        assert_eq!(inject_offset(NS_PER_SEC), Some(NS_PER_SEC));
+        assert_eq!(OFFSET_NS.load(Ordering::Acquire), 11 * NS_PER_SEC);
+        assert_eq!(set_count(), count + 1);
+        assert_eq!(inject_offset(-11 * NS_PER_SEC), Some(-11 * NS_PER_SEC));
+        assert_eq!(inject_offset(-1), None);
+        assert_eq!(inject_offset(i64::MAX), None);
+        assert_eq!(inject_offset(SETTOD_SEC_MAX * NS_PER_SEC), None);
+        assert_eq!(OFFSET_NS.load(Ordering::Acquire), 0);
         OFFSET_NS.store(saved, Ordering::Release);
     }
 }

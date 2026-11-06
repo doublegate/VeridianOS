@@ -461,6 +461,10 @@ pub struct VirtualMapping {
     /// write -- opened read-only, or a memfd sealed against writes -- so a
     /// read-only mapping cannot be upgraded past the seal.
     pub may_write: bool,
+    /// Whether mprotect may make this mapping executable (Linux's
+    /// VM_MAYEXEC). False for a mapping of a file on a noexec mount (ADR
+    /// 0022 H3c).
+    pub may_exec: bool,
     /// The file this mapping shows, if it is a file mapping: what mremap
     /// grows it with and MADV_DONTNEED restores it from.
     #[cfg(feature = "alloc")]
@@ -478,6 +482,11 @@ pub struct VirtualMapping {
 pub struct FileBacking {
     pub node: alloc::sync::Arc<dyn crate::fs::VfsNode>,
     pub offset: usize,
+    /// The write access of the open file the mapping was made from, if it
+    /// was opened for writing: kept while any piece of the mapping lasts,
+    /// as Linux's vm_file keeps the file's, so the file cannot be executed
+    /// meanwhile (ETXTBSY).
+    pub write: Option<alloc::sync::Arc<crate::fs::write_access::WriteAccess>>,
 }
 
 #[cfg(feature = "alloc")]
@@ -521,6 +530,7 @@ impl VirtualMapping {
             #[cfg(feature = "alloc")]
             physical_frames: Vec::new(),
             may_write: true,
+            may_exec: true,
             #[cfg(feature = "alloc")]
             backing: None,
             dont_fork: false,
@@ -529,7 +539,8 @@ impl VirtualMapping {
     }
 
     /// Pages `[from, to)` of this mapping as a mapping of their own, with
-    /// everything else -- type, flags, may_write, file and offset -- kept.
+    /// everything else -- type, flags, may_write, may_exec, file and
+    /// offset -- kept.
     /// (Splitting rebuilt pieces from the type alone, so a partly unmapped
     /// read-only or write-sealed shared mapping came back writable-capable.)
     #[cfg(feature = "alloc")]
@@ -1840,6 +1851,7 @@ impl VirtualAddressSpace {
             physical_frames,
             // Borrowed: protect_region keeps it to its grant.
             may_write: true,
+            may_exec: true,
             backing: None,
             dont_fork: false,
             wipe_on_fork: false,
@@ -1926,6 +1938,7 @@ impl VirtualAddressSpace {
                 physical_frames: frames.to_vec(),
                 // Borrowed: protect_region keeps it to its grant.
                 may_write: true,
+                may_exec: true,
                 backing: None,
                 dont_fork: false,
                 wipe_on_fork: false,
@@ -2264,6 +2277,7 @@ impl VirtualAddressSpace {
             && left.mapping_type == right.mapping_type
             && left.flags == right.flags
             && left.may_write == right.may_write
+            && left.may_exec == right.may_exec
             && left.dont_fork == right.dont_fork
             && left.wipe_on_fork == right.wipe_on_fork
             && !left.flags.contains(PageFlags::HUGE)
@@ -2529,17 +2543,32 @@ impl VirtualAddressSpace {
         }
     }
 
+    /// Whether mprotect may make the mapping starting at `start` executable
+    /// (its VM_MAYEXEC).
+    #[cfg(feature = "alloc")]
+    pub fn set_may_exec(&self, start: VirtualAddress, may_exec: bool) {
+        if let Some(m) = self.mappings.lock().get_mut(&start) {
+            m.may_exec = may_exec;
+        }
+    }
+
     /// Record the file a mapping starting at `start` shows (mmap of a
-    /// file), from file offset `offset`.
+    /// file), from file offset `offset`, and the write access of the open
+    /// file it was made from.
     #[cfg(feature = "alloc")]
     pub fn set_backing(
         &self,
         start: VirtualAddress,
         node: alloc::sync::Arc<dyn crate::fs::VfsNode>,
         offset: usize,
+        write: Option<alloc::sync::Arc<crate::fs::write_access::WriteAccess>>,
     ) {
         if let Some(m) = self.mappings.lock().get_mut(&start) {
-            m.backing = Some(FileBacking { node, offset });
+            m.backing = Some(FileBacking {
+                node,
+                offset,
+                write,
+            });
         }
     }
 
@@ -2730,6 +2759,66 @@ impl VirtualAddressSpace {
                 Ok(copy)
             }
         }
+    }
+
+    /// Read `buf.len()` bytes at `vaddr` from this address space, for a
+    /// copy the kernel makes on another process's behalf
+    /// (process_vm_readv): every page must be present and readable by user
+    /// code here (PROT_NONE pages are not); device memory is refused, as
+    /// Linux's pin_user_pages refuses VM_IO and VM_PFNMAP mappings.
+    #[cfg(feature = "alloc")]
+    pub fn read_user_bytes(&self, vaddr: u64, buf: &mut [u8]) -> Result<(), KernelError> {
+        let root = self.page_table_root.load(Ordering::Acquire);
+        let bad = || KernelError::InvalidAddress {
+            addr: vaddr as usize,
+        };
+        if root == 0 {
+            return Err(bad());
+        }
+        let mappings = self.mappings.lock();
+        // SAFETY: `root` is this address space's L4 table, reached through
+        // the physical map and only read here; the mappings lock held keeps
+        // the user pages below it from being unmapped meanwhile.
+        let mapper = unsafe { create_mapper_from_root(root) };
+        let mut done = 0usize;
+        while done < buf.len() {
+            let at = vaddr.checked_add(done as u64).ok_or_else(bad)?;
+            let page = at & !0xFFF;
+            if !is_user_page(page) {
+                return Err(bad());
+            }
+            let device = mappings
+                .range(..=VirtualAddress(page))
+                .next_back()
+                .map(|(_, m)| m)
+                .filter(|m| m.contains(VirtualAddress(page)))
+                .ok_or_else(bad)?
+                .mapping_type
+                == MappingType::Device;
+            if device {
+                return Err(bad());
+            }
+            let (frame, flags) = mapper
+                .translate_page(VirtualAddress(page))
+                .map_err(|_| bad())?;
+            if !access_allowed_for(flags, false, true, false) {
+                return Err(bad());
+            }
+            let offset = (at & 0xFFF) as usize;
+            let n = (4096 - offset).min(buf.len() - done);
+            // SAFETY: `frame` is RAM (device memory is refused) that a user
+            // mapping of this address space maps readable, reached through
+            // the physical map; `offset + n` stays within the 4 KiB page.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    (super::phys_to_virt_addr(frame.as_u64() << 12) as *const u8).add(offset),
+                    buf[done..].as_mut_ptr(),
+                    n,
+                );
+            }
+            done += n;
+        }
+        Ok(())
     }
 
     /// Write `data` at `vaddr` into this address space only (see
@@ -3180,6 +3269,12 @@ impl VirtualAddressSpace {
             if !m.may_write && new_flags.contains(PageFlags::WRITABLE) {
                 return Err(KernelError::PermissionDenied {
                     operation: "mprotect: mapping may not be written",
+                });
+            }
+            // A file on a noexec mount never runs (VM_MAYEXEC, EACCES).
+            if !m.may_exec && !new_flags.contains(PageFlags::NO_EXECUTE) {
+                return Err(KernelError::PermissionDenied {
+                    operation: "mprotect: mapping may not be executed",
                 });
             }
             // W^X, and under MDWE no memory becoming executable (ADR 0017).
@@ -3870,12 +3965,13 @@ mod tests {
     fn pieces_keep_all_attributes() {
         let mut m = record(0x10_0000, 4, MappingType::Shared);
         m.may_write = false;
+        m.may_exec = false;
         m.dont_fork = true;
         m.flags = user_prot_flags(0x1);
         let p = m.piece(1, 3);
         assert_eq!((p.start.0, p.size), (0x10_1000, 0x2000));
         assert_eq!(p.physical_frames, m.physical_frames[1..3].to_vec());
-        assert!(!p.may_write && p.dont_fork && p.flags == m.flags);
+        assert!(!p.may_write && !p.may_exec && p.dont_fork && p.flags == m.flags);
         assert_eq!(p.mapping_type, MappingType::Shared);
 
         let mut maps = BTreeMap::new();
