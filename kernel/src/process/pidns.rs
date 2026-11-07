@@ -165,6 +165,22 @@ impl PidNs {
         self.state.lock().adding
     }
 
+    /// Whether processes can still be made in it and in every namespace
+    /// above it. A process made in a new namespace below one whose init is
+    /// exiting would else escape that init's one kill of its namespace,
+    /// which then waits for it for ever (Linux stops that fork through the
+    /// parent's pending SIGKILL, in copy_process).
+    pub fn adding_at_every_level(&self) -> bool {
+        let mut ns = Some(self);
+        while let Some(level) = ns {
+            if !level.adding() {
+                return false;
+            }
+            ns = level.parent.as_deref();
+        }
+        true
+    }
+
     /// Stop making processes in it: its init is exiting (Linux's
     /// disable_pid_allocation).
     pub fn stop_adding(&self) {
@@ -399,7 +415,7 @@ pub fn reserve(
             .as_deref()
             .expect("level above 0 has a parent");
     }
-    if !ns.adding() {
+    if !ns.adding_at_every_level() {
         return Err(AllocError::Dead);
     }
     Ok(res)
@@ -608,6 +624,23 @@ mod tests {
         assert!(initial().adding());
         release(9_100_001);
         release(9_100_007);
+    }
+
+    /// A namespace whose init is exiting takes no more processes in any
+    /// namespace below it either: one made in a new namespace there would
+    /// escape the init's kill of its namespace, which then waits for ever
+    /// (PR #35 review).
+    #[test]
+    fn a_dying_namespace_takes_none_below_it() {
+        let a = child_of(&initial());
+        reserve(&a, &[], |_| true).unwrap().commit(9_300_001);
+        let b = child_of(&a);
+        assert!(b.adding_at_every_level());
+        a.stop_adding();
+        assert!(b.adding(), "b's own flag is untouched");
+        assert!(!b.adding_at_every_level());
+        assert_eq!(reserve(&b, &[], |_| true).err(), Some(AllocError::Dead));
+        release(9_300_001);
     }
 
     /// A first fork that fails gives its number back and leaves the

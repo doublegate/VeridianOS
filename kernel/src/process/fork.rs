@@ -590,10 +590,11 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
 
     // Add process to table. A fresh pid cannot already be there.
     table::add_process(new_process)?;
-    // Its namespace's init began exiting meanwhile: its kill of the
-    // namespace may have missed this child, which goes again (ENOMEM), as
-    // Linux's alloc_pid checks PIDNS_ADDING with the number's insert.
-    if !pid_ns.adding() {
+    // Its namespace's init, or that of one above it, began exiting
+    // meanwhile: its kill of the namespace may have missed this child,
+    // which goes again (ENOMEM), as Linux's alloc_pid checks PIDNS_ADDING
+    // with the number's insert.
+    if !pid_ns.adding_at_every_level() {
         if let Some(child) = table::get_process(new_pid) {
             super::exit::discard_unstarted(&child);
         }

@@ -401,6 +401,13 @@ pub struct Thread {
     /// clear_tid pointer for CLONE_CHILD_CLEARTID
     pub clear_tid: AtomicUsize,
 
+    /// The thread's ID was allocated for it and is still reserved
+    /// (`process::published` not yet called): only then does its drop give
+    /// the reservation up. A thread with a chosen ID (set_tid, or a
+    /// process's first) never had one, so a thread outliving its exit
+    /// cannot clear a later allocation's (PR #37 review).
+    pub(super) id_pending: AtomicBool,
+
     /// Signals this thread blocks (Linux layout: bit `sig - 1`; N-96, N-109).
     pub sigmask: AtomicU64,
 
@@ -549,9 +556,10 @@ pub struct ThreadParams {
 impl Drop for Thread {
     fn drop(&mut self) {
         self.release_fs();
-        // A clone that failed never published its ID.
-        #[cfg(feature = "alloc")]
-        super::published(self.tid.0);
+        // A clone that failed never published the ID allocated for it.
+        if *self.id_pending.get_mut() {
+            super::published(self.tid.0);
+        }
     }
 }
 
@@ -598,6 +606,7 @@ impl Thread {
             priority: 2, // Normal priority
             fpu_used: AtomicU32::new(0),
             clear_tid: AtomicUsize::new(0),
+            id_pending: AtomicBool::new(false),
             sigmask: AtomicU64::new(0),
             sigpending: AtomicU64::new(0),
             rt_queue: super::signals::RtQueue::new(),
@@ -1025,8 +1034,19 @@ impl ThreadBuilder {
     /// Stack pointers are set to the top of each allocated region since stacks
     /// grow downward on all supported architectures (x86_64, AArch64, RISC-V).
     pub fn build(self) -> Result<Thread, KernelError> {
+        let allocated = self.tid.is_none();
         let tid = self.tid.unwrap_or_else(super::alloc_tid);
+        let thread = self.build_as(tid);
+        match &thread {
+            Ok(t) => t.id_pending.store(allocated, Ordering::Release),
+            // No thread to give it up when dropped.
+            Err(_) if allocated => super::published(tid.0),
+            Err(_) => {}
+        }
+        thread
+    }
 
+    fn build_as(self, tid: ThreadId) -> Result<Thread, KernelError> {
         // Calculate page counts for stacks
         let user_stack_pages = self.user_stack_size.div_ceil(FRAME_SIZE);
         let kernel_stack_pages = self.kernel_stack_size.div_ceil(FRAME_SIZE);

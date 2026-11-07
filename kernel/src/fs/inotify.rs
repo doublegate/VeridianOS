@@ -578,7 +578,12 @@ fn on_global_path(path: &str, node: &Arc<dyn VfsNode>, mask: u32) {
 }
 
 /// The directory holding `path` (absolute, in the whole tree), and the
-/// entry's name.
+/// entry's name. Looked up in the calling thread's mount namespace, from
+/// the real root and without permission checks: the path names a place in
+/// that namespace's tree (the initial one's would find a directory a mount
+/// covers there, or none, after unshare(CLONE_NEWNS)). An open file's
+/// event made by a thread of another mount namespace than its opener's is
+/// looked up in the thread's (KNOWN-LIMITATIONS).
 fn parent_of(path: &str) -> Option<(Arc<dyn VfsNode>, String)> {
     let path = path.trim_end_matches('/');
     let pos = path.rfind('/')?;
@@ -586,7 +591,13 @@ fn parent_of(path: &str) -> Option<(Arc<dyn VfsNode>, String)> {
     if name.is_empty() || name == "." || name == ".." {
         return None;
     }
-    let dir = super::try_get_vfs()?.resolve_path(dir).ok()?;
+    let vfs = super::try_get_vfs()?;
+    let mut ctx = vfs.caller_context();
+    ctx.root = String::from("/");
+    ctx.cwd = String::from("/");
+    ctx.creds = None;
+    ctx.pid = 0;
+    let (dir, _) = vfs.lookup(&ctx, dir, "/", true).ok()?;
     Some((dir, String::from(name)))
 }
 

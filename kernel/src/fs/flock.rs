@@ -15,7 +15,9 @@
 //!   POSIX waiter that would close a cycle of waiting owners is a deadlock. A
 //!   POSIX lock's owner is a descriptor table, an OFD lock's an open file;
 //!   [`release_owner`] drops either
-//! - [`cleanup_process_locks`]: the POSIX record locks of an exiting process
+//! - [`release_all_of`]: every POSIX record lock of a descriptor table, when
+//!   its last holder closes it (an exiting process, the last of those sharing
+//!   it with CLONE_FILES)
 
 #![allow(dead_code)]
 
@@ -415,16 +417,19 @@ pub fn release_owner(key: u64, owner: u64) {
 // Process cleanup
 // ---------------------------------------------------------------------------
 
-/// Remove the POSIX record locks the process `pid` holds, at its exit
-/// (closing its descriptors has released most already). flock and OFD
-/// locks belong to open files and go with their last close.
-pub fn cleanup_process_locks(pid: u64) {
+/// Remove every POSIX record lock the descriptor table `owner` holds
+/// (`FileTable::lock_owner`), when its last holder closes it (closing its
+/// descriptors has released them already; this leaves none behind). Not
+/// by pid: a table shared with CLONE_FILES outlives the process that took
+/// a lock through it, and keeps the lock, as Linux's put_files_struct.
+/// flock and OFD locks belong to open files and go with their last close.
+pub fn release_all_of(owner: u64) {
     let changed = {
         let mut table = LOCK_TABLE.write();
         let mut changed = false;
         table.range_locks.retain(|_, locks| {
             let held = locks.len();
-            locks.retain(|lock| lock.ofd || lock.pid as i64 as u64 != pid);
+            locks.retain(|lock| lock.ofd || lock.owner != owner);
             changed |= locks.len() != held;
             !locks.is_empty()
         });
@@ -694,7 +699,7 @@ mod tests {
             ..rl(F_WRLCK, 10, 19, 0xAB00)
         };
         set_lock(k, &ofd, false).unwrap();
-        cleanup_process_locks(21);
+        release_all_of(21);
         assert_eq!(held(k), [(F_WRLCK, 10, 19, 0xAB00)]);
         release_owner(k, 0xAB00);
         assert!(held(k).is_empty());
@@ -705,12 +710,12 @@ mod tests {
     /// flock locks belong to open files, not processes: a process exit
     /// (which may leave the file open in a fork child) does not drop them.
     #[test]
-    fn test_cleanup_process_locks_keeps_flock_locks() {
+    fn test_release_all_of_keeps_flock_locks() {
         let ids = unique_inodes(1);
         let file_owner: u64 = 7000;
         let other: u64 = 7001;
         assert!(flock(ids[0], file_owner, LOCK_EX).is_ok());
-        cleanup_process_locks(file_owner);
+        release_all_of(file_owner);
         assert_eq!(
             flock(ids[0], other, LOCK_EX | LOCK_NB),
             Err(KernelError::WouldBlock)
@@ -727,7 +732,7 @@ mod tests {
         let pid_c: u64 = 7202;
         assert!(flock(ids[0], pid_a, LOCK_EX).is_ok());
         assert!(flock(ids[1], pid_b, LOCK_EX).is_ok());
-        cleanup_process_locks(pid_a);
+        release_all_of(pid_a);
         // PID B's lock on ids[1] should still be in place.
         assert_eq!(
             flock(ids[1], pid_c, LOCK_EX | LOCK_NB),

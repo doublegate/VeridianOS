@@ -210,13 +210,30 @@ fn ns_link_target(pid: Option<u64>, name: &str) -> Result<crate::process::ns::Ns
     if !crate::syscall::may_read_process(&process) {
         return Err(KernelError::FsError(FsError::PermissionDenied));
     }
+    // The process's own: still there when its first thread has exited
+    // (Linux's pidns_get and userns_get read the task's pid and creds,
+    // not its nsproxy).
+    match name {
+        "pid" => return Ok(ns::pid_of(&process)),
+        "user" => return Ok(ns::user_of(&process)),
+        _ => {}
+    }
+    // The rest come from the first thread's set: gone with it, as Linux's
+    // nsproxy-based links are ENOENT once the leader has exited (its
+    // exit_task_namespaces). An exited first thread stays in the table as
+    // a zombie until the process is reaped, so its state decides.
     let set = process
         .get_thread(crate::process::ThreadId(process.pid.0))
+        .filter(|t| {
+            !matches!(
+                t.get_state(),
+                crate::process::thread::ThreadState::Zombie
+                    | crate::process::thread::ThreadState::Dead
+            )
+        })
         .ok_or_else(not_found)?
         .namespaces();
     Ok(match name {
-        "pid" => ns::pid_of(&process),
-        "user" => ns::user_of(&process),
         // None until the namespace has its init (pidns_for_children_get).
         "pid_for_children" if set.pid_for_children.reaper().is_none() => return Err(not_found()),
         "pid_for_children" => set.get(NsKind::Pid),
@@ -297,6 +314,23 @@ impl Sysctl {
             Self::MaxNetNamespaces => crate::process::ns::NET_NAMESPACES
                 .max
                 .load(Ordering::Acquire) as usize,
+        }
+    }
+
+    /// Whether `writer` may write it now: Linux checks the writer at every
+    /// write, not only at open (proc_sys_call_handler's sysctl_perm), so a
+    /// descriptor root opened and then lost root with (setuid, SCM_RIGHTS)
+    /// cannot change it. The `fs` and `kernel` ones are 0644 files of root,
+    /// written with euid 0 alone (test_perm: no DAC override); the `user`
+    /// ones need CAP_SYS_RESOURCE (the ucount table's set_permissions),
+    /// here over the initial user namespace, as these limits are the
+    /// whole system's rather than a namespace's.
+    fn writer_may(self, writer: &crate::process::creds::Caller) -> bool {
+        match self {
+            Self::Inotify(_) | Self::UnprivilegedUsernsClone => writer.creds.euid == 0,
+            Self::MaxUserNamespaces | Self::MaxPidNamespaces | Self::MaxNetNamespaces => {
+                writer.capable(crate::process::linux_caps::CAP_SYS_RESOURCE)
+            }
         }
     }
 
@@ -827,6 +861,15 @@ impl VfsNode for ProcNode {
         let limit = self
             .sysctl()
             .ok_or(KernelError::FsError(FsError::PermissionDenied))?;
+        // The writer, checked at every write (EACCES, as sysctl_perm).
+        if !limit.writer_may(&crate::process::creds::Caller::current()) {
+            return Err(KernelError::FsError(FsError::PermissionDenied));
+        }
+        // sysctl_writes_strict: a numeric write past the start of the
+        // file is ignored, consuming nothing (proc_first_pos_non_zero_ignore).
+        if offset != 0 {
+            return Ok(0);
+        }
         limit.write(data)?;
         Ok(data.len())
     }
@@ -1688,6 +1731,36 @@ mod tests {
     }
 
     use super::*;
+
+    /// A sysctl's writer is checked at every write, as Linux's sysctl_perm:
+    /// euid 0 for the `fs` and `kernel` ones (CAP_DAC_OVERRIDE alone does
+    /// not do), CAP_SYS_RESOURCE for the `user` limits, so a descriptor
+    /// that root opened writes nothing once its holder is not root (PR #35
+    /// review).
+    #[test]
+    fn sysctl_writers_are_checked_at_write() {
+        use crate::process::{
+            creds::{Caller, Credentials},
+            linux_caps::{LinuxCaps, CAP_DAC_OVERRIDE, CAP_SYS_RESOURCE},
+        };
+        let who = |uid, caps: &[u32]| Caller {
+            creds: Credentials::new(uid, uid),
+            caps: caps.iter().fold(LinuxCaps::EMPTY, |s, &c| s.with(c)),
+            userns: crate::process::userns::initial(),
+        };
+        let root = who(0, &[]);
+        let user = who(1000, &[]);
+        let override_only = who(1000, &[CAP_DAC_OVERRIDE]);
+        let resource = who(1000, &[CAP_SYS_RESOURCE]);
+        let clone = Sysctl::UnprivilegedUsernsClone;
+        assert!(clone.writer_may(&root));
+        assert!(!clone.writer_may(&user));
+        assert!(!clone.writer_may(&override_only));
+        let max = Sysctl::MaxUserNamespaces;
+        assert!(max.writer_may(&resource));
+        assert!(!max.writer_may(&user));
+        assert!(!max.writer_may(&override_only));
+    }
 
     /// Everyone may walk /proc and read its files, as on Linux: directories
     /// r-xr-xr-x, files r--r--r--. (Directories had no execute bit, so a

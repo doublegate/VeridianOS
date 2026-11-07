@@ -401,11 +401,20 @@ pub fn new_filesystem(
 /// tmpfs's `size=`: bytes, with a k, m, g or t suffix (binary units), or
 /// a percentage of RAM.
 fn tmpfs_size(value: &str) -> Result<usize, NewFsError> {
+    let ram = crate::mm::get_memory_stats()
+        .total_frames
+        .saturating_mul(4096);
+    tmpfs_size_of(value, ram)
+}
+
+/// [`tmpfs_size`] with `ram` bytes of RAM. A percentage may exceed 100,
+/// as on Linux, but one that overflows the size is refused (EINVAL)
+/// rather than wrapping to a small limit.
+fn tmpfs_size_of(value: &str, ram: usize) -> Result<usize, NewFsError> {
     let bad = NewFsError::BadOption;
     if let Some(pct) = value.strip_suffix('%') {
         let pct: usize = pct.parse().map_err(|_| bad)?;
-        let ram = crate::mm::get_memory_stats().total_frames * 4096;
-        return Ok(ram / 100 * pct);
+        return (ram / 100).checked_mul(pct).ok_or(bad);
     }
     let (digits, shift) = match value.as_bytes().last() {
         Some(b'k' | b'K') => (&value[..value.len() - 1], 10),
@@ -1648,6 +1657,19 @@ mod tests {
         );
         assert_eq!(tmpfs_size("2k"), Ok(2048));
         assert_eq!(tmpfs_size("3G"), Ok(3 << 30));
+        // A percentage of RAM: over 100 is allowed, an overflow is not
+        // (it used to panic a debug kernel and wrap in a release one).
+        let ram = 1usize << 30;
+        assert_eq!(tmpfs_size_of("50%", ram), Ok(ram / 100 * 50));
+        assert_eq!(tmpfs_size_of("200%", ram), Ok(ram / 100 * 200));
+        assert_eq!(
+            tmpfs_size_of("99999999999999999999%", ram),
+            Err(NewFsError::BadOption)
+        );
+        assert_eq!(
+            tmpfs_size_of(&alloc::format!("{}%", usize::MAX / 2), ram),
+            Err(NewFsError::BadOption)
+        );
     }
 
     /// A root with /c (the caller's root), /c/new, /c/new/sub, /c/other
