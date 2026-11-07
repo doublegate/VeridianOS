@@ -72,8 +72,9 @@ listed but do not fail it; `--strict` fails on any difference.
   by polling (the limit was written before VeridianOS had `alarm`), and its
   output in a file, of which a few lines naming the problem are printed.
   LTP also keeps its own timeout (30 s by default); the runner sets
-  `LTP_TIMEOUT_MUL` to the limit in whole minutes (1 under KVM, 3 under TCG),
-  so LTP does not kill a test under emulation long before the limit.
+  `LTP_TIMEOUT_MUL` to the limit in 30 s units (2 under KVM, 6 under TCG),
+  so LTP's timeout is the limit and it does not kill a test under emulation
+  before the host would.
 - `tools/compat/compat.py run` boots QEMU, starts the runner, reads its
   `COMPAT-*` lines from the serial console, and when a test takes the guest
   down (a panic, a hang past the limit, a killed runner) records it as

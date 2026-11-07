@@ -164,7 +164,10 @@ extern "C" fn ktimerd(_: usize) {
         let _ = crate::sched::dispatch::wait_event(&WAKE, next, || {
             CHANGED.swap(false, Ordering::AcqRel)
         });
-        if ntp.is_some() {
+        // Looked at again: adjtimex may have made the state active while
+        // the thread slept (it kicks it), and a clock set since must be
+        // seen at once (`steer::next_due`).
+        if ntp.is_some() || super::steer::next_due().is_some() {
             super::steer::service();
         }
         let now = crate::timer::monotonic_ns();

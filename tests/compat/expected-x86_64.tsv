@@ -84,7 +84,7 @@ ltp-syscalls	clock_adjtime02	PASS
 ltp-syscalls	clock_getres01	PASS	
 ltp-syscalls	clock_gettime01	BROK	clock_gettime01.c:82: TBROK: Failed to open FILE '/proc/self/stat' for reading: ENOENT (2)
 ltp-syscalls	clock_gettime02	PASS	
-ltp-syscalls	clock_gettime03	PASS	
+ltp-syscalls	clock_gettime03	FLAKY	PASS, FAIL and BROK in x86_64 CI runs on 4 CPUs (2026-11-06): the child's fork and setns can take more than LTP's fixed 10 ms (clock_gettime03.c:84: TFAIL: Wrong offset (CLOCK_MONOTONIC) read 11ms), and on a guest up for under 10 s the -10 s offset is refused with ERANGE, as on Linux (clock_gettime03.c:99: TBROK: Failed to close FILE '/proc/self/timens_offsets': ERANGE (34))
 ltp-syscalls	clock_gettime04	PASS	
 ltp-syscalls	clock_nanosleep01	FAIL	clock_nanosleep01.c:218: TPASS: clock_nanosleep() failed with: EINVAL (22)
 ltp-syscalls	clock_nanosleep02	FAIL	tst_timer_test.c:314: TFAIL: clock_nanosleep() slept for too long

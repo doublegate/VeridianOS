@@ -5963,20 +5963,30 @@ static void test_posix_timers(void)
 /* restart_syscall: a relative sleep, or a poll with a timeout, that a stop
  * interrupts carries on to its first deadline once the process continues,
  * instead of starting the whole duration again (Linux's restart block).
- * The child tells the parent it is about to wait, is stopped 50 ms in and
- * continued at 300 ms; it must then return at once, not 300 ms later.
+ * The child tells the parent it is about to wait 1 s, is stopped 50 ms in
+ * and continued about 1050 ms in, after its deadline; it must then return
+ * at once, where a wait started over would take 1 s more.
  * Where there is no poll syscall (arm64, riscv64) musl's poll is ppoll,
  * which Linux reruns with the time left when the stop came (fs/select.c
- * poll_select_finish): about 250 ms more after the continue. */
+ * poll_select_finish): that case waits 300 ms, is continued at 300 ms and
+ * takes about 250 ms more. */
 enum { RESTART_SLEEP, RESTART_POLL, RESTART_PPOLL };
-static void restart_after_stop(const char *name, int mode)
+/* One try. Returns 1, without reporting, when the stop came too late to
+ * test anything and tries remain: the child had finished its wait before
+ * the parent sent SIGSTOP (the parent went unscheduled for over 250 ms,
+ * seen on GitHub's 4-CPU runner, PR #35). */
+static int restart_attempt(const char *name, int mode, int tries)
 {
     char why[200];
     int ready[2] = {-1, -1}, result[2] = {-1, -1}, idle[2] = {-1, -1};
     if (pipe(ready) != 0 || pipe(result) != 0 || pipe(idle) != 0) {
         report(name, 0, "pipe failed");
-        return;
+        return 0;
     }
+    /* The wait, and how long the parent keeps the child stopped. */
+    int wait_ms = mode == RESTART_PPOLL ? 300 : 1000;
+    /* below a second: usleep may refuse 1000000 (POSIX) */
+    useconds_t stop_us = mode == RESTART_PPOLL ? 250000 : 999000;
     pid_t pid = fork();
     if (pid == 0) {
         long long out[4];
@@ -5985,9 +5995,9 @@ static void restart_after_stop(const char *name, int mode)
         out[0] = mono_ns();
         if (mode != RESTART_SLEEP) {
             struct pollfd p = {idle[0], POLLIN, 0};
-            out[2] = poll(&p, 1, 300);
+            out[2] = poll(&p, 1, wait_ms);
         } else {
-            struct timespec req = {0, 300000000L}, rem = {0, 0};
+            struct timespec req = {wait_ms / 1000, (wait_ms % 1000) * 1000000L}, rem = {0, 0};
             out[2] = nanosleep(&req, &rem);
         }
         out[3] = errno;
@@ -5996,13 +6006,20 @@ static void restart_after_stop(const char *name, int mode)
         _exit(0);
     }
     char c = 0;
-    long long out[4] = {0, 0, -2, 0}, cont = 0;
+    long long out[4] = {0, 0, -2, 0}, cont = 0, sent = 0;
     int stopped = 0;
     if (pid > 0 && read(ready[0], &c, 1) == 1) {
         usleep(50000);
         int st = 0;
-        stopped = kill(pid, SIGSTOP) == 0 && waitpid(pid, &st, WUNTRACED) == pid && WIFSTOPPED(st);
-        usleep(250000);
+        int killed = kill(pid, SIGSTOP) == 0;
+        /* Taken after kill returns: the parent can lose the CPU between
+         * any earlier reading and the kill itself (1.7 s seen on GitHub's
+         * 4-CPU runner), and a child that finished in that gap was never
+         * stopped. One that finishes after this was stopped too late, and
+         * the kernel is wrong. */
+        sent = mono_ns();
+        stopped = killed && waitpid(pid, &st, WUNTRACED) == pid && WIFSTOPPED(st);
+        usleep(stop_us);
         cont = mono_ns();
         kill(pid, SIGCONT);
         read(result[0], out, sizeof(out));
@@ -6013,17 +6030,27 @@ static void restart_after_stop(const char *name, int mode)
         close(result[i]);
         close(idle[i]);
     }
+    if (!stopped && out[1] != 0 && out[1] < sent && tries > 1)
+        return 1;
     long long slept = (out[1] - out[0]) / 1000000, after = (out[1] - cont) / 1000000;
-    snprintf(why, sizeof(why), "stopped=%d ret=%lld errno=%lld slept=%lldms after_cont=%lldms",
-             stopped, out[2], out[3], slept, after);
+    snprintf(why, sizeof(why),
+             "stopped=%d ret=%lld errno=%lld slept=%lldms after_cont=%lldms tries_left=%d",
+             stopped, out[2], out[3], slept, after, tries - 1);
     if (mode == RESTART_PPOLL)
         report(name, stopped && out[2] == 0 && slept >= 450 && after >= 150 && after < 450, why);
     else
         /* Its deadline passed while it was stopped: it ends soon after
-         * SIGCONT. A sleep started again would take 300 ms more; the margin
-         * below that is for slow CI guests (200 ms seen on GitHub's 4-CPU
-         * runner, PR #35). */
-        report(name, stopped && out[2] == 0 && slept >= 300 && after < 280, why);
+         * SIGCONT. A wait started again would take 1000 ms more; the margin
+         * below that is for slow CI guests (280 ms seen on GitHub's 4-CPU
+         * runner, PR #36, where a 300 ms wait left no room). */
+        report(name, stopped && out[2] == 0 && slept >= 1000 && after < 800, why);
+    return 0;
+}
+
+static void restart_after_stop(const char *name, int mode)
+{
+    for (int tries = 5; restart_attempt(name, mode, tries); tries--)
+        ;
 }
 
 /* adjtimex and clock_adjtime: Linux's NTP state is read by everyone and
@@ -9595,11 +9622,12 @@ static void test_mount_flags(void)
     report("mount_flags", f == 0, why);
 }
 
-/* How many mounts /proc/self/mountinfo shows at mount point `point`. */
 /* A file does not leave a read-only bind mount by another name: a hard
  * link to another mount of the same filesystem is EXDEV, and a directory
  * with a mount under it cannot be renamed (mounts stay where they are, so
- * the moved tree would lose the mount's flags: EBUSY). PR #35 review. */
+ * the moved tree would lose the mount's flags: EBUSY). A descriptor with no
+ * name on any mount (a pipe) gets none: EXDEV, as Linux's pipefs. PR #35
+ * review. */
 static void test_mount_no_escape(void)
 {
     char why[96];
@@ -9630,6 +9658,17 @@ static void test_mount_no_escape(void)
         if (!(open("/tmp/me/top/ro/f", O_WRONLY) == -1 && errno == EROFS)) g |= 8;
         if (umount("/tmp/me/top/ro") != 0 || rename("/tmp/me/top", "/tmp/me/moved") != 0)
             g |= 16;
+        int p[2];
+        if (pipe(p) != 0) {
+            g |= 32;
+        } else {
+            errno = 0;
+            if (!(linkat(p[0], "", AT_FDCWD, "/tmp/me/pipe", AT_EMPTY_PATH) == -1 &&
+                  errno == EXDEV))
+                g |= 32;
+            close(p[0]);
+            close(p[1]);
+        }
         _exit(g);
     }
     int code = t_exit_status(child);
@@ -9638,6 +9677,7 @@ static void test_mount_no_escape(void)
     report("mount_no_escape", code == 0, why);
 }
 
+/* How many mounts /proc/self/mountinfo shows at mount point `point`. */
 static int t_mounts_at(const char *point)
 {
     static char info[8192];

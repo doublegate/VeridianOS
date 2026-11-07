@@ -33,10 +33,12 @@
 - The expected lists were refreshed again from full runs after the syscall groups (2026-11-05):
   LTP passes 741 of 1,552 tests on x86_64, 730 on AArch64 and 726 on RISC-V, Open POSIX
   1,640/1,637/1,635 of 1,965 and libc-test 527/529/529 of 560. The in-guest runner now sets
-  `LTP_TIMEOUT_MUL` from the per-test limit (1 at 60 s under KVM, 3 at 180 s under emulation):
-  LTP killed a test after its own 30 s, so tests making a hundred forks failed under emulation
-  whenever the host was busy. Three tests that sit at that limit under emulation are `FLAKY`
-  (fork06 and pthread_cond_timedwait 4-2 on AArch64, chdir02 on RISC-V).
+  `LTP_TIMEOUT_MUL` so that LTP's own timeout (30 s per unit) is the per-test limit (2 at 60 s
+  under KVM, 6 at 180 s under emulation): LTP killed a test after its own 30 s, so tests making a
+  hundred forks failed under emulation whenever the host was busy. (A first version counted a
+  unit per minute, which gave LTP half the limit: getpid01 was killed at 90 s on GitHub's
+  runners.) Three tests that sat at the 90 s limit under emulation are `FLAKY` (fork06 and
+  pthread_cond_timedwait 4-2 on AArch64, chdir02 on RISC-V).
 - statfs details: a device node's fstatfs names the filesystem holding the node (it said tmpfs
   wherever the node was), BlockFS on a read-only disk reports `ST_RDONLY`, and statfs of a
   non-directory with a trailing slash is ENOTDIR, as stat is.
@@ -446,9 +448,16 @@
   chunk of the phase offset and up to 500 us of the adjtime() slew, grows maxerror, and inserts or
   deletes a leap second at midnight UTC for STA_INS/STA_DEL (CLOCK_REALTIME reads 23:59:59 twice,
   adjtimex reports TIME_OOP, TAI moves a second, timers on the wall clock follow). Clock reads take
-  the rate from a two-slot snapshot, never waiting for a writer, and nothing runs each second
-  while there is nothing to deliver. clock_adjtime adjusts CLOCK_REALTIME and answers EOPNOTSUPP
-  for every other clock, EINVAL for an ID that names none.
+  the rate and the raw clock in one sequence section, so CLOCK_MONOTONIC never goes back across a
+  rate change; a second `ktimerd` runs late delivers what the rate before it delivered, and
+  nothing runs each second while there is nothing to deliver (a synchronized clock's maxerror
+  still grows each second until it becomes unsynchronized). CPU time and scheduling stay on the
+  unsteered clock, as Linux's sched_clock; sleep deadlines run on CLOCK_MONOTONIC. Setting the
+  clock (settimeofday, clock_settime, ADJ_SETOFFSET) clears the NTP state as on Linux: the slew
+  and phase offset stop, the clock is unsynchronized and no leap second stays armed. CLOCK_TAI
+  reads UTC and the TAI offset together, and so does an absolute clock_nanosleep on it.
+  clock_adjtime adjusts CLOCK_REALTIME and answers EOPNOTSUPP for every other clock, EINVAL for an
+  ID that names none.
 - restart_syscall (`syscall::restart`; it was ENOSYS). A relative nanosleep or clock_nanosleep,
   or a poll with a timeout, that a stop interrupts now carries on to its first deadline once the
   process continues; it started the whole duration again. As in Linux, the interrupted call
@@ -631,7 +640,9 @@
   - A file no longer leaves a read-only, noexec or nosuid bind mount by another name: linkat
     across two mounts (two bind mounts of one filesystem included) is EXDEV, as Linux's
     do_linkat, and renaming a directory with a mount under it is EBUSY. The rename used to leave
-    the mount at the old path and the moved tree without its flags.
+    the mount at the old path and the moved tree without its flags. linkat with AT_EMPTY_PATH
+    on a descriptor with no name (a pipe, a socket) is EXDEV too, as Linux, rather than
+    skipping the check.
   - A shared mapping keeps the write access of the file it was made from after the descriptor
     is closed (Linux's vm_file), so the file cannot be executed meanwhile (ETXTBSY).
   - wait4, waitpid and waitid in a PID namespace below the initial one report the reaped

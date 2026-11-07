@@ -217,6 +217,11 @@ pub struct Ntp {
     /// What the phase offset and the slew add to the current second,
     /// scaled ns.
     phase: i64,
+    /// Of `phase`: the phase offset chunk (in `time_offset`'s units) and
+    /// the slew (us). A second run late ran at this rate, so it delivered
+    /// these again.
+    phase_chunk: i64,
+    phase_adjust: i64,
     /// `timer::steer`'s bookkeeping: the next wall second to process, and
     /// the wall clock's set count it last saw.
     pub(super) next_second: i64,
@@ -247,6 +252,8 @@ impl Ntp {
             tai: 0,
             next_leap_sec: i64::MAX,
             phase: 0,
+            phase_chunk: 0,
+            phase_adjust: 0,
             next_second: 0,
             seen_sets: 0,
         }
@@ -263,7 +270,10 @@ impl Ntp {
 
     /// Whether anything happens at the next second: a phase offset or a
     /// slew to deliver, a leap second armed or under way, or maxerror still
-    /// growing. Otherwise every second is the same and none need running.
+    /// growing, which a synchronized clock's does until the second it
+    /// passes the limit and the clock becomes unsynchronized (maxerror at
+    /// the limit exactly is not yet past it). Otherwise every second is the
+    /// same and none need running.
     pub fn is_active(&self) -> bool {
         self.time_offset != 0
             || self.time_adjust != 0
@@ -271,6 +281,41 @@ impl Ntp {
             || self.time_state != TIME_OK
             || self.time_status & (STA_INS | STA_DEL) != 0
             || self.time_maxerror < NTP_PHASE_LIMIT
+            || self.time_status & STA_UNSYNC == 0
+    }
+
+    /// Linux's __ntp_clear, when the wall clock is set (settimeofday,
+    /// clock_settime, ADJ_SETOFFSET): the adjtime() slew and the phase
+    /// offset stop, the clock is unsynchronized with its errors at the
+    /// limit, and no leap second is pending. The current second's share of
+    /// them stops too (Linux lets that one second finish at its length):
+    /// a set leaves no adjustment running. The caller steers the clock
+    /// again.
+    pub fn clear(&mut self) {
+        self.time_adjust = 0;
+        self.time_status |= STA_UNSYNC;
+        self.time_maxerror = NTP_PHASE_LIMIT;
+        self.time_esterror = NTP_PHASE_LIMIT;
+        self.time_offset = 0;
+        self.next_leap_sec = i64::MAX;
+        self.phase = 0;
+        self.phase_chunk = 0;
+        self.phase_adjust = 0;
+    }
+
+    /// The seconds before `next` were not run (the wall clock was set, or
+    /// `ktimerd` could not run for longer than its catch-up): a leap second
+    /// armed for one of them, or disarmed by [`Ntp::clear`], never
+    /// happened, and its exact-second test would never match again. The
+    /// state starts over, so the next second arms STA_INS or STA_DEL (still
+    /// set) for the coming midnight.
+    pub fn skipped_to(&mut self, next: i64) {
+        if matches!(self.time_state, TIME_INS | TIME_DEL)
+            && (self.next_leap_sec == i64::MAX || self.next_leap_sec < next)
+        {
+            self.time_state = TIME_OK;
+            self.next_leap_sec = i64::MAX;
+        }
     }
 
     /// Linux's second_overflow, run as the wall clock starts second `secs`
@@ -279,7 +324,13 @@ impl Ntp {
     /// -1 when the clock must go back a second (an inserted 23:59:60), 1
     /// when it must go ahead (a deleted 23:59:59), else 0; the TAI offset
     /// has already moved with it.
-    pub fn second_overflow(&mut self, secs: i64) -> i32 {
+    ///
+    /// A `late` second had already ended when it was run, so it ran at the
+    /// rate of the second before: it delivered that second's phase chunk
+    /// and slew again, which are taken from what is left (a sign change is
+    /// what was delivered beyond it, and is given back later), and its
+    /// length stays.
+    pub fn second_overflow(&mut self, secs: i64, late: bool) -> i32 {
         let mut leap = 0;
         match self.time_state {
             TIME_OK => {
@@ -329,6 +380,12 @@ impl Ntp {
             self.time_status |= STA_UNSYNC;
         }
 
+        if late {
+            self.time_offset = self.time_offset.saturating_sub(self.phase_chunk);
+            self.time_adjust = self.time_adjust.saturating_sub(self.phase_adjust);
+            return leap;
+        }
+
         // The phase offset: a chunk a second, the rest once it rounds to
         // nothing (time_offset is per NTP interval).
         let mut chunk = shift_right(self.time_offset, (SHIFT_PLL + self.time_constant) as u32);
@@ -342,6 +399,8 @@ impl Ntp {
         self.time_adjust -= adj;
         phase = phase.saturating_add((adj * NSEC_PER_USEC) << NTP_SCALE_SHIFT);
         self.phase = phase;
+        self.phase_chunk = chunk;
+        self.phase_adjust = adj;
         leap
     }
 
@@ -523,11 +582,6 @@ static NTP: spin::Mutex<Ntp> = spin::Mutex::new(Ntp::new());
 /// Run `f` on the system's NTP state.
 pub fn with<R>(f: impl FnOnce(&mut Ntp) -> R) -> R {
     f(&mut NTP.lock())
-}
-
-/// TAI minus UTC, in seconds (CLOCK_TAI reads CLOCK_REALTIME plus this).
-pub fn tai_offset_s() -> i32 {
-    NTP.lock().tai
 }
 
 #[cfg(test)]
@@ -738,7 +792,7 @@ mod tests {
         tx.offset = 1_200; // us
         ntp.adjtimex(&mut tx, 0, 0);
         assert!(ntp.is_active());
-        assert_eq!(ntp.second_overflow(1), 0);
+        assert_eq!(ntp.second_overflow(1, false), 0);
         assert_eq!(
             ntp.second_length() as i128,
             NOMINAL + (500_000i128 << NTP_SCALE_SHIFT)
@@ -746,14 +800,14 @@ mod tests {
         let mut tx = modes(0xa001);
         ntp.adjtimex(&mut tx, 0, 1);
         assert_eq!(tx.offset, 700);
-        ntp.second_overflow(2);
-        ntp.second_overflow(3);
+        ntp.second_overflow(2, false);
+        ntp.second_overflow(3, false);
         assert_eq!(
             ntp.second_length() as i128,
             NOMINAL + (200_000i128 << NTP_SCALE_SHIFT)
         );
         // Drained: the next second is nominal again.
-        ntp.second_overflow(4);
+        ntp.second_overflow(4, false);
         assert_eq!(ntp.second_length() as i128, NOMINAL);
         let mut tx = modes(0xa001);
         ntp.adjtimex(&mut tx, 0, 4);
@@ -762,7 +816,7 @@ mod tests {
         let mut tx = modes(0x8001);
         tx.offset = -300;
         ntp.adjtimex(&mut tx, 0, 4);
-        ntp.second_overflow(5);
+        ntp.second_overflow(5, false);
         assert_eq!(
             ntp.second_length() as i128,
             NOMINAL - (300_000i128 << NTP_SCALE_SHIFT)
@@ -783,7 +837,7 @@ mod tests {
         tx.offset = 400_000; // ns
         ntp.adjtimex(&mut tx, 0, 100);
         let freq = ntp.time_freq as i128;
-        ntp.second_overflow(101);
+        ntp.second_overflow(101, false);
         // A quarter (shift 2) of 400 us this second, give or take the
         // scaled rounding.
         let delivered = (ntp.second_length() as i128 - NOMINAL - freq) >> NTP_SCALE_SHIFT;
@@ -793,7 +847,7 @@ mod tests {
         assert!((299_999..=300_000).contains(&tx.offset), "{}", tx.offset);
         // It converges to zero, and the clock goes back to its frequency.
         for s in 102..400 {
-            ntp.second_overflow(s);
+            ntp.second_overflow(s, false);
         }
         let mut tx = modes(0);
         ntp.adjtimex(&mut tx, 0, 400);
@@ -811,14 +865,71 @@ mod tests {
         tx.maxerror = NTP_PHASE_LIMIT - 700;
         assert_eq!(ntp.adjtimex(&mut tx, 0, 0), TIME_OK);
         assert!(ntp.is_active());
-        ntp.second_overflow(1);
+        ntp.second_overflow(1, false);
         let mut tx = modes(0);
         assert_eq!(ntp.adjtimex(&mut tx, 0, 1), TIME_OK);
         assert_eq!(tx.maxerror, NTP_PHASE_LIMIT - 200);
-        ntp.second_overflow(2);
+        ntp.second_overflow(2, false);
         let mut tx = modes(0);
         assert_eq!(ntp.adjtimex(&mut tx, 0, 2), TIME_ERROR);
         assert_eq!((tx.maxerror, tx.status), (NTP_PHASE_LIMIT, STA_UNSYNC));
+        assert!(!ntp.is_active(), "unsynchronized and idle");
+    }
+
+    /// maxerror that lands on the limit exactly is not yet past it: the
+    /// clock stays synchronized that second, so its seconds keep running
+    /// until the next one makes it unsynchronized (else it would read
+    /// TIME_OK for ever).
+    #[test]
+    fn maxerror_at_the_limit_keeps_running() {
+        let mut ntp = Ntp::new();
+        let mut tx = modes(ADJ_STATUS | ADJ_MAXERROR);
+        tx.status = 0;
+        tx.maxerror = NTP_PHASE_LIMIT - 500;
+        ntp.adjtimex(&mut tx, 0, 0);
+        ntp.second_overflow(1, false);
+        let mut tx = modes(0);
+        assert_eq!(ntp.adjtimex(&mut tx, 0, 1), TIME_OK);
+        assert_eq!(tx.maxerror, NTP_PHASE_LIMIT);
+        assert!(ntp.is_active());
+        ntp.second_overflow(2, false);
+        let mut tx = modes(0);
+        assert_eq!(ntp.adjtimex(&mut tx, 0, 2), TIME_ERROR);
+        assert!(!ntp.is_active());
+    }
+
+    /// Setting the clock clears the NTP state as Linux's __ntp_clear: the
+    /// slew and phase offset stop, the clock is unsynchronized, and an
+    /// armed leap second is disarmed, so a clock stepped past that midnight
+    /// does not read TIME_OOP for ever.
+    #[test]
+    fn a_clock_set_clears_the_state() {
+        let midnight: i64 = 20_000 * DAY;
+        let mut ntp = Ntp::new();
+        let mut tx = modes(ADJ_STATUS | ADJ_MAXERROR);
+        tx.status = STA_INS;
+        tx.maxerror = 0;
+        ntp.adjtimex(&mut tx, 0, midnight - 10);
+        ntp.second_overflow(midnight - 9, false);
+        let mut tx = modes(ADJ_ADJTIME);
+        tx.offset = 1_000;
+        ntp.adjtimex(&mut tx, 0, midnight - 9);
+        let after = (midnight + 100) * NSEC_PER_SEC;
+        let mut tx = modes(0);
+        assert_eq!(ntp.adjtimex(&mut tx, after, midnight + 100), TIME_OOP);
+
+        ntp.clear();
+        let mut tx = modes(0);
+        assert_eq!(ntp.adjtimex(&mut tx, after, midnight + 100), TIME_ERROR);
+        assert_eq!(tx.time_sec, midnight + 100, "no pending leap applied");
+        assert_ne!(tx.status & STA_UNSYNC, 0);
+        assert_eq!(
+            (tx.maxerror, tx.esterror),
+            (NTP_PHASE_LIMIT, NTP_PHASE_LIMIT)
+        );
+        let mut tx = modes(ADJ_ADJTIME | ADJ_OFFSET_READONLY);
+        ntp.adjtimex(&mut tx, after, midnight + 100);
+        assert_eq!(tx.offset, 0, "the slew stopped");
     }
 
     const DAY: i64 = 86_400;
@@ -838,7 +949,7 @@ mod tests {
         tx.maxerror = 0;
         ntp.adjtimex(&mut tx, 0, midnight - 2);
         assert!(ntp.is_active());
-        assert_eq!(ntp.second_overflow(midnight - 1), 0);
+        assert_eq!(ntp.second_overflow(midnight - 1, false), 0);
         assert_eq!(ntp.time_state, TIME_INS);
         assert_eq!(ntp.next_leap_sec, midnight);
         // Midnight reached but not yet processed: adjtimex reports the leap.
@@ -846,23 +957,31 @@ mod tests {
         let state = ntp.adjtimex(&mut tx, midnight * NSEC_PER_SEC + 5_000, midnight);
         assert_eq!((state, tx.time_sec, tx.tai), (TIME_OOP, midnight - 1, 1));
         // The leap: the clock goes back one second.
-        assert_eq!(ntp.second_overflow(midnight), -1);
+        assert_eq!(ntp.second_overflow(midnight, false), -1);
         assert_eq!((ntp.time_state, ntp.tai()), (TIME_OOP, 1));
         let mut tx = modes(0);
         assert_eq!(
             ntp.adjtimex(&mut tx, (midnight - 1) * NSEC_PER_SEC, midnight - 1),
             TIME_OOP
         );
+        // Midnight again, before the repeated second has been processed:
+        // the leap is over (Linux's TIME_OOP at ntp_next_leap_sec).
+        let mut tx = modes(0);
+        assert_eq!(
+            ntp.adjtimex(&mut tx, midnight * NSEC_PER_SEC, midnight),
+            TIME_WAIT
+        );
+        assert_eq!((tx.time_sec, tx.tai), (midnight, 1));
         // The repeated second ends: midnight comes once more, without a
         // second leap.
-        assert_eq!(ntp.second_overflow(midnight), 0);
+        assert_eq!(ntp.second_overflow(midnight, false), 0);
         assert_eq!(ntp.time_state, TIME_WAIT);
-        assert_eq!(ntp.second_overflow(midnight + 1), 0);
+        assert_eq!(ntp.second_overflow(midnight + 1, false), 0);
         assert_eq!(ntp.time_state, TIME_WAIT);
         let mut tx = modes(ADJ_STATUS);
         tx.status = 0;
         ntp.adjtimex(&mut tx, 0, midnight + 1);
-        ntp.second_overflow(midnight + 2);
+        ntp.second_overflow(midnight + 2, false);
         assert_eq!(ntp.time_state, TIME_OK);
         assert_eq!(ntp.tai(), 1);
     }
@@ -877,13 +996,45 @@ mod tests {
         tx.status = STA_DEL;
         tx.constant = 37;
         ntp.adjtimex(&mut tx, 0, midnight - 3);
-        assert_eq!(ntp.second_overflow(midnight - 2), 0);
+        assert_eq!(ntp.second_overflow(midnight - 2, false), 0);
         assert_eq!(
             (ntp.time_state, ntp.next_leap_sec),
             (TIME_DEL, midnight - 1)
         );
-        assert_eq!(ntp.second_overflow(midnight - 1), 1);
+        assert_eq!(ntp.second_overflow(midnight - 1, false), 1);
         assert_eq!((ntp.time_state, ntp.tai()), (TIME_WAIT, 36));
+    }
+
+    /// A deleted second due but not yet processed reads as already skipped
+    /// (TIME_WAIT, one second ahead); clearing STA_DEL before it cancels the
+    /// deletion.
+    #[test]
+    fn leap_second_delete_reported_then_cancelled() {
+        let mut ntp = Ntp::new();
+        let midnight = 20_000 * DAY;
+        let mut tx = modes(ADJ_STATUS | ADJ_MAXERROR | ADJ_TAI);
+        tx.status = STA_DEL;
+        tx.maxerror = 0;
+        tx.constant = 37;
+        ntp.adjtimex(&mut tx, 0, midnight - 3);
+        ntp.second_overflow(midnight - 2, false);
+        assert_eq!(
+            (ntp.time_state, ntp.next_leap_sec),
+            (TIME_DEL, midnight - 1)
+        );
+        let mut tx = modes(0);
+        let now = (midnight - 1) * NSEC_PER_SEC + 7_000;
+        assert_eq!(ntp.adjtimex(&mut tx, now, midnight - 1), TIME_WAIT);
+        assert_eq!((tx.time_sec, tx.tai), (midnight, 36));
+        // Cancelled: 23:59:59 runs as an ordinary second.
+        let mut tx = modes(ADJ_STATUS);
+        tx.status = 0;
+        ntp.adjtimex(&mut tx, now, midnight - 1);
+        assert_eq!(ntp.second_overflow(midnight - 1, false), 0);
+        assert_eq!(
+            (ntp.time_state, ntp.next_leap_sec, ntp.tai()),
+            (TIME_OK, i64::MAX, 37)
+        );
     }
 
     /// Clearing STA_INS before midnight cancels the leap; turning the PLL
@@ -895,19 +1046,19 @@ mod tests {
         let mut tx = modes(ADJ_STATUS);
         tx.status = STA_INS;
         ntp.adjtimex(&mut tx, 0, midnight - 5);
-        ntp.second_overflow(midnight - 4);
+        ntp.second_overflow(midnight - 4, false);
         assert_eq!(ntp.time_state, TIME_INS);
         let mut tx = modes(ADJ_STATUS);
         tx.status = 0;
         ntp.adjtimex(&mut tx, 0, midnight - 4);
-        assert_eq!(ntp.second_overflow(midnight - 3), 0);
+        assert_eq!(ntp.second_overflow(midnight - 3, false), 0);
         assert_eq!((ntp.time_state, ntp.next_leap_sec), (TIME_OK, i64::MAX));
-        assert_eq!(ntp.second_overflow(midnight), 0);
+        assert_eq!(ntp.second_overflow(midnight, false), 0);
 
         let mut tx = modes(ADJ_STATUS);
         tx.status = STA_PLL | STA_INS;
         ntp.adjtimex(&mut tx, 0, midnight + 10);
-        ntp.second_overflow(midnight + 11);
+        ntp.second_overflow(midnight + 11, false);
         assert_eq!(ntp.time_state, TIME_INS);
         let mut tx = modes(ADJ_STATUS);
         tx.status = 0;

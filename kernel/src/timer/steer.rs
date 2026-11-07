@@ -10,11 +10,14 @@
 //! (`timer::realtime`), so both are steered, and every timed wait (which
 //! counts on [`super::monotonic_ns`]) runs on it too.
 //!
-//! The rate is published in two slots, each under its own sequence count:
-//! a writer (holding the NTP lock) fills the slot not in use and then
-//! switches to it, so a reader, the timer interrupt included, never waits
-//! for a writer it interrupted. A new rate is anchored where the old one
-//! reads at the writer's raw time, so the clock is continuous.
+//! The rate is published under a sequence count (Linux's tk_core.seq),
+//! and a reader reads the raw clock inside the same section: a rate change
+//! that overlaps the read makes the reader retry, so it never extrapolates
+//! the old rate past where the new one was anchored, and CLOCK_MONOTONIC
+//! never goes back. The writer (holding the NTP lock) samples the raw clock
+//! after opening its section, with interrupts off on its CPU, so no reader
+//! can wait on a writer it interrupted. A new rate is anchored where the
+//! old one reads at that sample, so the clock is continuous.
 //!
 //! Once a wall second (UTC) starts, `ktimerd` runs [`service`]: Linux's
 //! second_overflow for each second that started (the leap second state
@@ -22,7 +25,7 @@
 //! for a leap second. It only wakes for this while the NTP state has
 //! something to do (`Ntp::is_active`); an idle clock costs nothing.
 
-use core::sync::atomic::{fence, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{fence, AtomicU64, Ordering};
 
 use super::ntp::Ntp;
 
@@ -79,16 +82,16 @@ pub(super) fn mult_of(second_length: u64) -> u64 {
     (second_length.saturating_add(NS_PER_SEC / 2) / NS_PER_SEC).max(1)
 }
 
-/// A slot of the published rate.
-struct Slot {
+/// The published rate, under a sequence count (odd while it changes).
+pub(super) struct Published {
     seq: AtomicU64,
     anchor_raw: AtomicU64,
     anchor_mono: AtomicU64,
     mult: AtomicU64,
 }
 
-impl Slot {
-    const fn new() -> Self {
+impl Published {
+    pub const fn new() -> Self {
         Self {
             seq: AtomicU64::new(0),
             anchor_raw: AtomicU64::new(0),
@@ -96,68 +99,79 @@ impl Slot {
             mult: AtomicU64::new(NOMINAL_MULT),
         }
     }
-}
 
-/// The published rate: two slots and which one is in use.
-pub(super) struct Published {
-    slots: [Slot; 2],
-    active: AtomicUsize,
-}
-
-impl Published {
-    pub const fn new() -> Self {
-        Self {
-            slots: [Slot::new(), Slot::new()],
-            active: AtomicUsize::new(0),
+    /// The rate as stored. Only for the writer (serialized), which needs no
+    /// sequence check.
+    fn current(&self) -> Rate {
+        Rate {
+            anchor_raw: self.anchor_raw.load(Ordering::Relaxed),
+            anchor_mono: self.anchor_mono.load(Ordering::Relaxed),
+            mult: self.mult.load(Ordering::Relaxed),
         }
     }
 
-    /// The rate in use.
-    pub fn load(&self) -> Rate {
+    /// The rate in use and a raw time `raw` read under it: no rate was
+    /// published between the two (Linux's ktime_get read loop).
+    pub fn read(&self, raw: impl Fn() -> u64) -> (Rate, u64) {
         loop {
-            let slot = &self.slots[self.active.load(Ordering::Acquire) & 1];
-            let seq = slot.seq.load(Ordering::Acquire);
+            let seq = self.seq.load(Ordering::Acquire);
             if seq & 1 != 0 {
-                // Being refilled: the writer has switched twice since.
+                // A writer on another CPU (interrupts are off on its own).
                 core::hint::spin_loop();
                 continue;
             }
-            let rate = Rate {
-                anchor_raw: slot.anchor_raw.load(Ordering::Relaxed),
-                anchor_mono: slot.anchor_mono.load(Ordering::Relaxed),
-                mult: slot.mult.load(Ordering::Relaxed),
-            };
-            fence(Ordering::Acquire);
-            if slot.seq.load(Ordering::Relaxed) == seq {
-                return rate;
+            let rate = self.current();
+            let now = raw();
+            fence(Ordering::SeqCst);
+            if self.seq.load(Ordering::Relaxed) == seq {
+                return (rate, now);
             }
         }
     }
 
-    /// Put `rate` in use. Writers must be serialized (the NTP lock).
-    pub fn store(&self, rate: Rate) {
-        let next = (self.active.load(Ordering::Relaxed) & 1) ^ 1;
-        let slot = &self.slots[next];
-        slot.seq.fetch_add(1, Ordering::Relaxed);
-        fence(Ordering::Release);
-        slot.anchor_raw.store(rate.anchor_raw, Ordering::Relaxed);
-        slot.anchor_mono.store(rate.anchor_mono, Ordering::Relaxed);
-        slot.mult.store(rate.mult, Ordering::Relaxed);
-        slot.seq.fetch_add(1, Ordering::Release);
-        self.active.store(next, Ordering::Release);
+    /// The steered time when the raw clock `raw` is read.
+    pub fn now(&self, raw: impl Fn() -> u64) -> u64 {
+        let (rate, now) = self.read(raw);
+        rate.mono_at(now)
     }
 
-    /// Steer from raw time `raw` on at seconds `second_length` long, if
-    /// that changes the rate. Writers must be serialized (the NTP lock).
-    pub fn steer(&self, raw: u64, second_length: u64) {
-        let rate = self.load();
-        if rate.mult != mult_of(second_length) {
-            self.store(rate.rebase(raw, second_length));
+    /// The rate in use.
+    #[cfg(test)]
+    pub fn load(&self) -> Rate {
+        self.read(|| 0).0
+    }
+
+    /// Steer at seconds `second_length` long from the raw time `raw` reads
+    /// now, if that changes the rate; the raw clock is read inside the
+    /// write section, so a reader that saw the old rate read it earlier.
+    /// Writers must be serialized (the NTP lock), and readers must not run
+    /// on this CPU meanwhile (interrupts off: [`steer`]).
+    pub fn steer(&self, raw: impl Fn() -> u64, second_length: u64) {
+        let rate = self.current();
+        if rate.mult == mult_of(second_length) {
+            return;
         }
+        let seq = self.seq.load(Ordering::Relaxed);
+        self.seq.store(seq.wrapping_add(1), Ordering::Relaxed);
+        fence(Ordering::SeqCst);
+        let next = rate.rebase(raw(), second_length);
+        self.anchor_raw.store(next.anchor_raw, Ordering::Relaxed);
+        self.anchor_mono.store(next.anchor_mono, Ordering::Relaxed);
+        self.mult.store(next.mult, Ordering::Relaxed);
+        self.seq.store(seq.wrapping_add(2), Ordering::Release);
     }
 }
 
 static PUBLISHED: Published = Published::new();
+
+/// Steer the system clock at seconds `second_length` long from now (the
+/// NTP lock held), with interrupts off so the timer interrupt cannot read
+/// the clock while the rate changes on this CPU.
+fn steer(second_length: u64) {
+    #[cfg(target_os = "none")]
+    let _irq = crate::arch::disable_interrupts();
+    PUBLISHED.steer(raw_ns, second_length);
+}
 
 /// The raw clock (CLOCK_MONOTONIC_RAW), in nanoseconds since boot. Host
 /// unit tests use the tick-driven counter.
@@ -174,25 +188,28 @@ pub(crate) fn raw_ns() -> u64 {
 
 /// The steered clock (CLOCK_MONOTONIC), in nanoseconds since boot.
 pub(crate) fn now_ns() -> u64 {
-    PUBLISHED.load().mono_at(raw_ns())
+    PUBLISHED.now(raw_ns)
 }
 
 /// Run the seconds that have started when the wall clock reads second
 /// `wall_secs`, whose set count is `sets`. A set of the wall clock since
 /// the last run starts counting again from the next second, running none.
-/// Returns how many ran, and how many seconds the wall clock must move for
-/// a leap second.
+/// A second that has already ended when it is run (ktimerd ran late) ran
+/// at the rate published before it, so it is run as late: it delivers what
+/// that rate did (`Ntp::second_overflow`). Returns how many ran, and how
+/// many seconds the wall clock must move for a leap second.
 pub(super) fn run_due(ntp: &mut Ntp, wall_secs: i64, sets: u64) -> (u32, i64) {
     if ntp.seen_sets != sets {
         ntp.seen_sets = sets;
         ntp.next_second = wall_secs.saturating_add(1);
+        ntp.skipped_to(ntp.next_second);
         return (0, 0);
     }
     let mut wall_secs = wall_secs;
     let (mut ran, mut moved) = (0, 0);
     while wall_secs >= ntp.next_second && ran < MAX_CATCH_UP {
         let secs = ntp.next_second;
-        let leap = ntp.second_overflow(secs) as i64;
+        let leap = ntp.second_overflow(secs, secs < wall_secs) as i64;
         ran += 1;
         moved += leap;
         wall_secs += leap;
@@ -202,17 +219,19 @@ pub(super) fn run_due(ntp: &mut Ntp, wall_secs: i64, sets: u64) -> (u32, i64) {
     }
     if wall_secs >= ntp.next_second {
         ntp.next_second = wall_secs.saturating_add(1);
+        ntp.skipped_to(ntp.next_second);
     }
     (ran, moved)
 }
 
 /// From `ktimerd`, when [`next_due`] comes: run the seconds that started,
 /// steer the clock for the next one, and step the wall clock for a leap
-/// second (the timers on it follow).
+/// second (the timers on it follow). The wall clock is only set under the
+/// NTP lock (`timer::set_wall_clock`, ADJ_SETOFFSET), so the time and the
+/// set count read here belong together.
 pub(crate) fn service() {
     let moved_ns = super::ntp::with(|ntp| {
-        let raw = raw_ns();
-        let wall = super::realtime::wall_ns_at(PUBLISHED.load().mono_at(raw));
+        let wall = super::realtime::now_ns();
         let (ran, leap) = run_due(
             ntp,
             wall.div_euclid(NS_PER_SEC as i64),
@@ -224,7 +243,7 @@ pub(crate) fn service() {
             ntp.seen_sets = super::realtime::set_count();
         }
         if ran > 0 {
-            PUBLISHED.steer(raw, ntp.second_length());
+            steer(ntp.second_length());
         }
         moved_ns
     });
@@ -235,10 +254,17 @@ pub(crate) fn service() {
 
 /// When [`service`] must next run (`monotonic_ns`): the start of the next
 /// wall second, while the NTP state has something to do; `None` otherwise.
+/// After a set of the wall clock it has not seen, now: `next_second` still
+/// counts from the old date (a step back would else put the next run off
+/// by the length of the step).
 pub(crate) fn next_due() -> Option<u64> {
     super::ntp::with(|ntp| {
         ntp.is_active().then(|| {
-            super::realtime::monotonic_at(ntp.next_second.saturating_mul(NS_PER_SEC as i64))
+            if ntp.seen_sets != super::realtime::set_count() {
+                0
+            } else {
+                super::realtime::monotonic_at(ntp.next_second.saturating_mul(NS_PER_SEC as i64))
+            }
         })
     })
 }
@@ -248,7 +274,7 @@ pub(crate) fn next_due() -> Option<u64> {
 /// and a state that has just become active counts its seconds from the
 /// next one. Returns whether `ktimerd` must run the seconds.
 pub(crate) fn adjusted(ntp: &mut Ntp, was_active: bool) -> bool {
-    PUBLISHED.steer(raw_ns(), ntp.second_length());
+    steer(ntp.second_length());
     let active = ntp.is_active();
     if active && !was_active {
         let wall = super::realtime::now_ns();
@@ -297,22 +323,135 @@ mod tests {
         assert_eq!(mult_of(NS << 32), NOMINAL_MULT);
     }
 
-    /// The published rate reads back what was stored, through both slots,
-    /// and is left alone when the rate does not change.
+    /// The published rate reads back what was stored, and is left alone
+    /// when the rate does not change.
     #[test]
-    fn published_rate_switches_slots() {
+    fn published_rate_reads_back() {
         let p = Published::new();
         assert_eq!(p.load(), Rate::IDENTITY);
         let fast = (NS << 32) + (100_000u64 << 32);
-        p.steer(5 * NS, fast);
+        p.steer(|| 5 * NS, fast);
         let r = p.load();
         assert_eq!((r.anchor_raw, r.mult), (5 * NS, mult_of(fast)));
-        p.steer(6 * NS, fast);
+        p.steer(|| 6 * NS, fast);
         assert_eq!(p.load(), r, "same rate: not re-anchored");
-        p.steer(7 * NS, NS << 32);
+        p.steer(|| 7 * NS, NS << 32);
         let n = p.load();
         assert_eq!((n.anchor_raw, n.mult), (7 * NS, NOMINAL_MULT));
         assert_eq!(n.anchor_mono, r.mono_at(7 * NS));
+    }
+
+    /// A reader that took the old (faster) rate and reads the raw clock
+    /// after a slower rate was anchored retries under the new one: it does
+    /// not extrapolate the old rate past the new anchor, which a later read
+    /// would then come in under (CLOCK_MONOTONIC going back).
+    #[test]
+    fn a_rate_change_during_a_read_is_not_extrapolated() {
+        let p = Published::new();
+        let fast = (NS << 32) + (500_000u64 << 32);
+        p.steer(|| 0, fast);
+        let old = p.load();
+        let changed = core::cell::Cell::new(false);
+        // The raw clock read inside the section: the first time, a writer
+        // anchors nominal seconds at 10 s first (as on another CPU).
+        let t = p.now(|| {
+            if !changed.replace(true) {
+                p.steer(|| 10 * NS, NS << 32);
+            }
+            20 * NS
+        });
+        let new = p.load();
+        assert_eq!(new.anchor_raw, 10 * NS);
+        assert_eq!(t, new.mono_at(20 * NS));
+        assert!(t < old.mono_at(20 * NS), "the old rate was not used");
+        // And the next read, later, is not behind it.
+        assert!(p.now(|| 20 * NS + 1) >= t);
+    }
+
+    /// A leap second armed for a midnight that is skipped over (ktimerd
+    /// could not run past its catch-up, or the clock was set past it) is
+    /// armed again for the coming midnight, not left armed for a second
+    /// that will never be run (adjtimex would read TIME_OOP for ever).
+    #[test]
+    fn a_leap_second_skipped_over_is_armed_again() {
+        const DAY: i64 = 86_400;
+        let midnight: i64 = 20_000 * DAY;
+        let armed = || {
+            let mut ntp = Ntp::new();
+            let mut tx = Timex {
+                modes: ADJ_STATUS | ADJ_MAXERROR,
+                status: STA_INS,
+                ..Timex::default()
+            };
+            ntp.adjtimex(&mut tx, 0, midnight - 100);
+            ntp.next_second = midnight - 99;
+            assert_eq!(run_due(&mut ntp, midnight - 99, 0), (1, 0));
+            ntp
+        };
+        let read = |ntp: &mut Ntp, secs: i64| {
+            let mut tx = Timex::default();
+            let state = ntp.adjtimex(&mut tx, secs * NS as i64, secs);
+            (state, tx.time_sec)
+        };
+
+        // ktimerd stalled across midnight, beyond its catch-up.
+        let mut ntp = armed();
+        assert_eq!(run_due(&mut ntp, midnight + 1_000, 0).0, MAX_CATCH_UP);
+        assert_eq!(run_due(&mut ntp, midnight + 1_001, 0), (1, 0));
+        let (state, secs) = read(&mut ntp, midnight + 1_001);
+        assert_ne!(state, TIME_OOP);
+        assert_eq!(secs, midnight + 1_001, "no leap applied to the reading");
+        // The next midnight inserts it (ktimerd running again by then).
+        ntp.next_second = midnight + DAY - 3;
+        let leaps: i64 = (midnight + DAY - 3..=midnight + DAY)
+            .map(|s| run_due(&mut ntp, s, 0).1)
+            .sum();
+        assert_eq!(leaps, -1);
+
+        // The clock set past midnight (which clears the state, as
+        // `timer::set_wall_clock`): the next midnight inserts it.
+        let mut ntp = armed();
+        ntp.clear();
+        assert_eq!(run_due(&mut ntp, midnight + DAY - 5, 1), (0, 0));
+        let leaps: i64 = (midnight + DAY - 4..=midnight + DAY)
+            .map(|s| run_due(&mut ntp, s, 1).1)
+            .sum();
+        assert_eq!(leaps, -1);
+    }
+
+    /// Seconds run late (ktimerd did not run for three boundaries) ran at
+    /// the rate before them, nominal here, so an adjtime() slew set before
+    /// them has delivered nothing: none of it is lost. The second run on
+    /// time starts delivering it.
+    #[test]
+    fn late_seconds_keep_an_undelivered_slew() {
+        let mut ntp = Ntp::new();
+        let mut tx = Timex {
+            modes: super::super::ntp::ADJ_ADJTIME,
+            offset: 1_000,
+            ..Timex::default()
+        };
+        ntp.adjtimex(&mut tx, 0, 100);
+        ntp.next_second = 101;
+        assert_eq!(run_due(&mut ntp, 103, 0), (3, 0));
+        let mut tx = Timex {
+            modes: super::super::ntp::ADJ_ADJTIME | super::super::ntp::ADJ_OFFSET_READONLY,
+            ..Timex::default()
+        };
+        ntp.adjtimex(&mut tx, 0, 103);
+        // 500 us of it in the second now starting, 500 us left after it.
+        assert_eq!(tx.offset, 500);
+        assert!(ntp.second_length() > NS << 32);
+        // The next second, late again: it ran at this second's rate, so it
+        // delivered the other 500 us.
+        assert_eq!(run_due(&mut ntp, 105, 0), (2, 0));
+        let mut tx = Timex {
+            modes: super::super::ntp::ADJ_ADJTIME | super::super::ntp::ADJ_OFFSET_READONLY,
+            ..Timex::default()
+        };
+        ntp.adjtimex(&mut tx, 0, 105);
+        assert_eq!(tx.offset, 0);
+        assert_eq!(ntp.second_length(), NS << 32);
     }
 
     /// Seconds run once each as the wall clock reaches them; a set of the
@@ -375,5 +514,31 @@ mod tests {
         );
         assert!(oop);
         assert_eq!(ntp.tai(), 1);
+    }
+
+    /// An idle NTP state needs ktimerd for no second; one that becomes
+    /// active starts counting at the next second, once. The NTP state here
+    /// is a local one at the default second length, so the rate it
+    /// publishes is the identity, as the system's (which no host test
+    /// changes) is.
+    #[test]
+    fn adjusted_arms_the_next_second_when_activated() {
+        assert_eq!(next_due(), None);
+        let mut ntp = Ntp::new();
+        assert!(!adjusted(&mut ntp, false));
+        assert_eq!(ntp.next_second, 0);
+        let mut tx = Timex {
+            modes: ADJ_STATUS,
+            status: STA_INS,
+            ..Timex::default()
+        };
+        ntp.adjtimex(&mut tx, 0, 0);
+        assert_eq!(ntp.second_length(), Ntp::new().second_length());
+        assert!(adjusted(&mut ntp, false));
+        // Already active: an adjustment keeps the second being counted.
+        let counting = ntp.next_second.wrapping_add(5);
+        ntp.next_second = counting;
+        assert!(adjusted(&mut ntp, true));
+        assert_eq!(ntp.next_second, counting);
     }
 }

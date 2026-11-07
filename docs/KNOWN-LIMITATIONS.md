@@ -62,8 +62,11 @@ exposed were fixed (N-182 to N-189); the rest are listed, with their targets, in
   STA_INS/STA_DEL insert or delete a leap second at midnight UTC. The differences: the phase and
   the slew are delivered a second at a time, as Linux did before 7.0's per-tick drain (the same
   totals); the per-second work and the leap second run in `ktimerd`, so they happen up to a
-  scheduling delay after the second starts, and not at all on a machine where the thread cannot
-  start (a rate set by adjtimex still applies); there is no PPS, and no auxiliary clocks. (LTP
+  scheduling delay after the second starts (seconds it runs late are charged with what the rate
+  before them delivered, so nothing is lost or given twice, but a second's change of rate starts
+  that delay late; after 64 seconds without it the count restarts), and not at all on a machine
+  where the thread cannot start (a rate set by adjtimex still applies); there is no PPS, and no
+  auxiliary clocks. (LTP
   leapsec01 passed before leap seconds existed, as it only checks that a sleep does not end early;
   the runtime test `adjtimex_leap_second_inserted` checks the repeated second.)
 - **File calls without a page cache.** readahead and posix_fadvise check their arguments and
@@ -379,8 +382,9 @@ What remains:
   differ, and sync(2) flushes the filesystems of the initial namespace only. The mount flags are
   checked the same way, by the path in the caller's namespace: a descriptor passed into another
   mount namespace (SCM_RIGHTS, pidfd_getfd) where that path is on a writable or executable mount
-  can be reopened for writing through O_EMPTYPATH, fchmod'ed, run by execveat with
-  AT_EMPTY_PATH or mapped executable, although its own mount is read-only or noexec. Mounts are
+  can be reopened for writing through O_EMPTYPATH, fchmod'ed, linked by linkat with
+  AT_EMPTY_PATH into that mount, run by execveat with AT_EMPTY_PATH or mapped executable,
+  although its own mount is read-only or noexec. Mounts are
   kept by path, so a directory with a mount under it cannot be renamed (EBUSY; Linux moves the
   mounts with it), but only the caller's namespace is looked at: renaming a directory under which
   another mount namespace has a mount leaves that mount at the old path there, uncovering what

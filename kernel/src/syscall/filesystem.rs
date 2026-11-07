@@ -3740,10 +3740,14 @@ pub(crate) fn link_at(
     // new_path.mnt): two bind mounts of one filesystem are two mounts, and
     // a link across them would carry a file out of a read-only, noexec or
     // nosuid mount (PR #35 review). After the new name's checks, as there.
-    if let Some(old_canonical) = &old_canonical {
-        if vfs.mount_point_of(old_canonical) != vfs.mount_point_of(&parent_canonical) {
-            return Err(SyscallError::CrossDevice);
-        }
+    // A descriptor with no path is on no mount here (a pipe, a socket: in
+    // Linux an internal one such as pipefs), so it is EXDEV too, not let
+    // through unchecked.
+    let same_mount = old_canonical
+        .as_deref()
+        .is_some_and(|old| vfs.mount_point_of(old) == vfs.mount_point_of(&parent_canonical));
+    if !same_mount {
+        return Err(SyscallError::CrossDevice);
     }
     // A file whose last name is gone (open, through AT_EMPTY_PATH) gets
     // no new one, as Linux's vfs_link, unless it is an O_TMPFILE file made

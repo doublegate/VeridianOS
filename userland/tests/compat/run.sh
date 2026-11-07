@@ -46,13 +46,16 @@ export TMPDIR=/tmp
 export LTP_COLORIZE_OUTPUT=0
 # LTP kills a test after its own timeout (30 s by default, lib/tst_test.c),
 # long before the 180 s the host allows under emulation, where a hundred
-# forks take that long. Scale it with the limit, a minute per unit, as
-# LTP_TIMEOUT_MUL is meant for slow machines.
+# forks take that long. LTP_TIMEOUT_MUL, meant for slow machines, scales it
+# to the limit: one unit per 30 s, so LTP's timeout is the host's (a unit
+# per minute gave LTP half of it, and getpid01's hundred forks, about 100 s
+# on GitHub's runners, were killed at 90 s).
 #
-# The image's ash has no arithmetic (FEATURE_SH_MATH is off), so the whole
-# minutes come from a table.
+# The image's ash has no arithmetic (FEATURE_SH_MATH is off), so the units
+# come from a table.
 mul=1
-for step in 2:120 3:180 4:240 5:300 6:360 7:420 8:480 9:540 10:600; do
+for step in 2:60 3:90 4:120 5:150 6:180 7:210 8:240 9:270 10:300 11:330 12:360 \
+    13:390 14:420 15:450 16:480 17:510 18:540 19:570 20:600; do
     [ "$limit" -ge "${step#*:}" ] 2>/dev/null && mul="${step%:*}"
 done
 export LTP_TIMEOUT_MUL="$mul"
