@@ -259,7 +259,7 @@ runner, so disable fork workflows there or gate them the same way.
 |----------|---------|---------|
 | `AGY_MODEL` | *(agy default)* | e.g. `gemini-3-pro`; run `agy models` to see IDs |
 | `AGY_EFFORT` | `high` | reasoning effort: `low` / `medium` / `high` |
-| `AGY_PRINT_TIMEOUT` | `5m` | max wait for a single `agy --print` |
+| `AGY_PRINT_TIMEOUT` | `5m` | max wait for a single `agy --print`, raised for a large diff; set explicitly, it is used as given and not raised. This repository sets `15m`, the per-attempt cap, because a high-effort review of an ordinary diff can take longer than the 5-minute base |
 | `AGY_DIFF_MODE` | `auto` | how the diff reaches agy: `inline` (in the `--print` prompt), `file` (written to a file agy reads with its tools), or `auto` (inline if it fits the arg-size budget, else file — so **large PRs are never truncated**) |
 | `MAX_DIFF_BYTES` | `5000000` | sanity cap on a pathological diff (5 MB). Not the arg-size limit — a large diff goes to agy as a file, not an argv value |
 | `MAX_PROMPT_BYTES` | `125000` | the inline/file threshold in `auto` mode, and a hard backstop on the **inlined** prompt. agy takes an inlined prompt as a `--print` argv value, and a single `execve` argument cannot exceed `MAX_ARG_STRLEN` (128 KiB); over it `execve` fails with E2BIG before agy starts. Clamped below 128 KiB |
