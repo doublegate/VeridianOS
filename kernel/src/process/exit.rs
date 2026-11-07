@@ -926,10 +926,10 @@ pub fn cleanup_process(process: &Process) {
                     process.pid.0, open_fds
                 );
             }
-            // Its POSIX record locks go with it (`close_all`), not with the
-            // process: a table still shared keeps its locks (N-120, PR #35
-            // review).
-            file_table.close_all();
+            // Dropping it closes its files and releases its POSIX record
+            // locks (`FileTable`'s Drop runs `close_all`), not the process:
+            // a table still shared keeps its locks (N-120, PR #35 review).
+            drop(file_table);
         }
     }
 

@@ -184,14 +184,22 @@ impl Drop for IdClaim {
 }
 
 /// Whether a process (in the table or awaiting its reap) or a thread has
-/// the ID `id`.
+/// the ID `id`, or it still names a live process group or session whose
+/// leader is gone (Linux keeps that struct pid while the group lives; PR
+/// #37 review).
 #[cfg(feature = "alloc")]
 fn id_in_use(id: u64) -> bool {
     if process_for_reap(id).is_some() || crate::fs::pidfd::holds(id) {
         return true;
     }
     let mut used = false;
-    table::PROCESS_TABLE.for_each(|p| used |= p.get_thread(ThreadId(id)).is_some());
+    table::PROCESS_TABLE.for_each(|p| {
+        if !used {
+            used = p.pgid.load(Ordering::Acquire) == id
+                || p.sid.load(Ordering::Acquire) == id
+                || p.get_thread(ThreadId(id)).is_some();
+        }
+    });
     used
 }
 
@@ -1022,6 +1030,33 @@ mod id_tests {
             return;
         }
         panic!("the ID was taken by another test every time");
+    }
+
+    /// An ID that still names a live process group or session, whose leader
+    /// is gone, is in use: neither a set_tid claim nor the allocator may
+    /// hand it out, as Linux keeps the group's struct pid (PR #37 review).
+    #[test]
+    fn a_live_group_or_session_id_is_in_use() {
+        for field in ["pgid", "sid"] {
+            let base = NEXT_ID.load(Ordering::Relaxed);
+            let (id, claim) = (base + 20..base + 1_000)
+                .find_map(|id| IdClaim::new(id).map(|c| (id, c)))
+                .expect("an ID ahead of the counter is free");
+            drop(claim);
+            let member = pcb::ProcessBuilder::new(alloc::string::String::from("member")).build();
+            let target = if field == "pgid" {
+                &member.pgid
+            } else {
+                &member.sid
+            };
+            target.store(id, Ordering::Release);
+            let pid = table::add_process(member).expect("added");
+            let refused = IdClaim::new(id).is_none();
+            let in_use = id_in_use(id);
+            table::remove_process(pid);
+            assert!(refused, "{field} {id} is claimable while it names a group");
+            assert!(in_use, "{field} {id} is not in use for the allocator");
+        }
     }
 
     /// A process dropped before it was published (a fork that failed)

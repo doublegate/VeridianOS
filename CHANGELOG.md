@@ -595,6 +595,8 @@
   - A process or thread that set_tid gave its ID, kept alive past its reap, no longer clears a
     later allocation's reservation of that ID when it finally goes, which let a set_tid claim
     take an ID already being handed out.
+  - An ID that still names a live process group or session whose leader is gone is not handed
+    out again, by fork or by set_tid, as Linux keeps the group's struct pid.
   - A child reaper's own SIGCONT timer continues it after a stop, as Linux's: continuing happens
     when the signal is sent, before the check that ignores its delivery.
 - From the PR #35 Antigravity review rounds (after its merge):
