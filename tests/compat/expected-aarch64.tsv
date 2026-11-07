@@ -2600,7 +2600,7 @@ open-posix	conformance/interfaces/pthread_spin_lock/1-1	PASS
 open-posix	conformance/interfaces/pthread_spin_lock/1-2	PASS	
 open-posix	conformance/interfaces/pthread_spin_lock/2-1	PASS	
 open-posix	conformance/interfaces/pthread_spin_lock/3-1	PASS	
-open-posix	conformance/interfaces/pthread_spin_lock/3-2	FLAKY	locks a spin lock never initialized: passes when the stack happens to hold 0, otherwise spins until an alarm VeridianOS does not deliver yet (TIMEOUT on a GitHub runner, 2026-10-22); last here: PASS
+open-posix	conformance/interfaces/pthread_spin_lock/3-2	FLAKY	locks a spin lock never initialized: passes when the stack happens to hold 0, otherwise spins until the test's alarm ends it (delivered since v0.28; the reason it is still listed: the result depends on stack contents) (TIMEOUT on a GitHub runner, 2026-10-22); last here: PASS
 open-posix	conformance/interfaces/pthread_spin_trylock/1-1	PASS	
 open-posix	conformance/interfaces/pthread_spin_trylock/2-1	PASS	
 open-posix	conformance/interfaces/pthread_spin_trylock/3-1	PASS	

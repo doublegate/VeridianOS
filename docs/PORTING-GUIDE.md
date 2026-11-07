@@ -14,9 +14,9 @@ Where to look for detail:
   summarizes the parts that matter most when porting);
 - conformance results: `tests/compat/expected-<arch>.tsv` and `tests/compat/README.md`.
 
-On all three architectures LTP's `syscalls` suite passes 524 (x86_64) and 519 (AArch64, RISC-V)
-of 1,552 tests, Open POSIX about 1,570 of 1,965 and libc-test 527 of 560 (full runs of
-2026-10-30, `CHANGELOG.md`).
+LTP's `syscalls` suite passes 741 (x86_64), 730 (AArch64) and 726 (RISC-V) of 1,552 tests, Open
+POSIX 1,640, 1,637 and 1,635 of 1,965, and libc-test 527, 529 and 529 of 560 (full runs of
+2026-11-05, `CHANGELOG.md` and `docs/compat/COMPATIBILITY-PLAN.md`).
 
 ## Toolchains
 

@@ -5566,6 +5566,25 @@ static void test_pivot_root(void);
 static void test_user_ns(void);
 static void test_pid_ns(void);
 static void test_net_ns(void);
+static void test_itimers(void);
+static void test_posix_timers(void);
+static void test_restart_syscall(void);
+static void test_adjtimex(void);
+static void test_preadv_pwritev(void);
+static void test_creat_lchown_fchmodat2(void);
+static void test_close_range_and_advice(void);
+static void test_splice_family(void);
+static void test_statx(void);
+static void test_openat2(void);
+static void test_execveat(void);
+static void test_fhandle(void);
+static void test_ioctl(void);
+#if defined(__x86_64__)
+static void test_ustat_sysfs(void);
+#endif
+static void test_pid_levels(void);
+static void test_inotify_mount_ns(void);
+static void test_sysctl_writer(void);
 
 /* Tests `--only NAME` can run alone (for debugging a single test). */
 static const struct {
@@ -5618,6 +5637,26 @@ static const struct {
     {"fs_ids", test_fs_ids},
     {"dev_shm_maps_the_file_s_pages", test_dev_shm},
     {"statfs", test_statfs},
+    {"itimers", test_itimers},
+    {"posix_timers", test_posix_timers},
+    {"restart_syscall", test_restart_syscall},
+    {"adjtimex", test_adjtimex},
+    {"preadv_pwritev", test_preadv_pwritev},
+    {"creat_lchown_fchmodat2", test_creat_lchown_fchmodat2},
+    {"close_range_and_advice", test_close_range_and_advice},
+    {"splice_family", test_splice_family},
+    {"statx", test_statx},
+    {"openat2", test_openat2},
+    {"execveat", test_execveat},
+    {"fhandle", test_fhandle},
+    {"ioctl", test_ioctl},
+    {"mount_no_escape", test_mount_no_escape},
+#if defined(__x86_64__)
+    {"ustat_sysfs", test_ustat_sysfs},
+#endif
+    {"pid_levels", test_pid_levels},
+    {"inotify_mount_ns", test_inotify_mount_ns},
+    {"sysctl_writer", test_sysctl_writer},
 };
 
 /* Interval timers (setitimer, getitimer, alarm): ITIMER_REAL sends SIGALRM
@@ -7547,6 +7586,27 @@ static void test_record_locks(void)
     int child_deadlk = pid > 0 && waitpid(pid, &st, 0) == pid && WIFEXITED(st) ? WEXITSTATUS(st) : 9;
     if (!((parent_deadlk == 1 && child_deadlk == 0) || (parent_deadlk == 0 && child_deadlk == 1)))
         f |= 512;
+
+    /* A table shared with CLONE_FILES keeps the locks taken through it
+     * when the process that took them exits: they are the table's, and
+     * Linux's put_files_struct closes it only at its last reference. */
+    pid = (pid_t)syscall(SYS_clone, CLONE_FILES | SIGCHLD, 0, 0, 0, 0);
+    if (pid == 0)
+        _exit(setlk(fd, F_SETLK, F_WRLCK, 600, 10) == 0 ? 0 : 1);
+    st = 0;
+    if (pid < 0 || waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 0)
+        f |= 1024;
+    /* Another table sees it, still held through the shared one. */
+    pid = fork();
+    if (pid == 0) {
+        struct flock q;
+        _exit(getlk(fd, F_GETLK, 600, 10, &q) == 0 && q.l_type == F_WRLCK ? 0 : 1);
+    }
+    st = 0;
+    if (pid < 0 || waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 0)
+        f |= 2048;
+    if (setlk(fd, F_SETLK, F_UNLCK, 600, 10) != 0) f |= 2048;
+
     close(sync[0]);
     close(sync[1]);
     close(fd);
@@ -8544,9 +8604,11 @@ static void test_clone3(void)
         f |= 32;
     if (watch >= 0) close(watch);
 
-    /* set_tid: one entry (one PID namespace), from 1 below pid_max, and
-     * only with CAP_CHECKPOINT_RESTORE or CAP_SYS_ADMIN; a taken ID is
-     * EEXIST. */
+    /* set_tid: an entry for each PID namespace level at most (more than
+     * MAX_PID_NS_LEVEL, 32, is EINVAL before anything is read, wherever
+     * the caller is; entries for levels it does not have are EINVAL too,
+     * test_pid_levels), each from 1 below pid_max, and only with
+     * CAP_CHECKPOINT_RESTORE or CAP_SYS_ADMIN; a taken ID is EEXIST. */
     pid_t ids[2] = {0, 0};
     memset(&a, 0, sizeof(a));
     a.exit_signal = SIGCHLD;
@@ -8554,7 +8616,7 @@ static void test_clone3(void)
     a.set_tid_size = 1;
     if (!(t_clone3(&a, sizeof(a)) == -1 && errno == EINVAL)) f |= 64;
     ids[0] = getpid() + 7000;
-    a.set_tid_size = 2;
+    a.set_tid_size = 33;
     if (!(t_clone3(&a, sizeof(a)) == -1 && errno == EINVAL)) f |= 64;
     a.set_tid_size = 1;
     if (geteuid() != 0) {
@@ -10434,6 +10496,198 @@ static void test_net_ns(void)
     report("net_ns", f == 0, why);
 }
 
+/* PR #35 review. In a new PID namespace (root only): its init is neither
+ * killed nor stopped by its own POSIX timer's SIGKILL or SIGSTOP, as a
+ * timer's signal is never forced (Linux's posixtimer_send_sigqueue); and
+ * clone3's set_tid names an ID at each level of a namespace below it. */
+static int t_levels_init(void)
+{
+    int f = 0;
+    if (getpid() != 1) return 1;
+    for (int i = 0; i < 2; i++) {
+        timer_t t;
+        struct sigevent ev;
+        memset(&ev, 0, sizeof(ev));
+        ev.sigev_notify = SIGEV_SIGNAL;
+        ev.sigev_signo = i == 0 ? SIGKILL : SIGSTOP;
+        struct itimerspec its = {.it_value = {0, 2000000}};
+        if (timer_create(CLOCK_MONOTONIC, &ev, &t) != 0) {
+            f |= 2; /* no timer: nothing to wait for or delete */
+            continue;
+        }
+        if (timer_settime(t, 0, &its, NULL) != 0) f |= 2;
+        usleep(100000);
+        timer_delete(t);
+    }
+    /* Still running (a stop would show in the parent's WUNTRACED wait).
+     * A namespace below: its first process is 1 there and 4242 here. */
+    if (unshare(CLONE_NEWPID) != 0) return f | 4;
+    pid_t ids[2] = {1, 4242};
+    struct t_clone_args a;
+    memset(&a, 0, sizeof(a));
+    a.exit_signal = SIGCHLD;
+    a.set_tid = (uintptr_t)ids;
+    a.set_tid_size = 2;
+    long r = t_clone3(&a, sizeof(a));
+    if (r == 0) _exit(getpid() == 1 ? 0 : 1);
+    if (r != 4242 || t_exit_status((pid_t)r) != 0) f |= 8;
+    return f;
+}
+
+/* Keeps the process alive until the parent closes the pipe's write end. */
+static void *t_levels_sleeper(void *arg)
+{
+    char c;
+    while (read(*(int *)arg, &c, 1) < 0 && errno == EINTR) {
+    }
+    return NULL;
+}
+
+/* Also: /proc/<pid>/ns/pid and ns/user still resolve once the process's
+ * first thread has exited (Linux answers them from the task's pid and
+ * credentials), while the links from its namespace set are ENOENT then,
+ * as Linux's with the leader's nsproxy gone. */
+static void test_pid_levels(void)
+{
+    char why[96], path[64], buf[64];
+    int f = 0, code = -1;
+    if (geteuid() != 0) {
+        report("pid_levels", 1, "not root: skipped");
+        return;
+    }
+    pid_t maker = fork();
+    if (maker == 0) {
+        if (unshare(CLONE_NEWPID) != 0) _exit(100);
+        pid_t init = fork();
+        if (init == 0) _exit(t_levels_init());
+        int st = 0;
+        if (init < 0 || waitpid(init, &st, WUNTRACED) != init) _exit(101);
+        if (WIFSTOPPED(st)) {
+            kill(init, SIGKILL);
+            waitpid(init, NULL, 0);
+            _exit(102);
+        }
+        _exit(WIFEXITED(st) ? WEXITSTATUS(st) : 103);
+    }
+    int st = 0;
+    if (maker > 0 && waitpid(maker, &st, 0) == maker && WIFEXITED(st)) code = WEXITSTATUS(st);
+    if (code != 0) f |= 1;
+
+    /* The child's second thread holds the process open on a pipe; the
+     * parent waits (up to 3 s, for slow emulated guests) until the first
+     * thread has exited, which the uts link going ENOENT shows. */
+    int hold[2];
+    if (pipe(hold) != 0) hold[0] = hold[1] = -1;
+    pid_t leaderless = hold[0] < 0 ? -1 : fork();
+    if (leaderless == 0) {
+        static int rd;
+        pthread_t t;
+        close(hold[1]);
+        rd = hold[0];
+        if (pthread_create(&t, NULL, t_levels_sleeper, &rd) != 0) _exit(1);
+        syscall(SYS_exit, 0); /* this thread only */
+        _exit(2);
+    }
+    if (hold[0] >= 0) close(hold[0]);
+    snprintf(path, sizeof(path), "/proc/%d/ns/uts", (int)leaderless);
+    for (int i = 0; leaderless > 0 && i < 60; i++) {
+        if (readlink(path, buf, sizeof(buf)) == -1 && errno == ENOENT) break;
+        usleep(50000);
+    }
+    snprintf(path, sizeof(path), "/proc/%d/ns/pid", (int)leaderless);
+    if (leaderless < 0 || readlink(path, buf, sizeof(buf)) <= 0) f |= 16;
+    snprintf(path, sizeof(path), "/proc/%d/ns/user", (int)leaderless);
+    if (readlink(path, buf, sizeof(buf)) <= 0) f |= 32;
+    snprintf(path, sizeof(path), "/proc/%d/ns/uts", (int)leaderless);
+    if (!(readlink(path, buf, sizeof(buf)) == -1 && errno == ENOENT)) f |= 64;
+    if (hold[1] >= 0) close(hold[1]);
+    if (leaderless > 0) waitpid(leaderless, NULL, 0);
+    snprintf(why, sizeof(why), "f=%#x levels=%d", f, code);
+    report("pid_levels", f == 0, why);
+}
+
+/* PR #35 review: inotify finds a watched file's directory in the caller's
+ * mount namespace, so a file in a tmpfs mounted after unshare(CLONE_NEWNS)
+ * reports to the watch on that tmpfs's root (the initial namespace's tree
+ * has the covered directory there). Root only (mount). */
+static void test_inotify_mount_ns(void)
+{
+    char why[64];
+    int code = -1;
+    if (geteuid() != 0) {
+        report("inotify_mount_ns", 1, "not root: skipped");
+        return;
+    }
+    mkdir("/tmp/inmnt", 0755);
+    pid_t pid = fork();
+    if (pid == 0) {
+        int g = 0;
+        if (unshare(CLONE_NEWNS) != 0) _exit(1);
+        if (mount("none", "/tmp/inmnt", "tmpfs", 0, NULL) != 0) _exit(2);
+        int fd = open("/tmp/inmnt/f", O_CREAT | O_RDWR, 0644);
+        int in = inotify_init1(IN_NONBLOCK);
+        if (fd < 0 || in < 0 || inotify_add_watch(in, "/tmp/inmnt", IN_MODIFY | IN_ATTRIB) < 0)
+            _exit(3);
+        if (write(fd, "x", 1) != 1 || fchmod(fd, 0600) != 0) g |= 4;
+        char ev[512] __attribute__((aligned(8)));
+        ssize_t n = read(in, ev, sizeof(ev));
+        int mod = 0, attr = 0;
+        for (char *p = ev; n > 0 && p < ev + n;) {
+            struct inotify_event *e = (struct inotify_event *)p;
+            if (e->len && strcmp(e->name, "f") == 0) {
+                mod |= (e->mask & IN_MODIFY) != 0;
+                attr |= (e->mask & IN_ATTRIB) != 0;
+            }
+            p += sizeof(*e) + e->len;
+        }
+        if (!mod) g |= 8;
+        if (!attr) g |= 16;
+        close(fd);
+        close(in);
+        umount("/tmp/inmnt");
+        _exit(g);
+    }
+    int st = 0;
+    if (pid > 0 && waitpid(pid, &st, 0) == pid && WIFEXITED(st)) code = WEXITSTATUS(st);
+    rmdir("/tmp/inmnt");
+    snprintf(why, sizeof(why), "code=%d", code);
+    report("inotify_mount_ns", code == 0, why);
+}
+
+/* PR #35 review: a sysctl's writer is checked at every write (Linux's
+ * sysctl_perm in proc_sys_call_handler), so a descriptor opened as root
+ * writes nothing (EACCES) once its holder is not root; and a numeric write
+ * past position 0 is ignored (sysctl_writes_strict). Root only. */
+static void test_sysctl_writer(void)
+{
+    char why[64];
+    int code = -1;
+    if (geteuid() != 0) {
+        report("sysctl_writer", 1, "not root: skipped");
+        return;
+    }
+    pid_t pid = fork();
+    if (pid == 0) {
+        int g = 0;
+        char was[32], now[32];
+        int fd = open("/proc/sys/user/max_net_namespaces", O_RDWR);
+        ssize_t n = fd < 0 ? -1 : pread(fd, was, sizeof(was) - 1, 0);
+        if (n <= 0) _exit(1);
+        was[n] = 0;
+        if (pwrite(fd, "7\n", 2, 3) != 0) g |= 2;
+        n = pread(fd, now, sizeof(now) - 1, 0);
+        if (n <= 0 || (now[n] = 0, strcmp(now, was) != 0)) g |= 2;
+        if (setresuid(1000, 1000, 1000) != 0) _exit(3);
+        errno = 0;
+        if (!(pwrite(fd, was, strlen(was), 0) == -1 && errno == EACCES)) g |= 4;
+        _exit(g);
+    }
+    int st = 0;
+    if (pid > 0 && waitpid(pid, &st, 0) == pid && WIFEXITED(st)) code = WEXITSTATUS(st);
+    snprintf(why, sizeof(why), "code=%d", code);
+    report("sysctl_writer", code == 0, why);
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
@@ -10565,6 +10819,9 @@ int main(int argc, char **argv)
     test_user_ns();
     test_pid_ns();
     test_net_ns();
+    test_pid_levels();
+    test_inotify_mount_ns();
+    test_sysctl_writer();
 #if defined(__x86_64__)
     test_ustat_sysfs();
 #endif

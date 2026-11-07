@@ -91,18 +91,39 @@ pub fn alloc_tid() -> ThreadId {
 }
 
 /// The next ID, marked pending until its process or thread is visible
-/// ([`published`]), so that clone3's set_tid cannot claim it meanwhile.
+/// ([`published`]), so that clone3's set_tid cannot claim it meanwhile. An
+/// ID set_tid has claimed, or given to a process or thread still alive, is
+/// skipped: a claim does not move the counter (a claim of an ID near
+/// `PID_MAX` would else use up every ID above it at once).
 fn alloc_id() -> u64 {
     #[cfg(feature = "alloc")]
-    {
+    loop {
+        // CLAIMED_IDS before PENDING_IDS, as in `IdClaim::new`.
+        let claimed = CLAIMED_IDS.lock();
         let mut pending = PENDING_IDS.lock();
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        if claimed.contains(&id) {
+            continue;
+        }
         pending.insert(id);
-        id
+        let maybe_used = id <= CLAIMED_MAX.load(Ordering::Acquire);
+        drop(pending);
+        drop(claimed);
+        // Not under PENDING_IDS: dropping a process takes it.
+        if maybe_used && id_in_use(id) {
+            published(id);
+            continue;
+        }
+        return id;
     }
     #[cfg(not(feature = "alloc"))]
     NEXT_ID.fetch_add(1, Ordering::Relaxed)
 }
+
+/// The highest ID set_tid has claimed: IDs at or below it may be in use
+/// out of turn, and [`alloc_id`] checks them. Only set under CLAIMED_IDS.
+#[cfg(feature = "alloc")]
+static CLAIMED_MAX: AtomicU64 = AtomicU64::new(0);
 
 /// `id`'s process is in the table, or its thread in its (listed) process,
 /// so [`id_in_use`] sees it from now on; or the process or thread of a
@@ -136,16 +157,17 @@ pub struct IdClaim(u64);
 impl IdClaim {
     /// Claim `id` unless a process, a zombie awaiting its reap, a thread, an
     /// open pidfd, another clone, or a fork or clone still under way has it
-    /// (None: Linux's EEXIST). `NEXT_ID` moves past it first, so no later
-    /// allocation hands it out.
+    /// (None: Linux's EEXIST). The counter stays where it is, as Linux's
+    /// cyclic allocator keeps its cursor: [`alloc_id`] skips the ID while it
+    /// is claimed or in use (`CLAIMED_MAX`).
     pub fn new(id: u64) -> Option<Self> {
         let mut claimed = CLAIMED_IDS.lock();
-        let before = NEXT_ID.fetch_max(id + 1, Ordering::AcqRel);
         let pending = PENDING_IDS.lock().contains(&id);
-        if claimed.contains(&id) || pending || (id < before && id_in_use(id)) {
+        if claimed.contains(&id) || pending || id_in_use(id) {
             return None;
         }
         claimed.push(id);
+        CLAIMED_MAX.fetch_max(id, Ordering::AcqRel);
         Some(Self(id))
     }
 
@@ -162,14 +184,22 @@ impl Drop for IdClaim {
 }
 
 /// Whether a process (in the table or awaiting its reap) or a thread has
-/// the ID `id`.
+/// the ID `id`, or it still names a live process group or session whose
+/// leader is gone (Linux keeps that struct pid while the group lives; PR
+/// #37 review).
 #[cfg(feature = "alloc")]
 fn id_in_use(id: u64) -> bool {
     if process_for_reap(id).is_some() || crate::fs::pidfd::holds(id) {
         return true;
     }
     let mut used = false;
-    table::PROCESS_TABLE.for_each(|p| used |= p.get_thread(ThreadId(id)).is_some());
+    table::PROCESS_TABLE.for_each(|p| {
+        if !used {
+            used = p.pgid.load(Ordering::Acquire) == id
+                || p.sid.load(Ordering::Acquire) == id
+                || p.get_thread(ThreadId(id)).is_some();
+        }
+    });
     used
 }
 
@@ -937,5 +967,106 @@ mod id_tests {
         assert!(IdClaim::new(id).is_none(), "claimed once");
         drop(claim);
         assert!(IdClaim::new(id).is_some());
+    }
+
+    /// A claim does not move the counter (one of PID_MAX - 1 used to push
+    /// every later fork past pid_max), and the allocator skips an ID while
+    /// a claim holds it (PR #35 review).
+    #[test]
+    fn a_claim_does_not_move_the_counter() {
+        let high = IdClaim::new(PID_MAX - 1).expect("unused");
+        assert!(NEXT_ID.load(Ordering::Relaxed) < PID_MAX - 1);
+        drop(high);
+        // Claim an ID about to be handed out (other tests allocate too, so
+        // the first one still free ahead); the next ones skip it.
+        let base = NEXT_ID.load(Ordering::Relaxed);
+        let (next, claim) = (base + 1..base + 1_000)
+            .find_map(|id| IdClaim::new(id).map(|c| (id, c)))
+            .expect("an ID ahead of the counter is free");
+        while NEXT_ID.load(Ordering::Relaxed) <= next {
+            let id = alloc_tid().0;
+            assert_ne!(id, next, "a claimed ID is not handed out");
+            published(id);
+        }
+        drop(claim);
+    }
+
+    /// A process whose ID set_tid chose, dropped only after a later
+    /// allocation has handed that ID out (an `Arc` kept past its reap),
+    /// leaves the new allocation's reservation alone: only the object an ID
+    /// was allocated for clears it (PR #37 review).
+    #[test]
+    fn a_stale_process_leaves_a_new_reservation_alone() {
+        for _ in 0..5 {
+            let base = NEXT_ID.load(Ordering::Relaxed);
+            let (id, claim) = (base + 20..base + 1_000)
+                .find_map(|id| IdClaim::new(id).map(|c| (id, c)))
+                .expect("an ID ahead of the counter is free");
+            let stale = pcb::ProcessBuilder::new(alloc::string::String::from("stale"))
+                .pid(Some(ProcessId(id)))
+                .build();
+            drop(claim);
+            // Counted up to it; other tests allocate meanwhile, and may
+            // take it first, then try again.
+            let mut mine = false;
+            while NEXT_ID.load(Ordering::Relaxed) <= id {
+                let got = alloc_tid().0;
+                if got == id {
+                    mine = true;
+                    break;
+                }
+                published(got);
+            }
+            if !mine {
+                drop(stale);
+                continue;
+            }
+            drop(stale);
+            assert!(
+                IdClaim::new(id).is_none(),
+                "still pending for its allocation"
+            );
+            published(id);
+            return;
+        }
+        panic!("the ID was taken by another test every time");
+    }
+
+    /// An ID that still names a live process group or session, whose leader
+    /// is gone, is in use: neither a set_tid claim nor the allocator may
+    /// hand it out, as Linux keeps the group's struct pid (PR #37 review).
+    #[test]
+    fn a_live_group_or_session_id_is_in_use() {
+        for field in ["pgid", "sid"] {
+            let base = NEXT_ID.load(Ordering::Relaxed);
+            let (id, claim) = (base + 20..base + 1_000)
+                .find_map(|id| IdClaim::new(id).map(|c| (id, c)))
+                .expect("an ID ahead of the counter is free");
+            drop(claim);
+            let member = pcb::ProcessBuilder::new(alloc::string::String::from("member")).build();
+            let target = if field == "pgid" {
+                &member.pgid
+            } else {
+                &member.sid
+            };
+            target.store(id, Ordering::Release);
+            let pid = table::add_process(member).expect("added");
+            let refused = IdClaim::new(id).is_none();
+            let in_use = id_in_use(id);
+            table::remove_process(pid);
+            assert!(refused, "{field} {id} is claimable while it names a group");
+            assert!(in_use, "{field} {id} is not in use for the allocator");
+        }
+    }
+
+    /// A process dropped before it was published (a fork that failed)
+    /// still gives its allocated ID's reservation up.
+    #[test]
+    fn an_unpublished_process_gives_its_reservation_up() {
+        let p = pcb::ProcessBuilder::new(alloc::string::String::from("failed")).build();
+        let id = p.pid.0;
+        assert!(IdClaim::new(id).is_none(), "pending while it lives");
+        drop(p);
+        assert!(IdClaim::new(id).is_some(), "free once it is dropped");
     }
 }
