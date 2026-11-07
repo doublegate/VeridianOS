@@ -1139,12 +1139,15 @@ pub fn send_timer(process: &Process, thread: Option<&Thread>, info: SigInfo) -> 
     use crate::sched::dispatch;
 
     let sig = info.signo();
+    // SIGCONT continues, and a stop signal discards a pending SIGCONT, when
+    // sent, before anything decides that the delivery is ignored (Linux's
+    // prepare_signal ahead of sig_ignored; PR #37 review).
+    job_control_on_send(process, sig);
     // A namespace's init takes its timer's signal only with a handler for
     // it, SIGKILL and SIGSTOP included (never forced, as on Linux).
     if init_ignores_with(process, thread, sig, false) {
         return TimerSend::Ignored;
     }
-    job_control_on_send(process, sig);
     if sig == SIGKILL {
         super::exit::set_kill_pending(process, SIGKILL as u32);
     } else if ignored(process, sig) {

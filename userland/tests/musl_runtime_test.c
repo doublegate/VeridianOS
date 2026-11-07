@@ -10367,8 +10367,11 @@ static int t_levels_init(void)
         ev.sigev_notify = SIGEV_SIGNAL;
         ev.sigev_signo = i == 0 ? SIGKILL : SIGSTOP;
         struct itimerspec its = {.it_value = {0, 2000000}};
-        if (timer_create(CLOCK_MONOTONIC, &ev, &t) != 0 || timer_settime(t, 0, &its, NULL) != 0)
-            f |= 2;
+        if (timer_create(CLOCK_MONOTONIC, &ev, &t) != 0) {
+            f |= 2; /* no timer: nothing to wait for or delete */
+            continue;
+        }
+        if (timer_settime(t, 0, &its, NULL) != 0) f |= 2;
         usleep(100000);
         timer_delete(t);
     }

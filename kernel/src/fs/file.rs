@@ -1038,6 +1038,17 @@ impl FileTable {
     }
 }
 
+/// However the last reference goes -- an exit's `close_all`, or a table
+/// replaced while a CLONE_FILES sharer's exit held it (`unshare_files`), so
+/// that the exit's `Arc::into_inner` saw another reference -- its files
+/// close and its record locks go (PR #37 review). After `close_all` there
+/// is nothing left to close.
+impl Drop for FileTable {
+    fn drop(&mut self) {
+        self.close_all();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1151,6 +1162,32 @@ mod tests {
         table.close_all();
         assert_eq!(test_lock(key, &probe), None);
         copy.close_all();
+    }
+
+    /// A table whose last reference goes without `close_all` -- an exit
+    /// that lost the `Arc::into_inner` race to an `unshare_files` copying
+    /// it -- still closes its files and releases its record locks (PR #37
+    /// review).
+    #[test]
+    fn a_table_dropped_without_close_all_still_closes() {
+        use crate::fs::flock::{set_lock, test_lock, RangeLock, F_WRLCK};
+        let file = some_file();
+        let key = file.flock_key();
+        let shared = Arc::new(FileTable::new());
+        shared.open(file.clone()).unwrap();
+        let lock = RangeLock {
+            kind: F_WRLCK,
+            start: 0,
+            end: 9,
+            owner: shared.lock_owner(),
+            pid: 1,
+            ofd: false,
+        };
+        set_lock(key, &lock, false).unwrap();
+        let held = *file.refcount.read();
+        drop(shared);
+        assert_eq!(test_lock(key, &RangeLock { owner: 0, ..lock }), None);
+        assert_eq!(*file.refcount.read(), held - 1, "the descriptor was closed");
     }
 
     /// Reference: the lowest fd that is neither open nor still the console.

@@ -179,6 +179,12 @@ pub struct Process {
     /// longer change its process group (setpgid EACCES, N-216).
     pub did_exec: core::sync::atomic::AtomicBool,
 
+    /// The process's ID was allocated for it and is still reserved (it is
+    /// not in the table yet): only then does its drop give the reservation
+    /// up. One with a chosen ID (set_tid) never had one, so a process kept
+    /// past its reap cannot clear a later allocation's (PR #37 review).
+    pub(super) id_pending: core::sync::atomic::AtomicBool,
+
     /// Job control (D3): the signal that stopped the process, 0 while it
     /// runs. Its threads park on their way back to user mode until SIGCONT
     /// or SIGKILL.
@@ -603,6 +609,7 @@ impl Process {
             vm_id: AtomicU64::new(new_vm_id()),
             vfork_pending: core::sync::atomic::AtomicBool::new(false),
             did_exec: core::sync::atomic::AtomicBool::new(false),
+            id_pending: core::sync::atomic::AtomicBool::new(false),
             stop_signal: AtomicU32::new(0),
             cont_seq: AtomicU32::new(0),
             sigtramp: AtomicU64::new(0),
@@ -701,9 +708,9 @@ impl Process {
 
         let thread = Arc::new(thread);
         threads.insert(tid, thread.clone());
-        // Another thread's ID is visible now; the first thread's, the
-        // process's own, once the process is in the table.
-        if tid.0 != self.pid.0 {
+        // An ID allocated for this thread is visible now (a first thread's
+        // is the process's own, published with the process).
+        if thread.id_pending.swap(false, Ordering::AcqRel) {
             super::published(tid.0);
         }
         Ok(thread)
@@ -1063,10 +1070,18 @@ impl Process {
     /// unshare_files; unshare(CLONE_FILES)).
     #[cfg(feature = "alloc")]
     pub fn unshare_files(&self) {
-        let mut table = self.file_table.lock();
-        if Arc::strong_count(&table) > 1 {
-            *table = Arc::new(table.clone_for_fork());
-        }
+        let old = {
+            let mut table = self.file_table.lock();
+            if Arc::strong_count(&table) <= 1 {
+                return;
+            }
+            let copy = Arc::new(table.clone_for_fork());
+            core::mem::replace(&mut *table, copy)
+        };
+        // Dropped outside the lock: if the sharers exited meanwhile this
+        // was the last reference, and the table closes its files as it
+        // goes (`FileTable`'s Drop).
+        drop(old);
     }
 
     /// A CLONE_VFORK child has exec'd or exited: its parent may resume.
@@ -1153,9 +1168,11 @@ impl Process {
 impl Drop for Process {
     fn drop(&mut self) {
         println!("[PROCESS] Dropping process {}", self.pid.0);
-        // A fork that failed never published its ID.
+        // A fork that failed never published the ID allocated for it.
         #[cfg(feature = "alloc")]
-        super::published(self.pid.0);
+        if *self.id_pending.get_mut() {
+            super::published(self.pid.0);
+        }
         // Cleanup will be handled by the process lifecycle manager
     }
 }
@@ -1334,6 +1351,22 @@ mod tests {
         );
         pidns::release(init.pid.0);
         pidns::release(other.pid.0);
+    }
+
+    /// A child reaper's own SIGCONT timer, with the default action,
+    /// continues it after a stop from an ancestor: continuing happens when
+    /// the signal is sent, before the check that ignores its delivery
+    /// (Linux's prepare_signal ahead of sig_ignored; PR #37 review).
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_reapers_sigcont_timer_still_continues_it() {
+        use crate::process::signals::{send_timer, SigInfo, TimerSend, SIGCONT, SIGSTOP};
+        let pid1 = make_process(1, "init");
+        assert!(pid1.is_child_reaper());
+        pid1.stop_signal.store(SIGSTOP as u32, Ordering::Release);
+        let sent = send_timer(&pid1, None, SigInfo::timer(SIGCONT, 1, 0, 1));
+        assert_eq!(pid1.stop_signal.load(Ordering::Acquire), 0, "continued");
+        assert_eq!(sent, TimerSend::Ignored, "nothing left to deliver");
     }
 
     /// In a user namespace, the setuid fixup's root is the namespace's: its
@@ -1914,8 +1947,10 @@ impl ProcessBuilder {
     /// `create_process_with_options` does), or clone from an existing
     /// address space (as `fork_process` does).
     pub fn build(self) -> Process {
+        let allocated = self.pid.is_none();
         let pid = self.pid.unwrap_or_else(super::alloc_pid);
         let process = Process::new(pid, self.parent, self.name, self.priority);
+        process.id_pending.store(allocated, Ordering::Release);
         process.update_credentials(|c| *c = self.creds);
         process
     }
@@ -1928,6 +1963,7 @@ impl ProcessBuilder {
     pub fn build_with_address_space(self) -> Result<Process, KernelError> {
         let pid = super::alloc_pid();
         let process = Process::new(pid, self.parent, self.name, self.priority);
+        process.id_pending.store(true, Ordering::Release);
         process.update_credentials(|c| *c = self.creds);
 
         // Initialize the virtual address space with a real page table root

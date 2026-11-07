@@ -297,10 +297,22 @@ pub fn get_process(pid: ProcessId) -> Option<Arc<Process>> {
 
 /// Add a process to the table
 pub fn add_process(process: Process) -> Result<ProcessId, KernelError> {
-    let pid = PROCESS_TABLE.add_process(process)?;
+    // An ID allocated for it leaves the reservations once the process is in
+    // the table, or is gone with it if the insertion failed; a chosen one
+    // (set_tid) was never reserved.
     #[cfg(feature = "alloc")]
-    super::published(pid.0);
-    Ok(pid)
+    let (id, pending) = (
+        process.pid.0,
+        process
+            .id_pending
+            .swap(false, core::sync::atomic::Ordering::AcqRel),
+    );
+    let added = PROCESS_TABLE.add_process(process);
+    #[cfg(feature = "alloc")]
+    if pending {
+        super::published(id);
+    }
+    added
 }
 
 /// Remove a process from the table

@@ -982,4 +982,56 @@ mod id_tests {
         }
         drop(claim);
     }
+
+    /// A process whose ID set_tid chose, dropped only after a later
+    /// allocation has handed that ID out (an `Arc` kept past its reap),
+    /// leaves the new allocation's reservation alone: only the object an ID
+    /// was allocated for clears it (PR #37 review).
+    #[test]
+    fn a_stale_process_leaves_a_new_reservation_alone() {
+        for _ in 0..5 {
+            let base = NEXT_ID.load(Ordering::Relaxed);
+            let (id, claim) = (base + 20..base + 1_000)
+                .find_map(|id| IdClaim::new(id).map(|c| (id, c)))
+                .expect("an ID ahead of the counter is free");
+            let stale = pcb::ProcessBuilder::new(alloc::string::String::from("stale"))
+                .pid(Some(ProcessId(id)))
+                .build();
+            drop(claim);
+            // Counted up to it; other tests allocate meanwhile, and may
+            // take it first, then try again.
+            let mut mine = false;
+            while NEXT_ID.load(Ordering::Relaxed) <= id {
+                let got = alloc_tid().0;
+                if got == id {
+                    mine = true;
+                    break;
+                }
+                published(got);
+            }
+            if !mine {
+                drop(stale);
+                continue;
+            }
+            drop(stale);
+            assert!(
+                IdClaim::new(id).is_none(),
+                "still pending for its allocation"
+            );
+            published(id);
+            return;
+        }
+        panic!("the ID was taken by another test every time");
+    }
+
+    /// A process dropped before it was published (a fork that failed)
+    /// still gives its allocated ID's reservation up.
+    #[test]
+    fn an_unpublished_process_gives_its_reservation_up() {
+        let p = pcb::ProcessBuilder::new(alloc::string::String::from("failed")).build();
+        let id = p.pid.0;
+        assert!(IdClaim::new(id).is_none(), "pending while it lives");
+        drop(p);
+        assert!(IdClaim::new(id).is_some(), "free once it is dropped");
+    }
 }

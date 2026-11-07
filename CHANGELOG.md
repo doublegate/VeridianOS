@@ -588,6 +588,15 @@
 
 ### Fixed
 
+- From the PR #37 review:
+  - A descriptor table closes its files and releases its record locks however its last
+    reference goes: an exec or unshare(CLONE_FILES) copying a table while its other sharer
+    exited used to drop the old one without closing it.
+  - A process or thread that set_tid gave its ID, kept alive past its reap, no longer clears a
+    later allocation's reservation of that ID when it finally goes, which let a set_tid claim
+    take an ID already being handed out.
+  - A child reaper's own SIGCONT timer continues it after a stop, as Linux's: continuing happens
+    when the signal is sent, before the check that ignores its delivery.
 - From the PR #35 Antigravity review rounds (after its merge):
   - POSIX record locks belong to the descriptor table by an ID of its own, not its address, and
     go when its last holder closes it: a process sharing its table with CLONE_FILES no longer
