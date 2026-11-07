@@ -200,21 +200,26 @@ fn read_cpu_clock(clock: Clock) -> Result<u64, SyscallError> {
 fn clock_now_ns(clock: Clock, id: i32) -> Result<i64, SyscallError> {
     match clock {
         Clock::Realtime => Ok(crate::timer::realtime::now_ns()),
-        Clock::Tai => Ok(crate::timer::realtime::now_ns().saturating_add(tai_offset_ns())),
-        Clock::Monotonic => Ok(
-            crate::process::ns::clock_from_host(id, crate::timer::monotonic_ns())
-                .min(i64::MAX as u64) as i64,
-        ),
+        // UTC and the TAI offset read together, under the NTP lock that a
+        // leap second moves both under (`timer::steer::service`): else a
+        // read across one pairs the old UTC with the new offset.
+        Clock::Tai => Ok(crate::timer::ntp::with(|ntp| {
+            crate::timer::realtime::now_ns().saturating_add(ntp.tai() as i64 * 1_000_000_000)
+        })),
+        Clock::Monotonic => {
+            // MONOTONIC_RAW is the clock source as adjtimex leaves it.
+            let host = if id == CLOCK_MONOTONIC_RAW {
+                crate::timer::monotonic_raw_ns()
+            } else {
+                crate::timer::monotonic_ns()
+            };
+            Ok(crate::process::ns::clock_from_host(id, host).min(i64::MAX as u64) as i64)
+        }
         #[cfg(feature = "alloc")]
         _ => Ok(read_cpu_clock(clock)?.min(i64::MAX as u64) as i64),
         #[cfg(not(feature = "alloc"))]
         _ => Err(SyscallError::InvalidArgument),
     }
-}
-
-/// CLOCK_TAI minus CLOCK_REALTIME, in nanoseconds.
-fn tai_offset_ns() -> i64 {
-    crate::timer::ntp::tai_offset_s() as i64 * 1_000_000_000
 }
 
 /// POSIX timespec structure layout (matches C struct timespec).
@@ -291,7 +296,7 @@ fn require_time_privilege() -> Result<(), SyscallError> {
 }
 
 /// The wall clock moved by `delta_ns`: timers on it follow.
-fn clock_was_set(delta_ns: i64) {
+pub(crate) fn clock_was_set(delta_ns: i64) {
     #[cfg(feature = "alloc")]
     crate::fs::timerfd::clock_was_set(delta_ns);
     crate::timer::ktimerd::clock_was_set(delta_ns);
@@ -336,7 +341,7 @@ pub fn sys_clock_settime(clock_id: usize, tp_ptr: usize) -> SyscallResult {
     let ts: Timespec = super::userspace::read_user(tp_ptr)?;
     let ns = ts.to_ns()?;
     require_time_privilege()?;
-    clock_was_set(crate::timer::realtime::set_now_ns(ns));
+    clock_was_set(crate::timer::set_wall_clock(ns));
     Ok(0)
 }
 
@@ -399,7 +404,7 @@ pub fn sys_settimeofday(tv_ptr: usize, tz_ptr: usize) -> SyscallResult {
         );
     }
     if let Some(ns) = wall_ns {
-        clock_was_set(crate::timer::realtime::set_now_ns(ns));
+        clock_was_set(crate::timer::set_wall_clock(ns));
     }
     Ok(0)
 }
@@ -419,22 +424,32 @@ fn do_adjtimex(tx: &mut crate::timer::ntp::Timex) -> Result<i32, SyscallError> {
         ntp::Refused::Invalid => SyscallError::InvalidArgument,
         ntp::Refused::NotPermitted => SyscallError::OperationNotPermitted,
     })?;
-    let (state, moved, tai_moved) = ntp::with(|ntp| {
+    let (state, moved, tai_moved, active) = ntp::with(|ntp| {
+        let was_active = ntp.is_active();
         // Linux reports the time read before the step.
         let now = realtime::now_ns();
         let moved = if tx.modes & ntp::ADJ_SETOFFSET != 0 {
-            Some(
-                realtime::inject_offset(ntp::setoffset_ns(tx))
-                    .ok_or(SyscallError::InvalidArgument)?,
-            )
+            let moved = realtime::inject_offset(ntp::setoffset_ns(tx))
+                .ok_or(SyscallError::InvalidArgument)?;
+            // timekeeping_inject_offset clears the NTP state (TK_CLEAR_NTP)
+            // before ntp_adjtimex applies the other modes.
+            ntp.clear();
+            Some(moved)
         } else {
             None
         };
         let tai = ntp.tai();
         let secs = realtime::now_ns().div_euclid(1_000_000_000);
         let state = ntp.adjtimex(tx, now, secs);
-        Ok::<_, SyscallError>((state, moved, ntp.tai() != tai))
+        let active = crate::timer::steer::adjusted(ntp, was_active);
+        Ok::<_, SyscallError>((state, moved, ntp.tai() != tai, active))
     })?;
+    if active {
+        // ktimerd runs the seconds; without it (no dispatcher) the rate
+        // set here stays, but nothing is delivered each second.
+        let _ = crate::timer::ktimerd::start();
+        crate::timer::ktimerd::kick();
+    }
     if let Some(delta) = moved {
         clock_was_set(delta);
     }
@@ -446,8 +461,10 @@ fn do_adjtimex(tx: &mut crate::timer::ntp::Timex) -> Result<i32, SyscallError> {
 }
 
 /// adjtimex (Linux 159): read the kernel's NTP state, or change it with
-/// CAP_SYS_TIME (`timer::ntp`: ADJ_SETOFFSET steps the clock and ADJ_TAI
-/// sets CLOCK_TAI; the rest is stored and read back). The struct is
+/// CAP_SYS_TIME (`timer::ntp`: ADJ_SETOFFSET steps the clock, ADJ_TAI
+/// sets CLOCK_TAI, the tick, frequency, phase offset and adjtime() slew
+/// steer CLOCK_MONOTONIC and CLOCK_REALTIME, STA_INS/STA_DEL arm a leap
+/// second). The struct is
 /// written back only on success; returns the clock state (TIME_ERROR, 5,
 /// while unsynchronized).
 pub fn sys_adjtimex(tx_ptr: usize) -> SyscallResult {
@@ -601,7 +618,13 @@ pub fn sys_clock_nanosleep(
     let at = req.to_ns()?;
     let deadline = match clock {
         Clock::Realtime => crate::timer::realtime::monotonic_at(at),
-        Clock::Tai => crate::timer::realtime::monotonic_at(at.saturating_sub(tai_offset_ns())),
+        // The TAI offset and the wall offset read together, as for
+        // `clock_now_ns`: a leap second moves both under the NTP lock.
+        Clock::Tai => crate::timer::ntp::with(|ntp| {
+            crate::timer::realtime::monotonic_at(
+                at.saturating_sub(ntp.tai() as i64 * 1_000_000_000),
+            )
+        }),
         _ => crate::process::ns::clock_to_host(clock_id as i32, at as u64),
     };
     #[cfg(feature = "alloc")]

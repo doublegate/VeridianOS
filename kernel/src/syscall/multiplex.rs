@@ -63,7 +63,7 @@ impl Scan {
 
 /// The monotonic clock the waits use, in nanoseconds.
 pub(crate) fn now_ns() -> u64 {
-    crate::arch::timer::monotonic_ns()
+    crate::timer::monotonic_ns()
 }
 
 /// Look with `scan` until it finds something ready or the timeout passes

@@ -443,10 +443,12 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
   7. [ ] D leftovers: N-115, N-260, N-52/N-261, N-282; the native thread call (private 1064),
      whose thread is never started and keeps its process from finishing its exit: start it as
      `clone` does, with a runtime test that the process exits, or retire it (found in PR #33).
-  8. [ ] adjtimex frequency steering, before the cut decision (set 2026-11-01): ADJ_FREQUENCY and
+  8. [x] adjtimex frequency steering, before the cut decision (set 2026-11-01): ADJ_FREQUENCY and
      the adjtime() slew change how fast CLOCK_REALTIME and CLOCK_MONOTONIC advance (as Linux's
-     `ntp_tick_length`), and STA_INS/STA_DEL insert or delete a leap second (LTP leapsec01); its own
-     commit or PR after group 3. KNOWN-LIMITATIONS "adjtimex and clock_adjtime".
+     `ntp_tick_length`), and STA_INS/STA_DEL insert or delete a leap second; its own commit or PR
+     after group 3. KNOWN-LIMITATIONS "adjtimex and clock_adjtime". Done 2026-11-05
+     (`timer::steer`); LTP leapsec01 passed before, so the runtime test
+     `adjtimex_leap_second_inserted` checks the repeated second.
   9. [x] Decision point (decided 2026-11-05): v0.28.0 is cut here, after items 4 to 8, and
      released (item 17); items 10 to 16 are the v0.29 queue, worked straight after the release.
   10. [ ] (v0.29) Sprint F (networking, storage), with `knetd` (N-69) and INET socket readiness.

@@ -83,6 +83,17 @@ pub fn inject_offset(delta_ns: i64) -> Option<i64> {
     Some(delta_ns)
 }
 
+/// Move the wall clock by `delta_ns` for a leap second (`timer::steer`):
+/// back a second for an inserted one, ahead for a deleted one. Counted as
+/// a set, for TFD_TIMER_CANCEL_ON_SET timers, as Linux's
+/// clock_was_set_delayed.
+pub fn leap(delta_ns: i64) {
+    let _ = OFFSET_NS.fetch_update(Ordering::AcqRel, Ordering::Acquire, |old| {
+        Some(old.saturating_add(delta_ns))
+    });
+    SET_COUNT.fetch_add(1, Ordering::AcqRel);
+}
+
 /// Count a change of the wall clocks that did not move CLOCK_REALTIME
 /// (a new TAI offset), for TFD_TIMER_CANCEL_ON_SET timers.
 pub fn mark_set() {
