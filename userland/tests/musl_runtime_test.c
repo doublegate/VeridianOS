@@ -5961,11 +5961,13 @@ static void test_posix_timers(void)
 /* restart_syscall: a relative sleep, or a poll with a timeout, that a stop
  * interrupts carries on to its first deadline once the process continues,
  * instead of starting the whole duration again (Linux's restart block).
- * The child tells the parent it is about to wait, is stopped 50 ms in and
- * continued at 300 ms; it must then return at once, not 300 ms later.
+ * The child tells the parent it is about to wait 1 s, is stopped 50 ms in
+ * and continued about 1050 ms in, after its deadline; it must then return
+ * at once, where a wait started over would take 1 s more.
  * Where there is no poll syscall (arm64, riscv64) musl's poll is ppoll,
  * which Linux reruns with the time left when the stop came (fs/select.c
- * poll_select_finish): about 250 ms more after the continue. */
+ * poll_select_finish): that case waits 300 ms, is continued at 300 ms and
+ * takes about 250 ms more. */
 enum { RESTART_SLEEP, RESTART_POLL, RESTART_PPOLL };
 /* One try. Returns 1, without reporting, when the stop came too late to
  * test anything and tries remain: the child had finished its wait before
@@ -5979,6 +5981,10 @@ static int restart_attempt(const char *name, int mode, int tries)
         report(name, 0, "pipe failed");
         return 0;
     }
+    /* The wait, and how long the parent keeps the child stopped. */
+    int wait_ms = mode == RESTART_PPOLL ? 300 : 1000;
+    /* below a second: usleep may refuse 1000000 (POSIX) */
+    useconds_t stop_us = mode == RESTART_PPOLL ? 250000 : 999000;
     pid_t pid = fork();
     if (pid == 0) {
         long long out[4];
@@ -5987,9 +5993,9 @@ static int restart_attempt(const char *name, int mode, int tries)
         out[0] = mono_ns();
         if (mode != RESTART_SLEEP) {
             struct pollfd p = {idle[0], POLLIN, 0};
-            out[2] = poll(&p, 1, 300);
+            out[2] = poll(&p, 1, wait_ms);
         } else {
-            struct timespec req = {0, 300000000L}, rem = {0, 0};
+            struct timespec req = {wait_ms / 1000, (wait_ms % 1000) * 1000000L}, rem = {0, 0};
             out[2] = nanosleep(&req, &rem);
         }
         out[3] = errno;
@@ -6011,7 +6017,7 @@ static int restart_attempt(const char *name, int mode, int tries)
          * the kernel is wrong. */
         sent = mono_ns();
         stopped = killed && waitpid(pid, &st, WUNTRACED) == pid && WIFSTOPPED(st);
-        usleep(250000);
+        usleep(stop_us);
         cont = mono_ns();
         kill(pid, SIGCONT);
         read(result[0], out, sizeof(out));
@@ -6032,10 +6038,10 @@ static int restart_attempt(const char *name, int mode, int tries)
         report(name, stopped && out[2] == 0 && slept >= 450 && after >= 150 && after < 450, why);
     else
         /* Its deadline passed while it was stopped: it ends soon after
-         * SIGCONT. A sleep started again would take 300 ms more; the margin
-         * below that is for slow CI guests (200 ms seen on GitHub's 4-CPU
-         * runner, PR #35). */
-        report(name, stopped && out[2] == 0 && slept >= 300 && after < 280, why);
+         * SIGCONT. A wait started again would take 1000 ms more; the margin
+         * below that is for slow CI guests (280 ms seen on GitHub's 4-CPU
+         * runner, PR #36, where a 300 ms wait left no room). */
+        report(name, stopped && out[2] == 0 && slept >= 1000 && after < 800, why);
     return 0;
 }
 
