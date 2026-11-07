@@ -515,4 +515,30 @@ mod tests {
         assert!(oop);
         assert_eq!(ntp.tai(), 1);
     }
+
+    /// An idle NTP state needs ktimerd for no second; one that becomes
+    /// active starts counting at the next second, once. The NTP state here
+    /// is a local one at the default second length, so the rate it
+    /// publishes is the identity, as the system's (which no host test
+    /// changes) is.
+    #[test]
+    fn adjusted_arms_the_next_second_when_activated() {
+        assert_eq!(next_due(), None);
+        let mut ntp = Ntp::new();
+        assert!(!adjusted(&mut ntp, false));
+        assert_eq!(ntp.next_second, 0);
+        let mut tx = Timex {
+            modes: ADJ_STATUS,
+            status: STA_INS,
+            ..Timex::default()
+        };
+        ntp.adjtimex(&mut tx, 0, 0);
+        assert_eq!(ntp.second_length(), Ntp::new().second_length());
+        assert!(adjusted(&mut ntp, false));
+        // Already active: an adjustment keeps the second being counted.
+        let counting = ntp.next_second.wrapping_add(5);
+        ntp.next_second = counting;
+        assert!(adjusted(&mut ntp, true));
+        assert_eq!(ntp.next_second, counting);
+    }
 }

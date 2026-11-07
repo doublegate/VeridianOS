@@ -584,11 +584,6 @@ pub fn with<R>(f: impl FnOnce(&mut Ntp) -> R) -> R {
     f(&mut NTP.lock())
 }
 
-/// TAI minus UTC, in seconds (CLOCK_TAI reads CLOCK_REALTIME plus this).
-pub fn tai_offset_s() -> i32 {
-    NTP.lock().tai
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -969,6 +964,14 @@ mod tests {
             ntp.adjtimex(&mut tx, (midnight - 1) * NSEC_PER_SEC, midnight - 1),
             TIME_OOP
         );
+        // Midnight again, before the repeated second has been processed:
+        // the leap is over (Linux's TIME_OOP at ntp_next_leap_sec).
+        let mut tx = modes(0);
+        assert_eq!(
+            ntp.adjtimex(&mut tx, midnight * NSEC_PER_SEC, midnight),
+            TIME_WAIT
+        );
+        assert_eq!((tx.time_sec, tx.tai), (midnight, 1));
         // The repeated second ends: midnight comes once more, without a
         // second leap.
         assert_eq!(ntp.second_overflow(midnight, false), 0);
@@ -1000,6 +1003,38 @@ mod tests {
         );
         assert_eq!(ntp.second_overflow(midnight - 1, false), 1);
         assert_eq!((ntp.time_state, ntp.tai()), (TIME_WAIT, 36));
+    }
+
+    /// A deleted second due but not yet processed reads as already skipped
+    /// (TIME_WAIT, one second ahead); clearing STA_DEL before it cancels the
+    /// deletion.
+    #[test]
+    fn leap_second_delete_reported_then_cancelled() {
+        let mut ntp = Ntp::new();
+        let midnight = 20_000 * DAY;
+        let mut tx = modes(ADJ_STATUS | ADJ_MAXERROR | ADJ_TAI);
+        tx.status = STA_DEL;
+        tx.maxerror = 0;
+        tx.constant = 37;
+        ntp.adjtimex(&mut tx, 0, midnight - 3);
+        ntp.second_overflow(midnight - 2, false);
+        assert_eq!(
+            (ntp.time_state, ntp.next_leap_sec),
+            (TIME_DEL, midnight - 1)
+        );
+        let mut tx = modes(0);
+        let now = (midnight - 1) * NSEC_PER_SEC + 7_000;
+        assert_eq!(ntp.adjtimex(&mut tx, now, midnight - 1), TIME_WAIT);
+        assert_eq!((tx.time_sec, tx.tai), (midnight, 36));
+        // Cancelled: 23:59:59 runs as an ordinary second.
+        let mut tx = modes(ADJ_STATUS);
+        tx.status = 0;
+        ntp.adjtimex(&mut tx, now, midnight - 1);
+        assert_eq!(ntp.second_overflow(midnight - 1, false), 0);
+        assert_eq!(
+            (ntp.time_state, ntp.next_leap_sec, ntp.tai()),
+            (TIME_OK, i64::MAX, 37)
+        );
     }
 
     /// Clearing STA_INS before midnight cancels the leap; turning the PLL

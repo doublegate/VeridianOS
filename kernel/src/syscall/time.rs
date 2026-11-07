@@ -222,11 +222,6 @@ fn clock_now_ns(clock: Clock, id: i32) -> Result<i64, SyscallError> {
     }
 }
 
-/// CLOCK_TAI minus CLOCK_REALTIME, in nanoseconds.
-fn tai_offset_ns() -> i64 {
-    crate::timer::ntp::tai_offset_s() as i64 * 1_000_000_000
-}
-
 /// POSIX timespec structure layout (matches C struct timespec).
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -623,7 +618,13 @@ pub fn sys_clock_nanosleep(
     let at = req.to_ns()?;
     let deadline = match clock {
         Clock::Realtime => crate::timer::realtime::monotonic_at(at),
-        Clock::Tai => crate::timer::realtime::monotonic_at(at.saturating_sub(tai_offset_ns())),
+        // The TAI offset and the wall offset read together, as for
+        // `clock_now_ns`: a leap second moves both under the NTP lock.
+        Clock::Tai => crate::timer::ntp::with(|ntp| {
+            crate::timer::realtime::monotonic_at(
+                at.saturating_sub(ntp.tai() as i64 * 1_000_000_000),
+            )
+        }),
         _ => crate::process::ns::clock_to_host(clock_id as i32, at as u64),
     };
     #[cfg(feature = "alloc")]

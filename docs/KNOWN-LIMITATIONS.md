@@ -65,8 +65,8 @@ exposed were fixed (N-182 to N-189); the rest are listed, with their targets, in
   scheduling delay after the second starts (seconds it runs late are charged with what the rate
   before them delivered, so nothing is lost or given twice, but a second's change of rate starts
   that delay late; after 64 seconds without it the count restarts), and not at all on a machine
-  where the thread cannot
-  start (a rate set by adjtimex still applies); there is no PPS, and no auxiliary clocks. (LTP
+  where the thread cannot start (a rate set by adjtimex still applies); there is no PPS, and no
+  auxiliary clocks. (LTP
   leapsec01 passed before leap seconds existed, as it only checks that a sleep does not end early;
   the runtime test `adjtimex_leap_second_inserted` checks the repeated second.)
 - **File calls without a page cache.** readahead and posix_fadvise check their arguments and

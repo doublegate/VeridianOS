@@ -420,8 +420,9 @@
   unsteered clock, as Linux's sched_clock; sleep deadlines run on CLOCK_MONOTONIC. Setting the
   clock (settimeofday, clock_settime, ADJ_SETOFFSET) clears the NTP state as on Linux: the slew
   and phase offset stop, the clock is unsynchronized and no leap second stays armed. CLOCK_TAI
-  reads UTC and the TAI offset together. clock_adjtime adjusts CLOCK_REALTIME and answers
-  EOPNOTSUPP for every other clock, EINVAL for an ID that names none.
+  reads UTC and the TAI offset together, and so does an absolute clock_nanosleep on it.
+  clock_adjtime adjusts CLOCK_REALTIME and answers EOPNOTSUPP for every other clock, EINVAL for an
+  ID that names none.
 - restart_syscall (`syscall::restart`; it was ENOSYS). A relative nanosleep or clock_nanosleep,
   or a poll with a timeout, that a stop interrupts now carries on to its first deadline once the
   process continues; it started the whole duration again. As in Linux, the interrupted call
