@@ -439,7 +439,20 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
      files and mappings keep the `Mount` they were reached through and the mount flags are checked
      on it, not on a path looked up again in the caller's namespace; mounts follow a renamed
      directory in every namespace; a remount read-only sees every writer of the superblock
-     (KNOWN-LIMITATIONS "Namespaces are partial").
+     (KNOWN-LIMITATIONS "Namespaces are partial"). Found 2026-11-06:
+     - [ ] With any move of mount, umount2 or pivot_root from `capable` to `ns_capable` (not
+       reachable before; ADR 0022 H4 says MNT_LOCKED comes with it): a superblock owner (the
+       mounter's user namespace) whose CAP_SYS_ADMIN a change of its read-only state needs, and
+       Linux's locked mount flags (MNT_LOCK_READONLY, NODEV, NOSUID, NOEXEC, ATIME) set by
+       `Mounts::copy` into a less privileged namespace, so they cannot be cleared there (EPERM)
+       and such a mount cannot be unmounted to uncover what it hides (EINVAL).
+     - [ ] `clock_gettime03` is FLAKY on x86_64 (2026-11-06): a retry boots a fresh guest, whose
+       uptime under 10 s makes the -10 s offset ERANGE (as on Linux). Have `--retry` wait until
+       the guest has been up 10 s, then set it back to PASS.
+     - [ ] An inotify event from an open file looks the file's directory up in the mount
+       namespace of the thread that made it: record the mount namespace with `File::path` at open.
+     - [ ] A pidfd setns that joins a user namespace checks the later namespaces with the new
+       credentials (Linux's `nsset->cred`), not the caller's from before.
   7. [ ] D leftovers: N-115, N-260, N-52/N-261, N-282; the native thread call (private 1064),
      whose thread is never started and keeps its process from finishing its exit: start it as
      `clone` does, with a runtime test that the process exits, or retire it (found in PR #33).

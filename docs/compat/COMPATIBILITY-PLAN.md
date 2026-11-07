@@ -115,7 +115,7 @@ Each group lands with its LTP cases. The counts are "missing" entries in the cov
   - Handles, xattrs, inotify and fanotify (handles, xattrs and inotify are done; handles decode
     by a walk and inotify follows paths, KNOWN-LIMITATIONS; fanotify stays ENOSYS, as on a
     kernel built without CONFIG_FANOTIFY).
-  - Real statx/statfs/fallocate, and every O_* flag (statx and statfs are done).
+  - Real statx/statfs/fallocate, and every O_* flag (statx, statfs and fallocate are done).
 - **memory (23)**
   - msync, mincore, the mlock family, real mremap, pkeys, mseal, membarrier and userfaultfd, plus
     the NUMA calls.
@@ -187,8 +187,8 @@ Each group lands with its LTP cases. The counts are "missing" entries in the cov
   4.4" warning, which now appears once); the full runs of 2026-10-30 had 524/519/519. The
   syscall groups (2026-11-05) added about 215 more on each architecture. What still stops most LTP tests before their check is
   listed in `docs/KNOWN-LIMITATIONS.md`, "Conformance suites": no test block device (about 175
-  tests, which on AArch64 and RISC-V run into the time limit while they write the image) and
-  no mount. The kernel configuration LTP reads is `/boot/config-<release>`, generated from
+  tests; fallocate refuses LTP's loop image at once with ENOSPC when the disk has less room, so
+  they no longer run into the time limit). The kernel configuration LTP reads is `/boot/config-<release>`, generated from
   `abi/kconfig.map` (ADR 0023).
 - **Coverage tables.** Regenerate the coverage table every release, add one for arm64, and track
   partial semantics per syscall.

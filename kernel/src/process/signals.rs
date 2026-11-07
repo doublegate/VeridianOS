@@ -843,16 +843,29 @@ fn sender_outside(target: &Process) -> bool {
 }
 
 /// Linux's SIGNAL_UNKILLABLE rule (sig_task_ignored): the init of a PID
-/// namespace below the initial one takes only the signals it has a handler
-/// for, except that SIGKILL and SIGSTOP still reach it from the kernel
-/// (SI_KERNEL) or from an ancestor namespace. Such a signal is dropped
+/// namespace, the initial one's PID 1 included, takes only the signals it
+/// has a handler for, except that SIGKILL and SIGSTOP still reach it from the
+/// kernel (SI_KERNEL) or from an ancestor namespace. Such a signal is dropped
 /// when generated, unless the target thread (`thread`, or the process's
 /// first) blocks it: then it waits, and delivery drops it if the action
 /// is still the default ([`init_skips`]), as Linux's sig_ignored and
 /// get_signal.
 pub fn init_ignores(process: &Process, thread: Option<&Thread>, info: &SigInfo) -> bool {
     let sig = info.signo();
-    if !process.is_ns_init() || process.get_signal_handler(sig).unwrap_or(SIG_DFL) != SIG_DFL {
+    // Only asked of a namespace's init, before the sender is looked at.
+    if !process.is_child_reaper() {
+        return false;
+    }
+    let force = info.si_code == SI_KERNEL || sender_outside(process);
+    init_ignores_with(process, thread, sig, force)
+}
+
+/// [`init_ignores`] with whether the signal is forced through (Linux's
+/// `force` of sig_task_ignored): a POSIX timer's never is, as Linux's
+/// posixtimer_send_sigqueue calls prepare_signal with `force` false, so an
+/// init's own timer cannot kill or stop it.
+fn init_ignores_with(process: &Process, thread: Option<&Thread>, sig: usize, force: bool) -> bool {
+    if !process.is_child_reaper() || process.get_signal_handler(sig).unwrap_or(SIG_DFL) != SIG_DFL {
         return false;
     }
     let first = process.get_thread(crate::process::ThreadId(process.pid.0));
@@ -862,7 +875,6 @@ pub fn init_ignores(process: &Process, thread: Option<&Thread>, info: &SigInfo) 
     if blocked && sig != SIGKILL {
         return false;
     }
-    let force = info.si_code == SI_KERNEL || sender_outside(process);
     !(force && (sig == SIGKILL || sig == SIGSTOP))
 }
 
@@ -870,7 +882,7 @@ pub fn init_ignores(process: &Process, thread: Option<&Thread>, info: &SigInfo) 
 /// namespace takes no default action on (all but SIGKILL and SIGSTOP,
 /// get_signal's SIGNAL_UNKILLABLE check).
 fn init_skips(process: &Process, sig: usize) -> bool {
-    sig != SIGKILL && sig != SIGSTOP && process.is_ns_init()
+    sig != SIGKILL && sig != SIGSTOP && process.is_child_reaper()
 }
 
 /// Whether sending `sig` to `process` would only be ignored (SIG_IGN, or
@@ -1127,6 +1139,11 @@ pub fn send_timer(process: &Process, thread: Option<&Thread>, info: SigInfo) -> 
     use crate::sched::dispatch;
 
     let sig = info.signo();
+    // A namespace's init takes its timer's signal only with a handler for
+    // it, SIGKILL and SIGSTOP included (never forced, as on Linux).
+    if init_ignores_with(process, thread, sig, false) {
+        return TimerSend::Ignored;
+    }
     job_control_on_send(process, sig);
     if sig == SIGKILL {
         super::exit::set_kill_pending(process, SIGKILL as u32);

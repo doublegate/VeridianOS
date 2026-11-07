@@ -509,6 +509,19 @@ pub struct FileTable {
     /// dup3 target EBADF, as on Linux. Descriptors already open above a
     /// lowered limit stay open.
     limit: AtomicUsize,
+
+    /// The owner of the POSIX record locks taken through this table
+    /// ([`FileTable::lock_owner`]): unique for the kernel's life, so it
+    /// survives the table being moved out of its `Arc` at the last close,
+    /// and a later table at the same address is never taken for it.
+    owner: u64,
+}
+
+/// The next [`FileTable`] lock owner.
+static NEXT_TABLE_OWNER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+
+fn new_table_owner() -> u64 {
+    NEXT_TABLE_OWNER.fetch_add(1, Ordering::Relaxed)
 }
 
 /// All three standard descriptors are the implicit console.
@@ -529,6 +542,7 @@ impl FileTable {
             console_fds: AtomicU8::new(CONSOLE_FDS_ALL),
             free_hint: AtomicUsize::new(3),
             limit: AtomicUsize::new(MAX_FDS),
+            owner: new_table_owner(),
         }
     }
 }
@@ -586,11 +600,12 @@ impl FileTable {
     }
 
     /// The owner of the POSIX record locks taken through this table (Linux's
-    /// `current->files`, so threads share them and a fork child, with its
-    /// own table, does not): the table's address, stable while its process
-    /// lives.
+    /// `current->files`, so threads and CLONE_FILES processes share them and
+    /// a fork child, with its own table, does not): an ID of the table's
+    /// own, not its address, which changes when the last holder moves it
+    /// out of its `Arc` to close it.
     pub fn lock_owner(&self) -> u64 {
-        self as *const Self as u64
+        self.owner
     }
 
     /// A descriptor of `file` left the table: the table's POSIX record
@@ -1000,10 +1015,14 @@ impl FileTable {
             console_fds: AtomicU8::new(self.console_fds.load(Ordering::Acquire)),
             free_hint: AtomicUsize::new(self.free_hint.load(Ordering::Acquire)),
             limit: AtomicUsize::new(self.limit()),
+            // A copy owns no locks: Linux's fork child does not inherit them.
+            owner: new_table_owner(),
         }
     }
 
-    /// Close all open file descriptors
+    /// Close all open file descriptors: the table's last holder is done
+    /// with it (Linux's put_files_struct), and every POSIX record lock it
+    /// owns goes with it.
     pub fn close_all(&self) {
         let mut files = self.files.write();
 
@@ -1014,6 +1033,8 @@ impl FileTable {
             }
         }
         self.free_hint.store(0, Ordering::Release);
+        drop(files);
+        crate::fs::flock::release_all_of(self.owner);
     }
 }
 
@@ -1093,6 +1114,43 @@ mod tests {
         );
         crate::fs::flock::release_owner(key, other.lock_owner());
         mine.close(fd).unwrap();
+    }
+
+    /// A table's record locks stay while any holder shares it, and go at
+    /// its last close even after the table has been moved out of its `Arc`
+    /// (its owner is an ID, not its address); a copy (fork) owns none of
+    /// them (PR #35 review: CLONE_FILES).
+    #[test]
+    fn a_tables_record_locks_go_with_its_last_close() {
+        use crate::fs::flock::{set_lock, test_lock, RangeLock, F_WRLCK};
+        let file = some_file();
+        let key = file.flock_key();
+        let shared = Arc::new(FileTable::new());
+        shared.open(file).unwrap();
+        let owner = shared.lock_owner();
+        let lock = RangeLock {
+            kind: F_WRLCK,
+            start: 0,
+            end: 9,
+            owner,
+            pid: 1,
+            ofd: false,
+        };
+        set_lock(key, &lock, false).unwrap();
+        let probe = RangeLock { owner: 0, ..lock };
+        let copy = shared.clone_for_fork();
+        assert_ne!(copy.lock_owner(), owner, "a fork child owns no locks");
+
+        // One of two holders done with it (a CLONE_FILES process exits).
+        let peer = shared.clone();
+        assert!(Arc::into_inner(shared).is_none());
+        assert_eq!(test_lock(key, &probe).map(|l| l.owner), Some(owner));
+
+        // The last: moved out and closed.
+        let table = Arc::into_inner(peer).expect("last holder");
+        table.close_all();
+        assert_eq!(test_lock(key, &probe), None);
+        copy.close_all();
     }
 
     /// Reference: the lowest fd that is neither open nor still the console.

@@ -404,6 +404,16 @@ impl Process {
         !ns.is_initial() && ns.reaper() == Some(self.pid.0)
     }
 
+    /// Whether it is the init of its PID namespace, PID 1 of the initial
+    /// one included: Linux's child reaper, which copy_process makes
+    /// SIGNAL_UNKILLABLE, so it takes only the signals it has a handler
+    /// for, but SIGKILL and SIGSTOP from the kernel or from an ancestor
+    /// namespace (`signals::init_ignores`). [`Process::is_ns_init`] is the
+    /// narrower rule for what ends with a namespace's init.
+    pub fn is_child_reaper(&self) -> bool {
+        self.pid_ns().reaper() == Some(self.pid.0)
+    }
+
     /// The process's resource limits.
     pub fn limits(&self) -> super::rlimit::Limits {
         *self.rlimits.lock()
@@ -1292,15 +1302,36 @@ mod tests {
         init.set_signal_handler(15, 0x4000).unwrap();
         assert!(!init_ignores(&init, None, &user(15)), "a handled signal");
         assert_eq!(user(10).for_receiver(&init).pid(), 0);
-        // Its second process is no init; the initial namespace's 1 is not
-        // one of these either.
+        // Its second process is no init.
         let other = make_process(7_000_002, "nsother");
         pidns::reserve(&ns, &[], |_| false)
             .unwrap()
             .commit(other.pid.0);
         other.set_pid_ns(ns.clone());
         assert!(!other.is_ns_init() && !init_ignores(&other, None, &user(15)));
-        assert!(!make_process(1, "init").is_ns_init());
+        // The initial namespace's 1 is not a namespace's init that takes
+        // the namespace with it, but it is unkillable as Linux's child
+        // reaper: a SIGKILL or SIGSTOP from inside its namespace (there is
+        // no outside) is dropped, as are unhandled default-action signals;
+        // the kernel's (SI_KERNEL) still reaches it.
+        let pid1 = make_process(1, "init");
+        assert!(!pid1.is_ns_init() && pid1.is_child_reaper());
+        assert!(
+            init_ignores(&pid1, None, &user(9)),
+            "SIGKILL from a process"
+        );
+        assert!(
+            init_ignores(&pid1, None, &user(19)),
+            "SIGSTOP from a process"
+        );
+        assert!(
+            init_ignores(&pid1, None, &user(15)),
+            "SIGTERM with no handler"
+        );
+        assert!(
+            !init_ignores(&pid1, None, &SigInfo::kernel(9)),
+            "the kernel's SIGKILL"
+        );
         pidns::release(init.pid.0);
         pidns::release(other.pid.0);
     }

@@ -926,10 +926,11 @@ pub fn cleanup_process(process: &Process) {
                     process.pid.0, open_fds
                 );
             }
+            // Its POSIX record locks go with it (`close_all`), not with the
+            // process: a table still shared keeps its locks (N-120, PR #35
+            // review).
             file_table.close_all();
         }
-        // flock/fcntl locks die with their owner (N-120).
-        crate::fs::flock::cleanup_process_locks(process.pid.0);
     }
 
     // An exiting tracer detaches from everything it traced (as on Linux),

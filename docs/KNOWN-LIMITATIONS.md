@@ -147,12 +147,11 @@ LTP's `syscalls`, the Open POSIX Test Suite and musl libc-test run on all three 
 [`docs/compat/COMPATIBILITY-PLAN.md`](compat/COMPATIBILITY-PLAN.md)). Most LTP tests never reach
 their check, for a few shared reasons:
 
-- **statfs reports no mount flags.** It reports each filesystem's type and counts (until it was
-  implemented, about 630 of LTP's 1,552 tests were TBROK on its ENOSYS), but VeridianOS has no
-  per-mount flags, so `f_flags` carries only `ST_VALID` and a read-only ext4's or FAT's
-  `ST_RDONLY` (never `ST_NOSUID`, `ST_NODEV`, `ST_NOEXEC` or `ST_RELATIME`). `f_fsid` is 0 except
-  on ext4, and an ext4 image whose superblock does not record its metadata overhead reports the
-  whole volume in `f_blocks`.
+- **statfs's `f_fsid` and ext4 counts.** It reports each filesystem's type and counts (until it
+  was implemented, about 630 of LTP's 1,552 tests were TBROK on its ENOSYS), and `f_flags` carries
+  the flags of the mount the path is on and its superblock's read-only state, as Linux's
+  calculate_f_flags. `f_fsid` is 0 except on ext4, and an ext4 image whose superblock does not
+  record its metadata overhead reports the whole volume in `f_blocks`.
 - **No test block device.** Tests that need a block device (about 175) ask LTP for a loop device
   backed by a 300 MB image in their temporary directory, and there are no loop devices to attach
   it to, so the test is TBROK. LTP creates the image with `fallocate`, which refuses it at once
@@ -327,14 +326,10 @@ What remains:
   An open `/proc/self` stands for
   whichever process uses it, not the one that opened it, so pidfd_send_signal on one passed to
   another process signals that process.
-- **clone3 has one PID namespace level and no cgroups.** set_tid takes one ID (more are EINVAL,
-  as on Linux without nested PID namespaces), and CLONE_INTO_CGROUP is EBADF, since no
-  descriptor can name a cgroup. CLONE_PTRACE and CLONE_UNTRACED are EINVAL from clone and
-  clone3 alike (there is no ptrace auto-attach). An ID that a fork or
-  clone still under way has just been given can be chosen again through set_tid before that
-  child is in the process table; the table then refuses the second process, but a second thread
-  with the ID is not refused. Only a caller with CAP_CHECKPOINT_RESTORE or CAP_SYS_ADMIN can
-  choose an ID.
+- **clone3 has no cgroups.** set_tid takes an ID for each PID namespace level, as on Linux, and
+  CLONE_INTO_CGROUP is EBADF, since no descriptor can name a cgroup. CLONE_PTRACE and
+  CLONE_UNTRACED are EINVAL from clone and clone3 alike (there is no ptrace auto-attach). Only a
+  caller with CAP_CHECKPOINT_RESTORE or CAP_SYS_ADMIN can choose an ID.
 - **kcmp.** KCMP_FILES and KCMP_SIGHAND see the tables a CLONE_FILES or CLONE_SIGHAND clone
   shares, and a table's identity can be reused once its last user is gone, as on Linux. A
   CLONE_VM child counts as sharing its parent's
@@ -421,15 +416,18 @@ What remains:
   namespaces, where Linux counts per user in each namespace; a map file finds its namespace by the pid
   at each write, where Linux binds it at open (the opener's credentials are still the ones
   checked); max_user_namespaces counts each user's namespaces system-wide, where Linux keeps
-  a count per user in each namespace, and max_pid_namespaces likewise; `/proc/sys/user` has
-  only those two limits. Creating a user namespace needs
+  a count per user in each namespace, and max_pid_namespaces and max_net_namespaces likewise;
+  `/proc/sys/user` has only those three limits. Creating a user namespace needs
   CAP_SYS_ADMIN unless root sets `/proc/sys/kernel/unprivileged_userns_clone` to 1 (it is 0 by
   default, by the maintainer's choice; Linux allows it to everyone).
   unshare(CLONE_FILES) in a multithreaded process is
   EINVAL, since the descriptor table belongs to the process, not the thread. The nsfs file's
   st_dev is procfs's, not an nsfs device's, and `/proc/sys/kernel/hostname` cannot be written
   (sethostname can). NS_MNT_GET_*, listns, statns and the `/proc/sys/user/max_*_namespaces` limits
-  other than max_user_namespaces and max_pid_namespaces do not exist. No vDSO
+  other than max_user_namespaces, max_pid_namespaces and max_net_namespaces do not exist. A
+  watched file's parent directory is looked up in the mount namespace of the thread whose call
+  made the event, so an open file written by a thread of another mount namespace than its
+  opener's may report to the wrong directory. No vDSO
   reads the offsets, as there is no vDSO at all (below).
 - **personality changes little.** Every value is stored and reported, but only PER_LINUX
   exists, and only STICKY_TIMEOUTS, UNAME26 and READ_IMPLIES_EXEC change anything.
