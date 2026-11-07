@@ -9897,6 +9897,56 @@ static void test_ns_object_cap(void)
     report("ns_object_cap", f == 0, why);
 }
 
+/* The clocks' object capabilities (ADR 0024, step 4): a root child that
+ * drops the system clock can still read it and the NTP state, and arm an
+ * alarm timer, but not set or steer the clock; dropping the alarm clocks
+ * too refuses the alarm timer. */
+#define T_CAP_CLOCK 10
+static void test_clock_object_cap(void)
+{
+    char why[160];
+    pid_t child = fork();
+    if (child == 0) {
+        int g = 0;
+        struct timespec now;
+        struct timeval tv;
+        struct timex tx;
+        timer_t t;
+        if (geteuid() != 0) g |= 1;
+        long d_sys = syscall(T_SYS_CAPABILITY_DROP, T_CAP_CLOCK, 0);
+        if (d_sys != 1) g |= 2;
+        if (clock_gettime(CLOCK_REALTIME, &now) != 0) g |= 4;
+        if (!(clock_settime(CLOCK_REALTIME, &now) == -1 && errno == EPERM)) g |= 8;
+        gettimeofday(&tv, NULL);
+        if (!(settimeofday(&tv, NULL) == -1 && errno == EPERM)) g |= 16;
+        memset(&tx, 0, sizeof(tx));
+        if (adjtimex(&tx) < 0) g |= 32;
+        memset(&tx, 0, sizeof(tx));
+        tx.modes = ADJ_MAXERROR;
+        tx.maxerror = 1000;
+        if (!(adjtimex(&tx) == -1 && errno == EPERM)) g |= 64;
+        if (timer_create(CLOCK_REALTIME_ALARM, NULL, &t) != 0)
+            g |= 128;
+        else
+            timer_delete(t);
+        long d_alarm = syscall(T_SYS_CAPABILITY_DROP, T_CAP_CLOCK, 1);
+        if (d_alarm != 1) g |= 256;
+        if (!(timer_create(CLOCK_BOOTTIME_ALARM, NULL, &t) == -1 && errno == EPERM)) g |= 512;
+        if (timer_create(CLOCK_MONOTONIC, NULL, &t) != 0)
+            g |= 1024;
+        else
+            timer_delete(t);
+        if (g != 0) {
+            printf("clock-object-cap g=%#x drops=%ld,%ld\n", g, d_sys, d_alarm);
+            fflush(stdout);
+        }
+        _exit(g == 0 ? 0 : 1);
+    }
+    int code = t_exit_status(child);
+    snprintf(why, sizeof(why), "code=%d", code);
+    report("clock_object_cap", code == 0, why);
+}
+
 /* Write `text` to `path`; 0 or the errno. */
 static int t_write_text(const char *path, const char *text)
 {
@@ -10661,6 +10711,7 @@ int main(int argc, char **argv)
     test_pivot_root();
     test_mount_object_cap();
     test_ns_object_cap();
+    test_clock_object_cap();
     test_user_ns();
     test_pid_ns();
     test_net_ns();

@@ -282,16 +282,32 @@ unsafe impl super::userspace::UserPod for Timezone {}
 /// The timezone settimeofday last set (minutes west, DST type).
 static SYS_TZ: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// Setting the wall clock needs CAP_SYS_TIME (ADR 0020). A caller that is
-/// not a process is refused, not trusted.
+/// Setting the wall clock needs CAP_SYS_TIME (ADR 0020) and MODIFY on the
+/// system clock (ADR 0024, step 4). A caller that is not a process is
+/// refused, not trusted.
 fn require_time_privilege() -> Result<(), SyscallError> {
     let caller = crate::process::creds::Caller::current();
     if crate::process::current_process().is_some()
         && caller.capable(crate::process::linux_caps::CAP_SYS_TIME)
+        && clock_capability(crate::cap::object::ClockObject::System)
     {
         Ok(())
     } else {
         Err(SyscallError::OperationNotPermitted)
+    }
+}
+
+/// Whether the caller holds the object capability `clock` asks for
+/// (`cap::authority::may_use_clock`).
+fn clock_capability(clock: crate::cap::object::ClockObject) -> bool {
+    #[cfg(feature = "alloc")]
+    {
+        crate::cap::authority::current_may_use_clock(clock)
+    }
+    #[cfg(not(feature = "alloc"))]
+    {
+        let _ = clock;
+        true
     }
 }
 
@@ -811,7 +827,8 @@ fn timer_id(arg: usize) -> Result<i32, SyscallError> {
 }
 
 /// timer_create(clock, sevp, timerid): a POSIX timer
-/// (`process::posix_timer`). The alarm clocks need CAP_WAKE_ALARM (EPERM).
+/// (`process::posix_timer`). The alarm clocks need CAP_WAKE_ALARM and WRITE
+/// on the alarm clocks' object capability (EPERM; ADR 0024, step 4).
 #[cfg(feature = "alloc")]
 pub fn sys_timer_create(clock_id: usize, sevp: usize, id_ptr: usize) -> SyscallResult {
     let event = match sevp {
@@ -828,8 +845,9 @@ pub fn sys_timer_create(clock_id: usize, sevp: usize, id_ptr: usize) -> SyscallR
             .ok_or(SyscallError::InvalidArgument)?;
     }
     if matches!(clock_id, CLOCK_REALTIME_ALARM | CLOCK_BOOTTIME_ALARM)
-        && !crate::process::creds::Caller::current()
+        && !(crate::process::creds::Caller::current()
             .capable(crate::process::linux_caps::CAP_WAKE_ALARM)
+            && clock_capability(crate::cap::object::ClockObject::Alarm))
     {
         return Err(SyscallError::OperationNotPermitted);
     }

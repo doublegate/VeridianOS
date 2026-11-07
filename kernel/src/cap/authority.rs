@@ -153,6 +153,29 @@ pub fn current_may_create_namespaces(
     }
 }
 
+/// Whether `space` may use `clock` as a privileged caller would (ADR 0024,
+/// step 4): MODIFY on the system clock to set or steer it (clock_settime,
+/// settimeofday, adjtimex and clock_adjtime past reading), WRITE on the
+/// alarm clocks to arm a timer on one. Checked after CAP_SYS_TIME and
+/// CAP_WAKE_ALARM; EPERM when it fails.
+#[cfg(feature = "alloc")]
+pub fn may_use_clock(space: &CapabilitySpace, clock: ClockObject) -> bool {
+    let rights = match clock {
+        ClockObject::System => Rights::MODIFY,
+        ClockObject::Alarm => Rights::WRITE,
+    };
+    holds(space, &ObjectRef::Clock { clock }, rights)
+}
+
+/// [`may_use_clock`] for the calling process; kernel context passes.
+#[cfg(feature = "alloc")]
+pub fn current_may_use_clock(clock: ClockObject) -> bool {
+    match crate::process::current_process() {
+        Some(process) => may_use_clock(&process.capability_space.lock(), clock),
+        None => true,
+    }
+}
+
 /// Give the process whose capability space is `space` [`authority_rights`]
 /// over user namespace `ns`, which it is creating (ADR 0024, decision 7): the
 /// namespaces made inside it then belong to a user namespace it has
@@ -392,6 +415,36 @@ mod tests {
             &ObjectRef::System,
             Rights::READ
         ));
+    }
+
+    #[test]
+    fn setting_the_clock_needs_modify_and_an_alarm_timer_write() {
+        let space = initial_space();
+        assert!(may_use_clock(&space, ClockObject::System));
+        assert!(may_use_clock(&space, ClockObject::Alarm));
+        // Dropping the system clock leaves the alarm clocks, and the reverse.
+        let child = CapabilitySpace::new();
+        child.clone_from(&space).unwrap();
+        assert_eq!(drop_object(&child, TYPE_CLOCK as usize, 0), Some(1));
+        assert!(!may_use_clock(&child, ClockObject::System));
+        assert!(may_use_clock(&child, ClockObject::Alarm));
+        assert_eq!(drop_object(&child, TYPE_CLOCK as usize, 1), Some(1));
+        assert!(!may_use_clock(&child, ClockObject::Alarm));
+        // WRITE arms an alarm timer, but setting the clock needs MODIFY.
+        let write_only = CapabilitySpace::new();
+        for clock in [ClockObject::System, ClockObject::Alarm] {
+            cap_manager()
+                .create_capability(ObjectRef::Clock { clock }, Rights::WRITE, &write_only)
+                .unwrap();
+        }
+        assert!(!may_use_clock(&write_only, ClockObject::System));
+        assert!(may_use_clock(&write_only, ClockObject::Alarm));
+        // The system's authority does not stand for a clock.
+        let system_only = CapabilitySpace::new();
+        cap_manager()
+            .create_capability(ObjectRef::System, Rights::ALL, &system_only)
+            .unwrap();
+        assert!(!may_use_clock(&system_only, ClockObject::System));
     }
 
     #[test]

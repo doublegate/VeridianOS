@@ -104,6 +104,12 @@
   setdomainname MODIFY on the UTS namespace; writes to `uid_map`, `gid_map` and `setgroups`
   MODIFY on the user namespace. A launcher can now run root unable to make, join or rename a
   namespace it has dropped.
+- Setting the clocks needs object capabilities too (ADR 0024, step 4), EPERM without:
+  clock_settime, settimeofday, and adjtimex and clock_adjtime for anything but reading need MODIFY
+  on the system clock besides CAP_SYS_TIME; timer_create on CLOCK_REALTIME_ALARM or
+  CLOCK_BOOTTIME_ALARM needs WRITE on the alarm clocks besides CAP_WAKE_ALARM; a write to
+  `/proc/<pid>/timens_offsets` needs MODIFY on the time namespace, itself or through a user
+  namespace above it. A launcher can now run root unable to set the clock.
 - `/boot/config-7.3.0-veridian` in every root filesystem (ADR 0023): the Linux kernel
   configuration VeridianOS reports, generated per architecture by `tools/compat/gen_kconfig.py`
   from `abi/kconfig.map`. An option is set only where the kernel does what Linux built with it

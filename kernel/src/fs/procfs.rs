@@ -129,7 +129,8 @@ fn parse_offset_line(line: &str) -> Option<(i32, i64, i64)> {
 /// timens_offsets_write and proc_timens_set_offset: at the start of the
 /// file and under a page (EINVAL), up to two well-formed lines (EINVAL),
 /// the process there (ESRCH), the `opener`'s CAP_SYS_TIME over the user
-/// namespace owning the time namespace (EPERM), each
+/// namespace owning the time namespace and the writing process's MODIFY on
+/// it (EPERM; ADR 0024, step 4), each
 /// offset and the clock it moves within range (ERANGE), and a namespace no
 /// process has entered (EACCES).
 fn write_timens_offsets(
@@ -172,6 +173,14 @@ fn write_timens_offsets(
     // file_ns_capable: the opener's CAP_SYS_TIME over the user namespace
     // that owns the time namespace.
     if !opener.ns_capable(&ns.owner, crate::process::linux_caps::CAP_SYS_TIME) {
+        return Err(KernelError::FsError(FsError::OperationNotPermitted));
+    }
+    // And the writing process's MODIFY on the time namespace, itself or
+    // through a user namespace above it (ADR 0024, step 4).
+    if !crate::cap::authority::current_holds_namespace(
+        &crate::process::ns::NsRef::Time(ns.clone()),
+        crate::cap::Rights::MODIFY,
+    ) {
         return Err(KernelError::FsError(FsError::OperationNotPermitted));
     }
     // There is no suspend: the boot-time clock reads the monotonic one.
