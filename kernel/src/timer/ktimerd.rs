@@ -14,6 +14,9 @@
 //! review: converting at arming and shifting at the set could miss the set,
 //! or apply it twice).
 //!
+//! The thread also runs the NTP state's seconds while it has something to
+//! do (`timer::steer`: the slew, the phase offset, a leap second).
+//!
 //! Lock order: an owner's timer lock, then [`ENTRIES`]; the thread never
 //! holds [`ENTRIES`] while it calls an owner.
 
@@ -117,6 +120,12 @@ pub fn clock_was_set(_delta_ns: i64) {
     changed();
 }
 
+/// Have the thread look again at when it must wake (the NTP state
+/// changed).
+pub fn kick() {
+    changed();
+}
+
 /// Disarm `key`.
 pub fn cancel(key: Key) {
     ENTRIES.lock().retain(|e| e.key != key);
@@ -150,9 +159,17 @@ extern "C" fn ktimerd(_: usize) {
     loop {
         let to_mono = |wall| crate::timer::realtime::monotonic_at(wall);
         let next = earliest(&ENTRIES.lock(), &to_mono);
+        let ntp = super::steer::next_due();
+        let next = [next, ntp].into_iter().flatten().min();
         let _ = crate::sched::dispatch::wait_event(&WAKE, next, || {
             CHANGED.swap(false, Ordering::AcqRel)
         });
+        // Looked at again: adjtimex may have made the state active while
+        // the thread slept (it kicks it), and a clock set since must be
+        // seen at once (`steer::next_due`).
+        if ntp.is_some() || super::steer::next_due().is_some() {
+            super::steer::service();
+        }
         let now = crate::timer::monotonic_ns();
         let due = take_due(&mut ENTRIES.lock(), now, &to_mono);
         for key in due {

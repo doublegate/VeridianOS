@@ -102,7 +102,8 @@ Each group lands with its LTP cases. The counts are "missing" entries in the cov
     realtime signals, per-thread masks, core dumps and job-control stops.
 - **time (14)**
   - Settable and adjustable clocks and POSIX timers (the utime family, the POSIX timers,
-    adjtimex and clock_adjtime are done; adjtimex steers no clock, KNOWN-LIMITATIONS).
+    adjtimex and clock_adjtime are done, adjtimex steering the clocks and inserting or deleting
+    leap seconds; KNOWN-LIMITATIONS).
   - CLOCK_REALTIME from the RTC epoch, every clock ID, and nanosecond file timestamps.
 - **files (55)**
   - truncate, fchdir, creat, lchown, getdents, mknodat, readahead/fadvise and the sync family

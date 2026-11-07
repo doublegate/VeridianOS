@@ -34,6 +34,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 pub mod ktimerd;
 pub mod ntp;
 pub mod realtime;
+pub mod steer;
 
 use spin::Mutex;
 
@@ -459,16 +460,34 @@ pub(crate) fn get_uptime_ms() -> u64 {
 }
 
 /// Monotonic time in nanoseconds (CLOCK_MONOTONIC), at the clock source's
-/// resolution.
+/// resolution: the clock source as adjtimex steers it ([`steer`]).
 pub(crate) fn monotonic_ns() -> u64 {
-    #[cfg(target_os = "none")]
-    {
-        crate::arch::timer::monotonic_ns()
+    steer::now_ns()
+}
+
+/// Set the wall clock to `wall_ns` (settimeofday, clock_settime), as
+/// Linux's do_settimeofday64: under the NTP lock, so `steer::service` reads
+/// the time and the set count together, and with the NTP state cleared
+/// (`Ntp::clear`, TK_CLEAR_NTP): the slew and phase offset stop, the clock
+/// is unsynchronized and no leap second stays armed for a date the clock
+/// has jumped past. Returns how far the wall clock moved, for the timers on
+/// it to follow (the caller does, outside the lock).
+pub(crate) fn set_wall_clock(wall_ns: i64) -> i64 {
+    let (moved, active) = ntp::with(|ntp| {
+        let moved = realtime::set_now_ns(wall_ns);
+        ntp.clear();
+        (moved, steer::adjusted(ntp, true))
+    });
+    if active {
+        // A leap second still flagged: ktimerd re-arms it from the new date.
+        ktimerd::kick();
     }
-    #[cfg(not(target_os = "none"))]
-    {
-        UPTIME_MS.load(Ordering::Relaxed) * 1_000_000
-    }
+    moved
+}
+
+/// The clock source unsteered (CLOCK_MONOTONIC_RAW), in nanoseconds.
+pub(crate) fn monotonic_raw_ns() -> u64 {
+    steer::raw_ns()
 }
 
 /// Return the number of currently pending (active) timers.

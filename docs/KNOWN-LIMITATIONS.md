@@ -55,13 +55,20 @@ exposed were fixed (N-182 to N-189); the rest are listed, with their targets, in
   on CLOCK_REALTIME, without it; BOOTTIME equals MONOTONIC, as there is no suspend; and on
   AArch64 and RISC-V the wall clock comes from a device-tree PL031 or Goldfish RTC, read once at
   boot (without one it counts from the epoch).
-- **adjtimex and clock_adjtime** keep Linux's NTP state and validate, store and report it as
-  Linux does (`timer::ntp`), but only ADJ_SETOFFSET (a step of CLOCK_REALTIME) and ADJ_TAI act on
-  a clock. The frequency, the phase offset the PLL computes, the tick length and an adjtime()
-  slew are kept and read back without changing how fast the clock runs; the phase offset does not
-  decay each second, the clock never leaves TIME_OK on its own, and STA_INS/STA_DEL are stored
-  but no leap second is inserted or deleted (LTP leapsec01 still fails). There is no PPS, and no
-  auxiliary clocks.
+- **adjtimex and clock_adjtime** keep Linux's NTP state (`timer::ntp`) and steer the clocks with
+  it (`timer::steer`): the tick and frequency set how fast CLOCK_MONOTONIC and CLOCK_REALTIME run
+  against CLOCK_MONOTONIC_RAW, the PLL's phase offset and the adjtime() slew (at most 500 us a
+  second) are delivered each second, maxerror grows until the clock is unsynchronized, and
+  STA_INS/STA_DEL insert or delete a leap second at midnight UTC. The differences: the phase and
+  the slew are delivered a second at a time, as Linux did before 7.0's per-tick drain (the same
+  totals); the per-second work and the leap second run in `ktimerd`, so they happen up to a
+  scheduling delay after the second starts (seconds it runs late are charged with what the rate
+  before them delivered, so nothing is lost or given twice, but a second's change of rate starts
+  that delay late; after 64 seconds without it the count restarts), and not at all on a machine
+  where the thread cannot start (a rate set by adjtimex still applies); there is no PPS, and no
+  auxiliary clocks. (LTP
+  leapsec01 passed before leap seconds existed, as it only checks that a sleep does not end early;
+  the runtime test `adjtimex_leap_second_inserted` checks the repeated second.)
 - **File calls without a page cache.** readahead and posix_fadvise check their arguments and
   change nothing; syncfs and sync_file_range sync every filesystem, as fsync does. RWF_NOWAIT
   is taken on regular files, whose reads and writes never wait, and refused with EOPNOTSUPP on a
