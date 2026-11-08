@@ -176,6 +176,90 @@ pub fn current_may_use_clock(clock: ClockObject) -> bool {
     }
 }
 
+/// Whether `space` has `rights` over the process `pid` in PID namespace
+/// `pid_ns` (ADR 0024, step 5): a capability on `Process { pid }` with
+/// them, or on the PID namespace, itself or through a user namespace above
+/// it ([`holds_namespace`]). WRITE to signal it; MODIFY to trace it, read
+/// its `/proc` files as ptrace allows, change its scheduling or its
+/// limits. Checked after the Linux rule (uid match, CAP_KILL,
+/// CAP_SYS_PTRACE, CAP_SYS_NICE, CAP_SYS_RESOURCE); EPERM when it fails.
+#[cfg(feature = "alloc")]
+pub fn may_act_on_process(
+    space: &CapabilitySpace,
+    pid: crate::process::ProcessId,
+    pid_ns: &alloc::sync::Arc<crate::process::pidns::PidNs>,
+    rights: Rights,
+) -> bool {
+    holds(space, &ObjectRef::Process { pid }, rights)
+        || holds_namespace(
+            space,
+            &crate::process::ns::NsRef::Pid(pid_ns.clone()),
+            rights,
+        )
+}
+
+/// [`may_act_on_process`] for the calling process acting on `target`. A
+/// process acting on itself needs neither, as Linux never asks for
+/// privilege there; kernel context passes.
+#[cfg(feature = "alloc")]
+pub fn current_may_act_on_process(target: &crate::process::Process, rights: Rights) -> bool {
+    current_may_act_on(target.pid, &target.pid_ns(), rights)
+}
+
+/// [`current_may_act_on_process`] for the process `pid` in `pid_ns`, for a
+/// caller that found it without keeping it (under the process table's
+/// lock, which the capability check must not be made under).
+#[cfg(feature = "alloc")]
+pub fn current_may_act_on(
+    pid: crate::process::ProcessId,
+    pid_ns: &alloc::sync::Arc<crate::process::pidns::PidNs>,
+    rights: Rights,
+) -> bool {
+    let Some(me) = crate::process::current_process() else {
+        return true;
+    };
+    me.pid == pid || may_act_on_process(&me.capability_space.lock(), pid, pid_ns, rights)
+}
+
+/// Whether `space` may choose the child's numbers in the `levels` PID
+/// namespaces from `ns` upward (clone3's set_tid, ADR 0024 step 5): MODIFY
+/// on each, itself or through a user namespace above it. Checked after
+/// CAP_CHECKPOINT_RESTORE or CAP_SYS_ADMIN; EPERM when it fails.
+#[cfg(feature = "alloc")]
+pub fn may_choose_pids(
+    space: &CapabilitySpace,
+    ns: &alloc::sync::Arc<crate::process::pidns::PidNs>,
+    levels: usize,
+) -> bool {
+    let mut level = Some(ns.clone());
+    for _ in 0..levels {
+        let Some(pid_ns) = level else {
+            return true;
+        };
+        if !holds_namespace(
+            space,
+            &crate::process::ns::NsRef::Pid(pid_ns.clone()),
+            Rights::MODIFY,
+        ) {
+            return false;
+        }
+        level = pid_ns.parent.clone();
+    }
+    true
+}
+
+/// [`may_choose_pids`] for the calling process; kernel context passes.
+#[cfg(feature = "alloc")]
+pub fn current_may_choose_pids(
+    ns: &alloc::sync::Arc<crate::process::pidns::PidNs>,
+    levels: usize,
+) -> bool {
+    match crate::process::current_process() {
+        Some(process) => may_choose_pids(&process.capability_space.lock(), ns, levels),
+        None => true,
+    }
+}
+
 /// Give the process whose capability space is `space` [`authority_rights`]
 /// over user namespace `ns`, which it is creating (ADR 0024, decision 7): the
 /// namespaces made inside it then belong to a user namespace it has
@@ -571,6 +655,67 @@ mod tests {
             .unwrap();
         assert!(holds_namespace(&root, &uts, Rights::READ));
         assert!(!holds_namespace(&root, &uts, Rights::MODIFY));
+    }
+
+    #[test]
+    fn acting_on_a_process_needs_its_pid_namespace_or_the_process() {
+        use crate::process::{pidns, ProcessId};
+        let space = initial_space();
+        let set = ns::initial();
+        let pid_ns = pidns::initial();
+        let target = ProcessId(4242);
+        assert!(may_act_on_process(&space, target, &pid_ns, Rights::MODIFY));
+        // Dropping the PID namespace leaves it standing through the user
+        // namespace that owns it; both go to deny it.
+        drop_object(&space, TYPE_NAMESPACE as usize, pid_ns.ident.id as usize).unwrap();
+        assert!(may_act_on_process(&space, target, &pid_ns, Rights::WRITE));
+        let user = set.get(NsKind::User).ident().id as usize;
+        drop_object(&space, TYPE_NAMESPACE as usize, user).unwrap();
+        assert!(!may_act_on_process(&space, target, &pid_ns, Rights::WRITE));
+
+        // A capability on the process itself, for what its rights cover.
+        cap_manager()
+            .create_capability(ObjectRef::Process { pid: target }, Rights::WRITE, &space)
+            .unwrap();
+        assert!(may_act_on_process(&space, target, &pid_ns, Rights::WRITE));
+        assert!(!may_act_on_process(&space, target, &pid_ns, Rights::MODIFY));
+        assert!(!may_act_on_process(
+            &space,
+            ProcessId(4243),
+            &pid_ns,
+            Rights::WRITE
+        ));
+    }
+
+    #[test]
+    fn choosing_pids_needs_modify_on_each_level_chosen() {
+        use crate::process::{pidns, userns};
+        let init = userns::initial();
+        let child_user = userns::UserNs::create(&init, 1000, 1000, false, false).unwrap();
+        let outer = pidns::initial();
+        let inner = pidns::PidNs::create(&outer, &child_user, 1000).unwrap();
+        // Authority over the child user namespace reaches the inner PID
+        // namespace only.
+        let space = CapabilitySpace::new();
+        grant_user_ns(&space, &child_user).unwrap();
+        assert!(may_choose_pids(&space, &inner, 0));
+        assert!(may_choose_pids(&space, &inner, 1));
+        assert!(!may_choose_pids(&space, &inner, 2));
+        // A started program holds both levels.
+        assert!(may_choose_pids(&initial_space(), &inner, 2));
+        // Rights below MODIFY do not do.
+        let reader = CapabilitySpace::new();
+        cap_manager()
+            .create_capability(
+                ObjectRef::Namespace {
+                    kind: NsKind::Pid,
+                    id: outer.ident.id,
+                },
+                Rights::READ | Rights::WRITE,
+                &reader,
+            )
+            .unwrap();
+        assert!(!may_choose_pids(&reader, &outer, 1));
     }
 
     #[test]

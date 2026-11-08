@@ -112,6 +112,15 @@
   CLOCK_BOOTTIME_ALARM needs WRITE on the alarm clocks besides CAP_WAKE_ALARM; a write to
   `/proc/<pid>/timens_offsets` needs MODIFY on the time namespace, itself or through a user
   namespace above it. A launcher can now run root unable to set the clock.
+- Acting on another process needs an object capability too (ADR 0024, step 5), EPERM without:
+  every signal sent to another process (kill, tkill, tgkill, rt_sigqueueinfo, rt_tgsigqueueinfo,
+  pidfd_send_signal) needs WRITE over it; ptrace, the `/proc/<pid>` files ptrace's rule guards,
+  process_vm_readv/writev, kcmp, pidfd_getfd, get_robust_list, the sched_set* calls,
+  sched_setaffinity, setpriority and prlimit64 need MODIFY; each on its PID namespace (itself or
+  through a user namespace above it) or on a `Process` capability for it. clone3's set_tid needs
+  MODIFY on each PID namespace a number is chosen in. A process acting on itself needs none. A
+  launcher can now run root unable to signal, trace or reprioritize anything outside what it
+  holds.
 - `/boot/config-7.3.0-veridian` in every root filesystem (ADR 0023): the Linux kernel
   configuration VeridianOS reports, generated per architecture by `tools/compat/gen_kconfig.py`
   from `abi/kconfig.map`. An option is set only where the kernel does what Linux built with it

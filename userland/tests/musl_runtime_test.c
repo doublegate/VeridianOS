@@ -9999,6 +9999,84 @@ static void test_ns_object_cap(void)
     report("ns_object_cap", f == 0, why);
 }
 
+/* Acting on another process (ADR 0024, step 5): signals need WRITE over
+ * it, tracing, scheduling and limits MODIFY, and set_tid MODIFY on the PID
+ * namespace, each on its PID namespace (itself or through a user
+ * namespace above it) or on the process. A root child that drops its PID
+ * namespace and its user namespace keeps every POSIX capability, and can
+ * still act on itself, but no longer on its own child. */
+static void test_proc_object_cap(void)
+{
+    char why[160];
+    pid_t child = fork();
+    if (child == 0) {
+        int g = 0, gate[2];
+        if (pipe(gate) != 0) _exit(0x7f);
+        pid_t victim = fork();
+        if (victim == 0) {
+            char c;
+            close(gate[1]);
+            /* Until its parent closes the pipe, which it can still do. */
+            (void)read(gate[0], &c, 1);
+            _exit(0);
+        }
+        close(gate[0]);
+        if (victim < 0) _exit(0x7e);
+        unsigned long long pid_ns = t_ns_id("pid"), user = t_ns_id("user");
+        if (pid_ns == 0 || user == 0) _exit(0x7d);
+        /* Before the drop, all of it works. */
+        if (kill(victim, 0) != 0 || setpriority(PRIO_PROCESS, victim, 1) != 0) g |= 1;
+        long d_pid = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, pid_ns);
+        long d_user = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, user);
+        if (d_pid != 1 || d_user != 1) g |= 2;
+        if (geteuid() != 0) g |= 4;
+        /* Itself: no capability asked. */
+        if (kill(getpid(), 0) != 0 || setpriority(PRIO_PROCESS, 0, 2) != 0) g |= 8;
+        struct rlimit lim;
+        if (prlimit(0, RLIMIT_NOFILE, NULL, &lim) != 0) g |= 8;
+        /* Its child: EPERM for each, root or not. */
+        if (!(kill(victim, SIGTERM) == -1 && errno == EPERM)) g |= 16;
+        if (!(setpriority(PRIO_PROCESS, victim, 3) == -1 && errno == EPERM)) g |= 32;
+        struct sched_param sp = {0};
+        /* Raw: musl's sched_setscheduler is a stub returning ENOSYS. */
+        if (!(syscall(SYS_sched_setscheduler, victim, SCHED_OTHER, &sp) == -1 && errno == EPERM))
+            g |= 64;
+        if (!(prlimit(victim, RLIMIT_NOFILE, NULL, &lim) == -1 && errno == EPERM)) g |= 128;
+        if (!(syscall(SYS_ptrace, 16 /* PTRACE_ATTACH */, victim, 0, 0) == -1 && errno == EPERM))
+            g |= 256;
+        /* set_tid: choosing a number in the PID namespace. */
+        pid_t ids[1] = {getpid() + 7100};
+        struct t_clone_args a;
+        memset(&a, 0, sizeof(a));
+        a.exit_signal = SIGCHLD;
+        a.set_tid = (uintptr_t)ids;
+        a.set_tid_size = 1;
+        long r = t_clone3(&a, sizeof(a));
+        if (r == 0) _exit(0);
+        if (r > 0) {
+            waitpid((pid_t)r, NULL, 0);
+            g |= 512;
+        } else if (errno != EPERM) {
+            g |= 512;
+        }
+        /* Waiting needs nothing: the victim leaves once the pipe closes. */
+        close(gate[1]);
+        if (t_exit_status(victim) != 0) g |= 1024;
+        if (g != 0) {
+            printf("proc-object-cap g=%#x drops=%ld,%ld\n", g, d_pid, d_user);
+            fflush(stdout);
+        }
+        _exit(g == 0 ? 0 : 1);
+    }
+    int f = 0, code = t_exit_status(child);
+    if (code >= 0x7d && code <= 0x7f)
+        f |= 1;
+    else if (code != 0)
+        f |= 2;
+    snprintf(why, sizeof(why), "f=%#x code=%d", f, code);
+    report("proc_object_cap", f == 0, why);
+}
+
 /* The clocks' object capabilities (ADR 0024, step 4): a root child that
  * drops the system clock can still read it and the NTP state, and arm an
  * alarm timer, but not set or steer the clock; dropping the alarm clocks
@@ -11006,6 +11084,7 @@ int main(int argc, char **argv)
     test_mount_object_cap();
     test_ns_object_cap();
     test_clock_object_cap();
+    test_proc_object_cap();
     test_user_ns();
     test_pid_ns();
     test_net_ns();

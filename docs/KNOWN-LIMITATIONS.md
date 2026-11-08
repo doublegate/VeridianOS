@@ -370,8 +370,8 @@ What remains:
   in the new root stay visible there (the tree is keyed by path); MS_BIND with MS_REC does not
   copy parked trees; at most 16 parked roots stack (`MAX_PARKED_DEPTH`; the next pivot_root(".",
   ".") is ENOSPC), where Linux keeps one flat list bounded only by fs.mount-max, which is not
-  implemented. mount(2), umount2 and pivot_root check CAP_SYS_ADMIN only, not an object
-  capability (ADR 0024 will give them one); the private mount call keeps its own rules. The VFS
+  implemented. mount(2), umount2 and pivot_root check CAP_SYS_ADMIN and, since ADR 0024 step 2,
+  MODIFY on the mount namespace or a user namespace above it. The VFS
   finds open files by path, so a descriptor opened in another mount namespace is looked up by
   its path in the caller's (for fstat's mount id, fchdir and the like) once the two trees
   differ, and sync(2) flushes the filesystems of the initial namespace only. The mount flags are

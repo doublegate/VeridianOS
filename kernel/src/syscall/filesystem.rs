@@ -2227,7 +2227,10 @@ pub fn sys_kill(pid: usize, signal: usize) -> SyscallResult {
 }
 
 /// Whether the calling thread of `caller` may send `sig` to `target`
-/// (Linux's check_kill_permission).
+/// (Linux's check_kill_permission), and, for another process, holds WRITE
+/// over it: on its PID namespace or on the process (ADR 0024, step 5).
+/// kill, tkill, tgkill, rt_sigqueueinfo, rt_tgsigqueueinfo and
+/// pidfd_send_signal all decide here (`kill_one`).
 fn may_signal(
     caller: &crate::process::Process,
     target: &crate::process::Process,
@@ -2242,7 +2245,8 @@ fn may_signal(
         caller.pid == target.pid,
         sig,
         same_session,
-    )
+    ) && (caller.pid == target.pid
+        || crate::cap::authority::current_may_act_on_process(target, crate::cap::Rights::WRITE))
 }
 
 /// Linux's kill rule: a process may always signal itself; otherwise the

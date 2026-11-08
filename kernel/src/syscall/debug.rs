@@ -215,6 +215,9 @@ pub(super) struct PtraceTarget {
     /// The user namespace its memory belongs to (mm->user_ns), whose
     /// privilege a non-dumpable process needs of a tracer.
     pub mm_userns: alloc::sync::Arc<process::userns::UserNs>,
+    /// Whether the caller holds MODIFY over it, on its PID namespace or on
+    /// the process (ADR 0024, step 5).
+    pub authorized: bool,
 }
 
 impl PtraceTarget {
@@ -226,6 +229,10 @@ impl PtraceTarget {
             dumpable: process.dumpable.load(core::sync::atomic::Ordering::Acquire),
             userns: process.user_ns(),
             mm_userns: process.mm_user_ns(),
+            authorized: crate::cap::authority::current_may_act_on_process(
+                process,
+                crate::cap::Rights::MODIFY,
+            ),
         }
     }
 }
@@ -269,7 +276,10 @@ fn may_attach(
 ///   that kept them and use them through it, or the caller holds CAP_SYS_PTRACE
 ///   over the target's user namespace; the two sets are compared only in one
 ///   user namespace, so capabilities a caller holds in a namespace of its own
-///   do not cover a target outside it.
+///   do not cover a target outside it;
+///
+/// and the caller holds MODIFY over the target (`PtraceTarget::authorized`,
+/// ADR 0024 step 5): EPERM, or EACCES where a `/proc` file asks.
 ///
 /// Also guards get_robust_list.
 /// [`may_access`] for `target` as a process, with Linux's first rule of
@@ -310,6 +320,7 @@ pub(super) fn may_access(
         && ((caller.userns.ident.id == target.userns.ident.id
             && target.permitted.is_subset_of(caller_permitted))
             || over(&target.userns))
+        && target.authorized
 }
 
 /// Linux `cap_ptrace_traceme`: a process may make its parent its tracer if
@@ -538,6 +549,7 @@ mod tests {
             dumpable,
             userns: crate::process::userns::initial(),
             mm_userns: crate::process::userns::initial(),
+            authorized: true,
         };
         let other = Credentials::new(1001, 100);
         let mut setuid_root = Credentials::new(1000, 100);
@@ -556,6 +568,13 @@ mod tests {
         assert_eq!(may_attach(10, &root, full, 20, &me, 30), eperm);
         // Uid 0 without CAP_SYS_PTRACE is an ordinary user.
         assert_eq!(may_attach(10, &bare_root, none, 20, &me, 0), eperm);
+        // Without MODIFY over the target (ADR 0024 step 5), not even with
+        // every POSIX capability.
+        let confined = PtraceTarget {
+            authorized: false,
+            ..me.clone()
+        };
+        assert_eq!(may_attach(10, &root, full, 20, &confined, 0), eperm);
         // A process that made itself non-dumpable (PR_SET_DUMPABLE 0), or
         // exec'd a set-ID or unreadable program, only CAP_SYS_PTRACE may
         // trace.

@@ -479,6 +479,12 @@ fn pid_numbers(
     if levels > ns.level + 1 {
         return Err(SyscallError::InvalidArgument);
     }
+    // Choosing a number also needs MODIFY on each PID namespace it is
+    // chosen in (ADR 0024, step 5); EPERM before any number is looked at,
+    // as alloc_pid's capability check precedes its EEXIST.
+    if !crate::cap::authority::current_may_choose_pids(ns, levels) {
+        return Err(SyscallError::OperationNotPermitted);
+    }
     let chosen: alloc::vec::Vec<u64> = req.set_tid[..levels.min(ns.level)]
         .iter()
         .map(|&t| t.max(0) as u64)

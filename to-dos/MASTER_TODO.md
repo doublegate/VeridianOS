@@ -404,7 +404,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
      - Progress: ADR 0024 accepted 2026-11-05 (`docs/adr/0024-linux-personality.md`; the moves
        wait for the IPC redesign, item 16); ADR 0025 (accepted) supersedes its "all rights". Its steps, one commit each: [x] 1 object kinds for
        namespaces, clocks and the system, the grants at launch, `CapabilityDrop`; [x] 2 mount,
-       umount2, pivot_root and the private mount calls; [x] 3 namespaces; [x] 4 time; [ ] 5
+       umount2, pivot_root and the private mount calls; [x] 3 namespaces; [x] 4 time; [x] 5
        process and signals; [ ] 6 filesystem inode checks; [ ] 7 system, then the docs.
   5. [ ] The Linux system calls still missing after group 3 (added 2026-11-03; 108 of the 111 in
      `docs/compat/LINUX-SYSCALL-COVERAGE.md`, group 3 adds mount, umount2 and pivot_root). One

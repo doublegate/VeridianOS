@@ -45,8 +45,14 @@ pub fn sys_prlimit64(pid: usize, resource: usize, new_ptr: usize, old_ptr: usize
                 crate::process::pidns::from_vnr(p as i64).ok_or(SyscallError::ProcessNotFound)?;
             let target = crate::process::find_process(crate::process::ProcessId(kid))
                 .ok_or(SyscallError::ProcessNotFound)?;
+            // Another process's limits also need MODIFY over it, on its
+            // PID namespace or the process (ADR 0024, step 5).
             if target.pid != caller.pid
-                && !may_prlimit(&me, &target.credentials(), &target.user_ns())
+                && (!may_prlimit(&me, &target.credentials(), &target.user_ns())
+                    || !crate::cap::authority::current_may_act_on_process(
+                        &target,
+                        crate::cap::Rights::MODIFY,
+                    ))
             {
                 return Err(SyscallError::OperationNotPermitted);
             }

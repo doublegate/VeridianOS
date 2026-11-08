@@ -148,10 +148,12 @@ There are two kinds of capability:
    (`security.capability`) follow Linux, so libcap, `setcap`-ed programs and services that drop
    privilege work unmodified.
 2. **Object capabilities.** The native IPC and memory calls are authorised by unforgeable
-   capability tokens (`kernel/src/cap/`), inherited on `fork()` and filtered on `exec()`. Where a
-   native call stands for a POSIX privilege it needs both: `mount` takes CAP_SYS_ADMIN and a
-   Memory capability with WRITE and CREATE rights. ADR 0024 (planned) extends this to every
-   Linux privilege check.
+   capability tokens (`kernel/src/cap/`), inherited on `fork()` and filtered on `exec()`. Linux
+   privilege checks also need one for the object they act on (ADR 0024): `mount` takes
+   CAP_SYS_ADMIN and MODIFY on the mount namespace; the namespace calls, setting the clocks, and
+   signalling, tracing, rescheduling or limiting another process need theirs likewise (EPERM
+   without). A program the kernel starts holds all of them, so a Linux program sees no
+   difference unless its launcher dropped some (`CapabilityDrop`).
 
 `setuid`/`setgid`, `access()` and `stat().st_mode` behave as on Linux, and a program that needs
 one privilege can run as an ordinary user with a file or ambient capability instead of as root.
