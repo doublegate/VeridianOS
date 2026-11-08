@@ -616,6 +616,10 @@
     writable page a CLONE_VM child (vfork, posix_spawn) shares with its parent writes the
     shared page; it used to give that address space a private copy, so the other side never
     saw the store and the page stopped being shared.
+  - A fork by a CLONE_VM child (a vfork or posix_spawn child, before its exec) gives the new
+    process its own copy of the pages it shares with its parent. Only the forking side's page
+    became copy-on-write, so the new process saw the parent's later writes to that page, and the
+    CLONE_VM child's own next write took a private copy, leaving its parent behind.
   - A fork child discarded before it ran gives up its process group's and session's numbers
     when it was the last process naming them, as a reap does; only its own number was freed.
   - One set_tid claim of a high ID no longer makes every later allocation below it scan the

@@ -8796,6 +8796,65 @@ static void test_clone_share(void)
     report("clone_share", f == 0, why);
 }
 
+/* A fork by a CLONE_VM child copies the memory it shares with its parent
+ * (PR #38 review): the grandchild keeps the value at the fork, not the
+ * parent's later write, and the CLONE_VM child's own stores after the fork
+ * still reach the parent. The grandchild is the caller's (CLONE_PARENT) so
+ * it can be waited for, and uses raw system calls only. */
+static volatile int t_vmfork_var;
+static volatile long t_vmfork_pid;
+static int t_vmfork_go[2], t_vmfork_res[2];
+
+static int t_vmfork_child(void *arg)
+{
+    (void)arg;
+    long p = syscall(SYS_clone, CLONE_PARENT | SIGCHLD, 0, 0, 0, 0);
+    if (p == 0) {
+        char c;
+        int v = -1;
+        if (syscall(SYS_read, t_vmfork_go[0], &c, 1) == 1)
+            v = t_vmfork_var;
+        syscall(SYS_write, t_vmfork_res[1], &v, sizeof(v));
+        syscall(SYS_exit_group, 0);
+    }
+    t_vmfork_pid = p;
+    return 0;
+}
+
+static void test_clone_vm_fork(void)
+{
+    char why[96];
+    int f = 0, v = -1, st = 0;
+    t_vmfork_var = 1;
+    t_vmfork_pid = 0;
+    if (pipe(t_vmfork_go) != 0 || pipe(t_vmfork_res) != 0) {
+        report("clone_vm_fork", 0, "pipe");
+        return;
+    }
+    if (t_share_run(t_vmfork_child, CLONE_VM | CLONE_VFORK | SIGCHLD) != 0)
+        f |= 1;
+    pid_t gc = (pid_t)t_vmfork_pid;
+    /* No pid here means the CLONE_VM child's store after its fork stayed
+     * in a private copy; the grandchild may still be waiting, so let it go
+     * and read its answer either way (closing the write end ends a read
+     * nobody will answer). */
+    if (gc <= 0)
+        f |= 2;
+    t_vmfork_var = 2;
+    if (write(t_vmfork_go[1], "g", 1) != 1)
+        f |= 4;
+    close(t_vmfork_res[1]);
+    if (read(t_vmfork_res[0], &v, sizeof(v)) != (ssize_t)sizeof(v) || v != 1)
+        f |= 8;
+    if (gc > 0 && (waitpid(gc, &st, 0) != gc || !WIFEXITED(st) || WEXITSTATUS(st) != 0))
+        f |= 16;
+    close(t_vmfork_go[0]);
+    close(t_vmfork_go[1]);
+    close(t_vmfork_res[0]);
+    snprintf(why, sizeof(why), "f=%#x grandchild saw %d pid=%d st=%#x", f, v, (int)gc, st);
+    report("clone_vm_fork", f == 0, why);
+}
+
 static void test_kcmp_process_vm(void)
 {
     char why[160];
@@ -10808,6 +10867,7 @@ int main(int argc, char **argv)
     test_clone3();
     test_kcmp_process_vm();
     test_clone_share();
+    test_clone_vm_fork();
     test_personality();
     test_namespaces_uts();
     test_namespaces_time();
