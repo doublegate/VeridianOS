@@ -1539,6 +1539,7 @@ fn handle_syscall(
         Syscall::Mount => mount::sys_mount(arg1, arg2, arg3, arg4, arg5),
         #[cfg(feature = "alloc")]
         Syscall::Umount2 => mount::sys_umount2(arg1, arg2),
+        #[cfg(feature = "alloc")]
         Syscall::PivotRoot => mount::sys_pivot_root(arg1, arg2),
         #[cfg(feature = "alloc")]
         Syscall::Sethostname => namespaces::sys_sethostname(arg1, arg2),

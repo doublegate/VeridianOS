@@ -133,8 +133,8 @@ def gen_rust(entries):
     out += [f"//! {l}" for l in HEADER.splitlines()]
     out += [
         "//!",
-        "//! A call that Linux also has uses its Linux x86_64 number; a call only",
-        f"//! VeridianOS has uses a private number from {PRIVATE_BASE} up.",
+        "//! A call that Linux also has uses its Linux x86_64 number; a call that",
+        f"//! only VeridianOS has gets a private number from {PRIVATE_BASE} up.",
         "",
         "/// System call numbers",
         "// The variants are Linux's names (restart_syscall -> RestartSyscall).",

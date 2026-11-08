@@ -636,6 +636,40 @@
 
 ### Fixed
 
+- From the PR #37 review:
+  - A descriptor table closes its files and releases its record locks however its last
+    reference goes: an exec or unshare(CLONE_FILES) copying a table while its other sharer
+    exited used to drop the old one without closing it.
+  - A process or thread that set_tid gave its ID, kept alive past its reap, no longer clears a
+    later allocation's reservation of that ID when it finally goes, which let a set_tid claim
+    take an ID already being handed out.
+  - An ID that still names a live process group or session whose leader is gone is not handed
+    out again, by fork or by set_tid, as Linux keeps the group's struct pid.
+  - A child reaper's own SIGCONT timer continues it after a stop, as Linux's: continuing happens
+    when the signal is sent, before the check that ignores its delivery.
+- From the PR #35 Antigravity review rounds (after its merge):
+  - POSIX record locks belong to the descriptor table by an ID of its own, not its address, and
+    go when its last holder closes it: a process sharing its table with CLONE_FILES no longer
+    takes the others' locks with it when it exits, and a lock no longer outlives the table that
+    took it.
+  - A PID namespace's init, and now the initial namespace's PID 1 too (Linux's
+    SIGNAL_UNKILLABLE for every child reaper), takes only the signals it handles; its own POSIX
+    timer's SIGKILL or SIGSTOP no longer kills or stops it, as a timer's signal is never forced.
+  - tmpfs `size=N%` refuses a percentage whose size overflows (EINVAL) instead of panicking a
+    debug kernel or wrapping in a release one.
+  - inotify finds a watched file's directory in the caller's mount namespace, so a file in a
+    mount made after unshare(CLONE_NEWNS) reports to the watch on it.
+  - A set_tid claim no longer moves the ID counter (one near pid_max made every later fork fail);
+    the allocator skips claimed IDs instead.
+  - `/proc/<pid>/ns/pid` and `ns/user` still resolve after the first thread has exited.
+  - A sysctl's writer is checked at every write (EACCES: euid 0 for `fs` and `kernel`,
+    CAP_SYS_RESOURCE for the `user` limits), not only at open, and a write past position 0 is
+    ignored, as Linux's sysctl_writes_strict.
+  - A fork below a PID namespace whose init is exiting fails (ENOMEM) at every level, so a new
+    namespace's init made there cannot escape the exiting init's kill and leave it waiting.
+  - pivot_root's dispatch is built only with `alloc`, like the other mount calls; stale
+    statements corrected in KNOWN-LIMITATIONS, the ABI review, the porting guide, the
+    compatibility plan and an expected-list note; `musl_runtime_test --only` runs every suite.
 - From the PR #35 review:
   - A file no longer leaves a read-only, noexec or nosuid bind mount by another name: linkat
     across two mounts (two bind mounts of one filesystem included) is EXDEV, as Linux's
