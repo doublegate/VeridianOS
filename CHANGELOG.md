@@ -603,6 +603,18 @@
 
 ### Fixed
 
+- From the PR #37 review, after its merge:
+  - CLONE_PARENT_SETTID stores the child's TID after every step of a clone that can fail but
+    the start of its thread, as Linux's put_user follows copy_process; a start that fails puts
+    the old word back. A fork failing at the process table or a namespace whose init was
+    exiting used to leave the TID in the parent's memory behind an error. A thread clone
+    stores both TIDs that late too.
+  - A fork child discarded before it ran gives up its process group's and session's numbers
+    when it was the last process naming them, as a reap does; only its own number was freed.
+  - One set_tid claim of a high ID no longer makes every later allocation below it scan the
+    process table: only the IDs claimed ahead of the counter are checked, each once.
+  - An exit whose descriptor table owns no record locks checks under the lock table's read
+    lock instead of taking the write lock, twice with the table's Drop.
 - From the PR #37 review:
   - A descriptor table closes its files and releases its record locks however its last
     reference goes: an exec or unshare(CLONE_FILES) copying a table while its other sharer

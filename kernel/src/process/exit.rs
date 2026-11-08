@@ -1006,11 +1006,6 @@ fn forget_shared_regions(process: &Process) {
     }
 }
 
-/// Free everything of a process that never ran: a fork or process creation
-/// that failed part-way, or whose first thread could not be started
-/// (N-46). Its mappings, frames, page tables, kernel stacks, capabilities
-/// and files are released, and it leaves its parent's children and the
-/// process table. Nothing may be running in it.
 /// Where `process`'s children go when it exits: the init of its PID
 /// namespace (Linux's find_child_reaper), 1 in the initial one.
 #[cfg(feature = "alloc")]
@@ -1023,15 +1018,30 @@ pub(crate) fn child_reaper(process: &Process) -> Option<alloc::sync::Arc<Process
         .or_else(|| table::get_process(ProcessId(1)))
 }
 
+/// Free everything of a process that never ran: a fork or process creation
+/// that failed part-way, or whose first thread could not be started
+/// (N-46). Its mappings, frames, page tables, kernel stacks, capabilities
+/// and files are released, and it leaves its parent's children and the
+/// process table. Nothing may be running in it.
 #[cfg(feature = "alloc")]
 pub(crate) fn discard_unstarted(process: &Process) {
     cleanup_process(process);
     super::free_page_tables(process);
+    forget_unstarted(process);
+}
+
+/// Take a discarded child out of its parent's list and the process table,
+/// then give up its numbers as a reap does (`release_numbers`): its own,
+/// and its group's and session's if it was the last process naming them,
+/// since its parent may have left that group or session meanwhile (PR #37
+/// review; only its own number was released before).
+#[cfg(feature = "alloc")]
+pub(super) fn forget_unstarted(process: &Process) {
     if let Some(parent) = process.parent().and_then(table::get_process) {
         parent.children.lock().retain(|&p| p != process.pid);
     }
     let _ = table::remove_process(process.pid);
-    super::pidns::release(process.pid.0);
+    super::release_numbers(process);
 }
 
 // ============================================================================

@@ -37,7 +37,8 @@ pub(crate) fn sys_fork_with(opts: &crate::process::fork::ForkOptions) -> Syscall
     let current = current_process().ok_or(SyscallError::InvalidState)?;
 
     match crate::process::fork::fork_process_with(opts) {
-        Ok((child_pid, _)) => {
+        #[cfg_attr(not(feature = "alloc"), allow(unused_variables))]
+        Ok((child_pid, child_tid)) => {
             // In parent process, inherit capabilities to child
             if let Some(child_process) = crate::process::get_process(child_pid) {
                 let parent_cap_space = current.capability_space.lock();
@@ -74,6 +75,23 @@ pub(crate) fn sys_fork_with(opts: &crate::process::fork::ForkOptions) -> Syscall
                     None => None,
                 };
 
+                // CLONE_PARENT_SETTID: the child's TID as the parent sees it
+                // (kernel_clone's pid_vnr), stored after every step that can
+                // fail but the thread's start, as Linux's put_user follows
+                // copy_process; a start that fails puts the old word back.
+                // As on Linux (result unused) a store that cannot be made is
+                // skipped.
+                #[cfg(feature = "alloc")]
+                let parent_tid = opts.parent_settid.map(|ptr| {
+                    let nr = crate::process::pidns::nr_in(child_tid.0, &current.pid_ns()) as u32;
+                    let space = current.memory_space.lock();
+                    crate::process::fork::StoredTid::store(
+                        |b| space.read_user_bytes(ptr as u64, b).is_ok(),
+                        |b| space.write_bytes_private(ptr as u64, b, false).is_ok(),
+                        nr,
+                    )
+                });
+
                 // A dispatched parent's child runs as its own task, from the
                 // parent's registers at this syscall (rax = 0) and a copy of
                 // its vector state (on every architecture since sprint E).
@@ -85,10 +103,15 @@ pub(crate) fn sys_fork_with(opts: &crate::process::fork::ForkOptions) -> Syscall
                     });
                     if !started {
                         // Freed whole, not just unlisted (N-46); then its
-                        // pidfd, which finds it gone and kills nothing.
+                        // pidfd, which finds it gone and kills nothing, and
+                        // the parent's TID word.
                         crate::process::exit::discard_unstarted(&child_process);
                         if let Some(fd) = pidfd {
                             super::pidfd::uninstall(fd);
+                        }
+                        if let (Some(tid), Some(ptr)) = (parent_tid, opts.parent_settid) {
+                            let space = current.memory_space.lock();
+                            tid.undo(|b| space.write_bytes_private(ptr as u64, b, false).is_ok());
                         }
                         return Err(SyscallError::OutOfMemory);
                     }

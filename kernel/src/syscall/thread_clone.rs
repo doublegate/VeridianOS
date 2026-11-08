@@ -747,44 +747,6 @@ fn thread_clone(
     }
     drop(current_ctx);
 
-    // Both TID writes happen before the thread joins the process and before
-    // its task exists: either can fault, and failing after the enqueue left
-    // a runnable child behind an error return (review of the v0.26.0 stack,
-    // PR #14). Here a failure only drops the unregistered `thread`.
-    //
-    // CLONE_PARENT_SETTID: write the child's TID into the parent's address
-    // space at `parent_tid_ptr`, so the parent can observe the TID
-    // immediately after clone returns.
-    if req.on(CLONE_PARENT_SETTID) {
-        // SAFETY: `parent_tid_ptr` was validated above via `validate_user_ptr`.
-        // `copy_to_user` performs its own bounds check as a defence-in-depth
-        // measure.  The write is a single u32 which is naturally aligned.
-        unsafe {
-            crate::syscall::userspace::copy_to_user(parent_tid_ptr, &vtid).map_err(|_| {
-                release_numbers();
-                SyscallError::InvalidPointer
-            })?;
-        }
-    }
-
-    // CLONE_CHILD_SETTID: write the child's TID into `child_tid_ptr`.
-    // TODO(tier7): On Linux this write happens in the *child's* address
-    // space after the child begins execution.  Because CLONE_VM is
-    // mandatory here (shared address space), writing from the parent
-    // context is equivalent.  For full fork() support (separate address
-    // spaces) this would need to be deferred to the child's first
-    // scheduling quantum.
-    if req.on(CLONE_CHILD_SETTID) {
-        // SAFETY: `child_tid_ptr` was validated above via `validate_user_ptr`.
-        // The pointer targets shared user memory (CLONE_VM is set).
-        unsafe {
-            crate::syscall::userspace::copy_to_user(child_tid_ptr, &vtid).map_err(|_| {
-                release_numbers();
-                SyscallError::InvalidPointer
-            })?;
-        }
-    }
-
     // CLONE_PIDFD: a PIDFD_THREAD pidfd for the new thread, stored before
     // it runs (EFAULT if the store faults; the thread never starts).
     #[cfg(feature = "alloc")]
@@ -825,16 +787,73 @@ fn thread_clone(
         *thread.caps.lock() = sets;
     }
 
+    // The TID stores come after every step that can fail but the start, as
+    // Linux's put_user follows copy_process (`kernel/fork.c` 2800); a start
+    // that fails puts the old words back. Both are before the task exists:
+    // failing after the enqueue left a runnable child behind an error
+    // return (review of the v0.26.0 stack, PR #14).
+    //
+    // CLONE_PARENT_SETTID: the child's TID in the parent's address space at
+    // `parent_tid_ptr`, so the parent can observe it as soon as clone
+    // returns. CLONE_CHILD_SETTID: the same at `child_tid_ptr`; on Linux the
+    // child makes that store once it runs (schedule_tail), which with
+    // CLONE_VM (mandatory here) is the same memory. Both pointers were
+    // validated above, so a store that faults anyway is EFAULT, the thread
+    // taken out again.
+    let take_out = |thread: alloc::sync::Arc<process::thread::Thread>| {
+        drop(thread);
+        let _ = crate::process::exit::cleanup_thread(&proc, tid);
+        undo_pidfd();
+    };
+    let user_word = |ptr: usize| {
+        let read = move |b: &mut [u8; 4]| {
+            // SAFETY: `ptr` was validated above via `validate_user_ptr`;
+            // `copy_from_user` checks it again and reads one naturally
+            // aligned u32 of the caller's (shared) memory.
+            unsafe { crate::syscall::userspace::copy_from_user::<[u8; 4]>(ptr) }
+                .map(|w| *b = w)
+                .is_ok()
+        };
+        let write = move |b: &[u8; 4]| {
+            // SAFETY: as for `read`; one naturally aligned u32 store.
+            unsafe { crate::syscall::userspace::copy_to_user(ptr, b) }.is_ok()
+        };
+        (read, write)
+    };
+    let mut stored: [Option<(usize, process::fork::StoredTid)>; 2] = [None, None];
+    for (i, (flag, ptr)) in [
+        (CLONE_PARENT_SETTID, parent_tid_ptr),
+        (CLONE_CHILD_SETTID, child_tid_ptr),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if !req.on(flag) {
+            continue;
+        }
+        let (read, write) = user_word(ptr);
+        let tid_word = process::fork::StoredTid::store(read, write, vtid);
+        if !tid_word.is_stored() {
+            for (p, t) in stored.iter().flatten().rev() {
+                t.undo(user_word(*p).1);
+            }
+            take_out(thread);
+            return Err(SyscallError::InvalidPointer);
+        }
+        stored[i] = Some((ptr, tid_word));
+    }
+
     // The new thread runs as its own dispatcher task (stage D2), starting
     // from the registers prepared above and a copy of the caller's vector
     // state. (CLONE_CHILD_CLEARTID is honoured by exit_dispatched.)
     if crate::process::start_thread(&proc, &thread, true).is_err() {
         // The thread never ran: take it out again (with its kernel
         // stack), or it counted as alive and its process could never
-        // finish exiting (N-46).
-        drop(thread);
-        let _ = crate::process::exit::cleanup_thread(&proc, tid);
-        undo_pidfd();
+        // finish exiting (N-46); and put the TID words back.
+        for (p, t) in stored.iter().flatten().rev() {
+            t.undo(user_word(*p).1);
+        }
+        take_out(thread);
         return Err(SyscallError::OutOfMemory);
     }
     Ok(vtid as usize)
