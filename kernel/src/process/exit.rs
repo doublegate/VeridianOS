@@ -1042,6 +1042,9 @@ pub(super) fn forget_unstarted(process: &Process) {
     }
     let _ = table::remove_process(process.pid);
     super::release_numbers(process);
+    // A namespace init in zap_pid_ns may have seen it there and sleeps
+    // until its namespace is empty (PR #38 review).
+    sched::dispatch::PROCESS_EVENTS.wake_all();
 }
 
 // ============================================================================

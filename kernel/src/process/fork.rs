@@ -686,28 +686,38 @@ pub(crate) struct StoredTid {
 
 impl StoredTid {
     /// Store `nr` with `write`, keeping what `read` finds there first. A
-    /// word that straddles a page boundary can be written in part before
-    /// the write fails on the second page; the bytes read before are then
-    /// written back at once, so a store that fails leaves the word as it
-    /// was.
+    /// word that cannot be read is not written: every page user code may
+    /// write is readable to it too, so the write could only fail, and on a
+    /// word straddling a page boundary it would change the bytes on the
+    /// first page before failing on the second (PR #38 review). A word
+    /// read whole that the write changes in part before failing (a
+    /// read-only second page) has the bytes read before written back at
+    /// once. Either way a store that fails leaves the word as it was.
     pub(crate) fn store(
         read: impl FnOnce(&mut [u8; 4]) -> bool,
         write: impl Fn(&[u8; 4]) -> bool,
         nr: u32,
     ) -> Self {
         let mut old = [0u8; 4];
-        let readable = read(&mut old);
+        if !read(&mut old) {
+            return Self {
+                stored: false,
+                old: None,
+            };
+        }
         let stored = write(&nr.to_ne_bytes());
-        if readable && !stored {
+        if !stored {
             let _ = write(&old);
         }
         Self {
             stored,
-            old: (readable && stored).then_some(old),
+            old: stored.then_some(old),
         }
     }
 
-    /// Whether the TID reached user memory.
+    /// Whether the TID reached user memory (the callers skip a store that
+    /// could not be made, as Linux does, and so never ask).
+    #[cfg(test)]
     pub(crate) fn is_stored(&self) -> bool {
         self.stored
     }
@@ -816,18 +826,22 @@ mod tests {
     }
 
     #[test]
-    fn an_unreadable_word_is_left_with_the_tid() {
-        let mem = memory(7);
+    fn an_unreadable_word_is_not_written() {
+        // A writable first page and an unmapped second one: the read fails,
+        // and a write would change the first page's bytes before failing.
+        let mem = memory(0x0102_0304);
         let tid = StoredTid::store(
             |_| false,
             |b| {
-                mem.set(*b);
-                true
+                let mut w = mem.get();
+                w[..2].copy_from_slice(&b[..2]);
+                mem.set(w);
+                false
             },
-            42,
+            0xffff_ffff,
         );
-        assert!(tid.is_stored());
-        tid.undo(|_| panic!("the old word is unknown"));
-        assert_eq!(u32::from_ne_bytes(mem.get()), 42);
+        assert!(!tid.is_stored());
+        tid.undo(|_| panic!("nothing to undo"));
+        assert_eq!(u32::from_ne_bytes(mem.get()), 0x0102_0304);
     }
 }

@@ -195,7 +195,14 @@ impl IdClaim {
 #[cfg(feature = "alloc")]
 impl Drop for IdClaim {
     fn drop(&mut self) {
-        CLAIMED_IDS.lock().held.retain(|&id| id != self.0);
+        let mut claimed = CLAIMED_IDS.lock();
+        claimed.held.retain(|&id| id != self.0);
+        // A clone that failed gave the ID to nothing: the allocator need
+        // not check it out of turn (PR #38 review). One it was given to is
+        // in use now, and stays listed until the counter passes it.
+        if !id_in_use(self.0) {
+            claimed.ahead.remove(&self.0);
+        }
     }
 }
 
@@ -1013,8 +1020,8 @@ mod id_tests {
     /// (PR #37 review), and a claim behind the counter adds nothing.
     #[test]
     fn only_ids_claimed_ahead_are_checked_until_passed() {
+        // Held throughout: a claim dropped unused is no longer listed.
         let high = IdClaim::new(PID_MAX - 3).expect("unused");
-        drop(high);
         let behind = alloc_tid().0;
         published(behind);
         drop(IdClaim::new(behind).expect("published and unused"));
@@ -1027,24 +1034,42 @@ mod id_tests {
             let (near, claim) = (base + 20..base + 1_000)
                 .find_map(|id| IdClaim::new(id).map(|c| (id, c)))
                 .expect("an ID ahead of the counter is free");
-            drop(claim);
-            let claimed = CLAIMED_IDS.lock();
-            assert!(claimed.ahead.contains(&(PID_MAX - 3)));
-            assert!(!claimed.ahead.contains(&behind), "behind the counter");
-            let ahead = NEXT_ID.load(Ordering::Relaxed) <= near;
-            assert_eq!(claimed.ahead.contains(&near), ahead);
+            let ahead = {
+                let claimed = CLAIMED_IDS.lock();
+                assert!(claimed.ahead.contains(&(PID_MAX - 3)));
+                assert!(!claimed.ahead.contains(&behind), "behind the counter");
+                let ahead = NEXT_ID.load(Ordering::Relaxed) <= near;
+                assert_eq!(claimed.ahead.contains(&near), ahead);
+                ahead
+            };
             if ahead {
-                seen_ahead = Some(near);
+                seen_ahead = Some((near, claim));
                 break;
             }
+            drop(claim);
         }
-        let near = seen_ahead.expect("the counter passed the claim every time");
+        let (near, claim) = seen_ahead.expect("the counter passed the claim every time");
         while NEXT_ID.load(Ordering::Relaxed) <= near {
             published(alloc_tid().0);
         }
-        let claimed = CLAIMED_IDS.lock();
-        assert!(!claimed.ahead.contains(&near), "passed: never again");
-        assert!(claimed.ahead.contains(&(PID_MAX - 3)), "not reached yet");
+        {
+            let claimed = CLAIMED_IDS.lock();
+            assert!(!claimed.ahead.contains(&near), "passed: never again");
+            assert!(claimed.ahead.contains(&(PID_MAX - 3)), "not reached yet");
+        }
+        drop(claim);
+        drop(high);
+    }
+
+    /// A claim dropped with its ID given to nothing (a clone3 that failed
+    /// after set_tid's claim) is not left for the allocator to check out
+    /// of turn (PR #38 review).
+    #[test]
+    fn a_failed_clones_claim_is_not_left_ahead() {
+        let high = IdClaim::new(PID_MAX - 5).expect("unused");
+        assert!(CLAIMED_IDS.lock().ahead.contains(&(PID_MAX - 5)));
+        drop(high);
+        assert!(!CLAIMED_IDS.lock().ahead.contains(&(PID_MAX - 5)));
     }
 
     /// A process whose ID set_tid chose, dropped only after a later

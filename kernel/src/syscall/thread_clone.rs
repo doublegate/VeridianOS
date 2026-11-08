@@ -797,9 +797,11 @@ fn thread_clone(
     // `parent_tid_ptr`, so the parent can observe it as soon as clone
     // returns. CLONE_CHILD_SETTID: the same at `child_tid_ptr`; on Linux the
     // child makes that store once it runs (schedule_tail), which with
-    // CLONE_VM (mandatory here) is the same memory. Both pointers were
-    // validated above, so a store that faults anyway is EFAULT, the thread
-    // taken out again.
+    // CLONE_VM (mandatory here) is the same memory. As on Linux (put_user's
+    // result unused in kernel_clone and schedule_tail), and as sys_fork_with
+    // does, a store that cannot be made is skipped: failing the clone here,
+    // with the thread already listed and the pidfd number already stored in
+    // user memory, exposed both behind an EFAULT (PR #38 review).
     let take_out = |thread: alloc::sync::Arc<process::thread::Thread>| {
         drop(thread);
         let _ = crate::process::exit::cleanup_thread(&proc, tid);
@@ -807,17 +809,11 @@ fn thread_clone(
     };
     let user_word = |ptr: usize| {
         let read = move |b: &mut [u8; 4]| {
-            // SAFETY: `ptr` was validated above via `validate_user_ptr`;
-            // `copy_from_user` checks it again and reads one naturally
-            // aligned u32 of the caller's (shared) memory.
-            unsafe { crate::syscall::userspace::copy_from_user::<[u8; 4]>(ptr) }
+            crate::syscall::userspace::read_user::<[u8; 4]>(ptr)
                 .map(|w| *b = w)
                 .is_ok()
         };
-        let write = move |b: &[u8; 4]| {
-            // SAFETY: as for `read`; one naturally aligned u32 store.
-            unsafe { crate::syscall::userspace::copy_to_user(ptr, b) }.is_ok()
-        };
+        let write = move |b: &[u8; 4]| crate::syscall::userspace::write_user(ptr, *b).is_ok();
         (read, write)
     };
     let mut stored: [Option<(usize, process::fork::StoredTid)>; 2] = [None, None];
@@ -828,19 +824,10 @@ fn thread_clone(
     .into_iter()
     .enumerate()
     {
-        if !req.on(flag) {
-            continue;
+        if req.on(flag) {
+            let (read, write) = user_word(ptr);
+            stored[i] = Some((ptr, process::fork::StoredTid::store(read, write, vtid)));
         }
-        let (read, write) = user_word(ptr);
-        let tid_word = process::fork::StoredTid::store(read, write, vtid);
-        if !tid_word.is_stored() {
-            for (p, t) in stored.iter().flatten().rev() {
-                t.undo(user_word(*p).1);
-            }
-            take_out(thread);
-            return Err(SyscallError::InvalidPointer);
-        }
-        stored[i] = Some((ptr, tid_word));
     }
 
     // The new thread runs as its own dispatcher task (stage D2), starting

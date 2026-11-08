@@ -611,7 +611,11 @@
     is stored that late too, after the parent's word and undone before it, so a failed clone
     leaves a word the child shares with the parent (CLONE_VM, MAP_SHARED) as it was, also when
     both flags name the same word; a thread clone stores both TIDs that late. A store that
-    fails part-way, on a word straddling a page boundary, puts back the bytes it wrote.
+    fails part-way, on a word straddling a page boundary, puts back the bytes it wrote, and a
+    word that cannot be read is not written at all (its first page's bytes were changed before
+    the write failed on an unmapped second page). As on Linux, a TID store that cannot be made
+    is skipped by a thread clone too, as by a fork: the clone used to fail with EFAULT after
+    the thread was listed and the CLONE_PIDFD number stored in user memory.
   - A write the kernel makes into one address space (a SETTID store, ptrace POKE) to a
     writable page a CLONE_VM child (vfork, posix_spawn) shares with its parent writes the
     shared page; it used to give that address space a private copy, so the other side never
@@ -622,8 +626,11 @@
     CLONE_VM child's own next write took a private copy, leaving its parent behind.
   - A fork child discarded before it ran gives up its process group's and session's numbers
     when it was the last process naming them, as a reap does; only its own number was freed.
+    Taking it out of the process table wakes a namespace init waiting for its namespace to
+    empty (zap_pid_ns), which could otherwise sleep on with nothing left to wake it.
   - One set_tid claim of a high ID no longer makes every later allocation below it scan the
-    process table: only the IDs claimed ahead of the counter are checked, each once.
+    process table: only the IDs claimed ahead of the counter are checked, each once, and a
+    claim whose clone3 failed is not checked at all.
   - An exit whose descriptor table owns no record locks checks under the lock table's read
     lock instead of taking the write lock, twice with the table's Drop.
 - From the PR #37 review:
