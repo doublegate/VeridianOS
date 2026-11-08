@@ -32,8 +32,8 @@ use super::ntp::Ntp;
 const NS_PER_SEC: u64 = 1_000_000_000;
 /// `mult` for a nominal second: one ns per raw ns.
 pub(super) const NOMINAL_MULT: u64 = 1 << 32;
-/// The most seconds one [`service`] runs; the clock is then resynchronized
-/// (only after the thread could not run for that long).
+/// The most late seconds one [`service`] runs; the rest before the current
+/// second are dropped (only after the thread could not run for that long).
 const MAX_CATCH_UP: u32 = 64;
 
 /// One rate of the steered clock: it read `anchor_mono` when the raw clock
@@ -196,8 +196,10 @@ pub(crate) fn now_ns() -> u64 {
 /// the last run starts counting again from the next second, running none.
 /// A second that has already ended when it is run (ktimerd ran late) ran
 /// at the rate published before it, so it is run as late: it delivers what
-/// that rate did (`Ntp::second_overflow`). Returns how many ran, and how
-/// many seconds the wall clock must move for a leap second.
+/// that rate did (`Ntp::second_overflow`). After [`MAX_CATCH_UP`] of them
+/// the rest before the current second are dropped, and the current one
+/// runs on time. Returns how many ran, and how many seconds the wall clock
+/// must move for a leap second.
 pub(super) fn run_due(ntp: &mut Ntp, wall_secs: i64, sets: u64) -> (u32, i64) {
     if ntp.seen_sets != sets {
         ntp.seen_sets = sets;
@@ -218,8 +220,14 @@ pub(super) fn run_due(ntp: &mut Ntp, wall_secs: i64, sets: u64) -> (u32, i64) {
         ntp.next_second = secs + 1 + leap;
     }
     if wall_secs >= ntp.next_second {
-        ntp.next_second = wall_secs.saturating_add(1);
-        ntp.skipped_to(ntp.next_second);
+        // Beyond the catch-up: the seconds before this one are dropped, and
+        // this one runs on time, so its phase is its own rather than the
+        // one from before the stall.
+        ntp.skipped_to(wall_secs);
+        let leap = ntp.second_overflow(wall_secs, false) as i64;
+        ran += 1;
+        moved += leap;
+        ntp.next_second = wall_secs + 1 + leap;
     }
     (ran, moved)
 }
@@ -287,7 +295,9 @@ pub(crate) fn adjusted(ntp: &mut Ntp, was_active: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        super::ntp::{Timex, ADJ_MAXERROR, ADJ_STATUS, STA_INS, TIME_OOP},
+        super::ntp::{
+            Timex, ADJ_ADJTIME, ADJ_MAXERROR, ADJ_OFFSET_SINGLESHOT, ADJ_STATUS, STA_INS, TIME_OOP,
+        },
         *,
     };
 
@@ -396,7 +406,7 @@ mod tests {
 
         // ktimerd stalled across midnight, beyond its catch-up.
         let mut ntp = armed();
-        assert_eq!(run_due(&mut ntp, midnight + 1_000, 0).0, MAX_CATCH_UP);
+        assert_eq!(run_due(&mut ntp, midnight + 1_000, 0).0, MAX_CATCH_UP + 1);
         assert_eq!(run_due(&mut ntp, midnight + 1_001, 0), (1, 0));
         let (state, secs) = read(&mut ntp, midnight + 1_001);
         assert_ne!(state, TIME_OOP);
@@ -468,8 +478,32 @@ mod tests {
         // The clock was set: count from the next second, running none.
         assert_eq!(run_due(&mut ntp, 9_000, 1), (0, 0));
         assert_eq!(ntp.next_second, 9_001);
-        assert_eq!(run_due(&mut ntp, 100_000, 1).0, MAX_CATCH_UP);
+        // Beyond the catch-up the seconds before this one are dropped, and
+        // this one runs on time.
+        assert_eq!(run_due(&mut ntp, 100_000, 1).0, MAX_CATCH_UP + 1);
         assert_eq!(ntp.next_second, 100_001);
+        assert_eq!(run_due(&mut ntp, 100_000, 1), (0, 0));
+    }
+
+    /// The second ktimerd wakes in after a stall beyond the catch-up gets
+    /// its own phase, not the one from before the stall: a 500 us slew is
+    /// delivered by second 1, and the late seconds that ran at its rate
+    /// delivered it again, so the current second gives some back.
+    #[test]
+    fn the_second_after_a_long_stall_is_steered_afresh() {
+        let mut ntp = Ntp::new();
+        let mut tx = Timex {
+            modes: ADJ_ADJTIME | ADJ_OFFSET_SINGLESHOT,
+            offset: 500,
+            ..Timex::default()
+        };
+        ntp.adjtimex(&mut tx, 0, 0);
+        ntp.next_second = 1;
+        assert_eq!(run_due(&mut ntp, 1, 0), (1, 0));
+        let normal = Ntp::new().second_length();
+        assert!(ntp.second_length() > normal, "second 1 delivers the slew");
+        assert_eq!(run_due(&mut ntp, 1_000, 0).0, MAX_CATCH_UP + 1);
+        assert!(ntp.second_length() < normal, "second 1000 gives back");
     }
 
     /// The leap second end to end: a wall clock read every quarter second

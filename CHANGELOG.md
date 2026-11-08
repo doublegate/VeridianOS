@@ -414,9 +414,11 @@
   deletes a leap second at midnight UTC for STA_INS/STA_DEL (CLOCK_REALTIME reads 23:59:59 twice,
   adjtimex reports TIME_OOP, TAI moves a second, timers on the wall clock follow). Clock reads take
   the rate and the raw clock in one sequence section, so CLOCK_MONOTONIC never goes back across a
-  rate change; a second `ktimerd` runs late delivers what the rate before it delivered, and
-  nothing runs each second while there is nothing to deliver (a synchronized clock's maxerror
-  still grows each second until it becomes unsynchronized). CPU time and scheduling stay on the
+  rate change; a second `ktimerd` runs late delivers what the rate before it delivered (after a
+  stall of more than 64 seconds the ones before the current second are dropped, and the current
+  one runs on time with its own phase), and nothing runs each second while there is nothing to
+  deliver (a synchronized clock's maxerror still grows each second until it becomes
+  unsynchronized). CPU time and scheduling stay on the
   unsteered clock, as Linux's sched_clock; sleep deadlines run on CLOCK_MONOTONIC. Setting the
   clock (settimeofday, clock_settime, ADJ_SETOFFSET) clears the NTP state as on Linux: the slew
   and phase offset stop, the clock is unsynchronized and no leap second stays armed. CLOCK_TAI
