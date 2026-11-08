@@ -124,6 +124,13 @@
   MODIFY on each PID namespace a number is chosen in. A process acting on itself needs none. A
   launcher can now run root unable to signal, trace or reprioritize anything outside what it
   holds.
+- `CapabilityDrop` drops by rights (ADR 0026, accepted): a third argument names the rights to
+  take off each capability naming the object, which keeps the rest, and is removed once it has
+  none; 0 removes it whole, as before, and rights only ever go. A launcher can now take MODIFY
+  off the mount namespace and the user namespaces above it, so root cannot mount, and keep READ
+  and WRITE, which file access is to need from ADR 0024's next step. `<veridian/capability.h>`
+  gives programs built against musl and the native libc `veridian_capability_drop()` and its
+  constants; the native libc had no wrapper for the call.
 - `/boot/config-7.3.0-veridian` in every root filesystem (ADR 0023): the Linux kernel
   configuration VeridianOS reports, generated per architecture by `tools/compat/gen_kconfig.py`
   from `abi/kconfig.map`. An option is set only where the kernel does what Linux built with it

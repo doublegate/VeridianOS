@@ -153,7 +153,9 @@ There are two kinds of capability:
    CAP_SYS_ADMIN and MODIFY on the mount namespace; the namespace calls, setting the clocks, and
    signalling, tracing, rescheduling or limiting another process need theirs likewise (EPERM
    without). A program the kernel starts holds all of them, so a Linux program sees no
-   difference unless its launcher dropped some (`CapabilityDrop`).
+   difference unless its launcher dropped some or some of their rights (`CapabilityDrop`;
+   `veridian_capability_drop()` in `<veridian/capability.h>`, ADR 0026). For example, MODIFY
+   taken off the mount namespace and the user namespaces above it gives root that cannot mount.
 
 `setuid`/`setgid`, `access()` and `stat().st_mode` behave as on Linux, and a program that needs
 one privilege can run as an ordinary user with a file or ambient capability instead of as root.

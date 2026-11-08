@@ -1,6 +1,7 @@
 # ADR 0024: the Linux ABI as a personality, under one security model
 
-- Status: accepted; decision 7's "all rights" superseded by ADR 0025 (2026-11-05)
+- Status: accepted; decision 7's "all rights" superseded by ADR 0025 (2026-11-05), and its
+  "Dropping" point by ADR 0026 (2026-11-08), which drops by rights
 - Date: 2026-11-05
 - Tracking: v0.28.0 order of work, item 4. The maintainer chose option (b) on 2026-11-03: the Linux
   system calls are to be served from user space on native IPC and capabilities, rather than kept
@@ -9,6 +10,8 @@
   The maintainer reviewed and accepted the details of this ADR as written on 2026-11-05.
 - Superseded in part 2026-11-05 (step 2): ADR 0025 replaces the "all rights" of decision 7 with
   every right but GRANT, REVOKE and DELETE.
+- Superseded in part 2026-11-08 (before step 6): ADR 0026 makes `CapabilityDrop` take a rights
+  mask, narrowing a capability instead of only removing it.
 
 ## Context
 

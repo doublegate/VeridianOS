@@ -36,5 +36,6 @@ Consequences (Michael Nygard's format).
 | [0021](0021-uname-identity.md) | what uname reports, and when the system calls itself Linux | accepted | 2026-10-27 |
 | [0022](0022-namespaces.md) | Linux namespaces | accepted | 2026-11-02 |
 | [0023](0023-kernel-config.md) | the kernel configuration VeridianOS reports | accepted | 2026-11-03 |
-| [0024](0024-linux-personality.md) | the Linux ABI as a personality, under one security model | accepted; decision 7's "all rights" superseded by [ADR 0025](0025-authority-rights.md) (2026-11-05) | 2026-11-05 |
+| [0024](0024-linux-personality.md) | the Linux ABI as a personality, under one security model | accepted; decision 7's "all rights" superseded by [ADR 0025](0025-authority-rights.md) (2026-11-05), and its "Dropping" point by [ADR 0026](0026-drop-by-rights.md) (2026-11-08), which drops by rights | 2026-11-05 |
 | [0025](0025-authority-rights.md) | the rights of the authority capabilities | accepted; supersedes [ADR 0024](0024-linux-personality.md), decision 7, only where it gives "all rights" (at launch, and to the creator of a user namespace). The rest of [ADR 0024](0024-linux-personality.md) stands. | 2026-11-05 |
+| [0026](0026-drop-by-rights.md) | dropping authority by rights | accepted; supersedes [ADR 0024](0024-linux-personality.md), decision 7, only its "Dropping" point (`CapabilityDrop(kind, id)` removes every capability naming the object). The rest of that ADR stands, as does the rights decision that amended it. | 2026-11-08 |

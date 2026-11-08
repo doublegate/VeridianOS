@@ -9877,8 +9877,9 @@ static unsigned long long t_ns_id(const char *name)
     return id;
 }
 
-/* VeridianOS's private CapabilityDrop(kind, id) (ADR 0024); kind 9 is a
- * namespace, named by its NS_GET_ID id. */
+/* VeridianOS's private CapabilityDrop(kind, id, rights) (ADR 0024, ADR
+ * 0026); kind 9 is a namespace, named by its NS_GET_ID id. Rights 0 drops
+ * the capability whole; otherwise those rights (the token's encoding) go. */
 #define T_SYS_CAPABILITY_DROP 1056
 #define T_CAP_NAMESPACE 9
 
@@ -9909,8 +9910,8 @@ static void test_mount_object_cap(void)
             mount("none", "/tmp/oc/new", "tmpfs", 0, NULL) != 0 ||
             mkdir("/tmp/oc/new/old", 0755) != 0)
             g |= 1;
-        dropped_mnt = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, mnt);
-        dropped_user = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, user);
+        dropped_mnt = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, mnt, 0);
+        dropped_user = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, user, 0);
         if (dropped_mnt != 0 || dropped_user != 1) g |= 2;
         /* Still root with every POSIX capability, but no authority. */
         if (geteuid() != 0) g |= 4;
@@ -9923,7 +9924,7 @@ static void test_mount_object_cap(void)
         /* The mounts made before the drop are still there. */
         if (t_mounts_at("/tmp/oc") != 1 || t_mounts_at("/tmp/oc/new") != 1) g |= 128;
         /* A selector naming nothing that can be dropped: EINVAL. */
-        if (!(syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, 0) == -1 && errno == EINVAL)) g |= 256;
+        if (!(syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, 0, 0) == -1 && errno == EINVAL)) g |= 256;
         if (g != 0) {
             printf("mount-object-cap g=%#x mnt=%ld user=%ld\n", g, dropped_mnt, dropped_user);
             fflush(stdout);
@@ -9940,6 +9941,63 @@ static void test_mount_object_cap(void)
     rmdir("/tmp/oc");
     snprintf(why, sizeof(why), "f=%#x code=%d", f, code);
     report("mount_object_cap", f == 0, why);
+}
+
+#define T_RIGHT_MODIFY 0x40
+
+/* Dropping by rights (ADR 0026): root that drops MODIFY alone, on its mount
+ * namespace and the user namespace above it, cannot mount but keeps the
+ * other rights, so files still work and it can still make a namespace
+ * (CREATE). */
+static void test_mount_modify_drop(void)
+{
+    char why[160];
+    mkdir("/tmp", 01777);
+    rmdir("/tmp/omd");
+    if (mkdir("/tmp/omd", 0755) != 0) {
+        report("mount_modify_drop", 0, "setup");
+        return;
+    }
+    pid_t child = fork();
+    if (child == 0) {
+        int g = 0;
+        if (unshare(CLONE_NEWNS) != 0 || mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0)
+            _exit(0x7f);
+        unsigned long long mnt = t_ns_id("mnt"), user = t_ns_id("user");
+        if (mnt == 0 || user == 0) _exit(0x7e);
+        /* Nothing names the new mount namespace; the user namespace's one
+         * is narrowed, not removed, and a second drop finds nothing to take. */
+        long d_mnt = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, mnt, T_RIGHT_MODIFY);
+        long d_user = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, user, T_RIGHT_MODIFY);
+        long again = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, user, T_RIGHT_MODIFY);
+        if (d_mnt != 0 || d_user != 1 || again != 0) g |= 1;
+        if (!(mount("none", "/tmp/omd", "tmpfs", 0, NULL) == -1 && errno == EPERM)) g |= 2;
+        /* Files still work. */
+        int fd = open("/tmp/omd/f", O_CREAT | O_RDWR | O_TRUNC, 0644);
+        char buf[4] = {0};
+        if (fd < 0 || write(fd, "abc", 3) != 3 || pread(fd, buf, 3, 0) != 3 || memcmp(buf, "abc", 3))
+            g |= 4;
+        if (fd >= 0) close(fd);
+        if (unlink("/tmp/omd/f") != 0) g |= 4;
+        /* CREATE is kept: a new UTS namespace can still be made. */
+        if (unshare(CLONE_NEWUTS) != 0) g |= 8;
+        /* Rights bits above CREATE: EINVAL. */
+        if (!(syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, user, 0x100) == -1 && errno == EINVAL))
+            g |= 16;
+        if (g != 0) {
+            printf("mount-modify-drop g=%#x drops=%ld,%ld,%ld\n", g, d_mnt, d_user, again);
+            fflush(stdout);
+        }
+        _exit(g == 0 ? 0 : 1);
+    }
+    int f = 0, code = t_exit_status(child);
+    if (code == 0x7f || code == 0x7e)
+        f |= 1;
+    else if (code != 0)
+        f |= 2;
+    rmdir("/tmp/omd");
+    snprintf(why, sizeof(why), "f=%#x code=%d", f, code);
+    report("mount_modify_drop", f == 0, why);
 }
 
 /* The namespace calls' object capabilities (ADR 0024, step 3): unshare and
@@ -9962,9 +10020,9 @@ static void test_ns_object_cap(void)
         if (unshare(CLONE_NEWUTS) != 0 || sethostname("ocap-a", 6) != 0) _exit(0x7e);
         unsigned long long uts = t_ns_id("uts"), user = t_ns_id("user");
         if (uts == 0 || user == 0 || uts == old_uts) _exit(0x7d);
-        long d_new = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, uts);
-        long d_old = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, old_uts);
-        long d_user = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, user);
+        long d_new = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, uts, 0);
+        long d_old = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, old_uts, 0);
+        long d_user = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, user, 0);
         if (d_new != 0 || d_old != 1 || d_user != 1) g |= 1;
         if (geteuid() != 0) g |= 2;
         if (!(sethostname("ocap-b", 6) == -1 && errno == EPERM)) g |= 4;
@@ -10026,8 +10084,8 @@ static void test_proc_object_cap(void)
         if (pid_ns == 0 || user == 0) _exit(0x7d);
         /* Before the drop, all of it works. */
         if (kill(victim, 0) != 0 || setpriority(PRIO_PROCESS, victim, 1) != 0) g |= 1;
-        long d_pid = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, pid_ns);
-        long d_user = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, user);
+        long d_pid = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, pid_ns, 0);
+        long d_user = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, user, 0);
         if (d_pid != 1 || d_user != 1) g |= 2;
         if (geteuid() != 0) g |= 4;
         /* Itself: no capability asked. */
@@ -10093,7 +10151,7 @@ static void test_clock_object_cap(void)
         struct timex tx;
         timer_t t;
         if (geteuid() != 0) g |= 1;
-        long d_sys = syscall(T_SYS_CAPABILITY_DROP, T_CAP_CLOCK, 0);
+        long d_sys = syscall(T_SYS_CAPABILITY_DROP, T_CAP_CLOCK, 0, 0);
         if (d_sys != 1) g |= 2;
         if (clock_gettime(CLOCK_REALTIME, &now) != 0) g |= 4;
         if (!(clock_settime(CLOCK_REALTIME, &now) == -1 && errno == EPERM)) g |= 8;
@@ -10109,7 +10167,7 @@ static void test_clock_object_cap(void)
             g |= 128;
         else
             timer_delete(t);
-        long d_alarm = syscall(T_SYS_CAPABILITY_DROP, T_CAP_CLOCK, 1);
+        long d_alarm = syscall(T_SYS_CAPABILITY_DROP, T_CAP_CLOCK, 1, 0);
         if (d_alarm != 1) g |= 256;
         if (!(timer_create(CLOCK_BOOTTIME_ALARM, NULL, &t) == -1 && errno == EPERM)) g |= 512;
         if (timer_create(CLOCK_MONOTONIC, NULL, &t) != 0)
@@ -11082,6 +11140,7 @@ int main(int argc, char **argv)
     test_mount_no_escape();
     test_pivot_root();
     test_mount_object_cap();
+    test_mount_modify_drop();
     test_ns_object_cap();
     test_clock_object_cap();
     test_proc_object_cap();

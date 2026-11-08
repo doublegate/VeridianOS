@@ -414,30 +414,61 @@ enum DropTarget {
 
 /// Remove from `space` every capability naming the object that `kind` and
 /// `id` select; how many were removed, or None for a selector naming no
-/// kind of object that can be dropped.
+/// kind of object that can be dropped. [`drop_rights`] with no mask.
 #[cfg(feature = "alloc")]
 pub fn drop_object(space: &CapabilitySpace, kind: usize, id: usize) -> Option<usize> {
+    drop_rights(space, kind, id, 0)
+}
+
+/// Take the rights `mask` (the token's rights encoding) off every
+/// capability in `space` naming the object `kind` and `id` select (ADR
+/// 0026): mask 0 removes each whole, as does a mask covering every right it
+/// has; otherwise each keeps its rights minus the mask, and one left with
+/// none is removed. Never adds a right. Returns how many were narrowed or
+/// removed (one already without those rights is not counted), or None for
+/// a selector naming nothing that can be dropped or a mask with bits above
+/// CREATE.
+#[cfg(feature = "alloc")]
+pub fn drop_rights(space: &CapabilitySpace, kind: usize, id: usize, mask: usize) -> Option<usize> {
+    if mask > Rights::ALL.bits() as usize {
+        return None;
+    }
     let select = drop_selector(kind, id)?;
+    let mask = if mask == 0 {
+        Rights::ALL
+    } else {
+        Rights::new(mask as u32)
+    };
     let tokens = matching(space, select);
     Some(
         tokens
             .into_iter()
-            .filter(|(cap, _)| space.remove(*cap).is_some())
+            .filter(|(cap, held)| {
+                if held.intersection(mask).is_empty() {
+                    return false;
+                }
+                match space.narrow(*cap, mask) {
+                    Some(left) if left.is_empty() => space.remove(*cap).is_some(),
+                    Some(_) => true,
+                    None => false,
+                }
+            })
             .count(),
     )
 }
 
-/// `CapabilityDrop(kind, id)`: delete from the caller's own space every
-/// capability naming that object (ADR 0024). Unlike `CapabilityRevoke`,
-/// which revokes the token in every space holding a copy, this affects
-/// only the caller (and what it starts afterwards). Returns the number
-/// removed; EINVAL for a kind and id naming nothing that can be dropped.
+/// `CapabilityDrop(kind, id, rights)`: take `rights` off, or with 0 delete,
+/// every capability in the caller's own space naming that object (ADR 0024,
+/// ADR 0026). Unlike `CapabilityRevoke`, which revokes the token in every
+/// space holding a copy, this affects only the caller (and what it starts
+/// afterwards). Returns the number narrowed or removed; EINVAL for a kind
+/// and id naming nothing that can be dropped, or rights bits above CREATE.
 #[cfg(feature = "alloc")]
-pub fn sys_capability_drop(kind: usize, id: usize) -> crate::syscall::SyscallResult {
+pub fn sys_capability_drop(kind: usize, id: usize, rights: usize) -> crate::syscall::SyscallResult {
     let process =
         crate::process::current_process().ok_or(crate::syscall::SyscallError::InvalidState)?;
     let space = process.capability_space.lock();
-    drop_object(&space, kind, id).ok_or(crate::syscall::SyscallError::InvalidArgument)
+    drop_rights(&space, kind, id, rights).ok_or(crate::syscall::SyscallError::InvalidArgument)
 }
 
 #[cfg(all(test, feature = "alloc", not(target_os = "none")))]
@@ -920,6 +951,102 @@ mod tests {
         assert_eq!(drop_object(&space, TYPE_CLOCK as usize, 2), None);
         assert_eq!(drop_object(&space, TYPE_SYSTEM as usize, 1), None);
         assert_eq!(drop_object(&space, 0x100 + TYPE_SYSTEM as usize, 0), None);
+        // Rights above CREATE.
+        assert_eq!(drop_rights(&space, TYPE_SYSTEM as usize, 0, 0x100), None);
         assert_eq!(space.used(), 11);
+    }
+
+    /// A rights mask narrows a capability instead of removing it (ADR
+    /// 0026); the rights taken off are gone, the rest stay, and nothing
+    /// is added back.
+    #[test]
+    fn a_rights_mask_narrows_and_never_widens() {
+        let space = initial_space();
+        let system = ObjectRef::System;
+        let modify = Rights::MODIFY.bits() as usize;
+        assert_eq!(
+            drop_rights(&space, TYPE_SYSTEM as usize, 0, modify),
+            Some(1)
+        );
+        assert!(!holds(&space, &system, Rights::MODIFY));
+        assert!(holds(&space, &system, Rights::READ.union(Rights::WRITE)));
+        assert_eq!(space.used(), 11, "narrowed, not removed");
+        // Again: nothing left to take, so nothing counted.
+        assert_eq!(
+            drop_rights(&space, TYPE_SYSTEM as usize, 0, modify),
+            Some(0)
+        );
+        // A mask naming rights it never had (GRANT) changes nothing.
+        let grant = Rights::GRANT.bits() as usize;
+        assert_eq!(drop_rights(&space, TYPE_SYSTEM as usize, 0, grant), Some(0));
+        assert!(!holds(&space, &system, Rights::MODIFY), "not widened");
+        // Taking the rest removes it.
+        let rest = authority_rights().remove(Rights::MODIFY).bits() as usize;
+        assert_eq!(drop_rights(&space, TYPE_SYSTEM as usize, 0, rest), Some(1));
+        assert!(!holds(&space, &system, Rights::READ));
+        assert_eq!(space.used(), 10);
+    }
+
+    /// Mask 0 is the whole drop, and a mask covering every right held
+    /// removes too.
+    #[test]
+    fn mask_zero_or_every_right_removes_the_capability() {
+        let space = initial_space();
+        assert_eq!(drop_rights(&space, TYPE_CLOCK as usize, 0, 0), Some(1));
+        assert_eq!(space.used(), 10);
+        let all = Rights::ALL.bits() as usize;
+        assert_eq!(drop_rights(&space, TYPE_CLOCK as usize, 1, all), Some(1));
+        assert_eq!(space.used(), 9);
+    }
+
+    /// Root that cannot mount but still uses files: MODIFY off the mount
+    /// namespace and the user namespace above it leaves READ and WRITE
+    /// through either (ADR 0026, the case step 6 needs).
+    #[test]
+    fn modify_dropped_along_the_owner_chain_keeps_read_and_write() {
+        let space = initial_space();
+        let set = ns::initial();
+        let mnt = set.get(NsKind::Mnt);
+        let user = set.get(NsKind::User).ident().id as usize;
+        let modify = Rights::MODIFY.bits() as usize;
+        let mnt_id = mnt.ident().id as usize;
+        assert_eq!(
+            drop_rights(&space, TYPE_NAMESPACE as usize, mnt_id, modify),
+            Some(1)
+        );
+        assert!(
+            holds_namespace(&space, &mnt, Rights::MODIFY),
+            "the owner stands"
+        );
+        assert_eq!(
+            drop_rights(&space, TYPE_NAMESPACE as usize, user, modify),
+            Some(1)
+        );
+        assert!(!holds_namespace(&space, &mnt, Rights::MODIFY));
+        assert!(holds_namespace(
+            &space,
+            &mnt,
+            Rights::READ.union(Rights::WRITE)
+        ));
+        assert!(holds_namespace(&space, &mnt, Rights::CREATE));
+    }
+
+    /// Narrowing is the caller's own: a forked copy's narrowing leaves the
+    /// parent's rights alone, and a child forked after it inherits it.
+    #[test]
+    fn narrowing_touches_only_this_space_and_is_inherited() {
+        let parent = initial_space();
+        let child = CapabilitySpace::new();
+        child.clone_from(&parent).unwrap();
+        let modify = Rights::MODIFY.bits() as usize;
+        assert_eq!(
+            drop_rights(&child, TYPE_SYSTEM as usize, 0, modify),
+            Some(1)
+        );
+        assert!(holds(&parent, &ObjectRef::System, Rights::MODIFY));
+        let grandchild = CapabilitySpace::new();
+        grandchild.clone_from(&child).unwrap();
+        assert!(!holds(&grandchild, &ObjectRef::System, Rights::MODIFY));
+        assert!(holds(&grandchild, &ObjectRef::System, Rights::READ));
     }
 }
