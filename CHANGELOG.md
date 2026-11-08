@@ -95,7 +95,10 @@
   capability with MODIFY on the caller's mount namespace, or on a user namespace above it (ADR
   0024, step 2): a launcher that drops those can run root unable to mount. Whoever creates a user
   namespace (unshare, or clone's parent) receives one on it, so mounting in namespaces made inside
-  it keeps working. The private calls no longer accept any Memory capability with WRITE and
+  it keeps working; its capabilities on user namespaces that are gone are removed first, so a
+  launcher making one per child it reaps no longer fills its capability quota (256) after a few
+  hundred, and the registry forgets an authority capability once no space holds it, instead of
+  keeping eleven more entries for every program started. The private calls no longer accept any Memory capability with WRITE and
   CREATE, which no process was given; the private umount now needs CAP_SYS_ADMIN, and both give
   EPERM, not EACCES.
 - The namespace calls need object capabilities too (ADR 0024, step 3), each on the namespace

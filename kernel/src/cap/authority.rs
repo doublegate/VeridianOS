@@ -264,11 +264,16 @@ pub fn current_may_choose_pids(
 /// over user namespace `ns`, which it is creating (ADR 0024, decision 7): the
 /// namespaces made inside it then belong to a user namespace it has
 /// authority over, as the owner has on Linux.
+///
+/// Its capabilities on user namespaces that no longer exist go first
+/// ([`drop_dead_user_ns`]): a launcher making one per child it then reaps
+/// would else fill its space's quota after a few hundred (PR #39 review).
 #[cfg(feature = "alloc")]
 pub fn grant_user_ns(
     space: &CapabilitySpace,
     ns: &crate::process::userns::UserNs,
 ) -> Result<(), super::CapError> {
+    drop_dead_user_ns(space);
     grant(
         space,
         &[ObjectRef::Namespace {
@@ -276,6 +281,21 @@ pub fn grant_user_ns(
             id: ns.ident.id,
         }],
     )
+}
+
+/// Remove from `space` its capabilities on user namespaces that are gone.
+/// Namespace ids are never reused, so such a capability names nothing and
+/// can name nothing later. Returns how many were removed.
+#[cfg(feature = "alloc")]
+pub fn drop_dead_user_ns(space: &CapabilitySpace) -> usize {
+    use crate::process::ns::NsKind;
+    matching(space, |o| {
+        matches!(o, ObjectRef::Namespace { kind: NsKind::User, id }
+            if !crate::process::userns::is_live(*id))
+    })
+    .into_iter()
+    .filter(|(cap, _)| space.remove(*cap).is_some())
+    .count()
 }
 
 /// The objects a program the kernel starts has authority over: the
@@ -339,7 +359,9 @@ pub fn grant(space: &CapabilitySpace, objects: &[ObjectRef]) -> Result<(), super
         if holds(space, object, authority_rights()) {
             continue;
         }
-        cap_manager().create_capability_with_flags(
+        // Only spaces hold these, so the registry forgets one once no space
+        // does: every launched program gets its own (PR #39 review).
+        cap_manager().create_space_only_capability(
             object.clone(),
             authority_rights(),
             space,
@@ -583,6 +605,74 @@ mod tests {
         assert_eq!(drop_object(&child, TYPE_NAMESPACE as usize, mnt), Some(1));
         assert_eq!(drop_object(&child, TYPE_SYSTEM as usize, 0), Some(1));
         assert_eq!(child.used(), 8);
+    }
+
+    /// A launcher making a user namespace per child and reaping each one
+    /// keeps a bounded space: the capability on a namespace that is gone
+    /// goes before the next grant (PR #39 review: 245 such clones used to
+    /// fill the 256-entry quota, and the next clone failed).
+    #[test]
+    fn grants_on_user_namespaces_that_are_gone_are_reclaimed() {
+        use crate::process::userns;
+        let init = userns::initial();
+        let space = CapabilitySpace::new();
+        let user_caps = |space: &CapabilitySpace| {
+            matching(space, |o| {
+                matches!(
+                    o,
+                    ObjectRef::Namespace {
+                        kind: NsKind::User,
+                        ..
+                    }
+                )
+            })
+            .len()
+        };
+        for _ in 0..300 {
+            let ns = userns::UserNs::create(&init, 1000, 1000, false, false).unwrap();
+            grant_user_ns(&space, &ns).unwrap();
+            assert!(holds(
+                &space,
+                &ObjectRef::Namespace {
+                    kind: NsKind::User,
+                    id: ns.ident.id,
+                },
+                Rights::CREATE
+            ));
+            assert!(userns::is_live(ns.ident.id));
+            let id = ns.ident.id;
+            drop(ns);
+            assert!(!userns::is_live(id));
+            assert!(user_caps(&space) <= 1, "only the last one is left");
+        }
+        // One that is still there is kept.
+        let live = userns::UserNs::create(&init, 1000, 1000, false, false).unwrap();
+        grant_user_ns(&space, &live).unwrap();
+        let other = userns::UserNs::create(&init, 1000, 1000, false, false).unwrap();
+        grant_user_ns(&space, &other).unwrap();
+        assert_eq!(user_caps(&space), 2);
+        assert!(userns::is_live(init.ident.id), "the initial one always is");
+    }
+
+    /// The registry forgets an authority capability once no space holds
+    /// it, so programs started one after another do not grow it (PR #39
+    /// review); while a forked copy holds one, it stays.
+    #[test]
+    fn an_authority_capability_no_space_holds_leaves_the_registry() {
+        let parent = initial_space();
+        let mut ids = Vec::new();
+        let _ = parent.iter_capabilities(|entry| {
+            ids.push(entry.capability.id());
+            true
+        });
+        assert_eq!(ids.len(), 11);
+        let child = CapabilitySpace::new();
+        child.clone_from(&parent).unwrap();
+        drop(parent);
+        assert!(ids.iter().all(|&id| cap_manager().is_registered(id)));
+        assert!(holds(&child, &ObjectRef::System, Rights::MODIFY));
+        drop(child);
+        assert!(ids.iter().all(|&id| !cap_manager().is_registered(id)));
     }
 
     #[test]
