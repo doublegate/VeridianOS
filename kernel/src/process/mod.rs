@@ -1122,7 +1122,9 @@ mod id_tests {
     #[test]
     fn a_discarded_child_releases_a_group_it_was_the_last_in() {
         let ns = pidns::PidNs::create(&pidns::initial(), &userns::initial(), 0).unwrap();
-        let (group, session) = (9_100_001, 9_100_002);
+        // Kernel IDs no other test registers (the registry is global,
+        // shared by tests running in parallel).
+        let (group, session) = (9_500_001, 9_500_002);
         for kid in [group, session] {
             pidns::reserve(&ns, &[], |_| true).unwrap().commit(kid);
         }

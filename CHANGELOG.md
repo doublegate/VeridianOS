@@ -607,8 +607,15 @@
   - CLONE_PARENT_SETTID stores the child's TID after every step of a clone that can fail but
     the start of its thread, as Linux's put_user follows copy_process; a start that fails puts
     the old word back. A fork failing at the process table or a namespace whose init was
-    exiting used to leave the TID in the parent's memory behind an error. A thread clone
-    stores both TIDs that late too.
+    exiting used to leave the TID in the parent's memory behind an error. CLONE_CHILD_SETTID
+    is stored that late too, after the parent's word and undone before it, so a failed clone
+    leaves a word the child shares with the parent (CLONE_VM, MAP_SHARED) as it was, also when
+    both flags name the same word; a thread clone stores both TIDs that late. A store that
+    fails part-way, on a word straddling a page boundary, puts back the bytes it wrote.
+  - A write the kernel makes into one address space (a SETTID store, ptrace POKE) to a
+    writable page a CLONE_VM child (vfork, posix_spawn) shares with its parent writes the
+    shared page; it used to give that address space a private copy, so the other side never
+    saw the store and the page stopped being shared.
   - A fork child discarded before it ran gives up its process group's and session's numbers
     when it was the last process naming them, as a reap does; only its own number was freed.
   - One set_tid claim of a high ID no longer makes every later allocation below it scan the

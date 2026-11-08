@@ -217,7 +217,7 @@ pub(super) fn run_due(ntp: &mut Ntp, wall_secs: i64, sets: u64) -> (u32, i64) {
         wall_secs += leap;
         // An inserted second starts this second again; a deleted one
         // skips the next.
-        ntp.next_second = secs + 1 + leap;
+        ntp.next_second = secs.saturating_add(1 + leap);
     }
     if wall_secs >= ntp.next_second {
         // Beyond the catch-up: the seconds before this one are dropped, and
@@ -227,7 +227,7 @@ pub(super) fn run_due(ntp: &mut Ntp, wall_secs: i64, sets: u64) -> (u32, i64) {
         let leap = ntp.second_overflow(wall_secs, false) as i64;
         ran += 1;
         moved += leap;
-        ntp.next_second = wall_secs + 1 + leap;
+        ntp.next_second = wall_secs.saturating_add(1 + leap);
     }
     (ran, moved)
 }

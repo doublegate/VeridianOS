@@ -92,6 +92,27 @@ pub(crate) fn sys_fork_with(opts: &crate::process::fork::ForkOptions) -> Syscall
                     )
                 });
 
+                // CLONE_CHILD_SETTID: the TID as the child sees it, its
+                // number in its own namespace (schedule_tail's
+                // task_pid_vnr), in the child's memory. Linux stores it once
+                // the child runs; here it comes after the parent's store, so
+                // with both on one shared word (CLONE_VM) the child's number
+                // is what stays, and before the start, undone first if that
+                // fails. A copy-on-write page is copied first; a CLONE_VM
+                // child's writable page is the parent's frame, so the parent
+                // sees the store, as on Linux. Skipped when it cannot be made.
+                #[cfg(feature = "alloc")]
+                let child_tid_word = opts.child_settid.map(|ptr| {
+                    let nr =
+                        crate::process::pidns::nr_in(child_tid.0, &child_process.pid_ns()) as u32;
+                    let space = child_process.memory_space.lock();
+                    crate::process::fork::StoredTid::store(
+                        |b| space.read_user_bytes(ptr as u64, b).is_ok(),
+                        |b| space.write_bytes_private(ptr as u64, b, false).is_ok(),
+                        nr,
+                    )
+                });
+
                 // A dispatched parent's child runs as its own task, from the
                 // parent's registers at this syscall (rax = 0) and a copy of
                 // its vector state (on every architecture since sprint E).
@@ -102,16 +123,22 @@ pub(crate) fn sys_fork_with(opts: &crate::process::fork::ForkOptions) -> Syscall
                         crate::process::start_thread(&child_process, &t, true).is_ok()
                     });
                     if !started {
-                        // Freed whole, not just unlisted (N-46); then its
-                        // pidfd, which finds it gone and kills nothing, and
-                        // the parent's TID word.
-                        crate::process::exit::discard_unstarted(&child_process);
-                        if let Some(fd) = pidfd {
-                            super::pidfd::uninstall(fd);
+                        // The TID words first, the child's then the
+                        // parent's (the reverse of their stores, so one
+                        // shared word ends as it was); then the child,
+                        // freed whole, not just unlisted (N-46); then its
+                        // pidfd, which finds it gone and kills nothing.
+                        if let (Some(tid), Some(ptr)) = (child_tid_word, opts.child_settid) {
+                            let space = child_process.memory_space.lock();
+                            tid.undo(|b| space.write_bytes_private(ptr as u64, b, false).is_ok());
                         }
                         if let (Some(tid), Some(ptr)) = (parent_tid, opts.parent_settid) {
                             let space = current.memory_space.lock();
                             tid.undo(|b| space.write_bytes_private(ptr as u64, b, false).is_ok());
+                        }
+                        crate::process::exit::discard_unstarted(&child_process);
+                        if let Some(fd) = pidfd {
+                            super::pidfd::uninstall(fd);
                         }
                         return Err(SyscallError::OutOfMemory);
                     }
