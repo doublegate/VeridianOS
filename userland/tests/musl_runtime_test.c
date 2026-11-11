@@ -8937,6 +8937,12 @@ static void test_clone_bad_tid(void)
     char why[96];
     int f = 0;
     void *none = mmap(NULL, 4096, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (none == MAP_FAILED) {
+        /* Without the mapping bad[1] would be (void *)-1, a kernel address,
+         * and the PROT_NONE case would go untested. */
+        report("clone_bad_tid", 0, "mmap PROT_NONE failed");
+        return;
+    }
     void *bad[2] = {NULL, none};
     for (int i = 0; i < 2; i++) {
         /* ptid is the third argument everywhere, ctid the fourth on x86_64
@@ -8977,8 +8983,7 @@ static void test_clone_bad_tid(void)
     int code = t_exit_status(child);
     if (code != 0)
         f |= code << 2;
-    if (none != MAP_FAILED)
-        munmap(none, 4096);
+    munmap(none, 4096);
     snprintf(why, sizeof(why), "f=%#x", f);
     report("clone_bad_tid", f == 0, why);
 }

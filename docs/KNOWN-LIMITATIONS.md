@@ -41,10 +41,12 @@ exposed were fixed (N-182 to N-189); the rest are listed, with their targets, in
   their pages (N-230); the rest needs the v0.29 page cache.
 - **clone across processes.** A `clone` without CLONE_THREAD makes a process (fork, vfork,
   `posix_spawn`); with CLONE_VM it shares the parent's memory page by page as it is at the
-  clone, so a mapping either side adds or removes afterwards is its own, and so is a page that
-  had no frame yet: whichever side touches it first gets a frame the other does not see (enough
-  for vfork and `posix_spawn`, whose child only execs or exits; LTP clone08's
-  CLONE_PARENT_SETTID case reads 0 from such a page). CLONE_FILES shares the descriptor
+  clone, so a mapping either side adds, removes or changes the protection of afterwards is its
+  own, and so is a page that had no frame yet: whichever side touches it first gets a frame the
+  other does not see (enough for vfork and `posix_spawn`, whose child only execs or exits; LTP
+  clone08's CLONE_PARENT_SETTID case reads 0 from such a page). A side that makes a shared page
+  read-only and then forks shares that frame with the new process while the other side can still
+  write it. CLONE_FILES shares the descriptor
   table and CLONE_SIGHAND the signal actions with the new process (G2b); the descriptor limit
   belongs to the table, so two processes sharing one share their RLIMIT_NOFILE too, where Linux
   checks each one's own.

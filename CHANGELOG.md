@@ -603,7 +603,7 @@
 
 ### Fixed
 
-- From the PR #37 review, after its merge:
+- From the PR #37 review, after its merge, and the reviews of PR #38 that followed:
   - CLONE_PARENT_SETTID stores the child's TID after every step of a clone that can fail but
     the start of its thread, as Linux's put_user follows copy_process; a start that fails puts
     the old word back. A fork failing at the process table or a namespace whose init was
