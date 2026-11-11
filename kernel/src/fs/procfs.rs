@@ -878,8 +878,11 @@ impl VfsNode for ProcNode {
         let limit = self
             .sysctl()
             .ok_or(KernelError::FsError(FsError::PermissionDenied))?;
-        // The writer, checked at every write (EACCES, as sysctl_perm).
-        if !limit.writer_may(&crate::process::creds::Caller::current()) {
+        // The writer, checked at every write (EACCES, as sysctl_perm), and
+        // MODIFY on the System object (ADR 0024, step 7).
+        if !limit.writer_may(&crate::process::creds::Caller::current())
+            || !crate::cap::authority::current_may_change_system()
+        {
             return Err(KernelError::FsError(FsError::PermissionDenied));
         }
         // sysctl_writes_strict: a numeric write past the start of the

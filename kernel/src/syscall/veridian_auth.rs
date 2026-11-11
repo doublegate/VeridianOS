@@ -68,7 +68,13 @@ fn result_code(result: AuthResult) -> usize {
 /// Whether `caller` may act on an account whose user ID in the user
 /// database is `account_uid` (`None`: the database does not know the name).
 pub(crate) fn may_act_on(caller: &Caller, account_uid: Option<u32>) -> bool {
-    caller.capable(CAP_DAC_OVERRIDE) || account_uid == Some(caller.creds.ruid)
+    overrides(caller) || account_uid == Some(caller.creds.ruid)
+}
+
+/// CAP_DAC_OVERRIDE over the account store, which is a file: with WRITE
+/// on the mount namespace too (ADR 0024, step 7).
+fn overrides(caller: &Caller) -> bool {
+    caller.capable(CAP_DAC_OVERRIDE) && caller.fs.write
 }
 
 /// A NUL-terminated string from user memory into `buf`, at most
@@ -157,7 +163,7 @@ pub fn sys_veridian_auth(
             // told the change failed (PR #23 review).
             let before = auth.account_snapshot(name);
             let changed = if secret == 0 {
-                if !caller.capable(CAP_DAC_OVERRIDE) {
+                if !overrides(&caller) {
                     return Err(SyscallError::OperationNotPermitted);
                 }
                 auth.reset_password(name, new)
@@ -207,6 +213,12 @@ mod tests {
         // The capability, not uid 0.
         user.caps = LinuxCaps::EMPTY.with(CAP_DAC_OVERRIDE);
         assert!(may_act_on(&user, Some(0)));
+        // Without WRITE on the mount namespace the capability does not
+        // reach the account store (ADR 0024, step 7); its own still works.
+        user.fs.write = false;
+        assert!(!may_act_on(&user, Some(0)));
+        assert!(may_act_on(&user, Some(1000)));
+        user.fs.write = true;
         let bare_root = Caller {
             fs: crate::process::creds::FsAuthority::ALL,
             creds: Credentials::new(0, 0),

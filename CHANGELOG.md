@@ -146,6 +146,12 @@
   launcher can now run root that can read but not change files, or reach no file at all; one
   that only takes MODIFY (no mounting) leaves files as they were. The package calls no longer hold
   the capability space locked through the install, which file access now reads.
+- Changing the system as a whole needs an object capability too (ADR 0024, step 7): MODIFY on the
+  `System` object for writing a sysctl (EACCES without), for the package calls (EACCES; they used
+  to accept a capability of any type with WRITE), and for going past RLIMIT_NPROC as root or with
+  CAP_SYS_RESOURCE or CAP_SYS_ADMIN (EAGAIN, as for anyone else at the limit). The native account
+  calls on another user's account need WRITE on the mount namespace besides CAP_DAC_OVERRIDE,
+  as the account store is a file. With this the checks of ADR 0024's table are all in place.
 - `/boot/config-7.3.0-veridian` in every root filesystem (ADR 0023): the Linux kernel
   configuration VeridianOS reports, generated per architecture by `tools/compat/gen_kconfig.py`
   from `abi/kconfig.map`. An option is set only where the kernel does what Linux built with it

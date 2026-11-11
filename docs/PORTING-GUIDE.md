@@ -152,7 +152,9 @@ There are two kinds of capability:
    privilege checks also need one for the object they act on (ADR 0024): `mount` takes
    CAP_SYS_ADMIN and MODIFY on the mount namespace; the namespace calls, setting the clocks, and
    signalling, tracing, rescheduling or limiting another process need theirs likewise (EPERM
-   without). File access needs READ on the mount namespace, and WRITE as well to change anything
+   without), and changing the machine as a whole -- writing a sysctl (EACCES), the package
+   calls, going past RLIMIT_NPROC as root or with CAP_SYS_RESOURCE (EAGAIN) -- needs MODIFY on
+   the `System` object. File access needs READ on the mount namespace, and WRITE as well to change anything
    (EACCES without; EPERM for chmod, chown and the other owner checks, the owner included); a
    device node from `mknod` needs CREATE (EPERM). A descriptor opened before a drop keeps
    working, as one opened before a chmod does, so a launcher that wants a program to have no

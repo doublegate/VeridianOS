@@ -556,6 +556,11 @@ filesystem.
 - **mount (N-129).** The private mount and umount calls, like mount(2), need CAP_SYS_ADMIN and a
   capability with MODIFY on the mount namespace or a user namespace above it (ADR 0024). Type
   `blockfs` mounts an empty RAM filesystem.
+- **Object capabilities cover ADR 0024's table, not yet everything (ADR 0024, step 7).** Every
+  check in the table -- files, mounts, namespaces, the clocks, other processes and the system as
+  a whole (sysctls, packages, the process limit) -- needs its object capability. Sockets and
+  devices still use ordinary Unix permissions only, and the Linux calls still run in the kernel:
+  their move to a user-space runtime waits for the IPC redesign (ADR 0024, step 8).
 - **File access is checked at lookup and open, not on each read or write (ADR 0024, step 6).**
   A process that drops READ or WRITE on its mount namespace keeps using descriptors it opened
   before, as a Linux process keeps a file it opened before a chmod; a launcher that wants none

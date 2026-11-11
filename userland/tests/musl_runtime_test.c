@@ -5568,6 +5568,7 @@ static void test_mount_modify_drop(void);
 static void test_fs_object_cap(void);
 static void test_ns_object_cap(void);
 static void test_clock_object_cap(void);
+static void test_system_object_cap(void);
 static void test_proc_object_cap(void);
 static void test_user_ns(void);
 static void test_pid_ns(void);
@@ -5597,6 +5598,7 @@ static const struct {
     const char *name;
     void (*fn)(void);
 } only_tests[] = {
+    {"system_object_cap", test_system_object_cap},
     {"review_fixes", test_review_fixes},
     {"record_locks", test_record_locks},
     {"fcntl_flags", test_fcntl_flags},
@@ -10365,6 +10367,60 @@ static void test_clock_object_cap(void)
     report("clock_object_cap", code == 0, why);
 }
 
+/* ADR 0024, step 7: changing the system as a whole needs MODIFY on the
+ * System object. Root keeps writing a sysctl and going past RLIMIT_NPROC
+ * until it drops that right; after the drop a sysctl write is EACCES, a
+ * fork past the limit EAGAIN, and the package calls EACCES. */
+static void test_system_object_cap(void)
+{
+    char why[160];
+    pid_t child = fork();
+    if (child == 0) {
+        int g = 0;
+        const char *path = "/proc/sys/fs/inotify/max_user_watches";
+        char val[32] = {0};
+        int fd = open(path, O_RDWR);
+        if (fd < 0 || read(fd, val, sizeof(val) - 1) <= 0)
+            g |= 1;
+        if (fd >= 0 && pwrite(fd, val, strlen(val), 0) != (ssize_t)strlen(val))
+            g |= 2;
+        struct rlimit one = {1, 1};
+        if (setrlimit(RLIMIT_NPROC, &one) != 0)
+            g |= 4;
+        pid_t gc = fork();
+        if (gc == 0)
+            _exit(0);
+        if (gc < 0 || t_exit_status(gc) != 0)
+            g |= 8;
+        long d = syscall(T_SYS_CAPABILITY_DROP, VERIDIAN_CAP_SYSTEM, 0, T_RIGHT_MODIFY);
+        if (d != 1)
+            g |= 16;
+        if (fd >= 0 && !(pwrite(fd, val, strlen(val), 0) == -1 && errno == EACCES))
+            g |= 32;
+        gc = fork();
+        if (gc == 0)
+            _exit(0);
+        if (gc > 0) {
+            t_exit_status(gc);
+            g |= 64;
+        } else if (errno != EAGAIN) {
+            g |= 128;
+        }
+        if (!(syscall(1114, "veridian-nonexistent", 0) == -1 && errno == EACCES))
+            g |= 256;
+        if (fd >= 0)
+            close(fd);
+        if (g != 0) {
+            printf("system-object-cap g=%#x drop=%ld\n", g, d);
+            fflush(stdout);
+        }
+        _exit(g == 0 ? 0 : 1);
+    }
+    int code = t_exit_status(child);
+    snprintf(why, sizeof(why), "code=%d", code);
+    report("system_object_cap", code == 0, why);
+}
+
 /* Write `text` to `path`; 0 or the errno. */
 static int t_write_text(const char *path, const char *text)
 {
@@ -11324,6 +11380,7 @@ int main(int argc, char **argv)
     test_fs_object_cap();
     test_ns_object_cap();
     test_clock_object_cap();
+    test_system_object_cap();
     test_proc_object_cap();
     test_user_ns();
     test_pid_ns();

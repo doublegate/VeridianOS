@@ -143,6 +143,15 @@ pub fn current_may_change_mounts() -> bool {
     current_holds_namespace(&mnt, Rights::MODIFY)
 }
 
+/// Whether the caller may change the machine as a whole (ADR 0024, step
+/// 7): MODIFY on the `System` object, which a sysctl write, the package
+/// calls and going past RLIMIT_NPROC also need, besides any Linux
+/// privilege. Kernel context passes.
+#[cfg(feature = "alloc")]
+pub fn current_may_change_system() -> bool {
+    current_holds(&ObjectRef::System, Rights::MODIFY)
+}
+
 /// Whether `space` may create the namespaces `flags` asks for (ADR 0024,
 /// step 3): CREATE on each namespace a new one is made from -- the one of
 /// that kind in `current`, for PID and time the one for children, below

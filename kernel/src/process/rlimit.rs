@@ -147,7 +147,11 @@ pub fn check_nproc(process: &super::Process) -> Result<NprocGuard, SyscallError>
     use super::linux_caps::{CAP_SYS_ADMIN, CAP_SYS_RESOURCE};
     let creds = process.credentials();
     let caller = super::creds::Caller::current();
-    if creds.ruid == 0 || caller.capable(CAP_SYS_RESOURCE) || caller.capable(CAP_SYS_ADMIN) {
+    // Going past the limit also needs MODIFY on the System object (ADR
+    // 0024, step 7), so root whose launcher took it away is limited too.
+    let exempt =
+        creds.ruid == 0 || caller.capable(CAP_SYS_RESOURCE) || caller.capable(CAP_SYS_ADMIN);
+    if exempt && crate::cap::authority::current_may_change_system() {
         return Ok(NprocGuard { _held: None });
     }
     let limit = process.limits().cur(RLIMIT_NPROC);
