@@ -789,11 +789,6 @@ fn thread_clone(
     // does, a store that cannot be made is skipped: failing the clone here,
     // with the thread already listed and the pidfd number already stored in
     // user memory, exposed both behind an EFAULT (PR #38 review).
-    let take_out = |thread: alloc::sync::Arc<process::thread::Thread>| {
-        drop(thread);
-        let _ = crate::process::exit::cleanup_thread(&proc, tid);
-        undo_pidfd();
-    };
     let user_word = |ptr: usize| {
         let read = move |b: &mut [u8; 4]| {
             crate::syscall::userspace::read_user::<[u8; 4]>(ptr)
@@ -827,7 +822,9 @@ fn thread_clone(
         for (p, t) in stored.iter().flatten().rev() {
             t.undo(user_word(*p).1);
         }
-        take_out(thread);
+        drop(thread);
+        let _ = crate::process::exit::cleanup_thread(&proc, tid);
+        undo_pidfd();
         return Err(SyscallError::OutOfMemory);
     }
     Ok(vtid as usize)

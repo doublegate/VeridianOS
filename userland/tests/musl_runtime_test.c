@@ -8861,7 +8861,9 @@ static void test_clone_vm_fork(void)
  * CLONE_CHILD_CLEARTID on NULL or a PROT_NONE page still succeed, and the
  * child runs (PR #38 review; they were EFAULT). */
 static volatile int t_badtid_ran;
-static char t_badtid_stack[16384] __attribute__((aligned(16)));
+/* One stack per thread, so neither reuses one the other may still be
+ * leaving (PR #38 review). */
+static char t_badtid_stack[2][16384] __attribute__((aligned(16)));
 
 /* A thread clone made by hand: musl's clone() refuses CLONE_THREAD and
  * CLONE_CHILD_CLEARTID (EINVAL, no system call). The child touches no
@@ -8964,8 +8966,8 @@ static void test_clone_bad_tid(void)
             long flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD |
                          CLONE_SYSVSEM | CLONE_PARENT_SETTID | CLONE_CHILD_SETTID |
                          CLONE_CHILD_CLEARTID;
-            long r = t_raw_thread(flags, t_badtid_stack + sizeof(t_badtid_stack), bad[i], bad[i],
-                                  &t_badtid_ran);
+            long r = t_raw_thread(flags, t_badtid_stack[i] + sizeof(t_badtid_stack[i]), bad[i],
+                                  bad[i], &t_badtid_ran);
             if (r <= 0) {
                 g |= 1 << i;
                 continue;
@@ -8974,9 +8976,6 @@ static void test_clone_bad_tid(void)
                 sched_yield();
             if (!t_badtid_ran)
                 g |= 4 << i;
-            /* Let it finish exiting before the stack is used again. */
-            for (int n = 0; n < 100; n++)
-                sched_yield();
         }
         _exit(g);
     }
@@ -8986,6 +8985,60 @@ static void test_clone_bad_tid(void)
     munmap(none, 4096);
     snprintf(why, sizeof(why), "f=%#x", f);
     report("clone_bad_tid", f == 0, why);
+}
+
+/* Where a fork's TID words land (PR #38 review). On a page mapped but never
+ * touched, CLONE_PARENT_SETTID and CLONE_CHILD_SETTID are stored, as Linux's
+ * put_user faults the page in (they were skipped). A word straddling a
+ * writable page and a read-only one cannot be stored: it is skipped and the
+ * bytes on the writable page stay as they were, the fork still succeeding. */
+static void test_clone_settid_paths(void)
+{
+    char why[96];
+    int f = 0;
+    char *fresh = mmap(NULL, 2 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    char *two = mmap(NULL, 2 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (fresh == MAP_FAILED || two == MAP_FAILED) {
+        report("clone_settid_paths", 0, "mmap failed");
+        return;
+    }
+    /* Untouched pages: the parent's word on the first, the child's on the
+     * second. The child exits 0 if its word holds its TID. */
+    volatile pid_t *ptid = (volatile pid_t *)fresh;
+    volatile pid_t *ctid = (volatile pid_t *)(fresh + 4096);
+    long r = syscall(SYS_clone, CLONE_PARENT_SETTID | CLONE_CHILD_SETTID | SIGCHLD, 0, ptid,
+                     ctid, ctid);
+    if (r == 0)
+        _exit(*ctid == (pid_t)syscall(SYS_gettid) ? 0 : 1);
+    if (r < 0) {
+        f |= 1;
+    } else {
+        if (*ptid != (pid_t)r)
+            f |= 2;
+        if (t_exit_status((pid_t)r) != 0)
+            f |= 4;
+    }
+    /* A word at the last two bytes of a writable page and the first two of
+     * a read-only one, which is touched first so both are present. */
+    memset(two, 0xab, 4096);
+    if (mprotect(two + 4096, 4096, PROT_READ) != 0) {
+        f |= 8;
+    } else {
+        volatile char touch = two[4096];
+        (void)touch;
+        void *word = two + 4094;
+        r = syscall(SYS_clone, CLONE_PARENT_SETTID | SIGCHLD, 0, word, 0, 0);
+        if (r == 0)
+            _exit(5);
+        if (r < 0 || t_exit_status((pid_t)r) != 5)
+            f |= 16;
+        if ((unsigned char)two[4094] != 0xab || (unsigned char)two[4095] != 0xab)
+            f |= 32;
+    }
+    munmap(fresh, 2 * 4096);
+    munmap(two, 2 * 4096);
+    snprintf(why, sizeof(why), "f=%#x", f);
+    report("clone_settid_paths", f == 0, why);
 }
 
 static void test_kcmp_process_vm(void)
@@ -11002,6 +11055,7 @@ int main(int argc, char **argv)
     test_clone_share();
     test_clone_vm_fork();
     test_clone_bad_tid();
+    test_clone_settid_paths();
     test_personality();
     test_namespaces_uts();
     test_namespaces_time();
