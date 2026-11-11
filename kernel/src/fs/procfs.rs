@@ -1761,6 +1761,7 @@ mod tests {
             linux_caps::{LinuxCaps, CAP_DAC_OVERRIDE, CAP_SYS_RESOURCE},
         };
         let who = |uid, caps: &[u32]| Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             creds: Credentials::new(uid, uid),
             caps: caps.iter().fold(LinuxCaps::EMPTY, |s, &c| s.with(c)),
             userns: crate::process::userns::initial(),

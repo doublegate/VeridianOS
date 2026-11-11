@@ -131,10 +131,21 @@
   none; 0 removes it whole, as before, and rights only ever go. A launcher can now take MODIFY
   off the mount namespace and the user namespaces above it, and CREATE off the user namespace (or
   the program could make a user namespace of its own, which its creator is granted, and mount
-  inside it), so root cannot mount, and keep READ and WRITE, which file access is to need from
-  ADR 0024's next step. `<veridian/capability.h>`
+  inside it), so root cannot mount, and keep READ and WRITE, which file access needs (ADR 0024,
+  step 6). `<veridian/capability.h>`
   gives programs built against musl and the native libc `veridian_capability_drop()` and its
   constants; the native libc had no wrapper for the call.
+- File access needs an object capability too (ADR 0024, step 6): READ on the caller's mount
+  namespace, or on a user namespace above it, for every lookup, read and execute, and WRITE as
+  well for every change, checked before the mode bits and capabilities (EACCES without). The owner
+  checks behind chmod, chown, utimes, O_NOATIME and the sticky bit, and CAP_FSETID's keeping of
+  the set-group-ID bit, need WRITE too (EPERM), the file's owner included; every extended
+  attribute (EACCES); open_by_handle_at, which skips the path walk, READ (EPERM); a device node
+  from mknod CREATE besides CAP_MKNOD (EPERM). The rights are read once per call, not per path
+  component. A descriptor opened before a drop keeps working, as one opened before a chmod does. A
+  launcher can now run root that can read but not change files, or reach no file at all; one
+  that only takes MODIFY (no mounting) leaves files as they were. The package calls no longer hold
+  the capability space locked through the install, which file access now reads.
 - `/boot/config-7.3.0-veridian` in every root filesystem (ADR 0023): the Linux kernel
   configuration VeridianOS reports, generated per architecture by `tools/compat/gen_kconfig.py`
   from `abi/kconfig.map`. An option is set only where the kernel does what Linux built with it

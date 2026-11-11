@@ -54,6 +54,9 @@ pub fn sys_pkg_install(name_ptr: usize, _name_len: usize) -> SyscallResult {
         }
         found
     };
+    // Released before the work: file access reads this space again
+    // (`Caller::current`, ADR 0024 step 6), and the lock is not re-entrant.
+    drop(cap_space);
     if !has_perm {
         return Err(SyscallError::PermissionDenied);
     }
@@ -95,6 +98,9 @@ pub fn sys_pkg_remove(name_ptr: usize, _name_len: usize) -> SyscallResult {
         }
         found
     };
+    // Released before the work: file access reads this space again
+    // (`Caller::current`, ADR 0024 step 6), and the lock is not re-entrant.
+    drop(cap_space);
     if !has_perm {
         return Err(SyscallError::PermissionDenied);
     }
@@ -174,6 +180,9 @@ pub fn sys_pkg_update(_flags: usize) -> SyscallResult {
         }
         found
     };
+    // Released before the work: file access reads this space again
+    // (`Caller::current`, ADR 0024 step 6), and the lock is not re-entrant.
+    drop(cap_space);
     if !has_perm {
         return Err(SyscallError::PermissionDenied);
     }

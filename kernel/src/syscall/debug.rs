@@ -544,12 +544,14 @@ mod tests {
         };
         let none = LinuxCaps::EMPTY;
         let user = Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             creds: Credentials::new(1000, 100),
             caps: none,
             userns: crate::process::userns::initial(),
         };
         let root = Caller::kernel();
         let bare_root = Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             creds: Credentials::new(0, 0),
             caps: none,
             userns: crate::process::userns::initial(),
@@ -615,6 +617,7 @@ mod tests {
         )
         .unwrap();
         let inside = Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             creds: user.creds,
             caps: full,
             userns: own.clone(),
@@ -636,6 +639,7 @@ mod tests {
         joined.mm_userns = crate::process::userns::initial();
         assert_eq!(may_attach(10, &inside, full, 20, &joined, 0), eperm);
         let bare_inside = Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             caps: none,
             ..inside.clone()
         };

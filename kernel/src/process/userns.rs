@@ -645,6 +645,7 @@ pub(crate) fn test_child(uid_map: &[u8], gid_map: &[u8]) -> Arc<UserNs> {
     let init = initial();
     let ns = UserNs::create(&init, 1000, 1000, false, true).unwrap();
     let root = Caller {
+        fs: crate::process::creds::FsAuthority::ALL,
         creds: Credentials::new(0, 0),
         caps: LinuxCaps::FULL,
         userns: init,
@@ -664,6 +665,7 @@ mod tests {
 
     fn caller(uid: u32, caps: LinuxCaps, ns: &Arc<UserNs>) -> Caller {
         Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             creds: Credentials::new(uid, uid),
             caps,
             userns: ns.clone(),

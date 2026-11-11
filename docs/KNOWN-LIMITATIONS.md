@@ -556,6 +556,10 @@ filesystem.
 - **mount (N-129).** The private mount and umount calls, like mount(2), need CAP_SYS_ADMIN and a
   capability with MODIFY on the mount namespace or a user namespace above it (ADR 0024). Type
   `blockfs` mounts an empty RAM filesystem.
+- **File access is checked at lookup and open, not on each read or write (ADR 0024, step 6).**
+  A process that drops READ or WRITE on its mount namespace keeps using descriptors it opened
+  before, as a Linux process keeps a file it opened before a chmod; a launcher that wants none
+  left drops before it opens anything, or closes what it holds.
 - **ETXTBSY counts files opened by name.** A running program cannot be opened for writing or
   truncated, and a file open for writing cannot be executed, as on Linux; but a memfd's own
   descriptor does not count as a writer, so a memfd open for writing can be executed with

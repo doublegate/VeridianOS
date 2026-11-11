@@ -99,6 +99,7 @@ mod tests {
     fn prlimit_permission_needs_all_ids_or_cap_sys_resource() {
         use crate::process::linux_caps::LinuxCaps;
         let caller = |uid, gid, caps: LinuxCaps| Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             creds: Credentials::new(uid, gid),
             caps,
             userns: crate::process::userns::initial(),
@@ -122,6 +123,7 @@ mod tests {
         // Over a process in a namespace, its root's CAP_SYS_RESOURCE.
         let ns = crate::process::userns::test_child(b"0 1000 1", b"0 100 1");
         let ns_root = Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             userns: ns.clone(),
             ..caller(1000, 100, LinuxCaps::FULL)
         };

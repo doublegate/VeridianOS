@@ -32,7 +32,7 @@ VeridianOS intentionally prioritizes architectural clarity over feature velocity
 
 - **Microkernel architecture** -- Designed for a minimal trusted computing base with drivers and services in user space; today they run in the kernel (critique C6, see [`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md))
 - **Written in Rust** -- Memory safety without garbage collection; strict unsafe code policy
-- **Capability-based security** -- 64-bit tokens with generation counters, O(1) lookup, hierarchical delegation and cascading revocation. Capabilities guard IPC, memory sharing and process creation, and a Linux privilege check needs one too for the object it acts on (ADR 0024): mounting, the namespace calls, setting the clocks, and signalling, tracing or rescheduling another process. A launcher confines what it runs by dropping capabilities or some of their rights (`CapabilityDrop`, ADR 0026). Files, sockets and devices still use ordinary Unix permissions, and cascading revocation does not yet follow every grant path (N-89)
+- **Capability-based security** -- 64-bit tokens with generation counters, O(1) lookup, hierarchical delegation and cascading revocation. Capabilities guard IPC, memory sharing and process creation, and a Linux privilege check needs one too for the object it acts on (ADR 0024): file access (on the mount namespace), mounting, the namespace calls, setting the clocks, and signalling, tracing or rescheduling another process. A launcher confines what it runs by dropping capabilities or some of their rights (`CapabilityDrop`, ADR 0026), for example to root that can read files but not change them. Sockets and devices still use ordinary Unix permissions, and cascading revocation does not yet follow every grant path (N-89)
 - **IPC** -- Register-sized, kernel-buffered (up to 16 KiB) and shared-region message tiers, capability-checked. User programs can create endpoints and send and receive through them since v0.27.0 (private numbers 1024-1031, ADR 0009); the full IPC redesign is planned for v0.28
 - **Formal verification** -- 38 Kani proof harnesses and 6 TLA+ specifications for boot chain, IPC, memory allocation and capability invariants. They prove standalone models rather than the kernel's own functions, and CI runs neither (N-163)
 
@@ -284,7 +284,7 @@ See [Unsafe Policy](docs/UNSAFE-POLICY.md) for the full policy.
 
 Security is a foundational design goal. What is in effect today, and what is not, is listed in [`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md):
 
-- **Capability-based access control** -- Fine-grained permissions for IPC, memory sharing and process creation; Linux privilege checks on mounts, namespaces, the clocks and other processes need an object capability as well (ADR 0024)
+- **Capability-based access control** -- Fine-grained permissions for IPC, memory sharing and process creation; Linux privilege checks on files, mounts, namespaces, the clocks and other processes need an object capability as well (ADR 0024)
 - **Memory safety** -- Rust ownership guarantees, NX/W^X page protections and guarded kernel stacks (KPTI, KASLR and SMEP/SMAP are not active yet: N-145, N-146, N-15)
 - **Post-quantum cryptography** -- ML-DSA-65 verification (FIPS 204) and an experimental, non-standard Kyber KEM (N-57) alongside classical algorithms
 - **Mandatory access control** -- Policy-driven RBAC and MLS model (enforcement partial, N-152)

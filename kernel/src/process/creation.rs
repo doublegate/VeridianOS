@@ -1570,6 +1570,7 @@ mod tests {
         let file = NodeType::File;
         let root = Caller::kernel();
         let user = |uid: u32, gid: u32| Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             creds: Credentials::new(uid, gid),
             caps: crate::process::linux_caps::LinuxCaps::EMPTY,
             userns: crate::process::userns::initial(),

@@ -22,6 +22,12 @@
  * none. Rights only go away: nothing gives one back but a new grant from
  * the kernel. Only the caller's own space changes, never its parent's.
  *
+ * File access is checked when a file is looked up or opened, so a
+ * descriptor opened before a drop of READ or WRITE on the mount namespace
+ * keeps working, as one opened before a chmod does on Linux. To leave a
+ * program no file access at all, drop before opening anything it inherits,
+ * or close (or mark close-on-exec) what it should not keep.
+ *
  * Returns the number of capabilities narrowed or removed (0 when there was
  * nothing to change), or -1 with errno EINVAL for a kind and id naming
  * nothing that can be dropped, or rights bits above CREATE.

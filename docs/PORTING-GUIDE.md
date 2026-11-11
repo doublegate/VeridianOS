@@ -152,12 +152,17 @@ There are two kinds of capability:
    privilege checks also need one for the object they act on (ADR 0024): `mount` takes
    CAP_SYS_ADMIN and MODIFY on the mount namespace; the namespace calls, setting the clocks, and
    signalling, tracing, rescheduling or limiting another process need theirs likewise (EPERM
-   without). A program the kernel starts holds all of them, so a Linux program sees no
+   without). File access needs READ on the mount namespace, and WRITE as well to change anything
+   (EACCES without; EPERM for chmod, chown and the other owner checks, the owner included); a
+   device node from `mknod` needs CREATE (EPERM). A descriptor opened before a drop keeps
+   working, as one opened before a chmod does, so a launcher that wants a program to have no
+   file access drops before opening what the program inherits, or closes it (or sets
+   close-on-exec). A program the kernel starts holds all of them, so a Linux program sees no
    difference unless its launcher dropped some or some of their rights (`CapabilityDrop`;
    `veridian_capability_drop()` in `<veridian/capability.h>`, ADR 0026). For example, MODIFY
    taken off the mount namespace and the user namespaces above it, and CREATE off the user
    namespace (so it cannot make a user namespace of its own to mount in), gives root that cannot
-   mount but still uses files.
+   mount but still uses files; WRITE and CREATE off as well give root that can only read files.
 
 `setuid`/`setgid`, `access()` and `stat().st_mode` behave as on Linux, and a program that needs
 one privilege can run as an ordinary user with a file or ambient capability instead of as root.

@@ -56,17 +56,10 @@ pub fn current_holds(object: &ObjectRef, rights: Rights) -> bool {
     }
 }
 
-/// Whether `space` has `rights` over namespace `ns` (ADR 0024, decision 7):
-/// through a capability on `ns` itself, or on the user namespace that owns
-/// it or one of that one's ancestors, as Linux's `ns_capable(ns->owner, ..)`
-/// reaches every namespace a user namespace owns. For a user namespace the
-/// owner is its parent.
+/// The objects whose capabilities stand for namespace `ns`: `ns` itself,
+/// then the user namespace that owns it and each of that one's ancestors.
 #[cfg(feature = "alloc")]
-pub fn holds_namespace(
-    space: &CapabilitySpace,
-    ns: &crate::process::ns::NsRef,
-    rights: Rights,
-) -> bool {
+fn standing_for(ns: &crate::process::ns::NsRef) -> Vec<ObjectRef> {
     use crate::process::ns::NsKind;
     let ident = ns.ident();
     let mut wanted = Vec::new();
@@ -82,9 +75,49 @@ pub fn holds_namespace(
         });
         owner = user.parent.clone();
     }
+    wanted
+}
+
+/// Whether `space` has `rights` over namespace `ns` (ADR 0024, decision 7):
+/// through a capability on `ns` itself, or on the user namespace that owns
+/// it or one of that one's ancestors, as Linux's `ns_capable(ns->owner, ..)`
+/// reaches every namespace a user namespace owns. For a user namespace the
+/// owner is its parent.
+#[cfg(feature = "alloc")]
+pub fn holds_namespace(
+    space: &CapabilitySpace,
+    ns: &crate::process::ns::NsRef,
+    rights: Rights,
+) -> bool {
+    let wanted = standing_for(ns);
     matching(space, |o| wanted.contains(o))
         .into_iter()
         .any(|(cap, held)| held.contains(rights) && cap_manager().is_valid(cap))
+}
+
+/// The rights over mount namespace `mnt` that file access needs, read
+/// from `space` in one pass (ADR 0024, step 6): each of READ, WRITE and
+/// CREATE is held if some live capability on `mnt`, or on a user namespace
+/// above it, carries it. Checking each right on its own is all a file
+/// check asks, so the union over the capabilities is the same answer as
+/// one [`holds_namespace`] per right.
+#[cfg(feature = "alloc")]
+pub fn fs_authority(
+    space: &CapabilitySpace,
+    mnt: &crate::process::ns::NsRef,
+) -> crate::process::creds::FsAuthority {
+    let wanted = standing_for(mnt);
+    let mut held = Rights::new(0);
+    for (cap, rights) in matching(space, |o| wanted.contains(o)) {
+        if cap_manager().is_valid(cap) {
+            held |= rights;
+        }
+    }
+    crate::process::creds::FsAuthority {
+        read: held.contains(Rights::READ),
+        write: held.contains(Rights::WRITE),
+        create: held.contains(Rights::CREATE),
+    }
 }
 
 /// [`holds_namespace`] for the calling process; kernel context passes.
@@ -1080,6 +1113,60 @@ mod tests {
             &set.get(NsKind::Mnt),
             Rights::MODIFY
         ));
+    }
+
+    /// File access reads the mount namespace's rights (ADR 0024, step 6):
+    /// a launched program has them all; a MODIFY-only drop, the recipe for
+    /// "cannot mount", keeps them; taking READ, WRITE or CREATE off the
+    /// mount namespace and every user namespace above it takes that right
+    /// away, and a capability left on any one of them keeps it.
+    #[test]
+    fn fs_authority_follows_the_mount_namespace_and_its_owners() {
+        use crate::process::creds::FsAuthority;
+        let set = ns::initial();
+        let mnt = set.get(NsKind::Mnt);
+        let mnt_id = mnt.ident().id as usize;
+        let user_id = crate::process::userns::initial().ident.id as usize;
+        let bits = |r: Rights| r.bits() as usize;
+        let space = initial_space();
+        assert_eq!(fs_authority(&space, &mnt), FsAuthority::ALL);
+        for id in [mnt_id, user_id] {
+            drop_rights(&space, TYPE_NAMESPACE as usize, id, bits(Rights::MODIFY)).unwrap();
+        }
+        assert_eq!(fs_authority(&space, &mnt), FsAuthority::ALL);
+        // WRITE off the mount namespace alone: the user namespace above
+        // it still stands for it.
+        let partial = initial_space();
+        drop_rights(
+            &partial,
+            TYPE_NAMESPACE as usize,
+            mnt_id,
+            bits(Rights::WRITE),
+        )
+        .unwrap();
+        assert_eq!(fs_authority(&partial, &mnt), FsAuthority::ALL);
+        let read_only = initial_space();
+        for id in [mnt_id, user_id] {
+            let mask = bits(Rights::WRITE) | bits(Rights::CREATE);
+            drop_rights(&read_only, TYPE_NAMESPACE as usize, id, mask).unwrap();
+        }
+        assert_eq!(
+            fs_authority(&read_only, &mnt),
+            FsAuthority {
+                read: true,
+                write: false,
+                create: false
+            }
+        );
+        let none = initial_space();
+        for id in [mnt_id, user_id] {
+            drop_rights(&none, TYPE_NAMESPACE as usize, id, 0).unwrap();
+        }
+        assert_eq!(fs_authority(&none, &mnt), FsAuthority::NONE);
+        assert_eq!(
+            fs_authority(&CapabilitySpace::new(), &mnt),
+            FsAuthority::NONE
+        );
     }
 
     /// Narrowing is the caller's own: a forked copy's narrowing leaves the

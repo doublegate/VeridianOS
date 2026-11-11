@@ -191,6 +191,7 @@ mod tests {
         assert!(may_act_on(&root, Some(1000)));
         assert!(may_act_on(&root, None));
         let mut user = Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             creds: Credentials::new(1000, 100),
             caps: LinuxCaps::EMPTY,
             userns: crate::process::userns::initial(),
@@ -207,6 +208,7 @@ mod tests {
         user.caps = LinuxCaps::EMPTY.with(CAP_DAC_OVERRIDE);
         assert!(may_act_on(&user, Some(0)));
         let bare_root = Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             creds: Credentials::new(0, 0),
             caps: LinuxCaps::EMPTY,
             userns: crate::process::userns::initial(),

@@ -237,9 +237,10 @@ pub fn sys_open_by_handle_at(mount_fd: usize, handle_ptr: usize, flags: usize) -
     } else {
         return Err(SyscallError::BadFileDescriptor);
     };
-    if !crate::process::creds::Caller::current()
-        .capable(crate::process::linux_caps::CAP_DAC_READ_SEARCH)
-    {
+    // The handle skips the path walk, so the mount namespace's READ
+    // (ADR 0024, step 6) is checked here as the walk would have.
+    let caller = crate::process::creds::Caller::current();
+    if !caller.fs.read || !caller.capable(crate::process::linux_caps::CAP_DAC_READ_SEARCH) {
         return Err(SyscallError::OperationNotPermitted);
     }
     let mut body = [0u8; MAX_HANDLE_SZ as usize];

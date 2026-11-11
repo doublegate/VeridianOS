@@ -4707,7 +4707,8 @@ fn chown_id(id: usize) -> Option<u32> {
 /// chgrp_ok with _POSIX_CHOWN_RESTRICTED: CAP_CHOWN over the file
 /// (capable_wrt_inode_uidgid), or in the initial user namespace, may do
 /// anything; the owner may keep the owner and set the group to one it
-/// belongs to.
+/// belongs to. Either way the caller needs WRITE on its mount namespace
+/// (ADR 0024, step 6).
 pub(crate) fn may_chown(
     caller: &Caller,
     file_uid: u32,
@@ -4716,6 +4717,9 @@ pub(crate) fn may_chown(
     gid: Option<u32>,
 ) -> bool {
     use crate::process::linux_caps::CAP_CHOWN;
+    if !caller.fs.write {
+        return false;
+    }
     if caller.capable_wrt_inode(file_uid, file_gid, CAP_CHOWN) || caller.capable(CAP_CHOWN) {
         return true;
     }
@@ -4854,7 +4858,13 @@ pub(crate) fn make_node(
             operation: "create directory entry",
         };
         check_dir_write(dir).map_err(|_| denied)?;
-        if device && !Caller::current().capable(crate::process::linux_caps::CAP_MKNOD) {
+        // A device also needs CREATE on the mount namespace (ADR 0024,
+        // step 6): a device node reaches hardware, not just a file.
+        let may_device = || {
+            let caller = Caller::current();
+            caller.fs.create && caller.capable(crate::process::linux_caps::CAP_MKNOD)
+        };
+        if device && !may_device() {
             return Err(crate::error::KernelError::FsError(
                 crate::error::FsError::OperationNotPermitted,
             ));
@@ -5181,6 +5191,7 @@ mod tests {
         c.setresgid(100, 100, 100, true).unwrap();
         c.setresuid(1000, 1000, 1000, true).unwrap();
         Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             creds: c,
             caps: caps.iter().fold(LinuxCaps::EMPTY, |s, &cap| s.with(cap)),
             userns: crate::process::userns::initial(),
@@ -5217,6 +5228,7 @@ mod tests {
         let both = user_with(&[CAP_FOWNER, CAP_FSETID]);
         assert_eq!(chmod_perms(&both, 0, 7, 0o2755).unwrap().to_mode(), 0o2755);
         let bare_root = Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             creds: Credentials::new(0, 0),
             caps: LinuxCaps::EMPTY,
             userns: crate::process::userns::initial(),
@@ -5251,11 +5263,30 @@ mod tests {
             Some(9)
         ));
         let bare_root = Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             creds: Credentials::new(0, 0),
             caps: LinuxCaps::EMPTY,
             userns: crate::process::userns::initial(),
         };
         assert!(!may_chown(&bare_root, 1001, 7, Some(5), None));
+        // Without WRITE on the mount namespace (ADR 0024, step 6) neither
+        // CAP_CHOWN nor the owner may, and chmod is EPERM.
+        let read_only = crate::process::creds::FsAuthority {
+            read: true,
+            write: false,
+            create: true,
+        };
+        let confined = Caller {
+            fs: read_only,
+            ..Caller::kernel()
+        };
+        assert!(!may_chown(&confined, 1001, 7, Some(5), Some(9)));
+        let owner = Caller { fs: read_only, ..u };
+        assert!(!may_chown(&owner, 1000, 100, None, Some(20)));
+        assert_eq!(
+            chmod_perms(&owner, 1000, 100, 0o644),
+            Err(SyscallError::OperationNotPermitted)
+        );
     }
 
     /// kill(2): uid matches or CAP_KILL, not uid 0; oneself always; SIGCONT
@@ -5285,6 +5316,7 @@ mod tests {
         assert!(kill_ok(&u, &target, &init, false, SIGCONT, true));
         assert!(!kill_ok(&u, &target, &init, false, SIGCONT, false));
         let bare_root = Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             creds: Credentials::new(0, 0),
             caps: LinuxCaps::EMPTY,
             userns: crate::process::userns::initial(),
@@ -5295,6 +5327,7 @@ mod tests {
         // over nothing outside (ADR 0022 H4c).
         let ns = crate::process::userns::test_child(b"0 1000 1\n1 2000 1", b"0 1000 1");
         let ns_root = Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             creds: Credentials::new(1000, 1000),
             caps: LinuxCaps::FULL,
             userns: ns.clone(),
@@ -5352,6 +5385,7 @@ mod tests {
     fn access_uses_owner_group_other_precedence() {
         let granted = |uid: u32, gid: u32, m: &crate::fs::Metadata, mode: u32| {
             let caller = Caller {
+                fs: crate::process::creds::FsAuthority::ALL,
                 creds: Credentials::new(uid, gid),
                 caps: crate::process::linux_caps::LinuxCaps::EMPTY,
                 userns: crate::process::userns::initial(),

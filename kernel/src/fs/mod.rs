@@ -420,8 +420,16 @@ pub const MAY_READ: u32 = 4;
 /// only where some execute bit is set. The capabilities count in the
 /// caller's own user namespace, for a node whose owner and group it maps
 /// (capable_wrt_inode_uidgid).
+///
+/// Before any of that the caller needs the mount namespace's authority
+/// for the access (ADR 0024, step 6: [`crate::process::creds::FsAuthority`]):
+/// READ to read, search or execute, READ and WRITE to write. Without it
+/// the answer is no (EACCES), whatever the mode bits and capabilities.
 pub fn permission(caller: &crate::process::creds::Caller, meta: &Metadata, mask: u32) -> bool {
     use crate::process::linux_caps::{CAP_DAC_OVERRIDE, CAP_DAC_READ_SEARCH};
+    if !caller.fs.allows(mask) {
+        return false;
+    }
     let c = &caller.creds;
     let p = &meta.permissions;
     let owner = c.fsuid == meta.uid;
@@ -3050,6 +3058,66 @@ pub(crate) mod tests {
         assert!(p.set_uid && p.set_gid && !p.sticky);
     }
 
+    /// Without the mount namespace's authority (ADR 0024, step 6) nothing
+    /// is permitted, even to root with every capability or the file's
+    /// owner on a mode of 0777; READ alone permits reading, searching and
+    /// executing but not writing.
+    #[test]
+    fn permission_needs_the_mount_namespace_authority() {
+        use crate::process::{
+            creds::{Caller, Credentials, FsAuthority},
+            linux_caps::LinuxCaps,
+        };
+        let meta = |node_type| Metadata {
+            node_type,
+            size: 0,
+            permissions: Permissions::from_mode(0o777),
+            uid: 0,
+            gid: 0,
+            created: 0,
+            modified: 0,
+            accessed: 0,
+            inode: 1,
+        };
+        let root = |fs| Caller {
+            creds: Credentials::new(0, 0),
+            caps: LinuxCaps::FULL,
+            userns: crate::process::userns::initial(),
+            fs,
+        };
+        let read_only = FsAuthority {
+            read: true,
+            write: false,
+            create: true,
+        };
+        for node_type in [NodeType::File, NodeType::Directory] {
+            let m = meta(node_type);
+            for mask in [MAY_READ, MAY_WRITE, MAY_EXEC] {
+                assert!(!permission(&root(FsAuthority::NONE), &m, mask));
+            }
+            assert!(permission(&root(read_only), &m, MAY_READ | MAY_EXEC));
+            assert!(!permission(&root(read_only), &m, MAY_WRITE));
+            assert!(!permission(&root(read_only), &m, MAY_READ | MAY_WRITE));
+            assert!(permission(
+                &root(FsAuthority::ALL),
+                &m,
+                MAY_READ | MAY_WRITE
+            ));
+        }
+        // WRITE without READ allows nothing: a file is found before it is
+        // changed.
+        let write_only = FsAuthority {
+            read: false,
+            write: true,
+            create: false,
+        };
+        assert!(!permission(
+            &root(write_only),
+            &meta(NodeType::File),
+            MAY_WRITE
+        ));
+    }
+
     /// fs::permission is Linux's generic_permission: the first class that
     /// applies decides from the mode bits, then the DAC capabilities
     /// override -- not uid 0 (ADR 0020).
@@ -3071,6 +3139,7 @@ pub(crate) mod tests {
             inode: 1,
         };
         let who = |uid, caps: &[u32]| Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             creds: Credentials::new(uid, uid),
             caps: caps.iter().fold(LinuxCaps::EMPTY, |s, &c| s.with(c)),
             userns: crate::process::userns::initial(),
@@ -3121,6 +3190,7 @@ pub(crate) mod tests {
         // maps (capable_wrt_inode_uidgid; ADR 0022 H4c).
         let ns = crate::process::userns::test_child(b"0 1000 1\n1 2000 1", b"0 1000 1");
         let ns_root = Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             creds: Credentials::new(1000, 1000),
             caps: LinuxCaps::FULL,
             userns: ns,
@@ -3377,6 +3447,7 @@ pub(crate) mod tests {
     #[test]
     fn a_refused_truncate_keeps_the_set_id_bits() {
         let user = crate::process::creds::Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             creds: crate::process::creds::Credentials::new(1000, 1000),
             caps: crate::process::linux_caps::LinuxCaps::EMPTY,
             userns: crate::process::userns::initial(),
@@ -3600,6 +3671,7 @@ pub(crate) mod tests {
         open.create("f", Permissions::from_mode(0o644)).unwrap();
         let table = vfs.snapshot();
         let other = Some(crate::process::creds::Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             creds: crate::process::creds::Credentials::new(1000, 1000),
             caps: crate::process::linux_caps::LinuxCaps::EMPTY,
             userns: crate::process::userns::initial(),
