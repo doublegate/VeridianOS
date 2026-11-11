@@ -8,9 +8,13 @@
  * by dropping, before exec, what that program should not have:
  *
  *     // root that cannot mount: MODIFY off its mount namespace and off
- *     // every user namespace above it, which stand for it (NS_GET_ID ids)
+ *     // every user namespace above it, which stand for it (NS_GET_ID ids),
+ *     // and CREATE off its user namespace, or it could make a user
+ *     // namespace of its own (granted to its creator) and mount in a mount
+ *     // namespace made inside that
  *     veridian_capability_drop(VERIDIAN_CAP_NAMESPACE, mnt_id, VERIDIAN_RIGHT_MODIFY);
- *     veridian_capability_drop(VERIDIAN_CAP_NAMESPACE, user_id, VERIDIAN_RIGHT_MODIFY);
+ *     veridian_capability_drop(VERIDIAN_CAP_NAMESPACE, user_id,
+ *                              VERIDIAN_RIGHT_MODIFY | VERIDIAN_RIGHT_CREATE);
  *
  * `rights` 0 (VERIDIAN_DROP_WHOLE), or every right held, removes the
  * capability; otherwise it is

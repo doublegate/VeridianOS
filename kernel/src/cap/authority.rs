@@ -999,9 +999,9 @@ mod tests {
         assert_eq!(space.used(), 9);
     }
 
-    /// Root that cannot mount but still uses files: MODIFY off the mount
-    /// namespace and the user namespace above it leaves READ and WRITE
-    /// through either (ADR 0026, the case step 6 needs).
+    /// MODIFY off the mount namespace and the user namespace above it leaves
+    /// READ and WRITE through either (ADR 0026, the case step 6 needs); the
+    /// next test shows what else denying mounts takes.
     #[test]
     fn modify_dropped_along_the_owner_chain_keeps_read_and_write() {
         let space = initial_space();
@@ -1029,6 +1029,57 @@ mod tests {
             Rights::READ.union(Rights::WRITE)
         ));
         assert!(holds_namespace(&space, &mnt, Rights::CREATE));
+    }
+
+    /// MODIFY off the mount namespace and the user namespaces above it still
+    /// leaves CREATE on the user namespace, so a new user namespace can be
+    /// made, its creator is granted it, and mounting inside a mount
+    /// namespace it owns passes. Taking CREATE off the caller's user
+    /// namespace too closes that: no new user namespace, while namespaces
+    /// of other kinds still pass on their own capabilities (side review of
+    /// ADR 0026's recipe).
+    #[test]
+    fn denying_mounts_also_takes_create_off_the_user_namespace() {
+        use crate::process::{
+            ns::{CLONE_NEWNS, CLONE_NEWUSER, CLONE_NEWUTS},
+            userns,
+        };
+        let space = initial_space();
+        let set = ns::initial();
+        let init = userns::initial();
+        let modify = Rights::MODIFY.bits() as usize;
+        let create = Rights::CREATE.bits() as usize;
+        let mnt_id = set.get(NsKind::Mnt).ident().id as usize;
+        let user_id = init.ident.id as usize;
+        drop_rights(&space, TYPE_NAMESPACE as usize, mnt_id, modify).unwrap();
+        drop_rights(&space, TYPE_NAMESPACE as usize, user_id, modify).unwrap();
+        // MODIFY alone: a new user namespace is still allowed.
+        assert!(may_create_namespaces(&space, &set, &init, CLONE_NEWUSER));
+        // The way round it: a new one, granted to its creator, owns a new
+        // mount namespace's MODIFY.
+        let private = userns::UserNs::create(&init, 0, 0, false, true).unwrap();
+        let copy = set
+            .copy_for(CLONE_NEWNS, &private, &crate::process::pidns::initial(), 0)
+            .unwrap();
+        grant_user_ns(&space, &private).unwrap();
+        assert!(holds_namespace(
+            &space,
+            &copy.get(NsKind::Mnt),
+            Rights::MODIFY
+        ));
+        // CREATE off the caller's user namespace closes it.
+        let fresh = initial_space();
+        for (id, mask) in [(mnt_id, modify), (user_id, modify | create)] {
+            drop_rights(&fresh, TYPE_NAMESPACE as usize, id, mask).unwrap();
+        }
+        assert!(!may_create_namespaces(&fresh, &set, &init, CLONE_NEWUSER));
+        assert!(may_create_namespaces(&fresh, &set, &init, CLONE_NEWUTS));
+        assert!(may_create_namespaces(&fresh, &set, &init, CLONE_NEWNS));
+        assert!(!holds_namespace(
+            &fresh,
+            &set.get(NsKind::Mnt),
+            Rights::MODIFY
+        ));
     }
 
     /// Narrowing is the caller's own: a forked copy's narrowing leaves the

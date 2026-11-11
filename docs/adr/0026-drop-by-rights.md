@@ -58,3 +58,14 @@ planning step 6, before any of it was written.
   the checks for the rights it kept.
 - Narrowing changes the entry in the caller's own space only, like a full drop: the parent's
   and siblings' copies of the same token keep their rights.
+
+## Note (2026-11-10)
+
+Decision 5's recipe for stopping a program mounting is incomplete; the decision itself is
+unchanged. A MODIFY-only drop keeps CREATE, so the program can still make a user namespace,
+which its creator is granted (ADR 0024, decision 7), and mount in a mount namespace made inside
+it: a private view, but a mount all the same. The full recipe also takes CREATE off the
+caller's user namespace, which stops new user namespaces while namespaces of other kinds still
+pass on their own capabilities. `<veridian/capability.h>`, the PORTING-GUIDE and the design
+document give that recipe, and `denying_mounts_also_takes_create_off_the_user_namespace` (host)
+and `mount_modify_drop` (runtime) test both halves. Found in a side review after acceptance.

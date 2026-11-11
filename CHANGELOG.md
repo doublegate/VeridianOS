@@ -91,16 +91,16 @@
   second time (each copy was refused as a duplicate). These capabilities carry no GRANT, REVOKE
   or DELETE right (ADR 0025, superseding ADR 0024's "all rights"): fork copies the token itself,
   so revoking a copy would have revoked the parent's.
-- mount(2), umount2, pivot_root and the private mount and umount calls also need an object
-  capability with MODIFY on the caller's mount namespace, or on a user namespace above it (ADR
-  0024, step 2): a launcher that drops those can run root unable to mount. Whoever creates a user
-  namespace (unshare, or clone's parent) receives one on it, so mounting in namespaces made inside
-  it keeps working; its capabilities on user namespaces that are gone are removed first, so a
-  launcher making one per child it reaps no longer fills its capability quota (256) after a few
-  hundred, and the registry forgets an authority capability once no space holds it, instead of
-  keeping eleven more entries for every program started. The private calls no longer accept any Memory capability with WRITE and
-  CREATE, which no process was given; the private umount now needs CAP_SYS_ADMIN, and both give
-  EPERM, not EACCES.
+- mount(2), umount2, pivot_root, chroot and the private mount and umount calls also need an
+  object capability with MODIFY on the caller's mount namespace, or on a user namespace above it
+  (ADR 0024, step 2): a launcher that drops those can run root unable to mount or chroot. Whoever
+  creates a user namespace (unshare, or clone's parent) receives one on it, so mounting in
+  namespaces made inside it keeps working; its capabilities on user namespaces that are gone are
+  removed first, so a launcher making one per child it reaps no longer fills its capability quota
+  (256) after a few hundred, and the registry forgets an authority capability once no space holds
+  it, instead of keeping eleven more entries for every program started. The private calls no
+  longer accept any Memory capability with WRITE and CREATE, which no process was given; the
+  private umount now needs CAP_SYS_ADMIN, and both give EPERM, not EACCES.
 - The namespace calls need object capabilities too (ADR 0024, step 3), each on the namespace
   itself or a user namespace above it, and EPERM without: unshare and clone with CLONE_NEW* need
   CREATE on the namespace each new one is made from (the caller's of that kind; for PID and time
@@ -121,14 +121,18 @@
   process_vm_readv/writev, kcmp, pidfd_getfd, get_robust_list, the sched_set* calls,
   sched_setaffinity, setpriority and prlimit64 need MODIFY; each on its PID namespace (itself or
   through a user namespace above it) or on a `Process` capability for it. clone3's set_tid needs
-  MODIFY on each PID namespace a number is chosen in. A process acting on itself needs none. A
-  launcher can now run root unable to signal, trace or reprioritize anything outside what it
-  holds.
+  MODIFY on each PID namespace a number is chosen in. PTRACE_TRACEME needs the parent's MODIFY over
+  the caller, as an attach needs the caller's, and PTRACE_PEEK* and PTRACE_POKE* check the
+  tracer's MODIFY on every access, so a tracer that drops it stops reaching what it traced (it can
+  still detach). A process acting on itself needs none. A launcher can now run root unable to
+  signal, trace or reprioritize anything outside what it holds.
 - `CapabilityDrop` drops by rights (ADR 0026, accepted): a third argument names the rights to
   take off each capability naming the object, which keeps the rest, and is removed once it has
   none; 0 removes it whole, as before, and rights only ever go. A launcher can now take MODIFY
-  off the mount namespace and the user namespaces above it, so root cannot mount, and keep READ
-  and WRITE, which file access is to need from ADR 0024's next step. `<veridian/capability.h>`
+  off the mount namespace and the user namespaces above it, and CREATE off the user namespace (or
+  the program could make a user namespace of its own, which its creator is granted, and mount
+  inside it), so root cannot mount, and keep READ and WRITE, which file access is to need from
+  ADR 0024's next step. `<veridian/capability.h>`
   gives programs built against musl and the native libc `veridian_capability_drop()` and its
   constants; the native libc had no wrapper for the call.
 - `/boot/config-7.3.0-veridian` in every root filesystem (ADR 0023): the Linux kernel
@@ -655,6 +659,11 @@
 
 ### Fixed
 
+- PTRACE_PEEKTEXT/PEEKDATA on AArch64 and RISC-V read the tracee's frame at its physical
+  address, as if physical memory were identity-mapped, which it is not once the kernel runs at
+  its high address: the first peek there panicked the kernel with a translation fault. PEEK now
+  reads through the physical map on every architecture, as POKE does. No test peeked on those
+  architectures before; `proc_object_cap` (musl runtime) now does.
 - From the PR #37 review:
   - A descriptor table closes its files and releases its record locks however its last
     reference goes: an exec or unshare(CLONE_FILES) copying a table while its other sharer

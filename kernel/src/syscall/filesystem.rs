@@ -1892,8 +1892,8 @@ pub fn sys_fchdir(fd: usize) -> SyscallResult {
 
 /// chroot (N-250): make `path` the root for every later lookup of this
 /// process's threads that share its filesystem state (and of children,
-/// which inherit it). CAP_SYS_CHROOT in the caller's own user namespace
-/// only (EPERM), as on Linux. The
+/// which inherit it). CAP_SYS_CHROOT in the caller's own user namespace, as
+/// on Linux, and MODIFY on its mount namespace (ADR 0024), EPERM. The
 /// working directory stays where it is if it is under the new
 /// root; otherwise it becomes the new root, where Linux would leave it
 /// outside (the classic way out of a chroot).
@@ -1901,6 +1901,12 @@ pub fn sys_chroot(path_ptr: usize) -> SyscallResult {
     let path = read_user_path(path_ptr)?;
     let caller = Caller::current();
     if !caller.ns_capable(&caller.userns, crate::process::linux_caps::CAP_SYS_CHROOT) {
+        return Err(SyscallError::OperationNotPermitted);
+    }
+    // And MODIFY on the mount namespace, or a user namespace above it, as
+    // for mount and pivot_root (ADR 0024's table; PR #39 review: chroot was
+    // left out of step 2).
+    if !crate::cap::authority::current_may_change_mounts() {
         return Err(SyscallError::OperationNotPermitted);
     }
     let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;

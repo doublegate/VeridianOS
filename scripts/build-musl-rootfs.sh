@@ -109,8 +109,10 @@ build_programs() {
     rm -f "${BUILD_DIR}/sbin/init"
     "${CC}" -static-pie -O2 -Wall -Wextra -o "${BUILD_DIR}/sbin/init" "${ROOT}/userland/init/init.c"
     # A static PIE: the kernel picks its address (ADR 0010).
-    "${CC}" -static-pie -O2 -Wall -Wextra -o "${BUILD_DIR}/bin/musl_runtime_test" \
-        "${TESTS}/musl_runtime_test.c"
+    # -idirafter: <veridian/capability.h> (the native libc's header-only
+    # wrappers), searched after musl's own headers, which still win.
+    "${CC}" -static-pie -O2 -Wall -Wextra -idirafter "${ROOT}/userland/libc/include" \
+        -o "${BUILD_DIR}/bin/musl_runtime_test" "${TESTS}/musl_runtime_test.c"
     # The audit suite uses <veridian/sysno.h> and <veridian/syscall.h>
     # (the native libc's, for all three architectures) and GNU extensions.
     "${CC}" -D_GNU_SOURCE -static-pie -O2 -Wall -Wextra -idirafter "${ROOT}/userland/libc/include" \

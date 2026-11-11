@@ -254,10 +254,18 @@ fn may_act_on(pid: u64) -> bool {
     })
 }
 
-/// The user namespace of process `pid` (the initial one if it is gone).
-fn user_ns_of(pid: u64) -> Arc<crate::process::userns::UserNs> {
-    crate::process::table::get_process(crate::process::ProcessId(pid))
-        .map_or_else(crate::process::userns::initial, |p| p.user_ns())
+/// `same_owner` over process `pid`'s user namespace and [`may_act_on`], with
+/// one lookup of the process, so both rules see the same one (PR #39
+/// review). A process gone meanwhile is judged in the initial user
+/// namespace and left to the caller's own error, as each rule did alone.
+fn may_change(caller: &Caller, owner: &Credentials, pid: u64) -> bool {
+    match crate::process::table::get_process(crate::process::ProcessId(pid)) {
+        Some(p) => {
+            same_owner(caller, owner, &p.user_ns())
+                && crate::cap::authority::current_may_act_on_process(&p, crate::cap::Rights::MODIFY)
+        }
+        None => same_owner(caller, owner, &crate::process::userns::initial()),
+    }
 }
 
 /// Whether the caller may change the scheduling of process `pid`'s threads
@@ -581,7 +589,7 @@ pub fn sys_sched_setaffinity(pid: usize, len: usize, mask: usize) -> SyscallResu
     let n = len.min(8);
     userspace::read_user_bytes(mask, &mut raw[..n])?;
     let wanted = u64::from_ne_bytes(raw) & online_mask();
-    if !same_owner(&caller()?, &owner, &user_ns_of(tpid)) || !may_act_on(tpid) {
+    if !may_change(&caller()?, &owner, tpid) {
         return Err(SyscallError::OperationNotPermitted);
     }
     if wanted == 0 {
@@ -684,7 +692,7 @@ pub fn sys_setpriority(which: usize, who: usize, nice: usize) -> SyscallResult {
     let me = caller()?;
     let mut result = Ok(0);
     for (pid, owner, thread) in targets {
-        if !same_owner(&me, &owner, &user_ns_of(pid)) || !may_act_on(pid) {
+        if !may_change(&me, &owner, pid) {
             result = Err(SyscallError::OperationNotPermitted);
             continue;
         }
