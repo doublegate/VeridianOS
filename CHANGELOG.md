@@ -415,7 +415,7 @@
   adjtimex reports TIME_OOP, TAI moves a second, timers on the wall clock follow). Clock reads take
   the rate and the raw clock in one sequence section, so CLOCK_MONOTONIC never goes back across a
   rate change; a second `ktimerd` runs late delivers what the rate before it delivered (after a
-  stall of more than 64 seconds the ones before the current second are dropped, and the current
+  stall of more than 64 seconds, the late seconds past the first 64 are dropped, and the current
   one runs on time with its own phase), and nothing runs each second while there is nothing to
   deliver (a synchronized clock's maxerror still grows each second until it becomes
   unsynchronized). CPU time and scheduling stay on the
@@ -615,7 +615,9 @@
     word that cannot be read is not written at all (its first page's bytes were changed before
     the write failed on an unmapped second page). As on Linux, a TID store that cannot be made
     is skipped by a thread clone too, as by a fork: the clone used to fail with EFAULT after
-    the thread was listed and the CLONE_PIDFD number stored in user memory.
+    the thread was listed and the CLONE_PIDFD number stored in user memory. A NULL, kernel or
+    PROT_NONE pointer for CLONE_PARENT_SETTID, CLONE_CHILD_SETTID or CLONE_CHILD_CLEARTID is
+    no longer EFAULT up front either: each store checks the address as it is made.
   - A write the kernel makes into one address space (a SETTID store, ptrace POKE) to a
     writable page a CLONE_VM child (vfork, posix_spawn) shares with its parent writes the
     shared page; it used to give that address space a private copy, so the other side never

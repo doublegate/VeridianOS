@@ -8,7 +8,7 @@ use crate::process::thread::ThreadFs;
 use crate::{
     arch::context::ThreadContext,
     process::{self, ns, thread::ThreadBuilder},
-    syscall::{userspace::validate_user_ptr, SyscallError},
+    syscall::SyscallError,
 };
 
 // clone's flags (its low 32 bits).
@@ -513,15 +513,10 @@ fn process_clone(
     if req.stack > user_space_end() {
         return Err(SyscallError::InvalidPointer);
     }
-    for (flag, ptr) in [
-        (CLONE_PARENT_SETTID, req.parent_tid),
-        (CLONE_CHILD_SETTID, req.child_tid),
-        (CLONE_CHILD_CLEARTID, req.child_tid),
-    ] {
-        if req.on(flag) {
-            validate_user_ptr(ptr as *const u32, core::mem::size_of::<u32>())?;
-        }
-    }
+    // The TID pointers are not checked here: as on Linux, a SETTID store
+    // that cannot be made is skipped (`StoredTid`) and a CLEARTID one at
+    // exit too (`write_user`), each checking the address as it writes, so
+    // a NULL or unmapped pointer is not EFAULT (PR #38 review).
     let on = |flag: u64| req.on(flag);
     super::process::sys_fork_with(&process::fork::ForkOptions {
         share_vm: on(CLONE_VM),
@@ -606,16 +601,8 @@ fn thread_clone(
         return Err(SyscallError::InvalidPointer);
     }
 
-    // Validate TID pointers if requested
-    if req.on(CLONE_PARENT_SETTID) {
-        validate_user_ptr(parent_tid_ptr as *const u32, core::mem::size_of::<u32>())?;
-    }
-    if req.on(CLONE_CHILD_SETTID) {
-        validate_user_ptr(child_tid_ptr as *const u32, core::mem::size_of::<u32>())?;
-    }
-    if req.on(CLONE_CHILD_CLEARTID) {
-        validate_user_ptr(child_tid_ptr as *const u32, core::mem::size_of::<u32>())?;
-    }
+    // The TID pointers are checked as they are written, not here (see
+    // `process_clone`): a store that cannot be made is skipped, as on Linux.
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
     // RLIMIT_NPROC counts threads too (EAGAIN).
     // Held until the thread is added.

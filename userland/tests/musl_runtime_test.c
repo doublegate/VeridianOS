@@ -8855,6 +8855,134 @@ static void test_clone_vm_fork(void)
     report("clone_vm_fork", f == 0, why);
 }
 
+/* A TID store that cannot be made is skipped, as on Linux (put_user's
+ * result is unused in kernel_clone and schedule_tail): a fork and a thread
+ * clone with CLONE_PARENT_SETTID, CLONE_CHILD_SETTID and (for the thread)
+ * CLONE_CHILD_CLEARTID on NULL or a PROT_NONE page still succeed, and the
+ * child runs (PR #38 review; they were EFAULT). */
+static volatile int t_badtid_ran;
+static char t_badtid_stack[16384] __attribute__((aligned(16)));
+
+/* A thread clone made by hand: musl's clone() refuses CLONE_THREAD and
+ * CLONE_CHILD_CLEARTID (EINVAL, no system call). The child touches no
+ * stack: it stores 1 through `ran` and calls exit (the thread's alone).
+ * clone(flags, stack, ptid, ctid, tls) on x86_64, (flags, stack, ptid, tls,
+ * ctid) elsewhere; tls is 0, unused without CLONE_SETTLS. */
+static long t_raw_thread(long flags, void *stack, void *ptid, void *ctid, volatile int *ran)
+{
+#if defined(__x86_64__)
+    long ret;
+    register long r10 __asm__("r10") = (long)ctid;
+    register long r8 __asm__("r8") = 0;
+    __asm__ volatile("syscall\n\t"
+                     "test %%rax, %%rax\n\t"
+                     "jnz 1f\n\t"
+                     "movl $1, (%%rbx)\n\t"
+                     "mov $60, %%eax\n\t"
+                     "xor %%edi, %%edi\n\t"
+                     "syscall\n"
+                     "1:"
+                     : "=a"(ret)
+                     : "a"(56L), "D"(flags), "S"(stack), "d"(ptid), "r"(r10), "r"(r8), "b"(ran)
+                     : "rcx", "r11", "memory");
+    return ret;
+#elif defined(__aarch64__)
+    register long x8 __asm__("x8") = 220;
+    register long x0 __asm__("x0") = flags;
+    register long x1 __asm__("x1") = (long)stack;
+    register long x2 __asm__("x2") = (long)ptid;
+    register long x3 __asm__("x3") = 0;
+    register long x4 __asm__("x4") = (long)ctid;
+    register long x5 __asm__("x5") = (long)ran;
+    __asm__ volatile("svc #0\n\t"
+                     "cbnz x0, 1f\n\t"
+                     "mov w6, #1\n\t"
+                     "str w6, [x5]\n\t"
+                     "mov x8, #93\n\t"
+                     "mov x0, #0\n\t"
+                     "svc #0\n"
+                     "1:"
+                     : "+r"(x0)
+                     : "r"(x8), "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x5)
+                     : "x6", "memory");
+    return x0;
+#elif defined(__riscv)
+    register long a7 __asm__("a7") = 220;
+    register long a0 __asm__("a0") = flags;
+    register long a1 __asm__("a1") = (long)stack;
+    register long a2 __asm__("a2") = (long)ptid;
+    register long a3 __asm__("a3") = 0;
+    register long a4 __asm__("a4") = (long)ctid;
+    register long a5 __asm__("a5") = (long)ran;
+    __asm__ volatile("ecall\n\t"
+                     "bnez a0, 1f\n\t"
+                     "li t0, 1\n\t"
+                     "sw t0, 0(a5)\n\t"
+                     "li a7, 93\n\t"
+                     "li a0, 0\n\t"
+                     "ecall\n"
+                     "1:"
+                     : "+r"(a0)
+                     : "r"(a7), "r"(a1), "r"(a2), "r"(a3), "r"(a4), "r"(a5)
+                     : "t0", "memory");
+    return a0;
+#else
+    (void)flags; (void)stack; (void)ptid; (void)ctid; (void)ran;
+    return -ENOSYS;
+#endif
+}
+
+static void test_clone_bad_tid(void)
+{
+    char why[96];
+    int f = 0;
+    void *none = mmap(NULL, 4096, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    void *bad[2] = {NULL, none};
+    for (int i = 0; i < 2; i++) {
+        /* ptid is the third argument everywhere, ctid the fourth on x86_64
+         * and the fifth elsewhere (tls in the other slot, unused here). */
+        long r = syscall(SYS_clone, CLONE_PARENT_SETTID | CLONE_CHILD_SETTID | SIGCHLD, 0, bad[i],
+                         bad[i], bad[i]);
+        if (r == 0)
+            _exit(5);
+        if (r < 0 || t_exit_status((pid_t)r) != 5)
+            f |= 1 << i;
+    }
+    /* A thread, in a child of its own so a failure cannot take this
+     * process down. */
+    pid_t child = fork();
+    if (child == 0) {
+        int g = 0;
+        for (int i = 0; i < 2; i++) {
+            t_badtid_ran = 0;
+            long flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD |
+                         CLONE_SYSVSEM | CLONE_PARENT_SETTID | CLONE_CHILD_SETTID |
+                         CLONE_CHILD_CLEARTID;
+            long r = t_raw_thread(flags, t_badtid_stack + sizeof(t_badtid_stack), bad[i], bad[i],
+                                  &t_badtid_ran);
+            if (r <= 0) {
+                g |= 1 << i;
+                continue;
+            }
+            for (int n = 0; n < 100000 && !t_badtid_ran; n++)
+                sched_yield();
+            if (!t_badtid_ran)
+                g |= 4 << i;
+            /* Let it finish exiting before the stack is used again. */
+            for (int n = 0; n < 100; n++)
+                sched_yield();
+        }
+        _exit(g);
+    }
+    int code = t_exit_status(child);
+    if (code != 0)
+        f |= code << 2;
+    if (none != MAP_FAILED)
+        munmap(none, 4096);
+    snprintf(why, sizeof(why), "f=%#x", f);
+    report("clone_bad_tid", f == 0, why);
+}
+
 static void test_kcmp_process_vm(void)
 {
     char why[160];
@@ -10868,6 +10996,7 @@ int main(int argc, char **argv)
     test_kcmp_process_vm();
     test_clone_share();
     test_clone_vm_fork();
+    test_clone_bad_tid();
     test_personality();
     test_namespaces_uts();
     test_namespaces_time();
