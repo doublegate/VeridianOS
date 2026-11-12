@@ -119,12 +119,14 @@ pub struct MqNode {
     /// The IPC namespace it belongs to, whose rights every operation on
     /// it checks: a descriptor carried into another namespace (setns,
     /// unshare, SCM_RIGHTS) still answers to the queue's own (PR #40
-    /// review).
+    /// review). Weak, as the namespace holds its named queues; each open
+    /// file of the queue holds it ([`VfsNode::held_by_open`]).
     ns: Weak<PlainNs>,
 }
 
-/// The caller's rights over the namespace `node` belongs to; none if the
-/// namespace is gone (no capability can name it any more).
+/// The caller's rights over the namespace `node` belongs to. Every open
+/// file of the queue keeps that namespace, so it is gone only for a queue
+/// no descriptor names; then, none.
 fn queue_rights(node: &MqNode) -> super::sysvipc::NsRights {
     node.ns.upgrade().map_or(
         super::sysvipc::NsRights {
@@ -270,6 +272,16 @@ impl VfsNode for MqNode {
 
     fn as_any(&self) -> Option<&dyn core::any::Any> {
         Some(self)
+    }
+
+    /// An open queue keeps its namespace: the descriptor works, and is
+    /// checked against the queue's namespace, after every process has
+    /// left it, as on Linux. Held by the file, not the queue, since the
+    /// namespace holds its named queues.
+    fn held_by_open(&self) -> Option<Arc<dyn core::any::Any + Send + Sync>> {
+        self.ns
+            .upgrade()
+            .map(|ns| ns as Arc<dyn core::any::Any + Send + Sync>)
     }
 }
 
@@ -1127,5 +1139,53 @@ mod tests {
             (8192, 128, 16 * 1024 * 1024)
         );
         assert!(sysctl_of(&space, "nope").is_none());
+    }
+
+    /// A queue of IPC namespace `ns`, charged to nobody.
+    fn queue_in(ns: &Arc<PlainNs>) -> Arc<MqNode> {
+        Arc::new(MqNode {
+            state: Mutex::new(State {
+                maxmsg: 1,
+                msgsize: 1,
+                msgs: BTreeMap::new(),
+                count: 0,
+                qsize: 0,
+                notify: None,
+                receivers: 0,
+            }),
+            metadata: RwLock::new(Metadata {
+                node_type: NodeType::File,
+                size: 0,
+                permissions: Permissions::from_mode(0o600),
+                uid: 0,
+                gid: 0,
+                created: 0,
+                modified: 0,
+                accessed: 0,
+                inode: 0,
+            }),
+            waiters: crate::sched::dispatch::WaitQueue::new(),
+            charge: (0, 0),
+            space: Weak::new(),
+            ns: Arc::downgrade(ns),
+        })
+    }
+
+    #[test]
+    fn an_open_queue_keeps_its_namespace() {
+        // As on Linux, a descriptor for a queue keeps working after its
+        // IPC namespace has no process left: the open file holds the
+        // namespace, so the rights checks still have one to ask.
+        let init = crate::process::ns::initial();
+        let ns = init
+            .copy_with(crate::process::ns::CLONE_NEWIPC, &init.ipc.owner)
+            .unwrap()
+            .ipc;
+        let node = queue_in(&ns);
+        let file = crate::fs::file::File::new(node.clone(), crate::fs::OpenFlags::read_write());
+        drop(ns);
+        assert!(node.ns.upgrade().is_some());
+        drop(file);
+        assert!(node.ns.upgrade().is_none());
     }
 }

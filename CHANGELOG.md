@@ -103,13 +103,13 @@
   CLOCK_REALTIME timeouts (ETIMEDOUT); O_NONBLOCK (EAGAIN) through mq_getsetattr; mq_notify by
   signal (si_code SI_MESGQ) or SIGEV_NONE, one registration per queue (EBUSY), sent only to the
   process that registered and dropped when it closes a descriptor of the queue; the rights a
-  queue's operations need are on the queue's own IPC namespace; queues_max checked and counted
-  in one step; queue bytes
-  charged to RLIMIT_MSGQUEUE per real user (EMFILE); `/proc/sys/fs/mqueue` per namespace. New
-  errno EMSGSIZE. The `mqueue` filesystem mounts (usually on /dev/mqueue): its root lists the
-  namespace's queues, reading one shows its status, unlink and open(O_CREAT) there are
-  mq_unlink and mq_open. SIGEV_THREAD waits for netlink sockets (KNOWN-LIMITATIONS).
-  `CONFIG_POSIX_MQUEUE` is set. Runtime tests posix_mq and posix_mq_fs.
+  queue's operations need are on the queue's own IPC namespace, which an open descriptor keeps
+  alive (the queue works after every process has left it, as on Linux); queues_max checked and
+  counted in one step; queue bytes charged to RLIMIT_MSGQUEUE per real user (EMFILE);
+  `/proc/sys/fs/mqueue` per namespace. New errno EMSGSIZE. The `mqueue` filesystem mounts
+  (usually on /dev/mqueue): its root lists the namespace's queues, reading one shows its status,
+  unlink and open(O_CREAT) there are mq_unlink and mq_open. SIGEV_THREAD waits for netlink
+  sockets (KNOWN-LIMITATIONS). `CONFIG_POSIX_MQUEUE` is set. Runtime tests posix_mq and posix_mq_fs.
 - futex2 (v0.28 item 5, ADR 0027): futex_waitv (up to 128 futexes, the index of the one woken),
   futex_wake, futex_wait (absolute CLOCK_REALTIME or CLOCK_MONOTONIC timeouts) and
   futex_requeue, on the futex table futex(2) uses; 32-bit futexes only (others EINVAL), as on
