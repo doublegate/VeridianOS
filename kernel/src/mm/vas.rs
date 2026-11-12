@@ -363,7 +363,8 @@ pub enum MappingType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PrivateWrite {
     /// The frame is this address space's to write (or meant for every
-    /// sharer, for a writable shared mapping).
+    /// sharer: a writable shared mapping, or a writable private page a
+    /// CLONE_VM child shares with its parent).
     InPlace,
     /// The frame is shared with another address space: copy it first.
     Copy,
@@ -383,7 +384,9 @@ fn is_user_page(page: u64) -> bool {
 /// writable, even when forced (a FOLL_FORCE write to a shared mapping
 /// without VM_WRITE fails, so a write-sealed or read-only memfd stays
 /// unchanged); a private page needs write access or copy-on-write unless
-/// forced, and is copied first while another address space shares it.
+/// forced. A writable one is written in place (another address space
+/// sharing its frame is a CLONE_VM sharer); a copy-on-write or read-only
+/// one is copied first while another address space shares it.
 fn private_write_policy(
     kind: MappingType,
     may_write: bool,
@@ -401,8 +404,13 @@ fn private_write_policy(
             }
         }
         _ => {
-            let writable = flags.contains(PageFlags::WRITABLE) || flags.contains(PageFlags::COW);
-            if !force && !writable {
+            // A writable private page another address space maps too is a
+            // CLONE_VM sharer's (share_from; fork makes every page it
+            // shares read-only and copy-on-write), meant to be written for
+            // both, as through one Linux mm.
+            if flags.contains(PageFlags::WRITABLE) && !flags.contains(PageFlags::COW) {
+                PrivateWrite::InPlace
+            } else if !force && !flags.contains(PageFlags::COW) {
                 PrivateWrite::Denied
             } else if shared_frame {
                 PrivateWrite::Copy
@@ -410,6 +418,37 @@ fn private_write_policy(
                 PrivateWrite::InPlace
             }
         }
+    }
+}
+
+/// What a fork does with one present page of a private mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForkPage {
+    /// Both map the frame with the same flags (read-only, already
+    /// copy-on-write, or a mapping that stays shared).
+    Share,
+    /// Both map the frame read-only and copy-on-write.
+    Cow,
+    /// The child gets a private copy now; the forking side keeps its page.
+    Copy,
+}
+
+/// The rule for [`ForkPage`]. `keep_writable` is a MAP_SHARED mapping or a
+/// CLONE_VM child (`share_from`); `shared_before` says another address
+/// space mapped the frame before this fork. A writable private page that
+/// is not copy-on-write yet another address space maps belongs to a
+/// CLONE_VM sharer (fork leaves only copy-on-write pages shared): making
+/// it copy-on-write in the forking space alone would leave the sharer
+/// writing a frame the child now reads (a vfork child's fork saw its
+/// parent's later writes), so the child copies it instead, as Linux's
+/// fork copies the one mm both CLONE_VM sides use.
+fn fork_page_policy(flags: PageFlags, keep_writable: bool, shared_before: bool) -> ForkPage {
+    if keep_writable || !flags.contains(PageFlags::WRITABLE) {
+        ForkPage::Share
+    } else if shared_before {
+        ForkPage::Copy
+    } else {
+        ForkPage::Cow
     }
 }
 
@@ -1339,6 +1378,14 @@ impl VirtualAddressSpace {
                 // (`share_from`): the frames gain an owner but not
                 // copy-on-write.
                 let keep_writable = share_all || mapping.mapping_type == MappingType::Shared;
+                // Which frames another address space mapped before this
+                // fork (a CLONE_VM sharer's), asked before the child's
+                // owners are added below.
+                let shared_before: Vec<bool> = mapping
+                    .physical_frames
+                    .iter()
+                    .map(|&f| super::frame_refs::is_shared(f))
+                    .collect();
                 let mut child_mapping = mapping.clone();
                 child_mapping.physical_frames = mapping.physical_frames.clone();
                 for &frame in &child_mapping.physical_frames {
@@ -1348,19 +1395,51 @@ impl VirtualAddressSpace {
                 // teardown releases exactly the owners added above.
                 child_mappings.insert(*addr, child_mapping);
 
-                for i in 0..mapping.physical_frames.len() {
+                for (i, &was_shared) in shared_before.iter().enumerate() {
                     let vaddr = VirtualAddress(mapping.start.0 + (i as u64) * 4096);
                     let (frame, flags) = match parent_mapper.translate_page(vaddr) {
                         Ok(result) => result,
                         Err(_) => continue, // Page not actually mapped in HW
                     };
-                    let flags = if flags.contains(PageFlags::WRITABLE) && !keep_writable {
-                        let cow = flags.without(PageFlags::WRITABLE) | PageFlags::COW;
-                        flush.downgraded = true;
-                        parent_mapper.update_page_flags(vaddr, cow)?;
-                        cow
-                    } else {
-                        flags
+                    let (frame, flags) = match fork_page_policy(flags, keep_writable, was_shared) {
+                        ForkPage::Share => (frame, flags),
+                        ForkPage::Cow => {
+                            let cow = flags.without(PageFlags::WRITABLE) | PageFlags::COW;
+                            flush.downgraded = true;
+                            parent_mapper.update_page_flags(vaddr, cow)?;
+                            (frame, cow)
+                        }
+                        ForkPage::Copy => {
+                            let copy =
+                                FRAME_ALLOCATOR
+                                    .lock()
+                                    .allocate_frames(1, None)
+                                    .map_err(|_| KernelError::OutOfMemory {
+                                        requested: 4096,
+                                        available: 0,
+                                    })?;
+                            // SAFETY: `frame` is a RAM page the forking
+                            // space maps; `copy` was just allocated and is
+                            // mapped nowhere. Both are reached through the
+                            // physical map, and exactly one page is copied.
+                            unsafe {
+                                let from =
+                                    super::phys_to_virt_addr(frame.as_u64() << 12) as *const u8;
+                                let to = super::phys_to_virt_addr(copy.as_u64() << 12) as *mut u8;
+                                super::page_ops::copy_page(to, from);
+                            }
+                            // The child owns the copy instead of an owner
+                            // of `frame`, which the forking space and its
+                            // sharer keep (so this release never frees it).
+                            if let Some(recorded) = child_mappings
+                                .get_mut(addr)
+                                .and_then(|m| m.physical_frames.get_mut(i))
+                            {
+                                let _ = super::frame_refs::release(*recorded);
+                                *recorded = copy;
+                            }
+                            (copy, flags)
+                        }
                     };
                     child_mapper
                         .map_page(vaddr, frame, flags, &mut alloc)
@@ -2833,13 +2912,15 @@ impl VirtualAddressSpace {
     /// Make the user page at `vaddr` this address space's to write and
     /// return its frame, for writes the kernel makes into one address
     /// space only (ptrace POKE, clone's SETTID stores), which must not
-    /// reach other address spaces: a private frame still shared after a
-    /// fork -- copy-on-write or read-only -- is replaced by a private copy
-    /// with the same access (a copy-on-write page becomes plainly
-    /// writable). The page must belong to a user mapping of this address
-    /// space; kernel addresses, device memory and shared pages the mapping
-    /// may not write now are refused ([`private_write_policy`]). `force`
-    /// (ptrace) also reaches read-only and PROT_NONE private pages.
+    /// reach other address spaces except CLONE_VM sharers (a writable
+    /// private page is written in place, so a vfork parent sees it): a
+    /// private frame still shared after a fork -- copy-on-write or
+    /// read-only -- is replaced by a private copy with the same access (a
+    /// copy-on-write page becomes plainly writable). The page must belong to a
+    /// user mapping of this address space; kernel addresses, device memory
+    /// and shared pages the mapping may not write now are refused
+    /// ([`private_write_policy`]). `force` (ptrace) also reaches read-only
+    /// and PROT_NONE private pages.
     #[cfg(feature = "alloc")]
     pub fn private_frame(&self, vaddr: u64, force: bool) -> Result<FrameNumber, KernelError> {
         let page = vaddr & !0xFFF;
@@ -2979,7 +3060,8 @@ impl VirtualAddressSpace {
             let frame = self.private_frame(at, force)?;
             // SAFETY: `frame` is RAM (device memory is refused) that this
             // address space alone maps, or a shared page its mapping may
-            // write, reached through the physical map; `offset + n` stays
+            // write (a shared mapping, or a CLONE_VM sharer's writable
+            // page), reached through the physical map; `offset + n` stays
             // within the 4 KiB page.
             unsafe {
                 core::ptr::copy_nonoverlapping(
@@ -4220,6 +4302,27 @@ mod tests {
     }
 
     #[test]
+    fn fork_copies_what_a_clone_vm_sharer_writes() {
+        use ForkPage::{Copy, Cow, Share};
+        let rw = user_prot_flags(0x3);
+        let ro = user_prot_flags(0x1);
+        let cow = ro | PageFlags::COW;
+        // A page only this space maps becomes copy-on-write in both.
+        assert_eq!(fork_page_policy(rw, false, false), Cow);
+        // One a CLONE_VM sharer maps too (vfork's child forking) is copied
+        // for the child; the sharers keep writing their frame.
+        assert_eq!(fork_page_policy(rw, false, true), Copy);
+        // Read-only and already copy-on-write pages are shared as they are,
+        // however many map them.
+        assert_eq!(fork_page_policy(ro, false, true), Share);
+        assert_eq!(fork_page_policy(cow, false, true), Share);
+        assert_eq!(fork_page_policy(cow, false, false), Share);
+        // MAP_SHARED, or a CLONE_VM child itself: the same frame, writable.
+        assert_eq!(fork_page_policy(rw, true, true), Share);
+        assert_eq!(fork_page_policy(rw, true, false), Share);
+    }
+
+    #[test]
     fn kernel_writes_respect_mapping_kind_and_protection() {
         use PrivateWrite::{Copy, Denied, InPlace};
         let rw = user_prot_flags(0x3);
@@ -4243,6 +4346,11 @@ mod tests {
         // Private pages: a plain write needs write access or copy-on-write.
         assert_eq!(policy(MappingType::Data, true, rw, false, false), InPlace);
         assert_eq!(policy(MappingType::Data, true, cow, true, false), Copy);
+        // A writable page whose frame another address space maps is a
+        // CLONE_VM sharer's (fork leaves only copy-on-write pages shared):
+        // written in place, so the sharer sees the store, forced or not.
+        assert_eq!(policy(MappingType::Data, true, rw, true, false), InPlace);
+        assert_eq!(policy(MappingType::Stack, true, rw, true, true), InPlace);
         assert_eq!(policy(MappingType::Code, true, ro, true, false), Denied);
         assert_eq!(policy(MappingType::Data, true, none, false, false), Denied);
         // A forced write (ptrace) reaches read-only and PROT_NONE private

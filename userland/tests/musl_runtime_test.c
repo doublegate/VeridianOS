@@ -9387,6 +9387,257 @@ static void test_posix_mq_fs(void)
     report("posix_mq_fs", f == 0, why);
 }
 
+/* A fork by a CLONE_VM child copies the memory it shares with its parent
+ * (PR #38 review): the grandchild keeps the value at the fork, not the
+ * parent's later write, and the CLONE_VM child's own stores after the fork
+ * still reach the parent. The grandchild is the caller's (CLONE_PARENT) so
+ * it can be waited for, and uses raw system calls only. */
+static volatile int t_vmfork_var;
+static volatile long t_vmfork_pid;
+static int t_vmfork_go[2], t_vmfork_res[2];
+
+static int t_vmfork_child(void *arg)
+{
+    (void)arg;
+    long p = syscall(SYS_clone, CLONE_PARENT | SIGCHLD, 0, 0, 0, 0);
+    if (p == 0) {
+        char c;
+        int v = -1;
+        if (syscall(SYS_read, t_vmfork_go[0], &c, 1) == 1)
+            v = t_vmfork_var;
+        syscall(SYS_write, t_vmfork_res[1], &v, sizeof(v));
+        syscall(SYS_exit_group, 0);
+    }
+    t_vmfork_pid = p;
+    return 0;
+}
+
+static void test_clone_vm_fork(void)
+{
+    char why[96];
+    int f = 0, v = -1, st = 0;
+    t_vmfork_var = 1;
+    t_vmfork_pid = 0;
+    if (pipe(t_vmfork_go) != 0 || pipe(t_vmfork_res) != 0) {
+        report("clone_vm_fork", 0, "pipe");
+        return;
+    }
+    if (t_share_run(t_vmfork_child, CLONE_VM | CLONE_VFORK | SIGCHLD) != 0)
+        f |= 1;
+    pid_t gc = (pid_t)t_vmfork_pid;
+    /* No pid here means the CLONE_VM child's store after its fork stayed
+     * in a private copy; the grandchild may still be waiting, so let it go
+     * and read its answer either way (closing the write end ends a read
+     * nobody will answer). */
+    if (gc <= 0)
+        f |= 2;
+    t_vmfork_var = 2;
+    if (write(t_vmfork_go[1], "g", 1) != 1)
+        f |= 4;
+    close(t_vmfork_res[1]);
+    if (read(t_vmfork_res[0], &v, sizeof(v)) != (ssize_t)sizeof(v) || v != 1)
+        f |= 8;
+    if (gc > 0 && (waitpid(gc, &st, 0) != gc || !WIFEXITED(st) || WEXITSTATUS(st) != 0))
+        f |= 16;
+    close(t_vmfork_go[0]);
+    close(t_vmfork_go[1]);
+    close(t_vmfork_res[0]);
+    snprintf(why, sizeof(why), "f=%#x grandchild saw %d pid=%d st=%#x", f, v, (int)gc, st);
+    report("clone_vm_fork", f == 0, why);
+}
+
+/* A TID store that cannot be made is skipped, as on Linux (put_user's
+ * result is unused in kernel_clone and schedule_tail): a fork and a thread
+ * clone with CLONE_PARENT_SETTID, CLONE_CHILD_SETTID and (for the thread)
+ * CLONE_CHILD_CLEARTID on NULL or a PROT_NONE page still succeed, and the
+ * child runs (PR #38 review; they were EFAULT). */
+static volatile int t_badtid_ran;
+/* One stack per thread, so neither reuses one the other may still be
+ * leaving (PR #38 review). */
+static char t_badtid_stack[2][16384] __attribute__((aligned(16)));
+
+/* A thread clone made by hand: musl's clone() refuses CLONE_THREAD and
+ * CLONE_CHILD_CLEARTID (EINVAL, no system call). The child touches no
+ * stack: it stores 1 through `ran` and calls exit (the thread's alone).
+ * clone(flags, stack, ptid, ctid, tls) on x86_64, (flags, stack, ptid, tls,
+ * ctid) elsewhere; tls is 0, unused without CLONE_SETTLS. */
+static long t_raw_thread(long flags, void *stack, void *ptid, void *ctid, volatile int *ran)
+{
+#if defined(__x86_64__)
+    long ret;
+    register long r10 __asm__("r10") = (long)ctid;
+    register long r8 __asm__("r8") = 0;
+    __asm__ volatile("syscall\n\t"
+                     "test %%rax, %%rax\n\t"
+                     "jnz 1f\n\t"
+                     "movl $1, (%%rbx)\n\t"
+                     "mov $60, %%eax\n\t"
+                     "xor %%edi, %%edi\n\t"
+                     "syscall\n"
+                     "1:"
+                     : "=a"(ret)
+                     : "a"(56L), "D"(flags), "S"(stack), "d"(ptid), "r"(r10), "r"(r8), "b"(ran)
+                     : "rcx", "r11", "memory");
+    return ret;
+#elif defined(__aarch64__)
+    register long x8 __asm__("x8") = 220;
+    register long x0 __asm__("x0") = flags;
+    register long x1 __asm__("x1") = (long)stack;
+    register long x2 __asm__("x2") = (long)ptid;
+    register long x3 __asm__("x3") = 0;
+    register long x4 __asm__("x4") = (long)ctid;
+    register long x5 __asm__("x5") = (long)ran;
+    __asm__ volatile("svc #0\n\t"
+                     "cbnz x0, 1f\n\t"
+                     "mov w6, #1\n\t"
+                     "str w6, [x5]\n\t"
+                     "mov x8, #93\n\t"
+                     "mov x0, #0\n\t"
+                     "svc #0\n"
+                     "1:"
+                     : "+r"(x0)
+                     : "r"(x8), "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x5)
+                     : "x6", "memory");
+    return x0;
+#elif defined(__riscv)
+    register long a7 __asm__("a7") = 220;
+    register long a0 __asm__("a0") = flags;
+    register long a1 __asm__("a1") = (long)stack;
+    register long a2 __asm__("a2") = (long)ptid;
+    register long a3 __asm__("a3") = 0;
+    register long a4 __asm__("a4") = (long)ctid;
+    register long a5 __asm__("a5") = (long)ran;
+    __asm__ volatile("ecall\n\t"
+                     "bnez a0, 1f\n\t"
+                     "li t0, 1\n\t"
+                     "sw t0, 0(a5)\n\t"
+                     "li a7, 93\n\t"
+                     "li a0, 0\n\t"
+                     "ecall\n"
+                     "1:"
+                     : "+r"(a0)
+                     : "r"(a7), "r"(a1), "r"(a2), "r"(a3), "r"(a4), "r"(a5)
+                     : "t0", "memory");
+    return a0;
+#else
+    (void)flags; (void)stack; (void)ptid; (void)ctid; (void)ran;
+    return -ENOSYS;
+#endif
+}
+
+static void test_clone_bad_tid(void)
+{
+    char why[96];
+    int f = 0;
+    void *none = mmap(NULL, 4096, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (none == MAP_FAILED) {
+        /* Without the mapping bad[1] would be (void *)-1, a kernel address,
+         * and the PROT_NONE case would go untested. */
+        report("clone_bad_tid", 0, "mmap PROT_NONE failed");
+        return;
+    }
+    void *bad[2] = {NULL, none};
+    for (int i = 0; i < 2; i++) {
+        /* ptid is the third argument everywhere, ctid the fourth on x86_64
+         * and the fifth elsewhere (tls in the other slot, unused here). */
+        long r = syscall(SYS_clone, CLONE_PARENT_SETTID | CLONE_CHILD_SETTID | SIGCHLD, 0, bad[i],
+                         bad[i], bad[i]);
+        if (r == 0)
+            _exit(5);
+        if (r < 0 || t_exit_status((pid_t)r) != 5)
+            f |= 1 << i;
+    }
+    /* A thread, in a child of its own so a failure cannot take this
+     * process down. */
+    pid_t child = fork();
+    if (child == 0) {
+        int g = 0;
+        for (int i = 0; i < 2; i++) {
+            t_badtid_ran = 0;
+            long flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD |
+                         CLONE_SYSVSEM | CLONE_PARENT_SETTID | CLONE_CHILD_SETTID |
+                         CLONE_CHILD_CLEARTID;
+            long r = t_raw_thread(flags, t_badtid_stack[i] + sizeof(t_badtid_stack[i]), bad[i],
+                                  bad[i], &t_badtid_ran);
+            if (r <= 0) {
+                g |= 1 << i;
+                continue;
+            }
+            for (int n = 0; n < 100000 && !t_badtid_ran; n++)
+                sched_yield();
+            if (!t_badtid_ran)
+                g |= 4 << i;
+        }
+        _exit(g);
+    }
+    int code = t_exit_status(child);
+    if (code != 0)
+        f |= code << 2;
+    munmap(none, 4096);
+    snprintf(why, sizeof(why), "f=%#x", f);
+    report("clone_bad_tid", f == 0, why);
+}
+
+/* Where a fork's TID words land (PR #38 review). On pages mapped but never
+ * written, CLONE_PARENT_SETTID and CLONE_CHILD_SETTID are stored (mmap backs
+ * every page when it maps it, so these are the copy-on-write pages of both
+ * sides after the fork). A word straddling a writable page and a read-only
+ * one cannot be stored: it is skipped and the bytes on the writable page stay
+ * as they were, the fork still succeeding. */
+static void test_clone_settid_paths(void)
+{
+    char why[96];
+    int f = 0;
+    char *fresh = mmap(NULL, 2 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (fresh == MAP_FAILED) {
+        report("clone_settid_paths", 0, "mmap failed");
+        return;
+    }
+    char *two = mmap(NULL, 2 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (two == MAP_FAILED) {
+        munmap(fresh, 2 * 4096);
+        report("clone_settid_paths", 0, "mmap failed");
+        return;
+    }
+    /* Unwritten pages: the parent's word on the first, the child's on the
+     * second. The child exits 0 if its word holds its TID. */
+    volatile pid_t *ptid = (volatile pid_t *)fresh;
+    volatile pid_t *ctid = (volatile pid_t *)(fresh + 4096);
+    long r = syscall(SYS_clone, CLONE_PARENT_SETTID | CLONE_CHILD_SETTID | SIGCHLD, 0, ptid,
+                     ctid, ctid);
+    if (r == 0)
+        _exit(*ctid == (pid_t)syscall(SYS_gettid) ? 0 : 1);
+    if (r < 0) {
+        f |= 1;
+    } else {
+        if (*ptid != (pid_t)r)
+            f |= 2;
+        if (t_exit_status((pid_t)r) != 0)
+            f |= 4;
+    }
+    /* A word at the last two bytes of a writable page and the first two of
+     * a read-only one, which is touched first so both are present. */
+    memset(two, 0xab, 4096);
+    if (mprotect(two + 4096, 4096, PROT_READ) != 0) {
+        f |= 8;
+    } else {
+        volatile char touch = two[4096];
+        (void)touch;
+        void *word = two + 4094;
+        r = syscall(SYS_clone, CLONE_PARENT_SETTID | SIGCHLD, 0, word, 0, 0);
+        if (r == 0)
+            _exit(5);
+        if (r < 0 || t_exit_status((pid_t)r) != 5)
+            f |= 16;
+        if ((unsigned char)two[4094] != 0xab || (unsigned char)two[4095] != 0xab)
+            f |= 32;
+    }
+    munmap(fresh, 2 * 4096);
+    munmap(two, 2 * 4096);
+    snprintf(why, sizeof(why), "f=%#x", f);
+    report("clone_settid_paths", f == 0, why);
+}
+
 static void test_kcmp_process_vm(void)
 {
     char why[160];
@@ -10749,6 +11000,12 @@ static void test_fs_object_cap(void)
         struct stat st;
         if (!(open("/tmp/foc/f", O_RDONLY) == -1 && errno == EACCES)) g |= 32;
         if (!(stat("/tmp/foc/f", &st) == -1 && errno == EACCES)) g |= 32;
+        /* No component to search: still a lookup (PR #39 review). */
+        if (!(stat("/", &st) == -1 && errno == EACCES)) g |= 128;
+        if (!(access("/", F_OK) == -1 && errno == EACCES)) g |= 128;
+        /* Listing attributes reads the inode, through a descriptor too. */
+        char names[64];
+        if (!(ro >= 0 && flistxattr(ro, names, sizeof(names)) == -1 && errno == EACCES)) g |= 256;
         if (ro < 0 || pread(ro, buf, 3, 0) != 3 || memcmp(buf, "abc", 3) != 0) g |= 64;
         if (g != 0) {
             printf("fs-object-cap g=%#x drops=%ld,%ld\n", g, d1, d2);
@@ -12022,6 +12279,9 @@ int main(int argc, char **argv)
     test_futex2();
     test_ipc_object_cap();
     test_clone_share();
+    test_clone_vm_fork();
+    test_clone_bad_tid();
+    test_clone_settid_paths();
     test_personality();
     test_namespaces_uts();
     test_namespaces_time();

@@ -272,17 +272,26 @@ pub fn may_choose_pids(
     space: &CapabilitySpace,
     ns: &alloc::sync::Arc<crate::process::pidns::PidNs>,
     levels: usize,
+    creating: Option<&alloc::sync::Arc<crate::process::userns::UserNs>>,
 ) -> bool {
     let mut level = Some(ns.clone());
     for _ in 0..levels {
         let Some(pid_ns) = level else {
             return true;
         };
-        if !holds_namespace(
-            space,
-            &crate::process::ns::NsRef::Pid(pid_ns.clone()),
-            Rights::MODIFY,
-        ) {
+        // A PID namespace of the user namespace this clone is making: the
+        // caller is about to get authority over that user namespace (the
+        // grant follows the numbers), as Linux's owner has every capability
+        // in a user namespace it creates.
+        let held_by_new_owner =
+            creating.is_some_and(|u| alloc::sync::Arc::ptr_eq(&pid_ns.owner, u));
+        if !held_by_new_owner
+            && !holds_namespace(
+                space,
+                &crate::process::ns::NsRef::Pid(pid_ns.clone()),
+                Rights::MODIFY,
+            )
+        {
             return false;
         }
         level = pid_ns.parent.clone();
@@ -295,9 +304,10 @@ pub fn may_choose_pids(
 pub fn current_may_choose_pids(
     ns: &alloc::sync::Arc<crate::process::pidns::PidNs>,
     levels: usize,
+    creating: Option<&alloc::sync::Arc<crate::process::userns::UserNs>>,
 ) -> bool {
     match crate::process::current_process() {
-        Some(process) => may_choose_pids(&process.capability_space.lock(), ns, levels),
+        Some(process) => may_choose_pids(&process.capability_space.lock(), ns, levels, creating),
         None => true,
     }
 }
@@ -398,7 +408,11 @@ pub fn authority_rights() -> Rights {
 #[cfg(feature = "alloc")]
 pub fn grant(space: &CapabilitySpace, objects: &[ObjectRef]) -> Result<(), super::CapError> {
     for object in objects {
-        if holds(space, object, authority_rights()) {
+        // Any valid capability on the object, a narrowed one included: a
+        // grant must never undo a CapabilityDrop by minting full rights
+        // beside it (PR #39 review). Today every grant is of a new
+        // namespace or into a new space, so this only keeps it that way.
+        if holds(space, object, Rights::empty()) {
             continue;
         }
         // Only spaces hold these, so the registry forgets one once no space
@@ -850,6 +864,26 @@ mod tests {
         ));
     }
 
+    /// A grant never re-mints full rights beside a narrowed capability
+    /// (PR #39 review): a CapabilityDrop holds.
+    #[test]
+    fn grant_does_not_undo_a_narrowing() {
+        use crate::process::{ns::NsKind, userns};
+        let user = userns::UserNs::create(&userns::initial(), 1000, 1000, false, false).unwrap();
+        let object = ObjectRef::Namespace {
+            kind: NsKind::User,
+            id: user.ident.id,
+        };
+        let space = CapabilitySpace::new();
+        grant(&space, core::slice::from_ref(&object)).unwrap();
+        assert!(holds(&space, &object, authority_rights()));
+        let (cap, _) = matching(&space, |o| o == &object)[0];
+        space.narrow(cap, Rights::MODIFY).unwrap();
+        grant(&space, core::slice::from_ref(&object)).unwrap();
+        assert!(!holds(&space, &object, Rights::MODIFY));
+        assert_eq!(matching(&space, |o| o == &object).len(), 1);
+    }
+
     #[test]
     fn choosing_pids_needs_modify_on_each_level_chosen() {
         use crate::process::{pidns, userns};
@@ -861,11 +895,19 @@ mod tests {
         // namespace only.
         let space = CapabilitySpace::new();
         grant_user_ns(&space, &child_user).unwrap();
-        assert!(may_choose_pids(&space, &inner, 0));
-        assert!(may_choose_pids(&space, &inner, 1));
-        assert!(!may_choose_pids(&space, &inner, 2));
+        assert!(may_choose_pids(&space, &inner, 0, None));
+        assert!(may_choose_pids(&space, &inner, 1, None));
+        assert!(!may_choose_pids(&space, &inner, 2, None));
         // A started program holds both levels.
-        assert!(may_choose_pids(&initial_space(), &inner, 2));
+        assert!(may_choose_pids(&initial_space(), &inner, 2, None));
+        // clone3(CLONE_NEWUSER | CLONE_NEWPID) with set_tid: the inner PID
+        // namespace belongs to the user namespace being made, whose
+        // authority the caller gets next, so it counts as held (PR #39
+        // review); the level above still needs its own.
+        let fresh = CapabilitySpace::new();
+        assert!(!may_choose_pids(&fresh, &inner, 1, None));
+        assert!(may_choose_pids(&fresh, &inner, 1, Some(&child_user)));
+        assert!(!may_choose_pids(&fresh, &inner, 2, Some(&child_user)));
         // Rights below MODIFY do not do.
         let reader = CapabilitySpace::new();
         cap_manager()
@@ -878,7 +920,7 @@ mod tests {
                 &reader,
             )
             .unwrap();
-        assert!(!may_choose_pids(&reader, &outer, 1));
+        assert!(!may_choose_pids(&reader, &outer, 1, None));
     }
 
     #[test]

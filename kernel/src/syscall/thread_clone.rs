@@ -8,7 +8,7 @@ use crate::process::thread::ThreadFs;
 use crate::{
     arch::context::ThreadContext,
     process::{self, ns, thread::ThreadBuilder},
-    syscall::{userspace::validate_user_ptr, SyscallError},
+    syscall::SyscallError,
 };
 
 // clone's flags (its low 32 bits).
@@ -454,7 +454,12 @@ fn kernel_clone(mut req: CloneRequest) -> Result<usize, SyscallError> {
     let may_choose = |owner: &process::userns::UserNs| {
         caller.ns_capable(owner, CAP_CHECKPOINT_RESTORE) || caller.ns_capable(owner, CAP_SYS_ADMIN)
     };
-    let (numbers, claim) = pid_numbers(&req, &namespaces.pid_for_children, may_choose)?;
+    let (numbers, claim) = pid_numbers(
+        &req,
+        &namespaces.pid_for_children,
+        may_choose,
+        user_ns.as_ref(),
+    )?;
     if req.on(CLONE_INTO_CGROUP) {
         return Err(SyscallError::BadFileDescriptor);
     }
@@ -474,15 +479,25 @@ fn pid_numbers(
     req: &CloneRequest,
     ns: &alloc::sync::Arc<process::pidns::PidNs>,
     may_choose: impl Fn(&process::userns::UserNs) -> bool,
+    creating: Option<&alloc::sync::Arc<process::userns::UserNs>>,
 ) -> Result<(process::pidns::Reservation, Option<process::IdClaim>), SyscallError> {
     let levels = req.set_tid_levels as usize;
     if levels > ns.level + 1 {
         return Err(SyscallError::InvalidArgument);
     }
+    // An ID out of range is EINVAL before any permission check, as
+    // alloc_pid checks each level's ID before checkpoint_restore_ns_capable
+    // (PR #39 review); each namespace's own pid_max is `pidns::reserve`'s.
+    if req.set_tid[..levels]
+        .iter()
+        .any(|&t| t < 1 || t as u64 >= crate::process::PID_MAX)
+    {
+        return Err(SyscallError::InvalidArgument);
+    }
     // Choosing a number also needs MODIFY on each PID namespace it is
-    // chosen in (ADR 0024, step 5); EPERM before any number is looked at,
-    // as alloc_pid's capability check precedes its EEXIST.
-    if !crate::cap::authority::current_may_choose_pids(ns, levels) {
+    // chosen in (ADR 0024, step 5); EPERM before any number is taken, as
+    // alloc_pid's capability check precedes its EEXIST.
+    if !crate::cap::authority::current_may_choose_pids(ns, levels, creating) {
         return Err(SyscallError::OperationNotPermitted);
     }
     let chosen: alloc::vec::Vec<u64> = req.set_tid[..levels.min(ns.level)]
@@ -529,15 +544,10 @@ fn process_clone(
     if req.stack > user_space_end() {
         return Err(SyscallError::InvalidPointer);
     }
-    for (flag, ptr) in [
-        (CLONE_PARENT_SETTID, req.parent_tid),
-        (CLONE_CHILD_SETTID, req.child_tid),
-        (CLONE_CHILD_CLEARTID, req.child_tid),
-    ] {
-        if req.on(flag) {
-            validate_user_ptr(ptr as *const u32, core::mem::size_of::<u32>())?;
-        }
-    }
+    // The TID pointers are not checked here: as on Linux, a SETTID store
+    // that cannot be made is skipped (`StoredTid`) and a CLEARTID one at
+    // exit too (`write_user`), each checking the address as it writes, so
+    // a NULL or unmapped pointer is not EFAULT (PR #38 review).
     // The creator of a new user namespace -- the parent, which also writes
     // the child's maps -- gets authority over it, and the child inherits
     // that with the rest of the space (ADR 0024, decision 7).
@@ -631,16 +641,8 @@ fn thread_clone(
         return Err(SyscallError::InvalidPointer);
     }
 
-    // Validate TID pointers if requested
-    if req.on(CLONE_PARENT_SETTID) {
-        validate_user_ptr(parent_tid_ptr as *const u32, core::mem::size_of::<u32>())?;
-    }
-    if req.on(CLONE_CHILD_SETTID) {
-        validate_user_ptr(child_tid_ptr as *const u32, core::mem::size_of::<u32>())?;
-    }
-    if req.on(CLONE_CHILD_CLEARTID) {
-        validate_user_ptr(child_tid_ptr as *const u32, core::mem::size_of::<u32>())?;
-    }
+    // The TID pointers are checked as they are written, not here (see
+    // `process_clone`): a store that cannot be made is skipped, as on Linux.
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
     // RLIMIT_NPROC counts threads too (EAGAIN).
     // Held until the thread is added.
@@ -772,44 +774,6 @@ fn thread_clone(
     }
     drop(current_ctx);
 
-    // Both TID writes happen before the thread joins the process and before
-    // its task exists: either can fault, and failing after the enqueue left
-    // a runnable child behind an error return (review of the v0.26.0 stack,
-    // PR #14). Here a failure only drops the unregistered `thread`.
-    //
-    // CLONE_PARENT_SETTID: write the child's TID into the parent's address
-    // space at `parent_tid_ptr`, so the parent can observe the TID
-    // immediately after clone returns.
-    if req.on(CLONE_PARENT_SETTID) {
-        // SAFETY: `parent_tid_ptr` was validated above via `validate_user_ptr`.
-        // `copy_to_user` performs its own bounds check as a defence-in-depth
-        // measure.  The write is a single u32 which is naturally aligned.
-        unsafe {
-            crate::syscall::userspace::copy_to_user(parent_tid_ptr, &vtid).map_err(|_| {
-                release_numbers();
-                SyscallError::InvalidPointer
-            })?;
-        }
-    }
-
-    // CLONE_CHILD_SETTID: write the child's TID into `child_tid_ptr`.
-    // TODO(tier7): On Linux this write happens in the *child's* address
-    // space after the child begins execution.  Because CLONE_VM is
-    // mandatory here (shared address space), writing from the parent
-    // context is equivalent.  For full fork() support (separate address
-    // spaces) this would need to be deferred to the child's first
-    // scheduling quantum.
-    if req.on(CLONE_CHILD_SETTID) {
-        // SAFETY: `child_tid_ptr` was validated above via `validate_user_ptr`.
-        // The pointer targets shared user memory (CLONE_VM is set).
-        unsafe {
-            crate::syscall::userspace::copy_to_user(child_tid_ptr, &vtid).map_err(|_| {
-                release_numbers();
-                SyscallError::InvalidPointer
-            })?;
-        }
-    }
-
     // CLONE_PIDFD: a PIDFD_THREAD pidfd for the new thread, stored before
     // it runs (EFAULT if the store faults; the thread never starts).
     #[cfg(feature = "alloc")]
@@ -850,13 +814,54 @@ fn thread_clone(
         *thread.caps.lock() = sets;
     }
 
+    // The TID stores come after every step that can fail but the start, as
+    // Linux's put_user follows copy_process (`kernel/fork.c` 2800); a start
+    // that fails puts the old words back. Both are before the task exists:
+    // failing after the enqueue left a runnable child behind an error
+    // return (review of the v0.26.0 stack, PR #14).
+    //
+    // CLONE_PARENT_SETTID: the child's TID in the parent's address space at
+    // `parent_tid_ptr`, so the parent can observe it as soon as clone
+    // returns. CLONE_CHILD_SETTID: the same at `child_tid_ptr`; on Linux the
+    // child makes that store once it runs (schedule_tail), which with
+    // CLONE_VM (mandatory here) is the same memory. As on Linux (put_user's
+    // result unused in kernel_clone and schedule_tail), and as sys_fork_with
+    // does, a store that cannot be made is skipped: failing the clone here,
+    // with the thread already listed and the pidfd number already stored in
+    // user memory, exposed both behind an EFAULT (PR #38 review).
+    let user_word = |ptr: usize| {
+        let read = move |b: &mut [u8; 4]| {
+            crate::syscall::userspace::read_user::<[u8; 4]>(ptr)
+                .map(|w| *b = w)
+                .is_ok()
+        };
+        let write = move |b: &[u8; 4]| crate::syscall::userspace::write_user(ptr, *b).is_ok();
+        (read, write)
+    };
+    let mut stored: [Option<(usize, process::fork::StoredTid)>; 2] = [None, None];
+    for (i, (flag, ptr)) in [
+        (CLONE_PARENT_SETTID, parent_tid_ptr),
+        (CLONE_CHILD_SETTID, child_tid_ptr),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if req.on(flag) {
+            let (read, write) = user_word(ptr);
+            stored[i] = Some((ptr, process::fork::StoredTid::store(read, write, vtid)));
+        }
+    }
+
     // The new thread runs as its own dispatcher task (stage D2), starting
     // from the registers prepared above and a copy of the caller's vector
     // state. (CLONE_CHILD_CLEARTID is honoured by exit_dispatched.)
     if crate::process::start_thread(&proc, &thread, true).is_err() {
         // The thread never ran: take it out again (with its kernel
         // stack), or it counted as alive and its process could never
-        // finish exiting (N-46).
+        // finish exiting (N-46); and put the TID words back.
+        for (p, t) in stored.iter().flatten().rev() {
+            t.undo(user_word(*p).1);
+        }
         drop(thread);
         let _ = crate::process::exit::cleanup_thread(&proc, tid);
         undo_pidfd();
@@ -1169,31 +1174,31 @@ mod tests {
         };
         let init = pidns::initial();
         assert!(matches!(
-            pid_numbers(&with(&[400, 401]), &init, |_| true),
+            pid_numbers(&with(&[400, 401]), &init, |_| true, None),
             Err(SyscallError::InvalidArgument)
         ));
         let ns = PidNs::create(&init, &crate::process::userns::initial(), 0).unwrap();
         assert!(matches!(
-            pid_numbers(&with(&[1, 2, 3]), &ns, |_| true),
+            pid_numbers(&with(&[1, 2, 3]), &ns, |_| true, None),
             Err(SyscallError::InvalidArgument)
         ));
         // Only the namespace's own entry: no kernel id is chosen.
-        let (r, claim) = pid_numbers(&with(&[1]), &ns, |_| true).unwrap();
+        let (r, claim) = pid_numbers(&with(&[1]), &ns, |_| true, None).unwrap();
         assert_eq!(r.innermost(), Some(1));
         assert!(claim.is_none());
         r.commit(3_900_001);
         // Both: a kernel id too, checked last.
-        let (r, claim) = pid_numbers(&with(&[5, 3_900_002]), &ns, |_| true).unwrap();
+        let (r, claim) = pid_numbers(&with(&[5, 3_900_002]), &ns, |_| true, None).unwrap();
         assert_eq!(r.innermost(), Some(5));
         assert_eq!(claim.as_ref().map(|c| c.id()), Some(3_900_002));
         drop(r);
         assert!(matches!(
-            pid_numbers(&with(&[5, 0]), &ns, |_| true),
+            pid_numbers(&with(&[5, 0]), &ns, |_| true, None),
             Err(SyscallError::InvalidArgument)
         ));
         assert!(ns.find(5).is_none(), "a failed walk frees what it reserved");
         assert!(matches!(
-            pid_numbers(&with(&[1]), &ns, |_| true),
+            pid_numbers(&with(&[1]), &ns, |_| true, None),
             Err(SyscallError::FileExists)
         ));
         pidns::release(3_900_001);

@@ -423,7 +423,17 @@ pub fn release_owner(key: u64, owner: u64) {
 /// by pid: a table shared with CLONE_FILES outlives the process that took
 /// a lock through it, and keeps the lock, as Linux's put_files_struct.
 /// flock and OFD locks belong to open files and go with their last close.
+/// A table with none asks under the read lock only, as `release_owner`:
+/// every exit comes here, and again from the table's Drop.
 pub fn release_all_of(owner: u64) {
+    let holds = LOCK_TABLE
+        .read()
+        .range_locks
+        .values()
+        .any(|locks| locks.iter().any(|lock| !lock.ofd && lock.owner == owner));
+    if !holds {
+        return;
+    }
     let changed = {
         let mut table = LOCK_TABLE.write();
         let mut changed = false;
@@ -702,6 +712,23 @@ mod tests {
         release_all_of(21);
         assert_eq!(held(k), [(F_WRLCK, 10, 19, 0xAB00)]);
         release_owner(k, 0xAB00);
+        assert!(held(k).is_empty());
+    }
+
+    /// A table that owns no record locks is let go under the read lock: it
+    /// returns while another reader holds the table (the write lock it
+    /// took on every exit, twice with the table's Drop, would wait here
+    /// forever; PR #37 review).
+    #[test]
+    fn exit_cleanup_without_locks_only_reads() {
+        let k = unique_inodes(1)[0];
+        set_lock(k, &rl(F_WRLCK, 0, 9, 7300), false).unwrap();
+        {
+            let _reader = LOCK_TABLE.read();
+            release_all_of(7301);
+        }
+        assert_eq!(held(k), [(F_WRLCK, 0, 9, 7300)]);
+        release_all_of(7300);
         assert!(held(k).is_empty());
     }
 

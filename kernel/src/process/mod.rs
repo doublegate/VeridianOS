@@ -99,14 +99,16 @@ fn alloc_id() -> u64 {
     #[cfg(feature = "alloc")]
     loop {
         // CLAIMED_IDS before PENDING_IDS, as in `IdClaim::new`.
-        let claimed = CLAIMED_IDS.lock();
+        let mut claimed = CLAIMED_IDS.lock();
         let mut pending = PENDING_IDS.lock();
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        if claimed.contains(&id) {
+        // The counter never comes back to `id`: whatever happens to it, it
+        // is checked out of turn now or never.
+        let maybe_used = claimed.ahead.remove(&id);
+        if claimed.held.contains(&id) {
             continue;
         }
         pending.insert(id);
-        let maybe_used = id <= CLAIMED_MAX.load(Ordering::Acquire);
         drop(pending);
         drop(claimed);
         // Not under PENDING_IDS: dropping a process takes it.
@@ -119,11 +121,6 @@ fn alloc_id() -> u64 {
     #[cfg(not(feature = "alloc"))]
     NEXT_ID.fetch_add(1, Ordering::Relaxed)
 }
-
-/// The highest ID set_tid has claimed: IDs at or below it may be in use
-/// out of turn, and [`alloc_id`] checks them. Only set under CLAIMED_IDS.
-#[cfg(feature = "alloc")]
-static CLAIMED_MAX: AtomicU64 = AtomicU64::new(0);
 
 /// `id`'s process is in the table, or its thread in its (listed) process,
 /// so [`id_in_use`] sees it from now on; or the process or thread of a
@@ -143,10 +140,29 @@ pub(crate) fn published(id: u64) {
 static PENDING_IDS: spin::Mutex<alloc::collections::BTreeSet<u64>> =
     spin::Mutex::new(alloc::collections::BTreeSet::new());
 
-/// IDs clone3's set_tid has claimed for a process or thread not yet in the
-/// process table.
+/// The IDs clone3's set_tid has claimed (`IdClaims`). Lock order: this,
+/// then PENDING_IDS, then what [`id_in_use`] takes (the process table, the
+/// reap list, the pidfd table, a process's threads); never the other way
+/// (`IdClaim::new`, `IdClaim::drop` and `alloc_id` keep it).
 #[cfg(feature = "alloc")]
-static CLAIMED_IDS: spin::Mutex<alloc::vec::Vec<u64>> = spin::Mutex::new(alloc::vec::Vec::new());
+static CLAIMED_IDS: spin::Mutex<IdClaims> = spin::Mutex::new(IdClaims {
+    held: alloc::vec::Vec::new(),
+    ahead: alloc::collections::BTreeSet::new(),
+});
+
+/// What clone3's set_tid has claimed.
+#[cfg(feature = "alloc")]
+struct IdClaims {
+    /// Claimed for a process or thread not yet in the process table.
+    held: alloc::vec::Vec<u64>,
+    /// Claimed at or ahead of the counter, and not yet reached by it: the
+    /// IDs [`alloc_id`] must check are in use before it hands them out,
+    /// each once, as the counter passes it. Only these: every other ID
+    /// ahead of the counter has never been used. (A highest-claimed bound
+    /// made every allocation below one high claim scan the process table,
+    /// for as long as the counter took to reach it; PR #37 review.)
+    ahead: alloc::collections::BTreeSet<u64>,
+}
 
 /// An ID clone3's set_tid chose, held until its process or thread is in
 /// the table, or the clone has failed.
@@ -159,15 +175,18 @@ impl IdClaim {
     /// open pidfd, another clone, or a fork or clone still under way has it
     /// (None: Linux's EEXIST). The counter stays where it is, as Linux's
     /// cyclic allocator keeps its cursor: [`alloc_id`] skips the ID while it
-    /// is claimed or in use (`CLAIMED_MAX`).
+    /// is claimed or in use (`IdClaims::ahead`).
     pub fn new(id: u64) -> Option<Self> {
         let mut claimed = CLAIMED_IDS.lock();
         let pending = PENDING_IDS.lock().contains(&id);
-        if claimed.contains(&id) || pending || id_in_use(id) {
+        if claimed.held.contains(&id) || pending || id_in_use(id) {
             return None;
         }
-        claimed.push(id);
-        CLAIMED_MAX.fetch_max(id, Ordering::AcqRel);
+        claimed.held.push(id);
+        // The counter moves only under this lock (`alloc_id`).
+        if id >= NEXT_ID.load(Ordering::Relaxed) {
+            claimed.ahead.insert(id);
+        }
         Some(Self(id))
     }
 
@@ -179,7 +198,16 @@ impl IdClaim {
 #[cfg(feature = "alloc")]
 impl Drop for IdClaim {
     fn drop(&mut self) {
-        CLAIMED_IDS.lock().retain(|&id| id != self.0);
+        let mut claimed = CLAIMED_IDS.lock();
+        claimed.held.retain(|&id| id != self.0);
+        // A clone that failed gave the ID to nothing: the allocator need
+        // not check it out of turn (PR #38 review). One it was given to is
+        // in use now, and stays listed until the counter passes it. Only an
+        // ID still listed is checked, so a claim the counter has passed
+        // costs no scan of the tables (PR #38 review).
+        if claimed.ahead.contains(&self.0) && !id_in_use(self.0) {
+            claimed.ahead.remove(&self.0);
+        }
     }
 }
 
@@ -991,6 +1019,64 @@ mod id_tests {
         drop(claim);
     }
 
+    /// Only the IDs claimed ahead of the counter are checked out of turn,
+    /// each until the counter passes it: a claim of an ID near `PID_MAX`
+    /// no longer makes every allocation below it scan the process table
+    /// (PR #37 review), and a claim behind the counter adds nothing.
+    #[test]
+    fn only_ids_claimed_ahead_are_checked_until_passed() {
+        // Held throughout: a claim dropped unused is no longer listed.
+        let high = IdClaim::new(PID_MAX - 3).expect("unused");
+        let behind = alloc_tid().0;
+        published(behind);
+        drop(IdClaim::new(behind).expect("published and unused"));
+        // The counter moves only under CLAIMED_IDS, so under it an ID is
+        // listed exactly while the counter has not reached it. Other tests
+        // allocate meanwhile and may pass the ID first; then try again.
+        let mut seen_ahead = None;
+        for _ in 0..5 {
+            let base = NEXT_ID.load(Ordering::Relaxed);
+            let (near, claim) = (base + 20..base + 1_000)
+                .find_map(|id| IdClaim::new(id).map(|c| (id, c)))
+                .expect("an ID ahead of the counter is free");
+            let ahead = {
+                let claimed = CLAIMED_IDS.lock();
+                assert!(claimed.ahead.contains(&(PID_MAX - 3)));
+                assert!(!claimed.ahead.contains(&behind), "behind the counter");
+                let ahead = NEXT_ID.load(Ordering::Relaxed) <= near;
+                assert_eq!(claimed.ahead.contains(&near), ahead);
+                ahead
+            };
+            if ahead {
+                seen_ahead = Some((near, claim));
+                break;
+            }
+            drop(claim);
+        }
+        let (near, claim) = seen_ahead.expect("the counter passed the claim every time");
+        while NEXT_ID.load(Ordering::Relaxed) <= near {
+            published(alloc_tid().0);
+        }
+        {
+            let claimed = CLAIMED_IDS.lock();
+            assert!(!claimed.ahead.contains(&near), "passed: never again");
+            assert!(claimed.ahead.contains(&(PID_MAX - 3)), "not reached yet");
+        }
+        drop(claim);
+        drop(high);
+    }
+
+    /// A claim dropped with its ID given to nothing (a clone3 that failed
+    /// after set_tid's claim) is not left for the allocator to check out
+    /// of turn (PR #38 review).
+    #[test]
+    fn a_failed_clones_claim_is_not_left_ahead() {
+        let high = IdClaim::new(PID_MAX - 5).expect("unused");
+        assert!(CLAIMED_IDS.lock().ahead.contains(&(PID_MAX - 5)));
+        drop(high);
+        assert!(!CLAIMED_IDS.lock().ahead.contains(&(PID_MAX - 5)));
+    }
+
     /// A process whose ID set_tid chose, dropped only after a later
     /// allocation has handed that ID out (an `Arc` kept past its reap),
     /// leaves the new allocation's reservation alone: only the object an ID
@@ -1057,6 +1143,32 @@ mod id_tests {
             assert!(refused, "{field} {id} is claimable while it names a group");
             assert!(in_use, "{field} {id} is not in use for the allocator");
         }
+    }
+
+    /// A fork child discarded before it ran gives up the group and session
+    /// numbers it held the last use of, as a reap does (`release_numbers`):
+    /// its parent may have left that group meanwhile, and the group's id
+    /// then names nothing (PR #37 review).
+    #[test]
+    fn a_discarded_child_releases_a_group_it_was_the_last_in() {
+        let ns = pidns::PidNs::create(&pidns::initial(), &userns::initial(), 0).unwrap();
+        // Kernel IDs no other test registers (the registry is global,
+        // shared by tests running in parallel).
+        let (group, session) = (9_500_001, 9_500_002);
+        for kid in [group, session] {
+            pidns::reserve(&ns, &[], |_| true).unwrap().commit(kid);
+        }
+        let child = pcb::ProcessBuilder::new(alloc::string::String::from("unstarted")).build();
+        child.pgid.store(group, Ordering::Release);
+        child.sid.store(session, Ordering::Release);
+        let pid = table::add_process(child).expect("added");
+        let child = table::get_process(pid).expect("in the table");
+        // discard_unstarted without the page-table and memory teardown,
+        // which needs real page tables.
+        exit::forget_unstarted(&child);
+        assert!(table::get_process(pid).is_none(), "out of the table");
+        assert!(!pidns::is_registered(group), "group number released");
+        assert!(!pidns::is_registered(session), "session number released");
     }
 
     /// A process dropped before it was published (a fork that failed)
