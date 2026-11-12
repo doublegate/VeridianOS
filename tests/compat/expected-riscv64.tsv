@@ -2,6 +2,7 @@
 # Baseline of 2026-10-22 (LTP 20260930, libc-test 7b95dfa5), from scripts/run-compat-tests.sh.
 # Refreshed 2026-10-30 from full runs (statfs, uname 7.3.0-veridian); notes refreshed, known: notes kept.
 # Refreshed 2026-11-05 from full runs (the syscall groups; LTP_TIMEOUT_MUL scaled with the limit).
+# Refreshed 2026-11-12 from full runs (the IPC group: System V IPC, POSIX mq, futex2).
 # Statuses and the update procedure: tests/compat/README.md.
 ltp-syscalls	abort01	PASS	
 ltp-syscalls	accept01	FAIL	accept01.c:91: TFAIL: UDP accept expected EOPNOTSUPP: EINVAL (22)
@@ -84,7 +85,7 @@ ltp-syscalls	clock_adjtime02	PASS
 ltp-syscalls	clock_getres01	PASS	
 ltp-syscalls	clock_gettime01	BROK	clock_gettime01.c:82: TBROK: Failed to open FILE '/proc/self/stat' for reading: ENOENT (2)
 ltp-syscalls	clock_gettime02	PASS	
-ltp-syscalls	clock_gettime03	FAIL	clock_gettime03.c:74: TFAIL: Wrong offset (CLOCK_MONOTONIC) read 10776ms
+ltp-syscalls	clock_gettime03	TIMEOUT	clock_gettime03.c:74: TFAIL: Wrong offset (CLOCK_MONOTONIC) read 12603ms
 ltp-syscalls	clock_gettime04	FAIL	clock_gettime04.c:169: TFAIL: CLOCK_REALTIME(syscall with old kernel spec): Difference between successive readings greater than 5 ms (1): 8
 ltp-syscalls	clock_nanosleep01	FAIL	clock_nanosleep01.c:218: TPASS: clock_nanosleep() failed with: EINVAL (22)
 ltp-syscalls	clock_nanosleep02	TIMEOUT	tst_timer_test.c:314: TFAIL: clock_nanosleep() slept for too long
@@ -123,7 +124,7 @@ ltp-syscalls	copy_file_range03	FAIL	copy_file_range03.c:52: TFAIL: diff_us = 0, 
 ltp-syscalls	creat01	PASS	
 ltp-syscalls	creat03	PASS	
 ltp-syscalls	creat04	PASS	
-ltp-syscalls	creat05	BROK	tst_test.c:1969: TBROK: Test killed! (timeout?)
+ltp-syscalls	creat05	HANG	no output
 ltp-syscalls	creat06	PASS	
 ltp-syscalls	creat07	PASS	
 ltp-syscalls	creat08	FAIL	creat08.c:55: TFAIL: dir_b/nosetgid: Incorrect group, 65534 != 4
@@ -169,7 +170,7 @@ ltp-syscalls	epoll_pwait04	PASS
 ltp-syscalls	epoll_pwait05	PASS	
 ltp-syscalls	epoll_pwait06	PASS	
 ltp-syscalls	epoll_wait01	PASS	
-ltp-syscalls	epoll_wait02	FAIL	tst_timer_test.c:314: TFAIL: epoll_wait() slept for too long
+ltp-syscalls	epoll_wait02	TIMEOUT	tst_timer_test.c:314: TFAIL: epoll_wait() slept for too long
 ltp-syscalls	epoll_wait03	PASS	
 ltp-syscalls	epoll_wait04	FLAKY	FAIL and WARN in riscv64 runs under TCG with 7 guests (2026-10-24, 2026-10-27); last here: WARN; tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	epoll_wait05	BROK	epoll_wait05.c:66: TBROK: connect(3, 127.0.0.1, 16) failed: EINVAL (22)
@@ -201,7 +202,7 @@ ltp-syscalls	execve01	PASS
 ltp-syscalls	execve02	PASS	
 ltp-syscalls	execve03	FAIL	execve03.c:106: TFAIL: execve failed unexpectedly; expected Filename too long: ENOENT (2)
 ltp-syscalls	execve04	PASS	
-ltp-syscalls	execve05	BROK	execve05.c:38: TBROK: tst_checkpoint_wait(0, 10000) failed: ETIMEDOUT (110)
+ltp-syscalls	execve05	TIMEOUT	execve_child.c:22: TPASS: argv[1] is canary, expected 'canary'
 ltp-syscalls	execve06	PASS	
 ltp-syscalls	execveat01	PASS	
 ltp-syscalls	execveat02	PASS	
@@ -295,8 +296,8 @@ ltp-syscalls	fcntl12	PASS
 ltp-syscalls	fcntl12_64	PASS	
 ltp-syscalls	fcntl13	PASS	
 ltp-syscalls	fcntl13_64	PASS	
-ltp-syscalls	fcntl14	BROK	fcntl14.c:117: TBROK: fcntl(3,F_SETLK,...) failed: EINVAL (22)
-ltp-syscalls	fcntl14_64	BROK	fcntl14.c:117: TBROK: fcntl(3,F_SETLK,...) failed: EINVAL (22)
+ltp-syscalls	fcntl14	TIMEOUT	tst_test.c:1895: TINFO: Overall timeout per run is 0h 03m 48s
+ltp-syscalls	fcntl14_64	TIMEOUT	tst_test.c:1895: TINFO: Overall timeout per run is 0h 03m 48s
 ltp-syscalls	fcntl15	PASS	
 ltp-syscalls	fcntl15_64	PASS	
 ltp-syscalls	fcntl16	PASS	
@@ -374,14 +375,14 @@ ltp-syscalls	fork01	PASS
 ltp-syscalls	fork03	PASS	
 ltp-syscalls	fork04	PASS	
 ltp-syscalls	fork05	CONF	tst_test.c:1429: TCONF: Test only supports Intel 32 bits
-ltp-syscalls	fork06	BROK	tst_test.c:1969: TBROK: Test killed! (timeout?)
+ltp-syscalls	fork06	TIMEOUT	tst_test.c:1895: TINFO: Overall timeout per run is 0h 03m 00s
 ltp-syscalls	fork07	PASS	
 ltp-syscalls	fork08	PASS	
-ltp-syscalls	fork09	BROK	tst_test.c:1969: TBROK: Test killed! (timeout?)
+ltp-syscalls	fork09	HANG	no output
 ltp-syscalls	fork10	PASS	
 ltp-syscalls	fork11	FLAKY	TIMEOUT and WARN in two x86_64 runs (2026-10-22); last here: WARN; tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	fork13	BROK	tst_sys_conf.c:118: TBROK: Failed to open '/proc/sys/kernel/pid_max' for writing: EACCES (13)
-ltp-syscalls	fork14	BROK	tst_test.c:1969: TBROK: Test killed! (timeout?)
+ltp-syscalls	fork14	TIMEOUT	fork14.c:45: TINFO: mmap() failed
 ltp-syscalls	fpathconf01	PASS	
 ltp-syscalls	fremovexattr01	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	fremovexattr02	BROK	tst_device.c:450: TBROK: Failed to acquire device
@@ -422,13 +423,13 @@ ltp-syscalls	futex_wait01	PASS
 ltp-syscalls	futex_wait02	BROK	futex_wait02.c:35: TBROK: Failed to open FILE '/proc/810/stat' for reading: ENOENT (2)
 ltp-syscalls	futex_wait03	BROK	futex_wait03.c:33: TBROK: Failed to open FILE '/proc/814/stat' for reading: ENOENT (2)
 ltp-syscalls	futex_wait04	PASS	
-ltp-syscalls	futex_wait05	FAIL	tst_timer_test.c:314: TFAIL: futex_wait() slept for too long
+ltp-syscalls	futex_wait05	TIMEOUT	tst_timer_test.c:314: TFAIL: futex_wait() slept for too long
 ltp-syscalls	futex_wait06	PASS	
 ltp-syscalls	futex_wait07	BROK	futex_wait07.c:63: TBROK: Failed to open FILE '/proc/829/stat' for reading: ENOENT (2)
 ltp-syscalls	futex_wait_bitset01	FLAKY	FAIL and WARN in two x86_64 runs (2026-10-22); last here: WARN; tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	futex_waitv01	CONF	futex2test.h:42: TCONF: syscall(449) __NR_futex_waitv not supported on your arch
-ltp-syscalls	futex_waitv02	BROK	tst_test.c:1973: TBROK: Test killed by SIGSEGV!
-ltp-syscalls	futex_waitv03	BROK	futex_waitv03.c:47: TBROK: shmget(0, 4096, 3b6) failed: ENOSYS (38)
+ltp-syscalls	futex_waitv01	FAIL	futex_waitv01.c:75: TFAIL: futex_waitv address is NULL expected EFAULT: EINVAL (22)
+ltp-syscalls	futex_waitv02	PASS	
+ltp-syscalls	futex_waitv03	PASS	
 ltp-syscalls	futex_wake01	PASS	
 ltp-syscalls	futex_wake02	BROK	futex_utils.h:46: TBROK: opendir(/proc/846/task/) failed: ENOENT (2)
 ltp-syscalls	futex_wake03	BROK	futex_wake03.c:80: TBROK: Failed to open FILE '/proc/905/stat' for reading: ENOENT (2)
@@ -502,7 +503,7 @@ ltp-syscalls	getrlimit02	PASS
 ltp-syscalls	getrlimit03	PASS	
 ltp-syscalls	getrusage01	PASS	
 ltp-syscalls	getrusage02	PASS	
-ltp-syscalls	getrusage03	BROK	getrusage03.h:36: TBROK: Expected 1 conversions got 0 FILE '/proc/self/status'
+ltp-syscalls	getrusage03	TIMEOUT	tst_kconfig.c:90: TINFO: Parsing kernel config '/boot/config-7.3.0-veridian'
 ltp-syscalls	getrusage04	FAIL	getrusage04    1  TFAIL  :  getrusage04.c:133: stime increased > 5000us:
 ltp-syscalls	getsid01	PASS	
 ltp-syscalls	getsid02	PASS	
@@ -534,7 +535,7 @@ ltp-syscalls	inotify07	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	inotify08	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	inotify09	PASS	
 ltp-syscalls	inotify10	PASS	
-ltp-syscalls	inotify11	BROK	tst_test.c:1969: TBROK: Test killed! (timeout?)
+ltp-syscalls	inotify11	TIMEOUT	tst_kconfig.c:90: TINFO: Parsing kernel config '/boot/config-7.3.0-veridian'
 ltp-syscalls	inotify12	FAIL	inotify12.c:82: TFAIL: Could not parse inotify fdinfo
 ltp-syscalls	inotify_init1_01	PASS	
 ltp-syscalls	inotify_init1_02	PASS	
@@ -637,7 +638,7 @@ ltp-syscalls	keyctl29	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable ke
 ltp-syscalls	keyctl30	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	kill02	PASS	
 ltp-syscalls	kill03	PASS	
-ltp-syscalls	kill05	BROK	kill05.c:89: TBROK: shmget(1627455497, 4096, 3b6) failed: ENOSYS (38)
+ltp-syscalls	kill05	PASS	
 ltp-syscalls	kill06	PASS	
 ltp-syscalls	kill08	PASS	
 ltp-syscalls	kill10	FLAKY	TIMEOUT and PASS in two x86_64 runs (2026-10-22); last here: PASS
@@ -663,7 +664,7 @@ ltp-syscalls	lgetxattr01	PASS
 ltp-syscalls	lgetxattr02	PASS	
 ltp-syscalls	link02	PASS	
 ltp-syscalls	link04	PASS	
-ltp-syscalls	link05	BROK	tst_test.c:1969: TBROK: Test killed! (timeout?)
+ltp-syscalls	link05	TIMEOUT	tst_kconfig.c:90: TINFO: Parsing kernel config '/boot/config-7.3.0-veridian'
 ltp-syscalls	link08	PASS	
 ltp-syscalls	linkat01	FAIL	linkat01   16  TFAIL  :  linkat01.c:276: linkat failed unexpectedly; expected 2 - No such file or directory: TEST_ERRNO=ENOTDIR(20): Not a directory
 ltp-syscalls	linkat02	BROK	linkat02    1  TBROK  :  tst_device.c:450: Failed to acquire device
@@ -814,13 +815,13 @@ ltp-syscalls	mprotect02	PASS
 ltp-syscalls	mprotect03	PASS	
 ltp-syscalls	mprotect04	PASS	
 ltp-syscalls	mprotect05	PASS	
-ltp-syscalls	mq_notify01	BROK	testcases/kernel/syscalls/mq_notify/../utils/mq.h:51: TBROK: mq_open(/test_mqueue_308,194,0700,0) failed: ENOSYS (38)
-ltp-syscalls	mq_notify02	FAIL	mq_notify02.c:28: TFAIL: mq_notify(0, &(test->sevp)) expected EINVAL: ENOSYS (38)
-ltp-syscalls	mq_notify03	BROK	mq_notify03.c:76: TBROK: mq_open(/ltp_mq_notify03,194,0600,0x3dfb086990) failed: ENOSYS (38)
-ltp-syscalls	mq_open01	BROK	mq_open01.c:198: TBROK: mq_open(/init_mqueue,194,0700,0) failed: ENOSYS (38)
-ltp-syscalls	mq_timedreceive01	BROK	testcases/kernel/syscalls/mq_timedreceive/../utils/mq.h:51: TBROK: mq_open(/test_mqueue_320,194,0700,0) failed: ENOSYS (38)
-ltp-syscalls	mq_timedsend01	BROK	testcases/kernel/syscalls/mq_timedsend/../utils/mq.h:51: TBROK: mq_open(/test_mqueue_323,194,0700,0) failed: ENOSYS (38)
-ltp-syscalls	mq_unlink01	BROK	mq_unlink01.c:85: TBROK: mq_open(/test_mqueue_326,194,0700,0) failed: ENOSYS (38)
+ltp-syscalls	mq_notify01	FAIL	mq_notify01.c:142: TFAIL: mq_notify failed unexpectedly, expected SUCCESS: EAFNOSUPPORT (97)
+ltp-syscalls	mq_notify02	PASS	
+ltp-syscalls	mq_notify03	TIMEOUT	mq_notify03.c:53: TFAIL: mq_notify(m, &sev) failed: EAFNOSUPPORT (97)
+ltp-syscalls	mq_open01	FAIL	mq_open01.c:263: TFAIL: NORMAL expected errno: 2: ENOENT (2)
+ltp-syscalls	mq_timedreceive01	FAIL	mq_timedreceive01.c:164: TPASS: mq_timedreceive() failed expectedly: EMSGSIZE (90)
+ltp-syscalls	mq_timedsend01	FAIL	mq_timedsend01.c:176: TPASS: mq_timedsend() failed expectedly: EMSGSIZE (90)
+ltp-syscalls	mq_unlink01	PASS	
 ltp-syscalls	mremap01	BROK	mremap01.c:103: TBROK: msync(0x1000004000, 8192000, 4) failed: ENOSYS (38)
 ltp-syscalls	mremap02	PASS	
 ltp-syscalls	mremap03	PASS	
@@ -832,27 +833,27 @@ ltp-syscalls	mremap08	PASS
 ltp-syscalls	mremap09	PASS	
 ltp-syscalls	mseal01	CONF	mseal01.c:40: TCONF: syscall(462) __NR_mseal not supported on your arch
 ltp-syscalls	mseal02	CONF	mseal02.c:47: TCONF: syscall(462) __NR_mseal not supported on your arch
-ltp-syscalls	msgctl01	BROK	msgctl01.c:124: TBROK: msgget(1627460383, 7b0) failed: ENOSYS (38)
-ltp-syscalls	msgctl02	BROK	msgctl02.c:55: TBROK: msgget(1627460383, 7b0) failed: ENOSYS (38)
-ltp-syscalls	msgctl03	BROK	msgctl03.c:22: TBROK: msgget(0, 180) failed: ENOSYS (38)
-ltp-syscalls	msgctl04	BROK	msgctl04.c:92: TBROK: msgget(0, 380) failed: ENOSYS (38)
+ltp-syscalls	msgctl01	PASS	
+ltp-syscalls	msgctl02	PASS	
+ltp-syscalls	msgctl03	PASS	
+ltp-syscalls	msgctl04	PASS	
 ltp-syscalls	msgctl05	CONF	tst_test.c:1429: TCONF: test requires struct msqid64_ds to have the time_high fields
-ltp-syscalls	msgctl06	BROK	msgctl06.c:148: TBROK: msgget(0, 380) failed: ENOSYS (38)
-ltp-syscalls	msgctl12	BROK	msgctl12.c:49: TBROK: msgget(0, 180) failed: ENOSYS (38)
-ltp-syscalls	msgget01	FAIL	msgget01.c:33: TFAIL: msgget() failed: ENOSYS (38)
-ltp-syscalls	msgget02	BROK	msgget02.c:78: TBROK: msgget(1627460383, 600) failed: ENOSYS (38)
-ltp-syscalls	msgget03	CONF	tst_sys_conf.c:73: TCONF: Path not found: /proc/sys/kernel/msgmni: ENOENT (2)
+ltp-syscalls	msgctl06	PASS	
+ltp-syscalls	msgctl12	PASS	
+ltp-syscalls	msgget01	PASS	
+ltp-syscalls	msgget02	PASS	
+ltp-syscalls	msgget03	PASS	
 ltp-syscalls	msgget04	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	msgget05	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
-ltp-syscalls	msgrcv01	BROK	msgrcv01.c:68: TBROK: msgget(1627460383, 780) failed: ENOSYS (38)
-ltp-syscalls	msgrcv02	BROK	msgrcv02.c:75: TBROK: msgget(1627460383, 780) failed: ENOSYS (38)
+ltp-syscalls	msgrcv01	PASS	
+ltp-syscalls	msgrcv02	PASS	
 ltp-syscalls	msgrcv03	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	msgrcv05	BROK	msgrcv05.c:54: TBROK: msgget(1627460383, 780) failed: ENOSYS (38)
 ltp-syscalls	msgrcv06	BROK	msgrcv06.c:35: TBROK: msgget(1627460383, 780) failed: ENOSYS (38)
-ltp-syscalls	msgrcv07	BROK	msgrcv07.c:52: TBROK: msgget(1627460383, 780) failed: ENOSYS (38)
-ltp-syscalls	msgrcv08	BROK	msgrcv08.c:66: TBROK: msgget(1627460383, 780) failed: ENOSYS (38)
-ltp-syscalls	msgsnd01	BROK	msgsnd01.c:69: TBROK: msgget(1627460383, 780) failed: ENOSYS (38)
-ltp-syscalls	msgsnd02	BROK	msgsnd02.c:91: TBROK: msgget(1627460383, 780) failed: ENOSYS (38)
+ltp-syscalls	msgrcv07	PASS	
+ltp-syscalls	msgrcv08	PASS	
+ltp-syscalls	msgsnd01	PASS	
+ltp-syscalls	msgsnd02	PASS	
 ltp-syscalls	msgsnd05	BROK	msgsnd05.c:83: TBROK: msgget(1627460383, 780) failed: ENOSYS (38)
 ltp-syscalls	msgsnd06	BROK	msgsnd06.c:39: TBROK: msgget(1627460383, 780) failed: ENOSYS (38)
 ltp-syscalls	msgstress01	BROK	msgstress01.c:256: TBROK: Failed to open FILE '/proc/sys/kernel/msgmni' for reading: ENOENT (2)
@@ -865,16 +866,16 @@ ltp-syscalls	munlock02	BROK	munlock02.c:34: TBROK: mlock() failed: ENOSYS (38)
 ltp-syscalls	munlockall01	BROK	munlockall01.c:19: TBROK: Expected 1 conversions got 0 FILE '/proc/self/status'
 ltp-syscalls	munmap01	PASS	
 ltp-syscalls	munmap03	PASS	
-ltp-syscalls	munmap04	BROK	tst_test.c:1969: TBROK: Test killed! (timeout?)
+ltp-syscalls	munmap04	TIMEOUT	tst_kconfig.c:90: TINFO: Parsing kernel config '/boot/config-7.3.0-veridian'
 ltp-syscalls	name_to_handle_at01	PASS	
 ltp-syscalls	name_to_handle_at02	PASS	
 ltp-syscalls	name_to_handle_at03	PASS	
-ltp-syscalls	nanosleep01	FAIL	tst_timer_test.c:314: TFAIL: nanosleep() slept for too long
+ltp-syscalls	nanosleep01	TIMEOUT	tst_test.c:1895: TINFO: Overall timeout per run is 0h 03m 09s
 ltp-syscalls	nanosleep02	PASS	
 ltp-syscalls	nanosleep04	PASS	
 ltp-syscalls	newuname01	FAIL	newuname01.c:32: TFAIL: name->sysname (VeridianOS) != "Linux" (Linux)
-ltp-syscalls	nftw01	FAIL	nftw01      3  TFAIL  :  tools.c:267: Test failed
-ltp-syscalls	nftw6401	FAIL	nftw6401    3  TFAIL  :  tools64.c:267: Test failed
+ltp-syscalls	nftw01	TIMEOUT	tst_timer_test.c:314: TFAIL: nanosleep() slept for too long
+ltp-syscalls	nftw6401	TIMEOUT	nftw6401    0  TINFO  :  Using /tmp/LTP_XXXXXX as tmpdir (unknown filesystem)
 ltp-syscalls	nice01	PASS	
 ltp-syscalls	nice02	FLAKY	TIMEOUT and WARN in two x86_64 runs (2026-10-22); last here: WARN; tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	nice03	PASS	
@@ -883,7 +884,7 @@ ltp-syscalls	nice05	PASS
 ltp-syscalls	open01	PASS	
 ltp-syscalls	open02	PASS	
 ltp-syscalls	open03	PASS	
-ltp-syscalls	open04	BROK	tst_test.c:1969: TBROK: Test killed! (timeout?)
+ltp-syscalls	open04	HANG	no output
 ltp-syscalls	open06	PASS	
 ltp-syscalls	open07	PASS	
 ltp-syscalls	open08	FAIL	open08.c:50: TFAIL: O_RDWR expected ENAMETOOLONG: ENOENT (2)
@@ -941,18 +942,18 @@ ltp-syscalls	pipe12	BROK	pipe12.c:97: TBROK: fcntl(4,F_GETPIPE_SZ,...) failed: E
 ltp-syscalls	pipe13	BROK	pipe13.c:78: TBROK: Failed to open FILE '/proc/153/stat' for reading: ENOENT (2)
 ltp-syscalls	pipe14	PASS	
 ltp-syscalls	pipe15	BROK	pipe15.c:48: TBROK: fcntl(4,F_GETPIPE_SZ,...) failed: EINVAL (22)
-ltp-syscalls	pipeio_1	BROK	pipeio_1    1  TBROK  :  pipeio.c:459: Couldn't allocate semaphore: errno=ENOSYS(38): Function not implemented
-ltp-syscalls	pipeio_2	BROK	pipeio_2    1  TBROK  :  pipeio.c:459: Couldn't allocate semaphore: errno=ENOSYS(38): Function not implemented
-ltp-syscalls	pipeio_3	BROK	pipeio_3    1  TBROK  :  pipeio.c:459: Couldn't allocate semaphore: errno=ENOSYS(38): Function not implemented
-ltp-syscalls	pipeio_4	BROK	pipeio_4    1  TBROK  :  pipeio.c:459: Couldn't allocate semaphore: errno=ENOSYS(38): Function not implemented
-ltp-syscalls	pipeio_5	BROK	pipeio_5    1  TBROK  :  pipeio.c:459: Couldn't allocate semaphore: errno=ENOSYS(38): Function not implemented
-ltp-syscalls	pipeio_6	BROK	pipeio_6    1  TBROK  :  pipeio.c:459: Couldn't allocate semaphore: errno=ENOSYS(38): Function not implemented
-ltp-syscalls	pipeio_7	BROK	pipeio_7    1  TBROK  :  pipeio.c:459: Couldn't allocate semaphore: errno=ENOSYS(38): Function not implemented
-ltp-syscalls	pipeio_8	BROK	pipeio_8    1  TBROK  :  pipeio.c:459: Couldn't allocate semaphore: errno=ENOSYS(38): Function not implemented
+ltp-syscalls	pipeio_1	TIMEOUT	pipeio      0  TINFO  :  Using /tmp/LTP_XXXXXX as tmpdir (unknown filesystem)
+ltp-syscalls	pipeio_2	TIMEOUT	pipeio      0  TINFO  :  Using /tmp/LTP_XXXXXX as tmpdir (unknown filesystem)
+ltp-syscalls	pipeio_3	TIMEOUT	pipeio      0  TINFO  :  Using /tmp/LTP_XXXXXX as tmpdir (unknown filesystem)
+ltp-syscalls	pipeio_4	TIMEOUT	pipeio      0  TINFO  :  Using /tmp/LTP_XXXXXX as tmpdir (unknown filesystem)
+ltp-syscalls	pipeio_5	PASS	
+ltp-syscalls	pipeio_6	PASS	
+ltp-syscalls	pipeio_7	PASS	
+ltp-syscalls	pipeio_8	PASS	
 ltp-syscalls	pivot_root01	PASS	
 ltp-syscalls	pkey01	CONF	../../../../include/lapi/pkey.h:43: TCONF: syscall(289) __NR_pkey_alloc not supported on your arch
 ltp-syscalls	poll01	PASS	
-ltp-syscalls	poll02	FAIL	tst_timer_test.c:314: TFAIL: poll() slept for too long
+ltp-syscalls	poll02	TIMEOUT	tst_timer_test.c:314: TFAIL: poll() slept for too long
 ltp-syscalls	poll03	FAIL	poll03.c:37: TFAIL: Expect: (pfd.revents & ~POLLHUP) == 0
 ltp-syscalls	poll04	PASS	
 ltp-syscalls	posix_fadvise01	PASS	
@@ -971,7 +972,7 @@ ltp-syscalls	prctl05	BROK	prctl05.c:67: TBROK: Failed to open FILE '/proc/self/t
 ltp-syscalls	prctl06	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	prctl07	CONF	prctl07.c:153: TCONF: libcap devel files missing during compilation
 ltp-syscalls	prctl08	FAIL	prctl08.c:69: TFAIL: Min prctl(PR_GET_TIMERSLACK) expected 1 got 50000
-ltp-syscalls	prctl09	FAIL	tst_timer_test.c:314: TFAIL: prctl() slept for too long
+ltp-syscalls	prctl09	TIMEOUT	tst_timer_test.c:314: TFAIL: prctl() slept for too long
 ltp-syscalls	prctl10	CONF	tst_test.c:1432: TCONF: This arch 'unknown' is not supported for test!
 ltp-syscalls	pread01	PASS	
 ltp-syscalls	pread01_64	PASS	
@@ -997,8 +998,8 @@ ltp-syscalls	process_vm_writev01	PASS
 ltp-syscalls	process_vm_writev02	PASS	
 ltp-syscalls	profil01	CONF	profil01    1  TCONF  :  profil01.c:135: system doesn't have profil() support
 ltp-syscalls	prot_hsymlinks	SIGNAL	SIGABRT; prot_hsymlinks    1  TBROK  :  prot_hsymlinks.c:323: Failed to run cmd: useradd hsym
-ltp-syscalls	pselect01	FAIL	tst_timer_test.c:314: TFAIL: pselect() slept for too long
-ltp-syscalls	pselect01_64	FAIL	tst_timer_test.c:314: TFAIL: pselect() slept for too long
+ltp-syscalls	pselect01	TIMEOUT	tst_timer_test.c:314: TFAIL: pselect() slept for too long
+ltp-syscalls	pselect01_64	TIMEOUT	tst_timer_test.c:314: TFAIL: pselect() slept for too long
 ltp-syscalls	pselect02	PASS	
 ltp-syscalls	pselect02_64	PASS	
 ltp-syscalls	pselect03	PASS	
@@ -1008,7 +1009,7 @@ ltp-syscalls	ptrace02	PASS
 ltp-syscalls	ptrace03	PASS	
 ltp-syscalls	ptrace04	CONF	ptrace04    1  TCONF  :  ptrace04.c:103: test not supported for your arch (yet)
 ltp-syscalls	ptrace05	BROK	ptrace05.c:65: TBROK: ptrace() failed: ENOSYS (38)
-ltp-syscalls	ptrace06	BROK	tst_test.c:1969: TBROK: Test killed! (timeout?)
+ltp-syscalls	ptrace06	TIMEOUT	tst_kconfig.c:90: TINFO: Parsing kernel config '/boot/config-7.3.0-veridian'
 ltp-syscalls	ptrace07	CONF	tst_test.c:1429: TCONF: Tests an x86_64 feature
 ltp-syscalls	ptrace08	CONF	tst_test.c:1432: TCONF: This arch 'unknown' is not supported for test!
 ltp-syscalls	ptrace09	CONF	tst_test.c:1432: TCONF: This arch 'unknown' is not supported for test!
@@ -1102,7 +1103,7 @@ ltp-syscalls	rt_sigprocmask02	FAIL	rt_sigprocmask02    1  TFAIL  :  rt_sigprocma
 ltp-syscalls	rt_sigqueueinfo01	FAIL	rt_sigqueueinfo01.c:70: TFAIL: rt_sigqueueinfo() failed: ESRCH (3)
 ltp-syscalls	rt_sigqueueinfo02	PASS	
 ltp-syscalls	rt_sigsuspend01	PASS	
-ltp-syscalls	rt_sigtimedwait01	BROK	tse_sigwait.c:165: TBROK: kill(618,SIGTERM) failed: ESRCH (3)
+ltp-syscalls	rt_sigtimedwait01	TIMEOUT	tse_sigwait.c:331: TPASS: Child exited with expected code
 ltp-syscalls	rt_tgsigqueueinfo01	PASS	
 ltp-syscalls	sbrk01	FAIL	sbrk01.c:27: TFAIL: sbrk(8192) returned 0xffffffffffffffff failed: ENOMEM (12)
 ltp-syscalls	sbrk02	PASS	
@@ -1140,22 +1141,22 @@ ltp-syscalls	select02	TIMEOUT	tst_timer_test.c:314: TFAIL: select() slept for to
 ltp-syscalls	select03	PASS	
 ltp-syscalls	select04	PASS	
 ltp-syscalls	semctl01	BROK	semctl01.c:267: TBROK: semget(0, 10, 780) failed: ENOSYS (38)
-ltp-syscalls	semctl02	BROK	semctl02.c:39: TBROK: semget(1627455497, 10, 600) failed: ENOSYS (38)
-ltp-syscalls	semctl03	BROK	semctl03.c:91: TBROK: semget(0, 10, 780) failed: ENOSYS (38)
-ltp-syscalls	semctl04	BROK	semctl04.c:67: TBROK: semget(1627455497, 10, 600) failed: ENOSYS (38)
-ltp-syscalls	semctl05	BROK	semctl05.c:48: TBROK: semget(0, 10, 780) failed: ENOSYS (38)
-ltp-syscalls	semctl06	FAIL	semctl06    1  TFAIL  :  semctl06.c:168:  semget() failed errno 38
-ltp-syscalls	semctl07	BROK	semctl07.c:135: TBROK: semget(0, 1, 380) failed: ENOSYS (38)
+ltp-syscalls	semctl02	PASS	
+ltp-syscalls	semctl03	PASS	
+ltp-syscalls	semctl04	PASS	
+ltp-syscalls	semctl05	PASS	
+ltp-syscalls	semctl06	TIMEOUT	semctl06    0  TINFO  :  Using /tmp/LTP_XXXXXX as tmpdir (unknown filesystem)
+ltp-syscalls	semctl07	PASS	
 ltp-syscalls	semctl08	CONF	tst_test.c:1429: TCONF: test requires struct semid64_ds to have the time_high fields
-ltp-syscalls	semctl09	BROK	semctl09.c:193: TBROK: semget(0, 2, 380) failed: ENOSYS (38)
-ltp-syscalls	semget01	FAIL	semget01.c:37: TFAIL: semget() failed: ENOSYS (38)
-ltp-syscalls	semget02	BROK	semget02.c:81: TBROK: semget(1627460383, 10, 600) failed: ENOSYS (38)
-ltp-syscalls	semget05	CONF	tst_sys_conf.c:73: TCONF: Path not found: /proc/sys/kernel/sem: ENOENT (2)
-ltp-syscalls	semop01	CONF	semop.h:48: TCONF: Test not supported on kernel/platform
-ltp-syscalls	semop02	CONF	semop.h:48: TCONF: Test not supported on kernel/platform
-ltp-syscalls	semop03	CONF	semop.h:48: TCONF: Test not supported on kernel/platform
-ltp-syscalls	semop04	BROK	semop04.c:68: TBROK: semget(9142, 1, 3b6) failed: ENOSYS (38)
-ltp-syscalls	semop05	FAIL	semget failed, errno = 38
+ltp-syscalls	semctl09	PASS	
+ltp-syscalls	semget01	PASS	
+ltp-syscalls	semget02	PASS	
+ltp-syscalls	semget05	TIMEOUT	semget05.c:39: TINFO: Current environment 0 semaphore arrays are already in use
+ltp-syscalls	semop01	PASS	
+ltp-syscalls	semop02	PASS	
+ltp-syscalls	semop03	BROK	semop03.c:104: TBROK: Failed to open FILE '/proc/54/stat' for reading: ENOENT (2)
+ltp-syscalls	semop04	TIMEOUT	tst_test.c:1895: TINFO: Overall timeout per run is 0h 03m 00s
+ltp-syscalls	semop05	PASS	
 ltp-syscalls	send01	BROK	send01      5  TBROK  :  send01.c:323: socket setup failed connect test 4: errno=ENOSYS(38): Function not implemented
 ltp-syscalls	send02	BROK	tst_test.c:1973: TBROK: Test killed by SIGSEGV!
 ltp-syscalls	sendfile02	PASS	
@@ -1176,8 +1177,8 @@ ltp-syscalls	sendfile09	CONF	sendfile09.c:44: TCONF: Test on large file needs 5G
 ltp-syscalls	sendfile09_64	CONF	sendfile09.c:44: TCONF: Test on large file needs 5G free space
 ltp-syscalls	sendmmsg01	FAIL	exit 33; sendmmsg01.c:28: TFAIL: sendmmsg() failed: EINVAL (22)
 ltp-syscalls	sendmmsg02	PASS	
-ltp-syscalls	sendmsg01	BROK	sendmsg01    1  TBROK  :  sendmsg01.c:544: ip/ifconfig failed to bring up loop back device
-ltp-syscalls	sendmsg02	BROK	sendmsg02    1  TBROK  :  sendmsg02.c:220: Couldn't allocate semaphore: errno=ENOSYS(38): Function not implemented
+ltp-syscalls	sendmsg01	TIMEOUT	sendmsg01    0  TINFO  :  Using /tmp/LTP_XXXXXX as tmpdir (unknown filesystem)
+ltp-syscalls	sendmsg02	PASS	
 ltp-syscalls	sendmsg03	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	sendto01	BROK	sendto01    9  TBROK  :  sendto01.c:392: socket setup failed connect test 8: errno=ENOSYS(38): Function not implemented
 ltp-syscalls	sendto02	CONF	sendto02.c:38: TCONF: sctp protocol was not supported
@@ -1224,10 +1225,10 @@ ltp-syscalls	setgroups03_16	CONF	testcases/kernel/syscalls/setgroups/../utils/co
 ltp-syscalls	sethostname01	PASS	
 ltp-syscalls	sethostname02	PASS	
 ltp-syscalls	sethostname03	PASS	
-ltp-syscalls	setitimer01	BROK	tst_test.c:1969: TBROK: Test killed! (timeout?)
+ltp-syscalls	setitimer01	TIMEOUT	setitimer01.c:80: TPASS: ovalue->it_interval.tv_sec == time_sec (10)
 ltp-syscalls	setitimer02	PASS	
 ltp-syscalls	setns01	PASS	
-ltp-syscalls	setns02	BROK	setns02.c:165: TBROK: shmget(1090650122, 4096, 3b6) failed: ENOSYS (38)
+ltp-syscalls	setns02	TIMEOUT	setns02.c:89: TPASS: (child) shmat failed as expected: EINVAL (22)
 ltp-syscalls	setpgid01	PASS	
 ltp-syscalls	setpgid02	PASS	
 ltp-syscalls	setpgid03	PASS	
@@ -1305,22 +1306,22 @@ ltp-syscalls	setxattr01	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	setxattr02	PASS	
 ltp-syscalls	setxattr03	BROK	setxattr03.c:139: TBROK: Set setxattr03immutable immutable failed: EINVAL (22)
 ltp-syscalls	sgetmask01	CONF	sgetmask01    1  TCONF  :  sgetmask01.c:128: syscall(-1) __NR_ssetmask not supported on your arch
-ltp-syscalls	shmat01	BROK	shmat01.c:132: TBROK: shmget(1627455497, 8192, 780) failed: ENOSYS (38)
-ltp-syscalls	shmat02	BROK	shmat02.c:72: TBROK: shmget(1627455497, 8192, 780) failed: ENOSYS (38)
-ltp-syscalls	shmat03	BROK	shmat03.c:51: TBROK: shmget(0, 4096, 1ff) failed: ENOSYS (38)
-ltp-syscalls	shmat04	BROK	shmat04.c:36: TBROK: shmget(1627455498, 12288, 780) failed: ENOSYS (38)
+ltp-syscalls	shmat01	PASS	
+ltp-syscalls	shmat02	PASS	
+ltp-syscalls	shmat03	PASS	
+ltp-syscalls	shmat04	PASS	
 ltp-syscalls	shmctl01	BROK	shmctl01.c:246: TBROK: shmget(0, 2048, 380) failed: ENOSYS (38)
-ltp-syscalls	shmctl02	BROK	shmctl02.c:109: TBROK: shmget(0, 2048, 380) failed: ENOSYS (38)
-ltp-syscalls	shmctl03	FAIL	shmctl03.c:23: TFAIL: shmctl(0, IPC_INFO, ...) returned -1: ENOSYS (38)
-ltp-syscalls	shmctl04	BROK	shmctl04.c:163: TBROK: shmget(0, 2048, 380) failed: ENOSYS (38)
+ltp-syscalls	shmctl02	PASS	
+ltp-syscalls	shmctl03	PASS	
+ltp-syscalls	shmctl04	PASS	
 ltp-syscalls	shmctl05	CONF	shmctl05.c:47: TCONF: syscall(234) __NR_remap_file_pages not supported on your arch
 ltp-syscalls	shmctl06	CONF	tst_test.c:1429: TCONF: test requires struct shmid64_ds to have the time_high fields
-ltp-syscalls	shmctl07	BROK	shmctl07.c:56: TBROK: shmget(0, 2048, 380) failed: ENOSYS (38)
-ltp-syscalls	shmctl08	BROK	shmctl08.c:91: TBROK: shmget(0, 2048, 3b6) failed: ENOSYS (38)
-ltp-syscalls	shmdt01	BROK	shmdt01.c:61: TBROK: shmget(1627460383, 4, 780) failed: ENOSYS (38)
-ltp-syscalls	shmdt02	BROK	shmdt02.c:38: TBROK: shmget(1627455497, 8192, 780) failed: ENOSYS (38)
-ltp-syscalls	shmget02	CONF	tst_sys_conf.c:73: TCONF: Path not found: /proc/sys/kernel/shmmax: ENOENT (2)
-ltp-syscalls	shmget03	BROK	shmget03.c:37: TBROK: fopen(/proc/sysvipc/shm,r) failed: ENOENT (2)
+ltp-syscalls	shmctl07	PASS	
+ltp-syscalls	shmctl08	PASS	
+ltp-syscalls	shmdt01	PASS	
+ltp-syscalls	shmdt02	PASS	
+ltp-syscalls	shmget02	PASS	
+ltp-syscalls	shmget03	TIMEOUT	tst_test.c:1895: TINFO: Overall timeout per run is 0h 03m 00s
 ltp-syscalls	shmget04	BROK	shmget04.c:53: TBROK: shmget(1627460383, 2048, 600) failed: ENOSYS (38)
 ltp-syscalls	shmget05	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	shmget06	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
@@ -1346,9 +1347,9 @@ ltp-syscalls	sigprocmask01	PASS
 ltp-syscalls	sigrelse01	PASS	
 ltp-syscalls	sigsuspend01	PASS	
 ltp-syscalls	sigsuspend02	PASS	
-ltp-syscalls	sigtimedwait01	BROK	tst_test.c:1969: TBROK: Test killed! (timeout?)
+ltp-syscalls	sigtimedwait01	TIMEOUT	tst_kconfig.c:90: TINFO: Parsing kernel config '/boot/config-7.3.0-veridian'
 ltp-syscalls	sigwait01	PASS	
-ltp-syscalls	sigwaitinfo01	BROK	tst_test.c:1969: TBROK: Test killed! (timeout?)
+ltp-syscalls	sigwaitinfo01	TIMEOUT	tst_kconfig.c:90: TINFO: Parsing kernel config '/boot/config-7.3.0-veridian'
 ltp-syscalls	socket01	FAIL	socket01.c:67: TFAIL: expected EPROTONOSUPPORT(93): EINVAL (22)
 ltp-syscalls	socket02	PASS	
 ltp-syscalls	socketcall01	CONF	socketcall01.c:39: TCONF: syscall(-1) __NR_socketcall not supported on your arch
@@ -1363,7 +1364,7 @@ ltp-syscalls	splice03	PASS
 ltp-syscalls	splice04	PASS	
 ltp-syscalls	splice05	FAIL	splice05.c:69: TFAIL: splice error: ENOSYS (38)
 ltp-syscalls	splice06	CONF	tst_sys_conf.c:73: TCONF: Path not found: /proc/sys/fs/pipe-max-size: ENOENT (2)
-ltp-syscalls	splice07	BROK	tst_fd.c:151: TCONF: Skipping fanotify: ENOSYS (38)
+ltp-syscalls	splice07	TIMEOUT	tst_fd.c:151: TCONF: Skipping fanotify: ENOSYS (38)
 ltp-syscalls	splice08	BROK	splice08.c:74: TBROK: open(/dev/full,0,0000) failed: ENOENT (2)
 ltp-syscalls	splice09	FAIL	splice09.c:37: TFAIL: splice(pipefd[0], NULL, dev_fd, NULL, sizeof(buf), 0) failed: ENOSYS (38)
 ltp-syscalls	ssetmask01	CONF	ssetmask01    1  TCONF  :  ssetmask01.c:115: syscall(-1) __NR_ssetmask not supported on your arch
@@ -1435,7 +1436,7 @@ ltp-syscalls	sysfs04	CONF	sysfs04.c:20: TCONF: syscall(-1) __NR_sysfs not suppor
 ltp-syscalls	sysfs05	CONF	sysfs05.c:33: TCONF: syscall(-1) __NR_sysfs not supported on your arch
 ltp-syscalls	sysinfo01	BROK	sysinfo01.c:37: TBROK: Expected 1 conversions got 0 FILE '/proc/meminfo'
 ltp-syscalls	sysinfo02	PASS	
-ltp-syscalls	sysinfo03	FAIL	sysinfo03.c:63: TFAIL: /proc/uptime 5513 differs from sysinfo 5512
+ltp-syscalls	sysinfo03	PASS	
 ltp-syscalls	syslog11	BROK	tst_sys_conf.c:73: TBROK: Path not found: /proc/sys/kernel/printk: ENOENT (2)
 ltp-syscalls	syslog12	CONF	syslog12.c:70: TCONF: syscall(116) __NR_syslog not supported on your arch
 ltp-syscalls	tee01	PASS	
@@ -1451,7 +1452,7 @@ ltp-syscalls	timer_delete01	PASS
 ltp-syscalls	timer_delete02	PASS	
 ltp-syscalls	timer_getoverrun01	PASS	
 ltp-syscalls	timer_gettime01	PASS	
-ltp-syscalls	timer_settime01	FAIL	timer_settime01.c:88: TFAIL: Timer CLOCK_REALTIME_ALARM expired too early
+ltp-syscalls	timer_settime01	TIMEOUT	timer_settime01.c:183: TPASS: timer_settime(CLOCK_REALTIME_ALARM) passed
 ltp-syscalls	timer_settime02	PASS	
 ltp-syscalls	timer_settime03	PASS	
 ltp-syscalls	timerfd01	FLAKY	FAIL and WARN in two x86_64 runs (2026-10-22); last here: WARN; tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
@@ -1470,7 +1471,7 @@ ltp-syscalls	truncate02_64	PASS
 ltp-syscalls	truncate03	PASS	
 ltp-syscalls	truncate03_64	PASS	
 ltp-syscalls	ulimit01	PASS	
-ltp-syscalls	umask01	BROK	tst_test.c:1969: TBROK: Test killed! (timeout?)
+ltp-syscalls	umask01	TIMEOUT	tst_kconfig.c:90: TINFO: Parsing kernel config '/boot/config-7.3.0-veridian'
 ltp-syscalls	umount01	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	umount02	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	umount2_01	BROK	umount2_01    1  TBROK  :  tst_device.c:450: Failed to acquire device
@@ -1489,7 +1490,7 @@ ltp-syscalls	unshare01	PASS
 ltp-syscalls	unshare02	PASS	
 ltp-syscalls	unshare03	CONF	tst_sys_conf.c:73: TCONF: Path not found: /proc/sys/fs/nr_open: ENOENT (2)
 ltp-syscalls	unshare04	PASS	
-ltp-syscalls	unshare05	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
+ltp-syscalls	unshare05	PASS	
 ltp-syscalls	userfaultfd01	CONF	../../../../include/lapi/userfaultfd.h:259: TCONF: syscall(282) __NR_userfaultfd not supported on your arch
 ltp-syscalls	userfaultfd02	CONF	../../../../include/lapi/userfaultfd.h:259: TCONF: syscall(282) __NR_userfaultfd not supported on your arch
 ltp-syscalls	userfaultfd03	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
@@ -1903,7 +1904,7 @@ open-posix	conformance/interfaces/fork/16-1	PASS
 open-posix	conformance/interfaces/fork/17-1	BROK	[20:42:27]
 open-posix	conformance/interfaces/fork/17-2	BROK	[20:42:29]
 open-posix	conformance/interfaces/fork/18-1	PASS	
-open-posix	conformance/interfaces/fork/19-1	BROK	Failed to create the message queue descriptor: Function not implemented
+open-posix	conformance/interfaces/fork/19-1	PASS	
 open-posix	conformance/interfaces/fork/21-1	PASS	
 open-posix	conformance/interfaces/fork/22-1	PASS	
 open-posix	conformance/interfaces/fsync/4-1	PASS	
@@ -1996,147 +1997,147 @@ open-posix	conformance/interfaces/mmap/24-2	PASS
 open-posix	conformance/interfaces/mmap/27-1	PASS	
 open-posix	conformance/interfaces/mmap/31-1	CONF	UNSUPPORTED: Cannot be tested on 64 bit architecture
 open-posix	conformance/interfaces/mmap/32-1	PASS	
-open-posix	conformance/interfaces/mq_close/1-1	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_close/2-1	BROK	unexpected error: mq_close 2-1: mq_open: Function not implemented
-open-posix	conformance/interfaces/mq_close/3-1	BROK	unexpected error: mq_close 3-1: mq_open: Function not implemented
+open-posix	conformance/interfaces/mq_close/1-1	PASS	
+open-posix	conformance/interfaces/mq_close/2-1	FAIL	Test FAILED
+open-posix	conformance/interfaces/mq_close/3-1	PASS	
 open-posix	conformance/interfaces/mq_close/3-2	PASS	
 open-posix	conformance/interfaces/mq_close/3-3	PASS	
-open-posix	conformance/interfaces/mq_close/4-1	BROK	unexpected error: mq_close 4-1: mq_open: Function not implemented
+open-posix	conformance/interfaces/mq_close/4-1	PASS	
 open-posix	conformance/interfaces/mq_getattr/1-1	PASS	
-open-posix	conformance/interfaces/mq_getattr/2-1	BROK	unexpected error: mq_getattr 2-1: mq_open(): Function not implemented
-open-posix	conformance/interfaces/mq_getattr/2-2	BROK	unexpected error: mq_getattr 2-2: mq_open(): Function not implemented
-open-posix	conformance/interfaces/mq_getattr/3-1	BROK	unexpected error: mq_getattr 3-1: mq_open(): Function not implemented
-open-posix	conformance/interfaces/mq_getattr/4-1	BROK	unexpected error: mq_getattr 4-1: mq_open(): Function not implemented
+open-posix	conformance/interfaces/mq_getattr/2-1	PASS	
+open-posix	conformance/interfaces/mq_getattr/2-2	PASS	
+open-posix	conformance/interfaces/mq_getattr/3-1	PASS	
+open-posix	conformance/interfaces/mq_getattr/4-1	PASS	
 open-posix	conformance/interfaces/mq_getattr/5-1	PASS	
 open-posix	conformance/interfaces/mq_getattr/6-1	PASS	
-open-posix	conformance/interfaces/mq_getattr/speculative/7-1	BROK	mq_open(): Function not implemented
-open-posix	conformance/interfaces/mq_notify/1-1	BROK	unexpected error: mq_notify 1-1: mq_open: Function not implemented
-open-posix	conformance/interfaces/mq_notify/2-1	BROK	unexpected error: mq_notify 2-1: mq_open: Function not implemented
-open-posix	conformance/interfaces/mq_notify/3-1	BROK	unexpected error: mq_notify 3-1: mq_open: Function not implemented
-open-posix	conformance/interfaces/mq_notify/4-1	BROK	unexpected error: mq_notify 4-1: mq_open: Function not implemented
-open-posix	conformance/interfaces/mq_notify/5-1	BROK	unexpected error: mq_notify 5-1: mq_open: Function not implemented
+open-posix	conformance/interfaces/mq_getattr/speculative/7-1	PASS	
+open-posix	conformance/interfaces/mq_notify/1-1	PASS	
+open-posix	conformance/interfaces/mq_notify/2-1	PASS	
+open-posix	conformance/interfaces/mq_notify/3-1	PASS	
+open-posix	conformance/interfaces/mq_notify/4-1	PASS	
+open-posix	conformance/interfaces/mq_notify/5-1	PASS	
 open-posix	conformance/interfaces/mq_notify/6-1	PASS	
 open-posix	conformance/interfaces/mq_notify/7-1	PASS	
-open-posix	conformance/interfaces/mq_notify/8-1	FAIL	Test FAILED (errno != EBADF)
-open-posix	conformance/interfaces/mq_notify/9-1	BROK	unexpected error: mq_notify 9-1: mq_open: Function not implemented
-open-posix	conformance/interfaces/mq_open/1-1	FAIL	Test FAILED
-open-posix	conformance/interfaces/mq_open/2-1	BROK	Test UNRESOLVED
+open-posix	conformance/interfaces/mq_notify/8-1	PASS	
+open-posix	conformance/interfaces/mq_notify/9-1	PASS	
+open-posix	conformance/interfaces/mq_open/1-1	PASS	
+open-posix	conformance/interfaces/mq_open/2-1	PASS	
 open-posix	conformance/interfaces/mq_open/3-1	PASS	
-open-posix	conformance/interfaces/mq_open/7-1	BROK	Test UNRESOLVED
-open-posix	conformance/interfaces/mq_open/7-2	BROK	Test UNRESOLVED
-open-posix	conformance/interfaces/mq_open/7-3	FAIL	Test FAILED
-open-posix	conformance/interfaces/mq_open/8-1	BROK	Test UNRESOLVED
-open-posix	conformance/interfaces/mq_open/8-2	BROK	Test UNRESOLVED
-open-posix	conformance/interfaces/mq_open/9-1	BROK	Test UNRESOLVED
-open-posix	conformance/interfaces/mq_open/9-2	BROK	Test UNRESOLVED
-open-posix	conformance/interfaces/mq_open/11-1	FAIL	Test FAILED
-open-posix	conformance/interfaces/mq_open/12-1	FAIL	Test FAILED
-open-posix	conformance/interfaces/mq_open/13-1	FAIL	Test FAILED
-open-posix	conformance/interfaces/mq_open/15-1	BROK	Test UNRESOLVED
-open-posix	conformance/interfaces/mq_open/16-1	FAIL	Test FAILED - mq_open() never succeeded
-open-posix	conformance/interfaces/mq_open/18-1	FAIL	Test FAILED
-open-posix	conformance/interfaces/mq_open/19-1	BROK	Test UNRESOLVED
-open-posix	conformance/interfaces/mq_open/20-1	FAIL	Test FAILED
+open-posix	conformance/interfaces/mq_open/7-1	PASS	
+open-posix	conformance/interfaces/mq_open/7-2	PASS	
+open-posix	conformance/interfaces/mq_open/7-3	PASS	
+open-posix	conformance/interfaces/mq_open/8-1	PASS	
+open-posix	conformance/interfaces/mq_open/8-2	PASS	
+open-posix	conformance/interfaces/mq_open/9-1	PASS	
+open-posix	conformance/interfaces/mq_open/9-2	PASS	
+open-posix	conformance/interfaces/mq_open/11-1	PASS	
+open-posix	conformance/interfaces/mq_open/12-1	PASS	
+open-posix	conformance/interfaces/mq_open/13-1	PASS	
+open-posix	conformance/interfaces/mq_open/15-1	PASS	
+open-posix	conformance/interfaces/mq_open/16-1	PASS	
+open-posix	conformance/interfaces/mq_open/18-1	PASS	
+open-posix	conformance/interfaces/mq_open/19-1	PASS	
+open-posix	conformance/interfaces/mq_open/20-1	PASS	
 open-posix	conformance/interfaces/mq_open/21-1	PASS	
-open-posix	conformance/interfaces/mq_open/23-1	BROK	Test UNRESOLVED
-open-posix	conformance/interfaces/mq_open/25-2	FAIL	Test FAILED
+open-posix	conformance/interfaces/mq_open/23-1	PASS	
+open-posix	conformance/interfaces/mq_open/25-2	PASS	
 open-posix	conformance/interfaces/mq_open/27-1	FAIL	Test FAILED
-open-posix	conformance/interfaces/mq_open/27-2	FAIL	Test FAILED
-open-posix	conformance/interfaces/mq_open/29-1	FAIL	Test FAILED
+open-posix	conformance/interfaces/mq_open/27-2	PASS	
+open-posix	conformance/interfaces/mq_open/29-1	PASS	
 open-posix	conformance/interfaces/mq_open/speculative/2-2	PASS	
 open-posix	conformance/interfaces/mq_open/speculative/2-3	PASS	
 open-posix	conformance/interfaces/mq_open/speculative/6-1	PASS	
-open-posix	conformance/interfaces/mq_open/speculative/26-1	FAIL	mq_open() failed before expected
-open-posix	conformance/interfaces/mq_receive/1-1	FAIL	unexpected error: mq_receive 1-1: mq_open: Function not implemented
-open-posix	conformance/interfaces/mq_receive/2-1	BROK	unexpected error: mq_receive 2-1: mq_open: Function not implemented
+open-posix	conformance/interfaces/mq_open/speculative/26-1	PASS	
+open-posix	conformance/interfaces/mq_receive/1-1	PASS	
+open-posix	conformance/interfaces/mq_receive/2-1	PASS	
 open-posix	conformance/interfaces/mq_receive/4-1	PASS	
-open-posix	conformance/interfaces/mq_receive/5-1	FAIL	unexpected error: mq_receive 5-1: mq_open: Function not implemented
-open-posix	conformance/interfaces/mq_receive/7-1	BROK	unexpected error: mq_receive 7-1: mq_open: Function not implemented
-open-posix	conformance/interfaces/mq_receive/8-1	FAIL	unexpected error: mq_receive 8-1: mq_open: Function not implemented
+open-posix	conformance/interfaces/mq_receive/5-1	PASS	
+open-posix	conformance/interfaces/mq_receive/7-1	PASS	
+open-posix	conformance/interfaces/mq_receive/8-1	PASS	
 open-posix	conformance/interfaces/mq_receive/9-1	PASS	
-open-posix	conformance/interfaces/mq_receive/10-1	FAIL	unexpected error: mq_receive 10-1: mq_open: Function not implemented
-open-posix	conformance/interfaces/mq_receive/11-1	FAIL	unexpected error: mq_receive 11-1: mq_open(): Function not implemented
-open-posix	conformance/interfaces/mq_receive/11-2	FAIL	unexpected error: mq_receive 11-2: mq_open(): Function not implemented
-open-posix	conformance/interfaces/mq_receive/12-1	FAIL	unexpected error: mq_receive 12-1: mq_open: Function not implemented
-open-posix	conformance/interfaces/mq_receive/13-1	BROK	unexpected error: mq_receive 13-1: mq_open: Function not implemented
-open-posix	conformance/interfaces/mq_send/1-1	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_send/2-1	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_send/3-1	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_send/3-2	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_send/4-1	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_send/4-2	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_send/4-3	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_send/5-1	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_send/5-2	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_send/7-1	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_send/8-1	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_send/9-1	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_send/10-1	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_send/11-1	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_send/11-2	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_send/12-1	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_send/13-1	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_send/14-1	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_setattr/1-1	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_setattr/1-2	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_setattr/2-1	BROK	mq_open() did not return success: Function not implemented
+open-posix	conformance/interfaces/mq_receive/10-1	PASS	
+open-posix	conformance/interfaces/mq_receive/11-1	PASS	
+open-posix	conformance/interfaces/mq_receive/11-2	PASS	
+open-posix	conformance/interfaces/mq_receive/12-1	PASS	
+open-posix	conformance/interfaces/mq_receive/13-1	PASS	
+open-posix	conformance/interfaces/mq_send/1-1	PASS	
+open-posix	conformance/interfaces/mq_send/2-1	PASS	
+open-posix	conformance/interfaces/mq_send/3-1	PASS	
+open-posix	conformance/interfaces/mq_send/3-2	PASS	
+open-posix	conformance/interfaces/mq_send/4-1	PASS	
+open-posix	conformance/interfaces/mq_send/4-2	PASS	
+open-posix	conformance/interfaces/mq_send/4-3	PASS	
+open-posix	conformance/interfaces/mq_send/5-1	PASS	
+open-posix	conformance/interfaces/mq_send/5-2	PASS	
+open-posix	conformance/interfaces/mq_send/7-1	PASS	
+open-posix	conformance/interfaces/mq_send/8-1	PASS	
+open-posix	conformance/interfaces/mq_send/9-1	PASS	
+open-posix	conformance/interfaces/mq_send/10-1	PASS	
+open-posix	conformance/interfaces/mq_send/11-1	PASS	
+open-posix	conformance/interfaces/mq_send/11-2	PASS	
+open-posix	conformance/interfaces/mq_send/12-1	PASS	
+open-posix	conformance/interfaces/mq_send/13-1	PASS	
+open-posix	conformance/interfaces/mq_send/14-1	PASS	
+open-posix	conformance/interfaces/mq_setattr/1-1	PASS	
+open-posix	conformance/interfaces/mq_setattr/1-2	PASS	
+open-posix	conformance/interfaces/mq_setattr/2-1	PASS	
 open-posix	conformance/interfaces/mq_setattr/3-1	PASS	
 open-posix	conformance/interfaces/mq_setattr/4-1	PASS	
-open-posix	conformance/interfaces/mq_setattr/5-1	BROK	unexpected error: mq_setattr 5-1: mq_open(): Function not implemented
-open-posix	conformance/interfaces/mq_timedreceive/1-1	FAIL	unexpected error: mq_timedreceive 1-1: mq_open: Function not implemented
-open-posix	conformance/interfaces/mq_timedreceive/2-1	BROK	unexpected error: mq_timedreceive 2-1: mq_open: Function not implemented
+open-posix	conformance/interfaces/mq_setattr/5-1	PASS	
+open-posix	conformance/interfaces/mq_timedreceive/1-1	PASS	
+open-posix	conformance/interfaces/mq_timedreceive/2-1	PASS	
 open-posix	conformance/interfaces/mq_timedreceive/4-1	PASS	
-open-posix	conformance/interfaces/mq_timedreceive/5-1	FAIL	unexpected error: mq_timedreceive 5-1: mq_open: Function not implemented
-open-posix	conformance/interfaces/mq_timedreceive/5-2	FAIL	unexpected error: mq_timedreceive 5-2: mq_open: Function not implemented
-open-posix	conformance/interfaces/mq_timedreceive/5-3	FAIL	unexpected error: mq_timedreceive 5-3: mq_open: Function not implemented
-open-posix	conformance/interfaces/mq_timedreceive/7-1	BROK	unexpected error: mq_timedreceive 7-1: mq_open: Function not implemented
-open-posix	conformance/interfaces/mq_timedreceive/8-1	FAIL	unexpected error: mq_timedreceive 8-1: mq_open: Function not implemented
-open-posix	conformance/interfaces/mq_timedreceive/10-1	FAIL	unexpected error: mq_timedreceive 10-1: mq_open: Function not implemented
-open-posix	conformance/interfaces/mq_timedreceive/10-2	FAIL	unexpected error: mq_timedreceive 10-2: mq_open: Function not implemented
-open-posix	conformance/interfaces/mq_timedreceive/11-1	FAIL	unexpected error: mq_timedreceive 11-1: mq_open: Function not implemented
+open-posix	conformance/interfaces/mq_timedreceive/5-1	PASS	
+open-posix	conformance/interfaces/mq_timedreceive/5-2	PASS	
+open-posix	conformance/interfaces/mq_timedreceive/5-3	PASS	
+open-posix	conformance/interfaces/mq_timedreceive/7-1	PASS	
+open-posix	conformance/interfaces/mq_timedreceive/8-1	PASS	
+open-posix	conformance/interfaces/mq_timedreceive/10-1	PASS	
+open-posix	conformance/interfaces/mq_timedreceive/10-2	PASS	
+open-posix	conformance/interfaces/mq_timedreceive/11-1	PASS	
 open-posix	conformance/interfaces/mq_timedreceive/12-1	PASS	
-open-posix	conformance/interfaces/mq_timedreceive/13-1	FAIL	unexpected error: mq_timedreceive 13-1: mq_open: Function not implemented
-open-posix	conformance/interfaces/mq_timedreceive/14-1	FAIL	unexpected error: mq_timedreceive 14-1: mq_open(): Function not implemented
-open-posix	conformance/interfaces/mq_timedreceive/15-1	FAIL	unexpected error: mq_timedreceive 15-1: mq_open: Function not implemented
+open-posix	conformance/interfaces/mq_timedreceive/13-1	PASS	
+open-posix	conformance/interfaces/mq_timedreceive/14-1	PASS	
+open-posix	conformance/interfaces/mq_timedreceive/15-1	PASS	
 open-posix	conformance/interfaces/mq_timedreceive/16-1	PASS	
-open-posix	conformance/interfaces/mq_timedreceive/17-1	FAIL	unexpected error: mq_timedreceive 17-1: mq_open: Function not implemented
-open-posix	conformance/interfaces/mq_timedreceive/17-2	FAIL	unexpected error: mq_timedreceive 17-2: mq_open: Function not implemented
-open-posix	conformance/interfaces/mq_timedreceive/17-3	FAIL	unexpected error: mq_timedreceive 17-3: mq_open: Function not implemented
-open-posix	conformance/interfaces/mq_timedreceive/18-1	FAIL	unexpected error: mq_timedreceive 18-1: mq_open: Function not implemented
-open-posix	conformance/interfaces/mq_timedreceive/18-2	FAIL	unexpected error: mq_timedreceive 18-2: mq_open: Function not implemented
-open-posix	conformance/interfaces/mq_timedreceive/speculative/10-2	BROK	unexpected error: mq_timedreceive 10-2: mq_open: Function not implemented
-open-posix	conformance/interfaces/mq_timedsend/1-1	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_timedsend/2-1	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_timedsend/3-1	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_timedsend/3-2	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_timedsend/4-1	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_timedsend/4-2	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_timedsend/4-3	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_timedsend/5-1	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_timedsend/5-2	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_timedsend/5-3	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_timedsend/7-1	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_timedsend/8-1	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_timedsend/9-1	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_timedsend/10-1	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_timedsend/11-1	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_timedsend/11-2	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_timedsend/12-1	BROK	mq_open: Function not implemented
-open-posix	conformance/interfaces/mq_timedsend/13-1	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_timedsend/14-1	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_timedsend/15-1	BROK	Test UNRESOLVED
-open-posix	conformance/interfaces/mq_timedsend/16-1	BROK	mq_open() did not return success: Function not implemented
-open-posix	conformance/interfaces/mq_timedsend/18-1	BROK	Test UNRESOLVED
-open-posix	conformance/interfaces/mq_timedsend/19-1	BROK	Test UNRESOLVED
-open-posix	conformance/interfaces/mq_timedsend/20-1	BROK	Test UNRESOLVED
-open-posix	conformance/interfaces/mq_timedsend/speculative/18-2	BROK	Test UNRESOLVED
-open-posix	conformance/interfaces/mq_unlink/1-1	BROK	unexpected error: mq_unlink 1-1: mq_open: Function not implemented
-open-posix	conformance/interfaces/mq_unlink/2-1	BROK	unexpected error: mq_unlink 2-1: mq_open: Function not implemented
-open-posix	conformance/interfaces/mq_unlink/2-2	BROK	unexpected error: mq_unlink 2-2: mq_open: Function not implemented
+open-posix	conformance/interfaces/mq_timedreceive/17-1	PASS	
+open-posix	conformance/interfaces/mq_timedreceive/17-2	PASS	
+open-posix	conformance/interfaces/mq_timedreceive/17-3	PASS	
+open-posix	conformance/interfaces/mq_timedreceive/18-1	PASS	
+open-posix	conformance/interfaces/mq_timedreceive/18-2	PASS	
+open-posix	conformance/interfaces/mq_timedreceive/speculative/10-2	PASS	
+open-posix	conformance/interfaces/mq_timedsend/1-1	PASS	
+open-posix	conformance/interfaces/mq_timedsend/2-1	PASS	
+open-posix	conformance/interfaces/mq_timedsend/3-1	PASS	
+open-posix	conformance/interfaces/mq_timedsend/3-2	PASS	
+open-posix	conformance/interfaces/mq_timedsend/4-1	PASS	
+open-posix	conformance/interfaces/mq_timedsend/4-2	PASS	
+open-posix	conformance/interfaces/mq_timedsend/4-3	PASS	
+open-posix	conformance/interfaces/mq_timedsend/5-1	PASS	
+open-posix	conformance/interfaces/mq_timedsend/5-2	PASS	
+open-posix	conformance/interfaces/mq_timedsend/5-3	PASS	
+open-posix	conformance/interfaces/mq_timedsend/7-1	PASS	
+open-posix	conformance/interfaces/mq_timedsend/8-1	PASS	
+open-posix	conformance/interfaces/mq_timedsend/9-1	PASS	
+open-posix	conformance/interfaces/mq_timedsend/10-1	PASS	
+open-posix	conformance/interfaces/mq_timedsend/11-1	PASS	
+open-posix	conformance/interfaces/mq_timedsend/11-2	PASS	
+open-posix	conformance/interfaces/mq_timedsend/12-1	PASS	
+open-posix	conformance/interfaces/mq_timedsend/13-1	PASS	
+open-posix	conformance/interfaces/mq_timedsend/14-1	PASS	
+open-posix	conformance/interfaces/mq_timedsend/15-1	PASS	
+open-posix	conformance/interfaces/mq_timedsend/16-1	PASS	
+open-posix	conformance/interfaces/mq_timedsend/18-1	PASS	
+open-posix	conformance/interfaces/mq_timedsend/19-1	PASS	
+open-posix	conformance/interfaces/mq_timedsend/20-1	PASS	
+open-posix	conformance/interfaces/mq_timedsend/speculative/18-2	PASS	
+open-posix	conformance/interfaces/mq_unlink/1-1	PASS	
+open-posix	conformance/interfaces/mq_unlink/2-1	PASS	
+open-posix	conformance/interfaces/mq_unlink/2-2	PASS	
 open-posix	conformance/interfaces/mq_unlink/3-1	PASS	
 open-posix	conformance/interfaces/mq_unlink/4-1	PASS	
-open-posix	conformance/interfaces/mq_unlink/7-1	FAIL	Test FAILED
-open-posix	conformance/interfaces/mq_unlink/speculative/7-2	FAIL	Test FAILED, error is Function not implemented
+open-posix	conformance/interfaces/mq_unlink/7-1	PASS	
+open-posix	conformance/interfaces/mq_unlink/speculative/7-2	PASS	
 open-posix	conformance/interfaces/munlock/2-1	PASS	
 open-posix	conformance/interfaces/munlock/7-1	BROK	An error occurs when calling mlock(): Function not implemented
 open-posix	conformance/interfaces/munlock/9-1	PASS	
@@ -3505,8 +3506,8 @@ open-posix	conformance/interfaces/timer_settime/13-1	PASS
 open-posix	conformance/interfaces/timer_settime/speculative/12-1	PASS	
 open-posix	conformance/interfaces/timer_settime/speculative/12-2	PASS	
 open-posix	conformance/interfaces/timer_settime/speculative/12-3	PASS	
-open-posix	functional/mqueues/send_rev_1	BROK	mq_open doesn't return success
-open-posix	functional/mqueues/send_rev_2	BROK	mq_open doesn't return success
+open-posix	functional/mqueues/send_rev_1	PASS	
+open-posix	functional/mqueues/send_rev_2	PASS	
 open-posix	functional/semaphores/sem_conpro	PASS	
 open-posix	functional/semaphores/sem_lock	PASS	
 open-posix	functional/semaphores/sem_philosopher	PASS	
@@ -3628,12 +3629,12 @@ libc-test	functional/iconv_open	PASS
 libc-test	functional/iconv_open-static	PASS	
 libc-test	functional/inet_pton	PASS	
 libc-test	functional/inet_pton-static	PASS	
-libc-test	functional/ipc_msg	FAIL	src/functional/ipc_msg.c:42: qid = msgget(k, IPC_CREAT|0666) failed: Function not implemented
-libc-test	functional/ipc_msg-static	FAIL	src/functional/ipc_msg.c:42: qid = msgget(k, IPC_CREAT|0666) failed: Function not implemented
-libc-test	functional/ipc_sem	FAIL	src/functional/ipc_sem.c:44: semid = semget(k, 1, IPC_CREAT|0666) failed: Function not implemented
-libc-test	functional/ipc_sem-static	FAIL	src/functional/ipc_sem.c:44: semid = semget(k, 1, IPC_CREAT|0666) failed: Function not implemented
-libc-test	functional/ipc_shm	FAIL	src/functional/ipc_shm.c:39: shmid = shmget(k, 100, IPC_CREAT|0666) failed: Function not implemented
-libc-test	functional/ipc_shm-static	FAIL	src/functional/ipc_shm.c:39: shmid = shmget(k, 100, IPC_CREAT|0666) failed: Function not implemented
+libc-test	functional/ipc_msg	PASS	
+libc-test	functional/ipc_msg-static	PASS	
+libc-test	functional/ipc_sem	PASS	
+libc-test	functional/ipc_sem-static	PASS	
+libc-test	functional/ipc_shm	PASS	
+libc-test	functional/ipc_shm-static	PASS	
 libc-test	functional/mbc	PASS	
 libc-test	functional/mbc-static	PASS	
 libc-test	functional/memstream	PASS	
@@ -3983,10 +3984,10 @@ libc-test	regression/lseek-large	PASS
 libc-test	regression/lseek-large-static	PASS	
 libc-test	regression/malloc-0	PASS	
 libc-test	regression/malloc-0-static	PASS	
-libc-test	regression/malloc-brk-fail	HANG	no output
-libc-test	regression/malloc-brk-fail-static	HANG	no output
-libc-test	regression/malloc-oom	HANG	no output
-libc-test	regression/malloc-oom-static	HANG	no output
+libc-test	regression/malloc-brk-fail	TIMEOUT	
+libc-test	regression/malloc-brk-fail-static	TIMEOUT	
+libc-test	regression/malloc-oom	TIMEOUT	
+libc-test	regression/malloc-oom-static	TIMEOUT	
 libc-test	regression/mbsrtowcs-overflow	PASS	
 libc-test	regression/mbsrtowcs-overflow-static	PASS	
 libc-test	regression/memmem-oob	PASS	
@@ -4017,8 +4018,8 @@ libc-test	regression/pthread_cond_wait-cancel_ignored	PASS
 libc-test	regression/pthread_cond_wait-cancel_ignored-static	PASS	
 libc-test	regression/pthread_condattr_setclock	PASS	
 libc-test	regression/pthread_condattr_setclock-static	PASS	
-libc-test	regression/pthread_create-oom	HANG	no output
-libc-test	regression/pthread_create-oom-static	HANG	no output
+libc-test	regression/pthread_create-oom	TIMEOUT	
+libc-test	regression/pthread_create-oom-static	TIMEOUT	
 libc-test	regression/pthread_exit-cancel	PASS	
 libc-test	regression/pthread_exit-cancel-static	PASS	
 libc-test	regression/pthread_exit-dtor	PASS	
