@@ -617,10 +617,7 @@
     is skipped by a thread clone too, as by a fork: the clone used to fail with EFAULT after
     the thread was listed and the CLONE_PIDFD number stored in user memory. A NULL, kernel or
     PROT_NONE pointer for CLONE_PARENT_SETTID, CLONE_CHILD_SETTID or CLONE_CHILD_CLEARTID is
-    no longer EFAULT up front either: each store checks the address as it is made. A fork's
-    SETTID word on a page mapped but not yet touched is stored, the page brought in first as
-    Linux's put_user faults it in; it used to be skipped (a thread clone's stores already
-    faulted it in).
+    no longer EFAULT up front either: each store checks the address as it is made.
   - A write the kernel makes into one address space (a SETTID store, ptrace POKE) to a
     writable page a CLONE_VM child (vfork, posix_spawn) shares with its parent writes the
     shared page; it used to give that address space a private copy, so the other side never

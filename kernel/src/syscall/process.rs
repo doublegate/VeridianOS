@@ -80,11 +80,10 @@ pub(crate) fn sys_fork_with(opts: &crate::process::fork::ForkOptions) -> Syscall
                 // fail but the thread's start, as Linux's put_user follows
                 // copy_process; a start that fails puts the old word back.
                 // As on Linux (result unused) a store that cannot be made is
-                // skipped; a page not yet touched is brought in first.
+                // skipped.
                 #[cfg(feature = "alloc")]
                 let parent_tid = opts.parent_settid.map(|ptr| {
                     let nr = crate::process::pidns::nr_in(child_tid.0, &current.pid_ns()) as u32;
-                    crate::process::fork::fault_in_tid_word(&current, ptr);
                     let space = current.memory_space.lock();
                     crate::process::fork::StoredTid::store(
                         |b| space.read_user_bytes(ptr as u64, b).is_ok(),
@@ -101,13 +100,11 @@ pub(crate) fn sys_fork_with(opts: &crate::process::fork::ForkOptions) -> Syscall
                 // is what stays, and before the start, undone first if that
                 // fails. A copy-on-write page is copied first; a CLONE_VM
                 // child's writable page is the parent's frame, so the parent
-                // sees the store, as on Linux. Skipped when it cannot be made;
-                // a page not yet touched is brought in first.
+                // sees the store, as on Linux. Skipped when it cannot be made.
                 #[cfg(feature = "alloc")]
                 let child_tid_word = opts.child_settid.map(|ptr| {
                     let nr =
                         crate::process::pidns::nr_in(child_tid.0, &child_process.pid_ns()) as u32;
-                    crate::process::fork::fault_in_tid_word(&child_process, ptr);
                     let space = child_process.memory_space.lock();
                     crate::process::fork::StoredTid::store(
                         |b| space.read_user_bytes(ptr as u64, b).is_ok(),

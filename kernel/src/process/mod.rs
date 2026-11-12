@@ -202,8 +202,10 @@ impl Drop for IdClaim {
         claimed.held.retain(|&id| id != self.0);
         // A clone that failed gave the ID to nothing: the allocator need
         // not check it out of turn (PR #38 review). One it was given to is
-        // in use now, and stays listed until the counter passes it.
-        if !id_in_use(self.0) {
+        // in use now, and stays listed until the counter passes it. Only an
+        // ID still listed is checked, so a claim the counter has passed
+        // costs no scan of the tables (PR #38 review).
+        if claimed.ahead.contains(&self.0) && !id_in_use(self.0) {
             claimed.ahead.remove(&self.0);
         }
     }

@@ -8987,22 +8987,28 @@ static void test_clone_bad_tid(void)
     report("clone_bad_tid", f == 0, why);
 }
 
-/* Where a fork's TID words land (PR #38 review). On a page mapped but never
- * touched, CLONE_PARENT_SETTID and CLONE_CHILD_SETTID are stored, as Linux's
- * put_user faults the page in (they were skipped). A word straddling a
- * writable page and a read-only one cannot be stored: it is skipped and the
- * bytes on the writable page stay as they were, the fork still succeeding. */
+/* Where a fork's TID words land (PR #38 review). On pages mapped but never
+ * written, CLONE_PARENT_SETTID and CLONE_CHILD_SETTID are stored (mmap backs
+ * every page when it maps it, so these are the copy-on-write pages of both
+ * sides after the fork). A word straddling a writable page and a read-only
+ * one cannot be stored: it is skipped and the bytes on the writable page stay
+ * as they were, the fork still succeeding. */
 static void test_clone_settid_paths(void)
 {
     char why[96];
     int f = 0;
     char *fresh = mmap(NULL, 2 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    char *two = mmap(NULL, 2 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (fresh == MAP_FAILED || two == MAP_FAILED) {
+    if (fresh == MAP_FAILED) {
         report("clone_settid_paths", 0, "mmap failed");
         return;
     }
-    /* Untouched pages: the parent's word on the first, the child's on the
+    char *two = mmap(NULL, 2 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (two == MAP_FAILED) {
+        munmap(fresh, 2 * 4096);
+        report("clone_settid_paths", 0, "mmap failed");
+        return;
+    }
+    /* Unwritten pages: the parent's word on the first, the child's on the
      * second. The child exits 0 if its word holds its TID. */
     volatile pid_t *ptid = (volatile pid_t *)fresh;
     volatile pid_t *ctid = (volatile pid_t *)(fresh + 4096);

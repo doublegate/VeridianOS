@@ -42,9 +42,9 @@ exposed were fixed (N-182 to N-189); the rest are listed, with their targets, in
 - **clone across processes.** A `clone` without CLONE_THREAD makes a process (fork, vfork,
   `posix_spawn`); with CLONE_VM it shares the parent's memory page by page as it is at the
   clone, so a mapping either side adds, removes or changes the protection of afterwards is its
-  own, and so is a page that had no frame yet: whichever side touches it first gets a frame the
-  other does not see (enough for vfork and `posix_spawn`, whose child only execs or exits; LTP
-  clone08's CLONE_PARENT_SETTID case reads 0 from such a page). A side that makes a shared page
+  own, and so is a stack page either side grows into afterwards: whichever side touches it
+  first gets a frame the other does not see (enough for vfork and `posix_spawn`, whose child
+  only execs or exits). A side that makes a shared page
   read-only and then forks shares that frame with the new process while the other side can still
   write it. CLONE_FILES shares the descriptor
   table and CLONE_SIGHAND the signal actions with the new process (G2b); the descriptor limit
@@ -717,6 +717,11 @@ Page protections now follow `prot` (fixed in v0.27, N-132 to N-137). What remain
   EINVAL (`MAP_FIXED` replacement and `munmap` across mappings work since v0.27, N-141).
   `mprotect` of part of a mapping does not split it (N-135 remainder).
 - **Memory is allocated eagerly** at `mmap` time, not on first touch (v0.29 memory work).
+  Only the stack's pages come on first touch, and only for a fault of the program itself: a
+  kernel store into user memory (a system call's result, a clone's TID word) below the stack's
+  lowest page does not grow the stack, so the call fails with EFAULT (a TID store is skipped),
+  where Linux grows it. Lazy pages will need the fork's TID stores, which go through the child's
+  address space rather than the current one, to bring pages in.
 - **A memfd or tmpfs file cannot shrink under a shared mapping:** `ftruncate` that would drop a page still
   mapped `MAP_SHARED` fails with EBUSY. Linux shrinks it and unmaps those pages (access raises
   SIGBUS); mappings cannot be invalidated here yet (v0.29 memory work).

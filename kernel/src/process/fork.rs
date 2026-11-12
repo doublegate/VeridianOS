@@ -670,21 +670,6 @@ fn register_inherited_regions(child: &super::pcb::Process) {
     }
 }
 
-/// Bring in the page or two a TID word at `ptr` of `process` covers, as
-/// Linux's put_user faults them in, so a word on a page mapped but not yet
-/// touched is stored rather than skipped (PR #38 review). Pages already
-/// present, or that cannot be brought in, are left to the store, which then
-/// skips the word. The caller holds no lock of that address space.
-#[cfg(feature = "alloc")]
-pub(crate) fn fault_in_tid_word(process: &super::Process, ptr: usize) {
-    let first = ptr as u64;
-    let last = first.saturating_add(3);
-    let _ = crate::mm::page_fault::fault_in_remote(process, first, true);
-    if last >> 12 != first >> 12 {
-        let _ = crate::mm::page_fault::fault_in_remote(process, last, true);
-    }
-}
-
 /// A TID that CLONE_PARENT_SETTID (or the thread path's CLONE_CHILD_SETTID)
 /// stored at a user address, with the word it replaced, so a clone that
 /// fails after the store can put that word back. Linux's put_user comes
