@@ -45,8 +45,14 @@ pub fn sys_prlimit64(pid: usize, resource: usize, new_ptr: usize, old_ptr: usize
                 crate::process::pidns::from_vnr(p as i64).ok_or(SyscallError::ProcessNotFound)?;
             let target = crate::process::find_process(crate::process::ProcessId(kid))
                 .ok_or(SyscallError::ProcessNotFound)?;
+            // Another process's limits also need MODIFY over it, on its
+            // PID namespace or the process (ADR 0024, step 5).
             if target.pid != caller.pid
-                && !may_prlimit(&me, &target.credentials(), &target.user_ns())
+                && (!may_prlimit(&me, &target.credentials(), &target.user_ns())
+                    || !crate::cap::authority::current_may_act_on_process(
+                        &target,
+                        crate::cap::Rights::MODIFY,
+                    ))
             {
                 return Err(SyscallError::OperationNotPermitted);
             }
@@ -93,6 +99,7 @@ mod tests {
     fn prlimit_permission_needs_all_ids_or_cap_sys_resource() {
         use crate::process::linux_caps::LinuxCaps;
         let caller = |uid, gid, caps: LinuxCaps| Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             creds: Credentials::new(uid, gid),
             caps,
             userns: crate::process::userns::initial(),
@@ -116,6 +123,7 @@ mod tests {
         // Over a process in a namespace, its root's CAP_SYS_RESOURCE.
         let ns = crate::process::userns::test_child(b"0 1000 1", b"0 100 1");
         let ns_root = Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             userns: ns.clone(),
             ..caller(1000, 100, LinuxCaps::FULL)
         };

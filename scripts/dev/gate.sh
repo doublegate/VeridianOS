@@ -96,8 +96,12 @@ step vsh-fmt bash -c 'cd "$0/userland/vsh" && cargo fmt -- --check' "$root"
 # tooling (tools/compat/compat.py: lists, results, expected-list checks).
 step mkfs-blockfs bash -c 'cd "$0/tools/mkfs-blockfs" && cargo fmt --check && cargo clippy --release --all-targets -- -D warnings && cargo test --release' "$root"
 step compat-tools python3 -I "$root/tools/compat/test_compat.py"
+# The ADR index (docs/adr/README.md) is generated from the ADRs and checked here.
+step adr-index python3 "$root/tools/docs/gen_adr_index.py" --check
+step adr-index-tests python3 -I "$root/tools/docs/test_gen_adr_index.py"
 if command -v ruff >/dev/null; then
-    step compat-ruff ruff check "$root/tools/compat/compat.py" "$root/tools/compat/gen_kconfig.py" "$root/tools/compat/test_compat.py"
+    step compat-ruff ruff check "$root/tools/compat/compat.py" "$root/tools/compat/gen_kconfig.py" "$root/tools/compat/test_compat.py" \
+        "$root/tools/docs/gen_adr_index.py" "$root/tools/docs/test_gen_adr_index.py"
 fi
 step vsh-build bash -c 'cd "$0/userland/vsh" && cargo build --target x86_64-unknown-none -Zbuild-std=core,compiler_builtins,alloc' "$root"
 step clippy-x86_64 cargo clippy --target targets/x86_64-veridian.json -p veridian-kernel "${bs[@]}" -- -D warnings

@@ -295,6 +295,41 @@ impl Credentials {
     }
 }
 
+/// The rights a caller holds over the mount namespace it is in, which file
+/// access needs besides the mode bits and capabilities (ADR 0024, step 6):
+/// READ for lookups, reads and executing, WRITE for any change to a file
+/// or directory, CREATE for device nodes. A capability on a user
+/// namespace above the mount namespace stands for it, as for mounting
+/// ([`crate::cap::authority::holds_namespace`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FsAuthority {
+    pub read: bool,
+    pub write: bool,
+    pub create: bool,
+}
+
+impl FsAuthority {
+    /// Every right: the kernel, and what a launched program starts with.
+    pub const ALL: Self = Self {
+        read: true,
+        write: true,
+        create: true,
+    };
+    /// No right: a caller that dropped its mount namespace's capability.
+    pub const NONE: Self = Self {
+        read: false,
+        write: false,
+        create: false,
+    };
+
+    /// Whether these rights allow the access `mask` (MAY_* bits) asks:
+    /// READ for reading, searching and executing, READ and WRITE for
+    /// writing (a file is found before it is changed).
+    pub fn allows(self, mask: u32) -> bool {
+        self.read && (mask & crate::fs::MAY_WRITE == 0 || self.write)
+    }
+}
+
 /// Who a privilege or permission check is made for (ADR 0020, decision 3):
 /// the process's credentials and the calling thread's effective
 /// capabilities. Linux keeps both in the task's `cred`; here the IDs are
@@ -306,10 +341,14 @@ pub struct Caller {
     pub caps: super::linux_caps::LinuxCaps,
     /// The user namespace the credentials and the set are in.
     pub userns: alloc::sync::Arc<super::userns::UserNs>,
+    /// The rights over the caller's mount namespace, read once when the
+    /// caller is made (ADR 0024, step 6).
+    pub fs: FsAuthority,
 }
 
 /// Two callers are the same credentials (Linux compares `struct cred`
-/// pointers; here the values, and the user namespace by identity).
+/// pointers; here the values, and the user namespace by identity). The
+/// object authority in `fs` is not a credential and is not compared.
 impl PartialEq for Caller {
     fn eq(&self, other: &Self) -> bool {
         self.creds == other.creds
@@ -328,23 +367,33 @@ impl Caller {
             creds: Credentials::new(0, 0),
             caps: super::linux_caps::LinuxCaps::FULL,
             userns: super::userns::initial(),
+            fs: FsAuthority::ALL,
         }
     }
 
-    /// The calling thread: its process's credentials and its own
-    /// effective set. Kernel context, with no process, is [`Self::KERNEL`];
-    /// a process without a current thread holds nothing (fails closed).
+    /// The calling thread: its process's credentials, its own effective
+    /// set and its rights over its mount namespace. Kernel context, with
+    /// no process, is [`Self::kernel`]; a process without a current thread
+    /// holds nothing (fails closed).
     pub fn current() -> Self {
         let Some(process) = super::current_process() else {
             return Self::kernel();
         };
-        let caps = super::current_thread().map_or(super::linux_caps::LinuxCaps::EMPTY, |t| {
-            t.caps.lock().effective
+        let thread = super::current_thread();
+        let caps = thread
+            .as_ref()
+            .map_or(super::linux_caps::LinuxCaps::EMPTY, |t| {
+                t.caps.lock().effective
+            });
+        let fs = thread.as_ref().map_or(FsAuthority::NONE, |t| {
+            let mnt = super::ns::NsRef::Mnt(t.namespaces().mnt.clone());
+            crate::cap::authority::fs_authority(&process.capability_space.lock(), &mnt)
         });
         Self {
             creds: process.credentials(),
             caps,
             userns: process.user_ns(),
+            fs,
         }
     }
 
@@ -377,16 +426,25 @@ impl Caller {
     /// its user namespace, which maps `uid` (Linux's
     /// inode_owner_or_capable: unlike capable_wrt_inode_uidgid, the file's
     /// group need not be mapped; PR #35 review).
+    ///
+    /// Every caller of this changes the file (its mode, times, flags or a
+    /// name in a sticky directory), so it also needs WRITE on the mount
+    /// namespace ([`FsAuthority`]; ADR 0024, step 6), the owner included.
     pub fn owner_or_capable(&self, uid: u32) -> bool {
-        self.creds.fsuid == uid
-            || (self.userns.uid_up(uid).is_some()
-                && self.ns_capable(&self.userns, super::linux_caps::CAP_FOWNER))
+        self.fs.write
+            && (self.creds.fsuid == uid
+                || (self.userns.uid_up(uid).is_some()
+                    && self.ns_capable(&self.userns, super::linux_caps::CAP_FOWNER)))
     }
 
     /// Whether the caller is in group `gid` or holds CAP_FSETID over an
-    /// inode owned by `uid` and `gid` (Linux's in_group_or_capable).
+    /// inode owned by `uid` and `gid` (Linux's in_group_or_capable). Group
+    /// membership is no privilege and needs nothing more; the capability
+    /// counts only with WRITE on the mount namespace, as every privilege
+    /// over a file does (ADR 0024, step 6).
     pub fn in_group_or_capable(&self, uid: u32, gid: u32) -> bool {
-        self.creds.in_group(gid) || self.capable_wrt_inode(uid, gid, super::linux_caps::CAP_FSETID)
+        self.creds.in_group(gid)
+            || (self.fs.write && self.capable_wrt_inode(uid, gid, super::linux_caps::CAP_FSETID))
     }
 }
 
@@ -616,6 +674,7 @@ mod tests {
         use super::super::linux_caps::{LinuxCaps, CAP_CHOWN, CAP_FOWNER};
         let ns = super::super::userns::test_child(b"0 1000 1\n1 2000 1", b"0 1000 1");
         let root = Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             creds: Credentials::new(1000, 1000),
             caps: LinuxCaps::FULL,
             userns: ns,
@@ -638,11 +697,63 @@ mod tests {
         assert!(root.capable_wrt_inode(2000, 1000, CAP_FOWNER));
         assert!(!root.capable_wrt_inode(2000, 0, CAP_FOWNER));
         let bare = Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             caps: LinuxCaps::EMPTY,
             ..root.clone()
         };
         assert!(!bare.owner_or_capable(2000));
         assert!(bare.in_group_or_capable(0, 1000), "its own group");
         assert!(!bare.in_group_or_capable(2000, 2000));
+    }
+
+    /// The owner checks behind chmod, utimes, O_NOATIME and the sticky bit
+    /// change the file, so without WRITE on the mount namespace (ADR 0024,
+    /// step 6) neither the owner nor CAP_FOWNER passes; group membership,
+    /// which is no privilege, still counts for keeping the set-group-ID
+    /// bit, and CAP_FSETID does not.
+    #[test]
+    fn owner_checks_need_write_on_the_mount_namespace() {
+        use super::super::linux_caps::LinuxCaps;
+        let read_only = FsAuthority {
+            read: true,
+            write: false,
+            create: true,
+        };
+        let root = Caller {
+            creds: Credentials::new(0, 0),
+            caps: LinuxCaps::FULL,
+            userns: super::super::userns::initial(),
+            fs: read_only,
+        };
+        assert!(!root.owner_or_capable(0), "its own file");
+        assert!(!root.owner_or_capable(1000), "CAP_FOWNER");
+        assert!(root.in_group_or_capable(0, 0), "its own group");
+        assert!(!root.in_group_or_capable(1000, 1000), "CAP_FSETID");
+        let full = Caller {
+            fs: FsAuthority::ALL,
+            ..root.clone()
+        };
+        assert!(full.owner_or_capable(1000));
+        assert!(full.in_group_or_capable(1000, 1000));
+        assert_eq!(root, full, "the authority is not a credential");
+    }
+
+    #[test]
+    fn fs_authority_allows_reading_with_read_and_writing_with_both() {
+        use crate::fs::{MAY_EXEC, MAY_READ, MAY_WRITE};
+        assert!(FsAuthority::ALL.allows(MAY_READ | MAY_WRITE | MAY_EXEC));
+        assert!(!FsAuthority::NONE.allows(MAY_READ));
+        assert!(!FsAuthority::NONE.allows(0), "not even a bare lookup");
+        let read = FsAuthority {
+            read: true,
+            ..FsAuthority::NONE
+        };
+        assert!(read.allows(MAY_READ | MAY_EXEC));
+        assert!(!read.allows(MAY_WRITE));
+        let write = FsAuthority {
+            write: true,
+            ..FsAuthority::NONE
+        };
+        assert!(!write.allows(MAY_WRITE));
     }
 }

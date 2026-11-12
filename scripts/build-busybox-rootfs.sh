@@ -518,8 +518,9 @@ phase_rootfs() {
     if [ -x "$musl_cc" ]; then
         echo -n "    musl_runtime_test... "
         # A static PIE: the kernel picks its address (ADR 0010).
-        if "$musl_cc" -static-pie -O2 -Wall -Wextra -o "$BUILD_DIR/bin/musl_runtime_test" \
-                "${TESTS_DIR}/musl_runtime_test.c" 2>&1; then
+        # -idirafter: <veridian/capability.h>, after musl's own headers.
+        if "$musl_cc" -static-pie -O2 -Wall -Wextra -idirafter "${PROJECT_ROOT}/userland/libc/include" \
+                -o "$BUILD_DIR/bin/musl_runtime_test" "${TESTS_DIR}/musl_runtime_test.c" 2>&1; then
             echo "OK"
         else
             echo "FAILED"

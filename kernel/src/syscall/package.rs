@@ -36,25 +36,10 @@ pub fn sys_pkg_install(name_ptr: usize, _name_len: usize) -> SyscallResult {
 
     // Check that the calling process has appropriate capabilities
     // Package installation is a privileged operation
-    let current = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
-    let cap_space = current.capability_space.lock();
-    let has_perm = {
-        let mut found = false;
-        #[cfg(feature = "alloc")]
-        {
-            let _ = cap_space.iter_capabilities(|entry| {
-                if entry.rights.contains(crate::cap::Rights::WRITE)
-                    && entry.rights.contains(crate::cap::Rights::CREATE)
-                {
-                    found = true;
-                    return false;
-                }
-                true
-            });
-        }
-        found
-    };
-    if !has_perm {
+    crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    // MODIFY on the System object (ADR 0024, step 7); it used to accept
+    // any capability with WRITE and CREATE, of any type.
+    if !crate::cap::authority::current_may_change_system() {
         return Err(SyscallError::PermissionDenied);
     }
 
@@ -77,25 +62,10 @@ pub fn sys_pkg_remove(name_ptr: usize, _name_len: usize) -> SyscallResult {
     let name = read_user_string(name_ptr, 256)?;
 
     // Check capabilities -- removal is a privileged operation
-    let current = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
-    let cap_space = current.capability_space.lock();
-    let has_perm = {
-        let mut found = false;
-        #[cfg(feature = "alloc")]
-        {
-            let _ = cap_space.iter_capabilities(|entry| {
-                if entry.rights.contains(crate::cap::Rights::WRITE)
-                    && entry.rights.contains(crate::cap::Rights::CREATE)
-                {
-                    found = true;
-                    return false;
-                }
-                true
-            });
-        }
-        found
-    };
-    if !has_perm {
+    crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    // MODIFY on the System object (ADR 0024, step 7); it used to accept
+    // any capability with WRITE and CREATE, of any type.
+    if !crate::cap::authority::current_may_change_system() {
         return Err(SyscallError::PermissionDenied);
     }
 
@@ -158,23 +128,10 @@ pub fn sys_pkg_list(buf_ptr: usize, _buf_size: usize) -> SyscallResult {
 /// 0 on success
 pub fn sys_pkg_update(_flags: usize) -> SyscallResult {
     // Check capabilities -- updating repos is a privileged operation
-    let current = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
-    let cap_space = current.capability_space.lock();
-    let has_perm = {
-        let mut found = false;
-        #[cfg(feature = "alloc")]
-        {
-            let _ = cap_space.iter_capabilities(|entry| {
-                if entry.rights.contains(crate::cap::Rights::WRITE) {
-                    found = true;
-                    return false;
-                }
-                true
-            });
-        }
-        found
-    };
-    if !has_perm {
+    crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    // MODIFY on the System object (ADR 0024, step 7); it used to accept
+    // any capability with WRITE, of any type.
+    if !crate::cap::authority::current_may_change_system() {
         return Err(SyscallError::PermissionDenied);
     }
 

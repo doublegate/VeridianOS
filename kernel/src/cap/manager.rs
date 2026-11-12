@@ -99,6 +99,11 @@ struct RegistryEntry {
     revoked: bool,
     /// Capability spaces holding this capability (see `hold`).
     holders: AtomicU32,
+    /// Forgotten once the last space holding it lets it go (`release`):
+    /// set for a capability no kernel object keeps a token of, such as the
+    /// authority capabilities of ADR 0024, which every launched program
+    /// gets anew (PR #39 review).
+    reclaim_unheld: bool,
 }
 
 /// Global capability manager
@@ -162,6 +167,49 @@ impl CapabilityManager {
         rights: Rights,
         cap_space: &CapabilitySpace,
     ) -> Result<CapabilityToken, CapError> {
+        self.create_capability_with_flags(
+            object,
+            rights,
+            cap_space,
+            super::inheritance::InheritanceFlags::INHERITABLE,
+        )
+    }
+
+    /// [`Self::create_capability`] with these inheritance flags (for
+    /// example PRESERVE_EXEC, ADR 0024).
+    pub fn create_capability_with_flags(
+        &self,
+        object: ObjectRef,
+        rights: Rights,
+        cap_space: &CapabilitySpace,
+        inheritance_flags: u32,
+    ) -> Result<CapabilityToken, CapError> {
+        self.create_in_space(object, rights, cap_space, inheritance_flags, false)
+    }
+
+    /// [`Self::create_capability_with_flags`] for a capability only spaces
+    /// hold: its registry entry goes when the last of them lets it go
+    /// (`release`), instead of staying for good.
+    pub fn create_space_only_capability(
+        &self,
+        object: ObjectRef,
+        rights: Rights,
+        cap_space: &CapabilitySpace,
+        inheritance_flags: u32,
+    ) -> Result<CapabilityToken, CapError> {
+        self.create_in_space(object, rights, cap_space, inheritance_flags, true)
+    }
+
+    fn create_in_space(
+        &self,
+        object: ObjectRef,
+        rights: Rights,
+        cap_space: &CapabilitySpace,
+        inheritance_flags: u32,
+        reclaim_unheld: bool,
+    ) -> Result<CapabilityToken, CapError> {
+        #[cfg(not(feature = "alloc"))]
+        let _ = reclaim_unheld;
         // Validate object
         if !object.is_valid() {
             return Err(CapError::InvalidObject);
@@ -186,13 +234,16 @@ impl CapabilityManager {
                 generation: AtomicU8::new(0),
                 revoked: false,
                 holders: AtomicU32::new(0),
+                reclaim_unheld,
             };
             self.registry.write().insert(id, entry);
         }
 
         // Insert into capability space; if that fails, the registry entry
         // and the ID go back (they leaked; PR #25 review).
-        if cap_space.insert(cap, object, rights).is_err() {
+        let entry =
+            super::space::CapabilityEntry::new(cap, object, rights).with_flags(inheritance_flags);
+        if cap_space.insert_entry(entry).is_err() {
             #[cfg(feature = "alloc")]
             self.registry.write().remove(&id);
             self.id_allocator.recycle(id);
@@ -302,6 +353,8 @@ impl CapabilityManager {
                     // In flight: held by this call until the target space
                     // holds it, so a concurrent collection cannot take it.
                     holders: AtomicU32::new(1),
+                    // Collected by `collect_unheld_delegations`.
+                    reclaim_unheld: false,
                 },
             );
             super::revocation::record_derivation(cap.id(), id);
@@ -351,15 +404,42 @@ impl CapabilityManager {
     /// drop).
     pub(crate) fn release(&self, id: u64) {
         #[cfg(feature = "alloc")]
-        if let Some(entry) = self.registry.read().get(&id) {
-            let _ = entry
-                .holders
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |h| {
-                    Some(h.saturating_sub(1))
-                });
+        {
+            let unheld = match self.registry.read().get(&id) {
+                Some(entry) => {
+                    let before = entry
+                        .holders
+                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |h| {
+                            Some(h.saturating_sub(1))
+                        })
+                        .unwrap_or(0);
+                    entry.reclaim_unheld && before == 1
+                }
+                None => false,
+            };
+            // Checked again under the write lock: nothing can hold it again
+            // meanwhile (a space gains a copy only from a space holding
+            // it), but a delegation keeps its parent for revocation. The ID
+            // is not recycled (see `collect_unheld_delegations`).
+            if unheld {
+                let mut registry = self.registry.write();
+                let gone = registry
+                    .get(&id)
+                    .is_some_and(|e| e.holders.load(Ordering::Acquire) == 0)
+                    && super::revocation::get_children(id).is_empty();
+                if gone {
+                    registry.remove(&id);
+                }
+            }
         }
         #[cfg(not(feature = "alloc"))]
         let _ = id;
+    }
+
+    /// Whether the registry still knows capability `id` (tests).
+    #[cfg(all(test, feature = "alloc"))]
+    pub(crate) fn is_registered(&self, id: u64) -> bool {
+        self.registry.read().contains_key(&id)
     }
 
     /// Forget delegations of `parent` that no space holds any more and that

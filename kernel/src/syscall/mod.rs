@@ -937,6 +937,7 @@ fn handle_syscall(
         Syscall::CapabilityRevoke => crate::cap::revocation::sys_capability_revoke(arg1 as u64)
             .map(|()| 0)
             .map_err(map_kernel_error),
+        Syscall::CapabilityDrop => crate::cap::authority::sys_capability_drop(arg1, arg2, arg3),
 
         // Process management
         Syscall::SchedYield => sys_yield(),
@@ -2319,11 +2320,12 @@ fn sys_get_robust_list(tid: usize, head_out: usize, len_out: usize) -> SyscallRe
                         t,
                         p.user_ns(),
                         p.mm_user_ns(),
+                        (p.pid, p.pid_ns()),
                     ));
                 }
             }
         });
-        let (creds, dumpable, thread, userns, mm_userns) =
+        let (creds, dumpable, thread, userns, mm_userns, (pid, pid_ns)) =
             found.ok_or(SyscallError::ProcessNotFound)?;
         // Linux checks the named task: this thread's permitted set.
         let target = debug::PtraceTarget {
@@ -2332,6 +2334,11 @@ fn sys_get_robust_list(tid: usize, head_out: usize, len_out: usize) -> SyscallRe
             dumpable,
             userns,
             mm_userns,
+            authorized: crate::cap::authority::current_may_act_on(
+                pid,
+                &pid_ns,
+                crate::cap::Rights::MODIFY,
+            ),
         };
         let me = crate::process::creds::Caller::current();
         if !debug::may_access(&me, debug::current_permitted(), &target) {

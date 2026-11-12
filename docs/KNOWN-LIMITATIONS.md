@@ -373,8 +373,8 @@ What remains:
   in the new root stay visible there (the tree is keyed by path); MS_BIND with MS_REC does not
   copy parked trees; at most 16 parked roots stack (`MAX_PARKED_DEPTH`; the next pivot_root(".",
   ".") is ENOSPC), where Linux keeps one flat list bounded only by fs.mount-max, which is not
-  implemented. mount(2), umount2 and pivot_root check CAP_SYS_ADMIN only, not an object
-  capability (ADR 0024 will give them one); the private mount call keeps its own rules. The VFS
+  implemented. mount(2), umount2 and pivot_root check CAP_SYS_ADMIN and, since ADR 0024 step 2,
+  MODIFY on the mount namespace or a user namespace above it. The VFS
   finds open files by path, so a descriptor opened in another mount namespace is looked up by
   its path in the caller's (for fstat's mount id, fchdir and the like) once the two trees
   differ, and sync(2) flushes the filesystems of the initial namespace only. The mount flags are
@@ -415,7 +415,8 @@ What remains:
   namespaces can be created, mapped and joined, ids are translated where they cross the
   system-call boundary, and each privilege check asks about the user namespace Linux names (ADR
   0022 H4a to H4c), with these gaps: mount(2), umount2 and pivot_root still need CAP_SYS_ADMIN
-  in the initial namespace (ADR 0024 will give them object capabilities), so a namespace's root
+  in the initial namespace (and, since ADR 0024 step 2, MODIFY on the mount namespace), so a
+  namespace's root
   can make a mount namespace and join it but not mount in it; a setns through a pidfd that
   joins a user namespace checks the namespaces after it with the caller's credentials from
   before, where Linux uses the new ones; the priority and scheduling calls lack cap_safe_nice's
@@ -555,8 +556,18 @@ filesystem.
 - **On-disk structures are not validated (N-123).** BlockFS checks only the magic number; the ext4
   and FAT32 readers have unchecked arithmetic and cannot be mounted; the shell `mkfs` does nothing.
   Only mount images you trust.
-- **mount (N-129)** is allowed to any process holding a memory capability, and type `blockfs`
-  mounts an empty RAM filesystem.
+- **mount (N-129).** The private mount and umount calls, like mount(2), need CAP_SYS_ADMIN and a
+  capability with MODIFY on the mount namespace or a user namespace above it (ADR 0024). Type
+  `blockfs` mounts an empty RAM filesystem.
+- **Object capabilities cover ADR 0024's table, not yet everything (ADR 0024, step 7).** Every
+  check in the table -- files, mounts, namespaces, the clocks, other processes and the system as
+  a whole (sysctls, packages, the process limit) -- needs its object capability. Sockets and
+  devices still use ordinary Unix permissions only, and the Linux calls still run in the kernel:
+  their move to a user-space runtime waits for the IPC redesign (ADR 0024, step 8).
+- **File access is checked at lookup and open, not on each read or write (ADR 0024, step 6).**
+  A process that drops READ or WRITE on its mount namespace keeps using descriptors it opened
+  before, as a Linux process keeps a file it opened before a chmod; a launcher that wants none
+  left drops before it opens anything, or closes what it holds.
 - **ETXTBSY counts files opened by name.** A running program cannot be opened for writing or
   truncated, and a file open for writing cannot be executed, as on Linux; but a memfd's own
   descriptor does not count as a writer, so a memfd open for writing can be executed with

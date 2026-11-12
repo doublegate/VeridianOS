@@ -222,8 +222,14 @@ fn get(
 
 fn list(dfd: usize, path: usize, at_flags: usize, out: usize, size: usize) -> SyscallResult {
     let node = target(dfd, path, at_flags, false)?;
-    let attrs = node.xattrs().map_err(super::map_kernel_error)?;
     let caller = Caller::current();
+    // Listing reads the inode's metadata, as getxattr does: READ on the
+    // mount namespace (ADR 0024 step 6), for a descriptor too (PR #39
+    // review).
+    if !caller.fs.allows(crate::fs::MAY_READ) {
+        return Err(SyscallError::PermissionDenied);
+    }
+    let attrs = node.xattrs().map_err(super::map_kernel_error)?;
     let mut names = Vec::new();
     for name in attrs.names().filter(|n| xattr::listed(&caller, n)) {
         names.extend_from_slice(name.as_bytes());

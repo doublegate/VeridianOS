@@ -78,7 +78,8 @@ impl TryFrom<usize> for PtraceRequest {
 ///
 /// Looks up the target process via the process table, finds the VAS mapping
 /// containing the target address, locates the backing physical frame, and
-/// reads the word from the kernel's physical memory window.
+/// reads the word through the kernel's physical map (`mm::phys_to_virt_addr`)
+/// on every architecture.
 fn ptrace_peek(
     target_pid: process::ProcessId,
     caller_pid: u64,
@@ -112,10 +113,10 @@ fn ptrace_peek(
     let frame = mapping.physical_frames[page_index];
     let phys_addr = frame.as_u64() as usize * 4096 + offset_in_page;
 
-    // Read the word from the physical address via identity mapping
-    // On x86_64, physical memory is mapped at 0xFFFF_8000_0000_0000.
-    // On AArch64/RISC-V, physical memory is identity-mapped during boot.
-    let kernel_vaddr = phys_to_kernel_vaddr(phys_addr);
+    // Read the word through the kernel's physical map. AArch64 and RISC-V
+    // have no identity map once the kernel runs at its high address, so the
+    // physical address itself is not readable there.
+    let kernel_vaddr = crate::mm::phys_to_virt_addr(phys_addr as u64) as usize;
 
     // ptrace semantics allow unaligned reads in practice, but we require
     // alignment here for safety.
@@ -124,8 +125,8 @@ fn ptrace_peek(
     }
 
     // SAFETY: The physical address was obtained from a valid VAS mapping
-    // with allocated frames. The kernel virtual address is the kernel's
-    // identity/offset mapping of physical memory, and it is usize-aligned
+    // with allocated frames (device memory refused above). The kernel
+    // virtual address is its place in the physical map, and it is usize-aligned
     // (checked above).
     let value = unsafe { *(kernel_vaddr as *const usize) };
     Ok(value)
@@ -163,27 +164,6 @@ fn ptrace_poke(
     }
 }
 
-/// Convert a physical address to a kernel virtual address.
-///
-/// Uses the architecture-specific physical memory mapping offset.
-fn phys_to_kernel_vaddr(phys_addr: usize) -> usize {
-    #[cfg(target_arch = "x86_64")]
-    {
-        // x86_64: through the physical map, wherever the bootloader put it.
-        crate::mm::phys_to_virt_addr(phys_addr as u64) as usize
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        // AArch64 QEMU virt: physical memory is identity-mapped
-        phys_addr
-    }
-    #[cfg(target_arch = "riscv64")]
-    {
-        // RISC-V QEMU virt: physical memory is identity-mapped
-        phys_addr
-    }
-}
-
 // ============================================================================
 // Syscall implementation
 // ============================================================================
@@ -215,6 +195,9 @@ pub(super) struct PtraceTarget {
     /// The user namespace its memory belongs to (mm->user_ns), whose
     /// privilege a non-dumpable process needs of a tracer.
     pub mm_userns: alloc::sync::Arc<process::userns::UserNs>,
+    /// Whether the caller holds MODIFY over it, on its PID namespace or on
+    /// the process (ADR 0024, step 5).
+    pub authorized: bool,
 }
 
 impl PtraceTarget {
@@ -226,6 +209,10 @@ impl PtraceTarget {
             dumpable: process.dumpable.load(core::sync::atomic::Ordering::Acquire),
             userns: process.user_ns(),
             mm_userns: process.mm_user_ns(),
+            authorized: crate::cap::authority::current_may_act_on_process(
+                process,
+                crate::cap::Rights::MODIFY,
+            ),
         }
     }
 }
@@ -269,7 +256,10 @@ fn may_attach(
 ///   that kept them and use them through it, or the caller holds CAP_SYS_PTRACE
 ///   over the target's user namespace; the two sets are compared only in one
 ///   user namespace, so capabilities a caller holds in a namespace of its own
-///   do not cover a target outside it.
+///   do not cover a target outside it;
+///
+/// and the caller holds MODIFY over the target (`PtraceTarget::authorized`,
+/// ADR 0024 step 5): EPERM, or EACCES where a `/proc` file asks.
 ///
 /// Also guards get_robust_list.
 /// [`may_access`] for `target` as a process, with Linux's first rule of
@@ -310,6 +300,7 @@ pub(super) fn may_access(
         && ((caller.userns.ident.id == target.userns.ident.id
             && target.permitted.is_subset_of(caller_permitted))
             || over(&target.userns))
+        && target.authorized
 }
 
 /// Linux `cap_ptrace_traceme`: a process may make its parent its tracer if
@@ -366,6 +357,23 @@ fn traced_by_caller(
     Ok(target)
 }
 
+/// [`traced_by_caller`] for reading or writing the tracee: the caller must
+/// still hold MODIFY over it (ADR 0024, step 5). The check is made on each
+/// access, not only at attach, so a tracer that drops that authority stops
+/// reaching the memory of what it traces, as a dropped capability stops
+/// every other privileged act at once (PR #39 review). EPERM; detaching
+/// needs no authority.
+fn traced_and_authorized(
+    pid: usize,
+    caller_pid: u64,
+) -> Result<alloc::sync::Arc<process::Process>, SyscallError> {
+    let target = traced_by_caller(pid, caller_pid)?;
+    if !crate::cap::authority::current_may_act_on_process(&target, crate::cap::Rights::MODIFY) {
+        return Err(SyscallError::OperationNotPermitted);
+    }
+    Ok(target)
+}
+
 pub fn sys_ptrace(request: usize, pid: usize, addr: usize, data: usize) -> SyscallResult {
     use core::sync::atomic::Ordering;
 
@@ -398,13 +406,27 @@ pub fn sys_ptrace(request: usize, pid: usize, addr: usize, data: usize) -> Sysca
             let own_ns = caller.user_ns();
             let parent_capable = tracer.capable_over(&own_ns);
             let same_ns = tracer.userns.ident.id == own_ns.ident.id;
+            // The parent's authority over the caller too (ADR 0024, step
+            // 5), as an attach would need it: the tracer is the parent, and
+            // a parent that has dropped MODIFY on the caller's PID
+            // namespace must not get a tracee for the asking (PR #39
+            // review). Linux checks the parent here likewise
+            // (security_ptrace_traceme).
+            let authorized = crate::cap::authority::may_act_on_process(
+                &parent.capability_space.lock(),
+                caller.pid,
+                &caller.pid_ns(),
+                crate::cap::Rights::MODIFY,
+            );
             let parent = parent.pid;
-            if !may_trace_me(
-                current_permitted(),
-                parent_permitted,
-                parent_capable,
-                same_ns,
-            ) {
+            if !authorized
+                || !may_trace_me(
+                    current_permitted(),
+                    parent_permitted,
+                    parent_capable,
+                    same_ns,
+                )
+            {
                 return Err(SyscallError::OperationNotPermitted);
             }
             let _guard = caller.cred_guard.lock();
@@ -460,14 +482,14 @@ pub fn sys_ptrace(request: usize, pid: usize, addr: usize, data: usize) -> Sysca
         PtraceRequest::PeekText | PtraceRequest::PeekData => {
             // The word goes to *data and the call returns 0: the raw
             // syscall's convention, which the C library wrappers unpack.
-            let target = traced_by_caller(pid, caller_pid)?;
+            let target = traced_and_authorized(pid, caller_pid)?;
             let word = ptrace_peek(target.pid, caller_pid, addr)?;
             super::userspace::write_user::<usize>(data, word)?;
             Ok(0)
         }
 
         PtraceRequest::PokeText | PtraceRequest::PokeData => {
-            let target = traced_by_caller(pid, caller_pid)?;
+            let target = traced_and_authorized(pid, caller_pid)?;
             ptrace_poke(target.pid, caller_pid, addr, data)?;
             Ok(0)
         }
@@ -522,12 +544,14 @@ mod tests {
         };
         let none = LinuxCaps::EMPTY;
         let user = Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             creds: Credentials::new(1000, 100),
             caps: none,
             userns: crate::process::userns::initial(),
         };
         let root = Caller::kernel();
         let bare_root = Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             creds: Credentials::new(0, 0),
             caps: none,
             userns: crate::process::userns::initial(),
@@ -538,6 +562,7 @@ mod tests {
             dumpable,
             userns: crate::process::userns::initial(),
             mm_userns: crate::process::userns::initial(),
+            authorized: true,
         };
         let other = Credentials::new(1001, 100);
         let mut setuid_root = Credentials::new(1000, 100);
@@ -556,6 +581,13 @@ mod tests {
         assert_eq!(may_attach(10, &root, full, 20, &me, 30), eperm);
         // Uid 0 without CAP_SYS_PTRACE is an ordinary user.
         assert_eq!(may_attach(10, &bare_root, none, 20, &me, 0), eperm);
+        // Without MODIFY over the target (ADR 0024 step 5), not even with
+        // every POSIX capability.
+        let confined = PtraceTarget {
+            authorized: false,
+            ..me.clone()
+        };
+        assert_eq!(may_attach(10, &root, full, 20, &confined, 0), eperm);
         // A process that made itself non-dumpable (PR_SET_DUMPABLE 0), or
         // exec'd a set-ID or unreadable program, only CAP_SYS_PTRACE may
         // trace.
@@ -585,6 +617,7 @@ mod tests {
         )
         .unwrap();
         let inside = Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             creds: user.creds,
             caps: full,
             userns: own.clone(),
@@ -606,6 +639,7 @@ mod tests {
         joined.mm_userns = crate::process::userns::initial();
         assert_eq!(may_attach(10, &inside, full, 20, &joined, 0), eperm);
         let bare_inside = Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             caps: none,
             ..inside.clone()
         };

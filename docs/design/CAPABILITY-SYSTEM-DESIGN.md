@@ -1,7 +1,7 @@
 # VeridianOS Capability System Design Document
 
-**Version**: 1.2
-**Date**: 2026-03-10
+**Version**: 1.3
+**Date**: 2026-11-08 (authority objects, ADR 0024-0026)
 **Status**: Implementation Complete (100%)
 
 ### Current Implementation Status (v0.25.1)
@@ -180,6 +180,46 @@ pub enum ObjectRef {
     },
 }
 ```
+
+The enum above is the original design. The kernel's `ObjectRef` (`kernel/src/cap/object.rs`)
+names memory, processes and endpoints, and since ADR 0024 the authority objects below.
+
+### Authority objects (ADR 0024, ADR 0025, ADR 0026)
+
+A Linux privilege check (a POSIX capability, a uid or mode bits) says whether a caller is
+privileged enough; an object capability says whether it may act on that object at all, and both
+must hold (`kernel/src/cap/authority.rs`). The objects, with their token type codes
+(`CapabilityDrop` takes 9, 10 and 11; a process holds a `Process` capability only on itself,
+which needs none, so acting on another process passes through its PID namespace until a
+launcher can hand one out):
+
+| Object | Type code | Checked for |
+| --- | --- | --- |
+| `Namespace { kind, id }`, each namespace by its NS_GET_ID id | 9 | mounting (MODIFY on the mount namespace), file access (READ on the mount namespace for lookups, reads and executing, WRITE too for any change, CREATE for device nodes; read once per call, at lookup and open, so a descriptor opened before a drop keeps reading and writing; its attributes are still checked), the namespace calls (CREATE, EXECUTE for setns, MODIFY for hostnames and ID maps), the time namespace's offsets, acting on processes through their PID namespace |
+| `Clock { System \| Alarm }` (id 0 and 1) | 10 | setting or steering the system clock (MODIFY), arming an alarm-clock timer (WRITE) |
+| `System` (id 0) | 11 | the system as a whole (MODIFY: writing a sysctl, the package calls, going past RLIMIT_NPROC; ADR 0024 step 7) |
+| `Process { pid }` | 1 | acting on one process without its PID namespace: signals (WRITE), tracing, scheduling, limits (MODIFY) |
+
+- **Rights.** READ inspects, WRITE acts, MODIFY changes configuration, CREATE makes children,
+  EXECUTE enters. The grants carry `authority_rights()`: those five, never GRANT, REVOKE or
+  DELETE, because fork copies the token itself and a revocable copy would revoke the parent's
+  (ADR 0025).
+- **Grants.** Every program the kernel starts holds one on each namespace it is in, both
+  clocks and `System`, inherited at fork and kept across exec. Whoever creates a user namespace
+  gets one on it; capabilities on user namespaces that no longer exist are removed before such a
+  grant, so a launcher's space stays bounded. The registry forgets an authority capability once
+  no space holds it.
+- **Owner chain.** A namespace passes a check through a capability on itself or on the user
+  namespace that owns it or any of that one's ancestors (`holds_namespace`), as Linux's
+  `ns_capable(ns->owner, ...)` does.
+- **Dropping.** `CapabilityDrop(kind, id, rights)` (1056; `veridian_capability_drop()` in
+  `<veridian/capability.h>`) changes the caller's own space only: rights 0 removes each
+  capability naming the object, otherwise those rights are taken off and one left with none is
+  removed. Rights never come back. For example, MODIFY taken off the mount namespace and the user
+  namespaces above it, and CREATE off the user namespace, gives root that cannot mount but still
+  reads and writes files (ADR 0026). CREATE matters because whoever makes a user namespace is
+  granted it: with CREATE left, the program could make one and mount in a mount namespace made
+  inside it (a private view, but a mount all the same).
 
 ## Capability Operations
 

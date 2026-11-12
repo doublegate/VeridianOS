@@ -336,6 +336,23 @@ impl CapabilitySpace {
         Some(entry.object)
     }
 
+    /// Take `rights` off the entry for exactly `cap` in this space only
+    /// (`CapabilityDrop` with a rights mask, ADR 0026): it keeps the rights
+    /// it had minus those, and gains none. Returns the rights left, or None
+    /// when this space does not hold `cap`. An entry left with no rights is
+    /// still there; the caller removes it.
+    pub fn narrow(&self, cap: CapabilityToken, rights: Rights) -> Option<Rights> {
+        let mut table = self.table.write();
+        let i = table.find(cap.id())?;
+        match &mut table.slots[i] {
+            Slot::Full(e) if e.capability == cap => {
+                e.rights = e.rights.remove(rights);
+                Some(e.rights)
+            }
+            _ => None,
+        }
+    }
+
     /// Check if process has capability with specific rights
     pub fn check_rights(&self, cap: CapabilityToken, required: Rights) -> bool {
         if let Some(rights) = self.lookup(cap) {

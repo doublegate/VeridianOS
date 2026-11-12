@@ -89,6 +89,83 @@
 
 ### Added
 
+- `docs/adr/README.md`, an index of the architecture decision records (number, title, status and
+  date), generated from each ADR's own lines by `tools/docs/gen_adr_index.py`; gate.sh and CI fail
+  when it is stale, when a Status is not one of proposed/accepted/rejected/deprecated/superseded,
+  or when an ADR that another supersedes does not say so in its own Status. ADR 0025 is accepted.
+- ADR 0024: the Linux ABI is to be served by a user-space runtime on native IPC and capabilities
+  (on the model of Starnix, after the IPC redesign), and every Linux privilege check also needs an
+  object capability for what it acts on, so the native model governs Linux programs too. Its first
+  step: object capabilities for namespaces, the clocks and the system (`cap::authority`), which
+  every program the kernel starts receives for the namespaces it is in, keeps across exec and
+  passes on at fork; the private call `CapabilityDrop` (1056) removes one from the caller's own
+  space, so a launcher can confine what it starts. Fork no longer copies the capability space a
+  second time (each copy was refused as a duplicate). These capabilities carry no GRANT, REVOKE
+  or DELETE right (ADR 0025, superseding ADR 0024's "all rights"): fork copies the token itself,
+  so revoking a copy would have revoked the parent's.
+- mount(2), umount2, pivot_root, chroot and the private mount and umount calls also need an
+  object capability with MODIFY on the caller's mount namespace, or on a user namespace above it
+  (ADR 0024, step 2): a launcher that drops those can run root unable to mount or chroot. Whoever
+  creates a user namespace (unshare, or clone's parent) receives one on it, so mounting in
+  namespaces made inside it keeps working; its capabilities on user namespaces that are gone are
+  removed first, so a launcher making one per child it reaps no longer fills its capability quota
+  (256) after a few hundred, and the registry forgets an authority capability once no space holds
+  it, instead of keeping eleven more entries for every program started. The private calls no
+  longer accept any Memory capability with WRITE and CREATE, which no process was given; the
+  private umount now needs CAP_SYS_ADMIN, and both give EPERM, not EACCES.
+- The namespace calls need object capabilities too (ADR 0024, step 3), each on the namespace
+  itself or a user namespace above it, and EPERM without: unshare and clone with CLONE_NEW* need
+  CREATE on the namespace each new one is made from (the caller's of that kind; for PID and time
+  the one for children; for CLONE_NEWUSER its user namespace), checked before anything is made;
+  setns needs EXECUTE on its target, after the type's own install rule; sethostname and
+  setdomainname MODIFY on the UTS namespace; writes to `uid_map`, `gid_map` and `setgroups`
+  MODIFY on the user namespace. A launcher can now run root unable to make, join or rename a
+  namespace it has dropped.
+- Setting the clocks needs object capabilities too (ADR 0024, step 4), EPERM without:
+  clock_settime, settimeofday, and adjtimex and clock_adjtime for anything but reading need MODIFY
+  on the system clock besides CAP_SYS_TIME; timer_create on CLOCK_REALTIME_ALARM or
+  CLOCK_BOOTTIME_ALARM needs WRITE on the alarm clocks besides CAP_WAKE_ALARM; a write to
+  `/proc/<pid>/timens_offsets` needs MODIFY on the time namespace, itself or through a user
+  namespace above it. A launcher can now run root unable to set the clock.
+- Acting on another process needs an object capability too (ADR 0024, step 5), EPERM without:
+  every signal sent to another process (kill, tkill, tgkill, rt_sigqueueinfo, rt_tgsigqueueinfo,
+  pidfd_send_signal) needs WRITE over it; ptrace, the `/proc/<pid>` files ptrace's rule guards,
+  process_vm_readv/writev, kcmp, pidfd_getfd, get_robust_list, the sched_set* calls,
+  sched_setaffinity, setpriority and prlimit64 need MODIFY; each on its PID namespace (itself or
+  through a user namespace above it) or on a `Process` capability for it. clone3's set_tid needs
+  MODIFY on each PID namespace a number is chosen in. PTRACE_TRACEME needs the parent's MODIFY over
+  the caller, as an attach needs the caller's, and PTRACE_PEEK* and PTRACE_POKE* check the
+  tracer's MODIFY on every access, so a tracer that drops it stops reaching what it traced (it can
+  still detach). A process acting on itself needs none. A launcher can now run root unable to
+  signal, trace or reprioritize anything outside what it holds.
+- `CapabilityDrop` drops by rights (ADR 0026, accepted): a third argument names the rights to
+  take off each capability naming the object, which keeps the rest, and is removed once it has
+  none; 0 removes it whole, as before, and rights only ever go. A launcher can now take MODIFY
+  off the mount namespace and the user namespaces above it, and CREATE off the user namespace (or
+  the program could make a user namespace of its own, which its creator is granted, and mount
+  inside it), so root cannot mount, and keep READ and WRITE, which file access needs (ADR 0024,
+  step 6). `<veridian/capability.h>`
+  gives programs built against musl and the native libc `veridian_capability_drop()` and its
+  constants; the native libc had no wrapper for the call.
+- File access needs an object capability too (ADR 0024, step 6): READ on the caller's mount
+  namespace, or on a user namespace above it, for every lookup, read and execute, and WRITE as
+  well for every change, checked before the mode bits and capabilities (EACCES without). The owner
+  checks behind chmod, chown, utimes, O_NOATIME and the sticky bit, and CAP_FSETID's keeping of
+  the set-group-ID bit, need WRITE too (EPERM), the file's owner included; every extended
+  attribute (EACCES); open_by_handle_at, which skips the path walk, READ (EPERM); a device node
+  from mknod CREATE besides CAP_MKNOD (EPERM). The rights are read once per call, not per path
+  component, and a lookup with no component ("/") needs READ too. A descriptor opened before a
+  drop keeps reading and writing, as one opened before a chmod does; its attributes still need
+  READ to read (getxattr, listxattr) and WRITE to change (fchmod, fchown, futimens). A
+  launcher can now run root that can read but not change files, or reach no file at all; one
+  that only takes MODIFY (no mounting) leaves files as they were. The package calls no longer hold
+  the capability space locked through the install, which file access now reads.
+- Changing the system as a whole needs an object capability too (ADR 0024, step 7): MODIFY on the
+  `System` object for writing a sysctl (EACCES without), for the package calls (EACCES; they used
+  to accept a capability of any type with WRITE), and for going past RLIMIT_NPROC as root or with
+  CAP_SYS_RESOURCE or CAP_SYS_ADMIN (EAGAIN, as for anyone else at the limit). The native account
+  calls on another user's account need WRITE on the mount namespace besides CAP_DAC_OVERRIDE,
+  as the account store is a file. With this the checks of ADR 0024's table are all in place.
 - `/boot/config-7.3.0-veridian` in every root filesystem (ADR 0023): the Linux kernel
   configuration VeridianOS reports, generated per architecture by `tools/compat/gen_kconfig.py`
   from `abi/kconfig.map`. An option is set only where the kernel does what Linux built with it
@@ -646,6 +723,11 @@
     toolchain before the pinned one, and `guest.py` takes `AARCH64_CPU` (#27); the reviewer
     self-test checks that the workflow has one job timeout (#6); `musl_runtime_test --only
     itimers N` resets its counters each run.
+- PTRACE_PEEKTEXT/PEEKDATA on AArch64 and RISC-V read the tracee's frame at its physical
+  address, as if physical memory were identity-mapped, which it is not once the kernel runs at
+  its high address: the first peek there panicked the kernel with a translation fault. PEEK now
+  reads through the physical map on every architecture, as POKE does. No test peeked on those
+  architectures before; `proc_object_cap` (musl runtime) now does.
 - From the PR #37 review, after its merge, and the reviews of PR #38 that followed:
   - CLONE_PARENT_SETTID stores the child's TID after every step of a clone that can fail but
     the start of its thread, as Linux's put_user follows copy_process; a start that fails puts

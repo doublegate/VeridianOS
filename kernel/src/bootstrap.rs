@@ -2732,6 +2732,18 @@ fn build_user_code(code: &[u8]) -> Option<crate::process::ProcessId> {
         c.set_instruction_pointer(CODE as usize);
         c.set_stack_pointer((STACK + STACK_SIZE as u64) as usize);
     }
+    // The capabilities every program the kernel starts holds (ADR 0024):
+    // without the mount namespace's, the exec test's lookup is refused.
+    if crate::cap::authority::grant_initial(
+        &p.capability_space.lock(),
+        &t.namespaces(),
+        p.user_ns().ident,
+        p.pid_ns().ident,
+    )
+    .is_err()
+    {
+        return None;
+    }
     if p.add_thread(t).is_err() {
         return None;
     }

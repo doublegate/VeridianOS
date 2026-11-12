@@ -48,6 +48,7 @@ pub mod sysno {
     pub const SYS_memfd_create: usize = 319;
     pub const SYS_CAPABILITY_GRANT: usize = 1054;
     pub const SYS_CAPABILITY_REVOKE: usize = 1055;
+    pub const SYS_CAPABILITY_DROP: usize = 1056;
     pub const SYS_THREAD_CREATE: usize = 1064;
     pub const SYS_exit: usize = 60;
     pub const SYS_THREAD_JOIN: usize = 1066;
@@ -380,6 +381,7 @@ pub mod sysno {
     pub const SYS_memfd_create: usize = 279;
     pub const SYS_CAPABILITY_GRANT: usize = 1054;
     pub const SYS_CAPABILITY_REVOKE: usize = 1055;
+    pub const SYS_CAPABILITY_DROP: usize = 1056;
     pub const SYS_THREAD_CREATE: usize = 1064;
     pub const SYS_exit: usize = 93;
     pub const SYS_THREAD_JOIN: usize = 1066;
@@ -675,6 +677,7 @@ pub mod sysno {
     pub const SYS_memfd_create: usize = 279;
     pub const SYS_CAPABILITY_GRANT: usize = 1054;
     pub const SYS_CAPABILITY_REVOKE: usize = 1055;
+    pub const SYS_CAPABILITY_DROP: usize = 1056;
     pub const SYS_THREAD_CREATE: usize = 1064;
     pub const SYS_exit: usize = 93;
     pub const SYS_THREAD_JOIN: usize = 1066;

@@ -112,6 +112,19 @@ pub fn create_process_with_options(
 
     let tid = main_thread.tid;
 
+    // A program the kernel starts holds the object capabilities behind the
+    // Linux privilege checks: its namespaces, the clocks and the system
+    // (ADR 0024). Fork copies them and exec keeps them.
+    crate::cap::authority::grant_initial(
+        &process.capability_space.lock(),
+        &main_thread.namespaces(),
+        process.user_ns().ident,
+        process.pid_ns().ident,
+    )
+    .map_err(|_| KernelError::ResourceExhausted {
+        resource: "capability quota",
+    })?;
+
     // Map the user stack pages into the process's VAS page tables.
     // ThreadBuilder::build() allocates physical frames for the user stack
     // but does not map them. We call vas.map_page() for each page, which
@@ -1557,6 +1570,7 @@ mod tests {
         let file = NodeType::File;
         let root = Caller::kernel();
         let user = |uid: u32, gid: u32| Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             creds: Credentials::new(uid, gid),
             caps: crate::process::linux_caps::LinuxCaps::EMPTY,
             userns: crate::process::userns::initial(),

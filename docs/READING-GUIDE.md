@@ -74,6 +74,7 @@ Normative (authoritative):
 - docs/INVARIANTS.md
 - docs/ARCHITECTURE.md
 - docs/UNSAFE-POLICY.md
+- docs/adr/README.md (the index of architecture decision records, with each one's status)
 
 Historical or developmental:
 - docs/status/PROJECT-STATUS.md
