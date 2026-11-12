@@ -90,8 +90,12 @@ The reference for every behaviour below is the Linux 7.3 source (kernel.org tarb
      choice for item 5): its sticky, world-writable root lists the mounting namespace's queues,
      reading one gives its status line, unlink is mq_unlink and open(O_CREAT) makes a queue
      with the default attributes; mkdir there is EPERM, as on Linux.
-   - A registration is removed when the queue's message arrives or by mq_notify(fd, NULL), not
-     also when its owner closes a descriptor of the queue (Linux's mqueue_flush_file).
+   - A registration also ends with its process. Linux drops it when the owner closes a
+     descriptor of the queue (mqueue_flush_file, which the owner's exit runs too), and so does
+     this kernel, but a process killed by another is cleaned up in the killer's context, where
+     that check cannot match; so a registration whose process has died counts as none. A
+     registration made through a descriptor table shared by CLONE_FILES therefore ends when its
+     process exits, where Linux keeps it (EBUSY to others) until the table goes.
 
 ### futex2 (futex_waitv, futex_wake, futex_wait, futex_requeue)
 

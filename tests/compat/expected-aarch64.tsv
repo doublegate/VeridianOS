@@ -427,7 +427,7 @@ ltp-syscalls	futex_wait05	TIMEOUT	tst_timer_test.c:314: TFAIL: futex_wait() slep
 ltp-syscalls	futex_wait06	PASS	
 ltp-syscalls	futex_wait07	BROK	futex_wait07.c:63: TBROK: Failed to open FILE '/proc/845/stat' for reading: ENOENT (2)
 ltp-syscalls	futex_wait_bitset01	FLAKY	FAIL and WARN in two x86_64 runs (2026-10-22); the WARN was LTP's kernel-version check, gone since uname reports 7.3.0 (PR #34)
-ltp-syscalls	futex_waitv01	FAIL	futex_waitv01.c:75: TFAIL: futex_waitv address is NULL expected EFAULT: EINVAL (22)
+ltp-syscalls	futex_waitv01	PASS	
 ltp-syscalls	futex_waitv02	PASS	
 ltp-syscalls	futex_waitv03	PASS	
 ltp-syscalls	futex_wake01	PASS	

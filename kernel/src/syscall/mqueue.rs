@@ -108,6 +108,36 @@ struct State {
     receivers: usize,
 }
 
+impl Notify {
+    /// Whether the registering process still lives: the same process
+    /// under that pid, and not exiting.
+    fn lives(&self) -> bool {
+        let Some(owner) = self.owner.upgrade() else {
+            return false;
+        };
+        let same = crate::process::table::get_process(crate::process::ProcessId(self.pid))
+            .is_some_and(|p| Arc::ptr_eq(&p, &owner));
+        same && !matches!(
+            owner.get_state(),
+            crate::process::ProcessState::Zombie | crate::process::ProcessState::Dead
+        )
+    }
+}
+
+impl State {
+    /// The registration, dropped first if its process has died. Linux
+    /// drops it when the owner's exit closes its descriptors
+    /// (mqueue_flush_file, in the exiting task); a process killed here is
+    /// cleaned up in the killer's context, where that check cannot match
+    /// (PR #40 review).
+    fn live_notify(&mut self) -> Option<&Notify> {
+        if self.notify.as_ref().is_some_and(|n| !n.lives()) {
+            self.notify = None;
+        }
+        self.notify.as_ref()
+    }
+}
+
 /// A queue (`struct mqueue_inode_info`).
 pub struct MqNode {
     state: Mutex<State>,
@@ -154,8 +184,8 @@ impl Drop for MqNode {
 
 impl MqNode {
     fn status(&self) -> String {
-        let s = self.state.lock();
-        let (kind, signo, pid) = s.notify.as_ref().map_or((0, 0, 0), |n| {
+        let mut s = self.state.lock();
+        let (kind, signo, pid) = s.live_notify().map_or((0, 0, 0), |n| {
             (
                 n.kind,
                 if n.kind == SIGEV_SIGNAL { n.signo } else { 0 },
@@ -667,17 +697,7 @@ fn notify(n: Notify) {
         return;
     }
     // Only to the process that registered, while it lives.
-    let Some(owner) = n.owner.upgrade() else {
-        return;
-    };
-    let same = crate::process::table::get_process(crate::process::ProcessId(n.pid))
-        .is_some_and(|p| Arc::ptr_eq(&p, &owner));
-    if !same
-        || matches!(
-            owner.get_state(),
-            crate::process::ProcessState::Zombie | crate::process::ProcessState::Dead
-        )
-    {
+    if !n.lives() {
         return;
     }
     let mut info = crate::process::signals::SigInfo::from_current(n.signo as usize, SI_MESGQ);
@@ -802,7 +822,7 @@ pub fn sys_mq_notify(fd: usize, sev_ptr: usize) -> SyscallResult {
             }
         }
         Some((kind, signo, value)) => {
-            if s.notify.is_some() {
+            if s.live_notify().is_some() {
                 return Err(SyscallError::Busy);
             }
             s.notify = Some(Notify {
@@ -1098,6 +1118,30 @@ impl VfsNode for MqRoot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dead_owners_registration_is_gone() {
+        // A process killed by another closes its descriptors in the
+        // killer's context, where mqueue_flush_file's "the closer is the
+        // owner" never matches: the registration must not outlive it.
+        let mut s = State {
+            maxmsg: 1,
+            msgsize: 1,
+            msgs: BTreeMap::new(),
+            count: 0,
+            qsize: 0,
+            notify: Some(Notify {
+                pid: 77,
+                owner: Weak::new(),
+                kind: SIGEV_SIGNAL,
+                signo: 10,
+                value: 0,
+            }),
+            receivers: 0,
+        };
+        assert!(s.live_notify().is_none());
+        assert!(s.notify.is_none());
+    }
 
     #[test]
     fn names_are_checked_as_the_mqueue_root_looks_them_up() {
