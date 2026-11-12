@@ -85,9 +85,12 @@ impl MqSpace {
 static CHARGED: Mutex<BTreeMap<u32, u64>> = Mutex::new(BTreeMap::new());
 
 /// Who to tell when a message arrives in an empty queue.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Notify {
     pid: u64,
+    /// The registering process itself (Linux holds its `struct pid`): a
+    /// later process given the same pid is not it.
+    owner: Weak<crate::process::Process>,
     kind: i32,
     signo: i32,
     value: u64,
@@ -131,7 +134,7 @@ impl Drop for MqNode {
 impl MqNode {
     fn status(&self) -> String {
         let s = self.state.lock();
-        let (kind, signo, pid) = s.notify.map_or((0, 0, 0), |n| {
+        let (kind, signo, pid) = s.notify.as_ref().map_or((0, 0, 0), |n| {
             (
                 n.kind,
                 if n.kind == SIGEV_SIGNAL { n.signo } else { 0 },
@@ -321,15 +324,14 @@ pub fn charge_of(maxmsg: usize, msgsize: usize) -> u64 {
 /// (mqueue_create_attr and mqueue_get_inode): CREATE on the namespace
 /// (EACCES), queues_max (ENOSPC unless CAP_SYS_RESOURCE), the attributes
 /// ([`new_attr`]), RLIMIT_MSGQUEUE for the caller's real user (EMFILE);
-/// mode `mode` less the umask, owned by the caller's fsuid and fsgid. If
-/// another caller made it meanwhile, theirs is returned, or EEXIST when
-/// `exclusive`.
+/// mode `mode` less the umask, owned by the caller's fsuid and fsgid.
+/// EEXIST if another caller made it meanwhile (the new queue is dropped,
+/// with its charge): mq_open then opens theirs through its access checks.
 pub(crate) fn create_queue(
     ns: &Arc<PlainNs>,
     name: &str,
     mode: u32,
     attr: Option<(i64, i64)>,
-    exclusive: bool,
 ) -> Result<Arc<MqNode>, SyscallError> {
     let space = space_of(ns).clone();
     let caller = Caller::current();
@@ -386,12 +388,9 @@ pub(crate) fn create_queue(
     });
     space.count.fetch_add(1, Ordering::Relaxed);
     let mut names = space.names.lock();
-    // Another creator first: theirs stands (EEXIST with O_EXCL).
-    if let Some(other) = names.get(name) {
-        if exclusive {
-            return Err(SyscallError::FileExists);
-        }
-        Ok(other.clone())
+    // Another creator first: theirs stands.
+    if names.contains_key(name) {
+        Err(SyscallError::FileExists)
     } else {
         names.insert(String::from(name), node.clone());
         Ok(node)
@@ -422,32 +421,36 @@ pub fn sys_mq_open(name_ptr: usize, oflag: usize, mode: usize, attr_ptr: usize) 
     let space = space_of(&ns).clone();
     let caller = Caller::current();
     let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
-    let existing = space.names.lock().get(&name).cloned();
-    let node = match existing {
-        None => {
+    // Linux holds the mqueue root's lock across the lookup and the create;
+    // here a create that loses the race (EEXIST) looks again, so the queue
+    // another caller made is opened only through the access checks below.
+    let node = loop {
+        let existing = space.names.lock().get(&name).cloned();
+        let Some(node) = existing else {
             if oflag & O_CREAT == 0 {
                 return Err(SyscallError::ResourceNotFound);
             }
-            create_queue(&ns, &name, mode as u32, attr, oflag & O_EXCL != 0)?
+            match create_queue(&ns, &name, mode as u32, attr) {
+                Err(SyscallError::FileExists) if oflag & O_EXCL == 0 => continue,
+                r => break r?,
+            }
+        };
+        if oflag & (O_CREAT | O_EXCL) == O_CREAT | O_EXCL {
+            return Err(SyscallError::FileExists);
         }
-        Some(node) => {
-            if oflag & (O_CREAT | O_EXCL) == O_CREAT | O_EXCL {
-                return Err(SyscallError::FileExists);
-            }
-            if oflag & O_ACCMODE == O_ACCMODE {
-                return Err(SyscallError::InvalidArgument);
-            }
-            let meta = node.metadata.read().clone();
-            let want = match oflag & O_ACCMODE {
-                O_WRONLY => crate::fs::MAY_WRITE,
-                O_RDWR => crate::fs::MAY_READ | crate::fs::MAY_WRITE,
-                _ => crate::fs::MAY_READ,
-            };
-            if !rights(&ns).read || !crate::fs::permission(&caller, &meta, want) {
-                return Err(SyscallError::PermissionDenied);
-            }
-            node
+        if oflag & O_ACCMODE == O_ACCMODE {
+            return Err(SyscallError::InvalidArgument);
         }
+        let meta = node.metadata.read().clone();
+        let want = match oflag & O_ACCMODE {
+            O_WRONLY => crate::fs::MAY_WRITE,
+            O_RDWR => crate::fs::MAY_READ | crate::fs::MAY_WRITE,
+            _ => crate::fs::MAY_READ,
+        };
+        if !rights(&ns).read || !crate::fs::permission(&caller, &meta, want) {
+            return Err(SyscallError::PermissionDenied);
+        }
+        break node;
     };
     if oflag & O_ACCMODE == O_ACCMODE {
         return Err(SyscallError::InvalidArgument);
@@ -595,6 +598,20 @@ fn notify(n: Notify) {
     if n.kind != SIGEV_SIGNAL {
         return;
     }
+    // Only to the process that registered, while it lives.
+    let Some(owner) = n.owner.upgrade() else {
+        return;
+    };
+    let same = crate::process::table::get_process(crate::process::ProcessId(n.pid))
+        .is_some_and(|p| Arc::ptr_eq(&p, &owner));
+    if !same
+        || matches!(
+            owner.get_state(),
+            crate::process::ProcessState::Zombie | crate::process::ProcessState::Dead
+        )
+    {
+        return;
+    }
     let mut info = crate::process::signals::SigInfo::from_current(n.signo as usize, SI_MESGQ);
     info.fields[1] = n.value;
     let _ =
@@ -708,11 +725,12 @@ pub fn sys_mq_notify(fd: usize, sev_ptr: usize) -> SyscallResult {
     if !rights(&super::sysvipc::current_ns()).write {
         return Err(SyscallError::PermissionDenied);
     }
-    let me = super::sysvipc::current_pid();
+    let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    let me = proc.pid.0;
     let mut s = node.state.lock();
     match sev {
         None => {
-            if s.notify.is_some_and(|n| n.pid == me) {
+            if s.notify.as_ref().is_some_and(|n| n.pid == me) {
                 s.notify = None;
             }
         }
@@ -722,6 +740,7 @@ pub fn sys_mq_notify(fd: usize, sev_ptr: usize) -> SyscallResult {
             }
             s.notify = Some(Notify {
                 pid: me,
+                owner: Arc::downgrade(&proc),
                 kind,
                 signo,
                 value,
@@ -729,6 +748,20 @@ pub fn sys_mq_notify(fd: usize, sev_ptr: usize) -> SyscallResult {
         }
     }
     Ok(0)
+}
+
+/// mqueue_flush_file: the registered process closing a descriptor of the
+/// queue (any, as on Linux) drops its notification. Called for every
+/// descriptor closed (`FileTable::closing`); other files are left alone.
+pub(crate) fn flush_file(file: &crate::fs::file::File) {
+    let Ok(node) = mq(file) else {
+        return;
+    };
+    let me = super::sysvipc::current_pid();
+    let mut s = node.state.lock();
+    if s.notify.as_ref().is_some_and(|n| n.pid == me) {
+        s.notify = None;
+    }
 }
 
 /// mq_getsetattr(fd, new, old): `old` gets mq_flags (O_NONBLOCK), the
@@ -927,7 +960,7 @@ impl VfsNode for MqRoot {
     ) -> Result<Arc<dyn VfsNode>, KernelError> {
         check_name(name)
             .map_err(|_| KernelError::FsError(crate::error::FsError::PermissionDenied))?;
-        create_queue(&self.ns, name, permissions.to_mode() & 0o777, None, true)
+        create_queue(&self.ns, name, permissions.to_mode() & 0o777, None)
             .map(|n| n as Arc<dyn VfsNode>)
             .map_err(|e| match e {
                 SyscallError::FileExists => {

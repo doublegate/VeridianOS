@@ -615,6 +615,9 @@ impl FileTable {
     /// file).
     fn closing(&self, file: &File) {
         crate::fs::flock::release_owner(file.flock_key(), self.lock_owner());
+        // A message queue's notification goes with its owner's close.
+        #[cfg(feature = "alloc")]
+        crate::syscall::mqueue::flush_file(file);
     }
 
     /// Install `file` at exactly descriptor `fd`, replacing whatever was

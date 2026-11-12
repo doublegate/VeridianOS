@@ -349,8 +349,7 @@ What remains:
   0027).
 - **POSIX message queues (ADR 0027).** As Linux, per IPC namespace, but mq_notify's
   SIGEV_THREAD fails (it needs a netlink socket, which do not exist yet: musl's mq_notify gets
-  EAFNOSUPPORT making one), and a notification registration is not removed when its owner closes a descriptor of the queue,
-  only when it fires or by mq_notify(fd, NULL).
+  EAFNOSUPPORT making one).
 - **kcmp.** KCMP_FILES and KCMP_SIGHAND see the tables a CLONE_FILES or CLONE_SIGHAND clone
   shares, and a table's identity can be reused once its last user is gone, as on Linux. A
   CLONE_VM child counts as sharing its parent's

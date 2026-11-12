@@ -98,7 +98,8 @@
   (`kernel/src/syscall/mqueue.rs`): a queue is a file whose descriptor reads Linux's status line
   and polls for a message or room; messages come out by priority, then in order; absolute
   CLOCK_REALTIME timeouts (ETIMEDOUT); O_NONBLOCK (EAGAIN) through mq_getsetattr; mq_notify by
-  signal (si_code SI_MESGQ) or SIGEV_NONE, one registration per queue (EBUSY); queue bytes
+  signal (si_code SI_MESGQ) or SIGEV_NONE, one registration per queue (EBUSY), sent only to the
+  process that registered and dropped when it closes a descriptor of the queue; queue bytes
   charged to RLIMIT_MSGQUEUE per real user (EMFILE); `/proc/sys/fs/mqueue` per namespace. New
   errno EMSGSIZE. The `mqueue` filesystem mounts (usually on /dev/mqueue): its root lists the
   namespace's queues, reading one shows its status, unlink and open(O_CREAT) there are

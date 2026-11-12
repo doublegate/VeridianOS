@@ -5729,6 +5729,10 @@ static void test_itimers(void)
         usleep(10000);
     struct itimerval zero = {{0, 0}, {0, 0}};
     int disarmed = setitimer(ITIMER_REAL, &zero, &got) == 0 && got.it_interval.tv_usec == 20000;
+    /* Disarming does not take back a SIGALRM already generated (as on
+     * Linux): one that fired just before is delivered at the next return
+     * to user mode, so let it arrive before counting. */
+    usleep(1000);
     int count = alrm_count;
     usleep(60000);
     int stopped = alrm_count == count && getitimer(ITIMER_REAL, &got) == 0 &&
@@ -9145,6 +9149,23 @@ static void test_posix_mq(void)
         f |= 8192;
     sigaction(SIGUSR1, &old, NULL);
     mq_close(q);
+    /* The owner closing a descriptor of the queue drops its registration
+     * (mqueue_flush_file): another process may register after it. */
+    struct sigevent none = {0};
+    none.sigev_notify = SIGEV_NONE;
+    mqd_t q2 = mq_open(name, O_RDWR);
+    if (q2 == (mqd_t)-1 || mq_notify(q2, &none)) {
+        f |= 65536;
+    } else {
+        mq_close(q2);
+        pid_t c2 = fork();
+        if (c2 == 0) {
+            mqd_t q3 = mq_open(name, O_RDWR);
+            _exit(q3 != (mqd_t)-1 && mq_notify(q3, &none) == 0 ? 0 : 1);
+        }
+        if (t_exit_status(c2) != 0)
+            f |= 65536;
+    }
     if (mq_unlink(name) || mq_open(name, O_RDWR) != (mqd_t)-1 || errno != ENOENT)
         f |= 16384;
     int fd = open("/proc/sys/fs/mqueue/msg_max", O_RDONLY);
