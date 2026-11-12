@@ -41,10 +41,12 @@ exposed were fixed (N-182 to N-189); the rest are listed, with their targets, in
   their pages (N-230); the rest needs the v0.29 page cache.
 - **clone across processes.** A `clone` without CLONE_THREAD makes a process (fork, vfork,
   `posix_spawn`); with CLONE_VM it shares the parent's memory page by page as it is at the
-  clone, so a mapping either side adds or removes afterwards is its own, and so is a page that
-  had no frame yet: whichever side touches it first gets a frame the other does not see (enough
-  for vfork and `posix_spawn`, whose child only execs or exits; LTP clone08's
-  CLONE_PARENT_SETTID case reads 0 from such a page). CLONE_FILES shares the descriptor
+  clone, so a mapping either side adds, removes or changes the protection of afterwards is its
+  own, and so is a stack page either side grows into afterwards: whichever side touches it
+  first gets a frame the other does not see (enough for vfork and `posix_spawn`, whose child
+  only execs or exits). A side that makes a shared page
+  read-only and then forks shares that frame with the new process while the other side can still
+  write it. CLONE_FILES shares the descriptor
   table and CLONE_SIGHAND the signal actions with the new process (G2b); the descriptor limit
   belongs to the table, so two processes sharing one share their RLIMIT_NOFILE too, where Linux
   checks each one's own.
@@ -64,7 +66,8 @@ exposed were fixed (N-182 to N-189); the rest are listed, with their targets, in
   totals); the per-second work and the leap second run in `ktimerd`, so they happen up to a
   scheduling delay after the second starts (seconds it runs late are charged with what the rate
   before them delivered, so nothing is lost or given twice, but a second's change of rate starts
-  that delay late; after 64 seconds without it the count restarts), and not at all on a machine
+  that delay late; after 64 seconds without it the ones before the current second are dropped,
+  and the current one runs on time), and not at all on a machine
   where the thread cannot start (a rate set by adjtimex still applies); there is no PPS, and no
   auxiliary clocks. (LTP
   leapsec01 passed before leap seconds existed, as it only checks that a sleep does not end early;
@@ -714,6 +717,11 @@ Page protections now follow `prot` (fixed in v0.27, N-132 to N-137). What remain
   EINVAL (`MAP_FIXED` replacement and `munmap` across mappings work since v0.27, N-141).
   `mprotect` of part of a mapping does not split it (N-135 remainder).
 - **Memory is allocated eagerly** at `mmap` time, not on first touch (v0.29 memory work).
+  Only the stack's pages come on first touch, and only for a fault of the program itself: a
+  kernel store into user memory (a system call's result, a clone's TID word) below the stack's
+  lowest page does not grow the stack, so the call fails with EFAULT (a TID store is skipped),
+  where Linux grows it. Lazy pages will need the fork's TID stores, which go through the child's
+  address space rather than the current one, to bring pages in.
 - **A memfd or tmpfs file cannot shrink under a shared mapping:** `ftruncate` that would drop a page still
   mapped `MAP_SHARED` fails with EBUSY. Linux shrinks it and unmaps those pages (access raises
   SIGBUS); mappings cannot be invalidated here yet (v0.29 memory work).
