@@ -140,7 +140,13 @@ pub fn get(space: &SysvSpace, asker: &Asker, key: i32, size: usize, flags: i32) 
             if flags & SHM_HUGETLB != 0 {
                 return Err(SyscallError::InvalidArgument);
             }
-            let pages = size.div_ceil(PAGE) as u64;
+            // newseg: a size whose whole pages do not fit the address
+            // arithmetic is ENOSPC (`numpages << PAGE_SHIFT < size`); with
+            // shmmax raised near the top, `size` can be (PR #40 review).
+            let Some(bytes) = size.checked_next_multiple_of(PAGE) else {
+                return Err(SyscallError::NoSpace);
+            };
+            let pages = (bytes / PAGE) as u64;
             let shmall = limits.shmall.load(core::sync::atomic::Ordering::Relaxed);
             match table.tot_pages.checked_add(pages) {
                 Some(t) if t <= shmall => {}
@@ -157,7 +163,7 @@ pub fn get(space: &SysvSpace, asker: &Asker, key: i32, size: usize, flags: i32) 
                 false,
                 0,
             );
-            node.truncate(pages as usize * PAGE)
+            node.truncate(bytes)
                 .map_err(|_| SyscallError::OutOfMemory)?;
             let pid = super::current_pid();
             let seg = Segment {
@@ -427,6 +433,12 @@ pub fn control(
     set: Option<(u32, u32, u32)>,
     memlock: u64,
 ) -> Result<(usize, CtlOut), SyscallError> {
+    // The commands that look without an object's own permission check
+    // need READ on the namespace, as every look does (ADR 0027; PR #40
+    // review).
+    if matches!(cmd, IPC_INFO | SHM_INFO | SHM_STAT_ANY) && !asker.may_read {
+        return Err(SyscallError::PermissionDenied);
+    }
     let limits = &space.limits;
     let load = core::sync::atomic::Ordering::Relaxed;
     let mut table = space.shm.lock();
@@ -558,6 +570,10 @@ pub fn proc_lines(space: &SysvSpace, asker: &Asker) -> alloc::string::String {
         "       key      shmid perms                  size  cpid  lpid nattch   uid   gid  cuid  \
          cgid      atime      dtime      ctime                   rss                  swap\n",
     );
+    // No READ on the namespace: the header and nothing else (ADR 0027).
+    if !asker.may_read {
+        return s;
+    }
     let table = space.shm.lock();
     for seg in table.ids.iter() {
         let p = asker.shown(&seg.perm);
@@ -621,6 +637,26 @@ mod tests {
         assert_eq!(attach_request(0, 0, SHM_EXEC).unwrap().prot, 7);
         assert_eq!(access_of(1), 0o444);
         assert_eq!(access_of(3), 0o666);
+    }
+
+    /// A size whose whole pages overflow is ENOSPC, not a wrapped (empty)
+    /// segment, even with shmmax raised to the top (PR #40 review).
+    #[test]
+    fn shmget_refuses_a_size_whose_pages_overflow() {
+        let space = SysvSpace::new();
+        let me = asker(1000, 1000);
+        space
+            .limits
+            .shmmax
+            .store(u64::MAX, core::sync::atomic::Ordering::Relaxed);
+        space
+            .limits
+            .shmall
+            .store(u64::MAX, core::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            get(&space, &me, 0, usize::MAX - 10, 0o600).err(),
+            Some(SyscallError::NoSpace)
+        );
     }
 
     #[test]
@@ -696,6 +732,18 @@ mod tests {
             Some(SyscallError::PermissionDenied)
         );
         assert!(control(&space, &other, id & 0x7fff, SHM_STAT_ANY, None, 0).is_ok());
+        // Without READ on the namespace no look is allowed (PR #40 review).
+        let mut blind = asker(1000, 1000);
+        blind.may_read = false;
+        for cmd in [SHM_STAT_ANY, IPC_INFO, SHM_INFO] {
+            assert_eq!(
+                control(&space, &blind, id & 0x7fff, cmd, None, 0).err(),
+                Some(SyscallError::PermissionDenied),
+                "cmd {cmd}"
+            );
+        }
+        assert_eq!(proc_lines(&space, &blind).lines().count(), 1, "header only");
+        assert_eq!(proc_lines(&space, &me).lines().count(), 2);
         assert_eq!(
             control(&space, &other, id, SHM_LOCK, None, 64).err(),
             Some(SyscallError::OperationNotPermitted)

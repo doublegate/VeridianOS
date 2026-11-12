@@ -226,6 +226,10 @@ pub struct File {
     /// the file's mappings, which keep it after the close (Linux's
     /// vm_file).
     pub write_access: Option<alloc::sync::Arc<crate::fs::write_access::WriteAccess>>,
+
+    /// What the node asks its open files to keep alive
+    /// ([`VfsNode::held_by_open`]), dropped with the file.
+    _held: Option<Arc<dyn core::any::Any + Send + Sync>>,
 }
 
 impl Drop for File {
@@ -278,6 +282,7 @@ impl File {
     /// Create a new file structure
     pub fn new(node: Arc<dyn VfsNode>, flags: OpenFlags) -> Self {
         let nb = flags.nonblock;
+        let held = node.held_by_open();
         Self {
             node,
             flags,
@@ -291,12 +296,14 @@ impl File {
             ofd_locked: AtomicBool::new(false),
             opener: None,
             write_access: None,
+            _held: held,
         }
     }
 
     /// Create a new file structure with a known path
     pub fn new_with_path(node: Arc<dyn VfsNode>, flags: OpenFlags, path: String) -> Self {
         let nb = flags.nonblock;
+        let held = node.held_by_open();
         Self {
             node,
             flags,
@@ -310,6 +317,7 @@ impl File {
             ofd_locked: AtomicBool::new(false),
             opener: None,
             write_access: None,
+            _held: held,
         }
     }
 
@@ -615,6 +623,9 @@ impl FileTable {
     /// file).
     fn closing(&self, file: &File) {
         crate::fs::flock::release_owner(file.flock_key(), self.lock_owner());
+        // A message queue's notification goes with its owner's close.
+        #[cfg(feature = "alloc")]
+        crate::syscall::mqueue::flush_file(file);
     }
 
     /// Install `file` at exactly descriptor `fd`, replacing whatever was

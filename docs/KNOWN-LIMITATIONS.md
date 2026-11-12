@@ -349,8 +349,7 @@ What remains:
   0027).
 - **POSIX message queues (ADR 0027).** As Linux, per IPC namespace, but mq_notify's
   SIGEV_THREAD fails (it needs a netlink socket, which do not exist yet: musl's mq_notify gets
-  EAFNOSUPPORT making one), and a notification registration is not removed when its owner closes a descriptor of the queue,
-  only when it fires or by mq_notify(fd, NULL).
+  EAFNOSUPPORT making one).
 - **Memory calls (ADR 0027 decisions 9-18).** Pages are never paged out, so mlock only changes
   what is counted and refused. mincore reports every page of a mapping resident (anonymous
   memory is not lazy; LTP's mincore03 expects untouched pages to be absent). msync writes a

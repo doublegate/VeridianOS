@@ -265,13 +265,15 @@ impl Default for UndoList {
     }
 }
 
-/// exit_sem for `process`: it leaves its undo list, which is applied if
-/// no other process shares it.
+/// exit_sem for `process`: it leaves its undo list, which is applied by
+/// whichever sharer lets it go last. `Arc::into_inner` hands the list to
+/// exactly that one, atomically: two sharers exiting at once on two CPUs
+/// each saw a count of two and neither applied it (PR #40 review).
 pub fn exit_sem(process: &crate::process::Process) {
     let Some(list) = process.sem_undo.lock().take() else {
         return;
     };
-    if Arc::strong_count(&list) == 1 {
+    if let Some(list) = Arc::into_inner(list) {
         list.apply(process.pid.0);
     }
 }
@@ -317,7 +319,7 @@ pub fn get(
             }
             let arr = SemArray {
                 perm: Perm::new(key, flags, asker.euid, asker.egid),
-                sems: alloc::vec![Sem::default(); nsems as usize],
+                sems: new_sems(nsems as usize)?,
                 otime: 0,
                 ctime: now_secs(),
                 adj: BTreeMap::new(),
@@ -478,6 +480,12 @@ pub fn control(
     cmd: i32,
     arg: CtlArg,
 ) -> Result<(usize, CtlOut), SyscallError> {
+    // The commands that look without an object's own permission check
+    // need READ on the namespace, as every look does (ADR 0027; PR #40
+    // review).
+    if matches!(cmd, IPC_INFO | SEM_INFO | SEM_STAT_ANY) && !asker.may_read {
+        return Err(SyscallError::PermissionDenied);
+    }
     let limits = space.limits.sem_limits();
     let mut ids = space.sem.lock();
     let r = match cmd {
@@ -613,6 +621,10 @@ pub fn proc_lines(space: &SysvSpace, asker: &Asker) -> alloc::string::String {
     let mut s = alloc::string::String::from(
         "       key      semid perms      nsems   uid   gid  cuid  cgid      otime      ctime\n",
     );
+    // No READ on the namespace: the header and nothing else (ADR 0027).
+    if !asker.may_read {
+        return s;
+    }
     for arr in space.sem.lock().iter() {
         let p = asker.shown(&arr.perm);
         let _ = writeln!(
@@ -633,9 +645,29 @@ pub fn proc_lines(space: &SysvSpace, asker: &Asker) -> alloc::string::String {
     s
 }
 
+/// `n` semaphores at 0, or ENOMEM if the heap cannot hold them (newary's
+/// kvzalloc fails; a `vec!` would panic, and semmsl is the namespace
+/// root's to raise).
+fn new_sems(n: usize) -> Result<Vec<Sem>, SyscallError> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(n)
+        .map_err(|_| SyscallError::OutOfMemory)?;
+    v.resize(n, Sem::default());
+    Ok(v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{super::tests::asker, *};
+
+    #[test]
+    fn an_array_too_big_for_the_heap_is_enomem() {
+        assert_eq!(new_sems(3).map(|v| v.len()), Ok(3));
+        assert_eq!(
+            new_sems(usize::MAX / 2).map(|v| v.len()),
+            Err(SyscallError::OutOfMemory)
+        );
+    }
 
     fn op(num: u16, op: i16, flg: i16) -> SemBuf {
         SemBuf { num, op, flg }
