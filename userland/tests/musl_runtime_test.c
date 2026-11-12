@@ -5563,6 +5563,13 @@ static void test_mount_calls(void);
 static void test_mount_flags(void);
 static void test_mount_no_escape(void);
 static void test_pivot_root(void);
+static void test_mount_object_cap(void);
+static void test_mount_modify_drop(void);
+static void test_fs_object_cap(void);
+static void test_ns_object_cap(void);
+static void test_clock_object_cap(void);
+static void test_system_object_cap(void);
+static void test_proc_object_cap(void);
 static void test_user_ns(void);
 static void test_pid_ns(void);
 static void test_net_ns(void);
@@ -5591,6 +5598,7 @@ static const struct {
     const char *name;
     void (*fn)(void);
 } only_tests[] = {
+    {"system_object_cap", test_system_object_cap},
     {"review_fixes", test_review_fixes},
     {"record_locks", test_record_locks},
     {"fcntl_flags", test_fcntl_flags},
@@ -5611,6 +5619,12 @@ static const struct {
     {"mount_calls", test_mount_calls},
     {"mount_flags", test_mount_flags},
     {"pivot_root", test_pivot_root},
+    {"mount_object_cap", test_mount_object_cap},
+    {"mount_modify_drop", test_mount_modify_drop},
+    {"fs_object_cap", test_fs_object_cap},
+    {"ns_object_cap", test_ns_object_cap},
+    {"clock_object_cap", test_clock_object_cap},
+    {"proc_object_cap", test_proc_object_cap},
     {"user_ns", test_user_ns},
     {"pid_ns", test_pid_ns},
     {"net_ns", test_net_ns},
@@ -9989,13 +10003,12 @@ static void test_mount_no_escape(void)
 }
 
 /* How many mounts /proc/self/mountinfo shows at mount point `point`. */
-static int t_mounts_at(const char *point)
+/* How many lines of mountinfo text `info` mount at `point`. */
+static int t_count_mounts(char *info, const char *point)
 {
-    static char info[8192];
     char needle[96];
     int n = 0;
     snprintf(needle, sizeof(needle), " %s ", point);
-    if (t_slurp("/proc/self/mountinfo", info, sizeof(info)) <= 0) return -1;
     for (char *line = info; *line;) {
         char *end = strchr(line, '\n');
         if (end) *end = 0;
@@ -10010,6 +10023,24 @@ static int t_mounts_at(const char *point)
         line = end + 1;
     }
     return n;
+}
+
+static int t_mounts_at(const char *point)
+{
+    static char info[8192];
+    if (t_slurp("/proc/self/mountinfo", info, sizeof(info)) <= 0) return -1;
+    return t_count_mounts(info, point);
+}
+
+/* t_mounts_at through `fd`, a /proc/self/mountinfo descriptor opened
+ * earlier: read from the start, so it shows the mounts as they are now. */
+static int t_mounts_at_fd(int fd, const char *point)
+{
+    static char info[8192];
+    ssize_t n = pread(fd, info, sizeof(info) - 1, 0);
+    if (n <= 0) return -1;
+    info[n] = 0;
+    return t_count_mounts(info, point);
 }
 
 /* pivot_root (ADR 0022 H3d): LTP pivot_root01's steps, in a mount
@@ -10111,6 +10142,540 @@ static void test_pivot_root(void)
     rmdir("/tmp/pr");
     snprintf(why, sizeof(why), "f=%#x code=%d", f, code);
     report("pivot_root", f == 0, why);
+}
+
+/* The id NS_GET_ID gives for the namespace `/proc/self/ns/<name>`, or 0. */
+static unsigned long long t_ns_id(const char *name)
+{
+    char path[48];
+    unsigned long long id = 0;
+    snprintf(path, sizeof(path), "/proc/self/ns/%s", name);
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return 0;
+    if (ioctl(fd, T_NS_GET_ID, &id) != 0) id = 0;
+    close(fd);
+    return id;
+}
+
+/* VeridianOS's private CapabilityDrop(kind, id, rights) (ADR 0024, ADR
+ * 0026), through the public header so the test also compiles it: kind 9 is
+ * a namespace, named by its NS_GET_ID id. Rights 0 drops the capability
+ * whole; otherwise those rights (the token's encoding) go. */
+#include <veridian/capability.h>
+#define T_SYS_CAPABILITY_DROP VERIDIAN_SYS_CAPABILITY_DROP
+#define T_CAP_NAMESPACE VERIDIAN_CAP_NAMESPACE
+
+/* mount's object capability (ADR 0024, decision 8): mount, umount2 and
+ * pivot_root need MODIFY on the mount namespace or on a user namespace
+ * above it, besides CAP_SYS_ADMIN. In a new mount namespace, which no
+ * capability names, mounting works through its owner, the initial user
+ * namespace; once root drops that too, every call fails: chroot with
+ * EPERM, the others with EACCES from their lookup, since the drop also
+ * takes file access (ADR 0024, step 6). */
+static void test_mount_object_cap(void)
+{
+    char why[160];
+    mkdir("/tmp", 01777);
+    rmdir("/tmp/oc");
+    if (mkdir("/tmp/oc", 0755) != 0) {
+        report("mount_object_cap", 0, "setup");
+        return;
+    }
+    pid_t child = fork();
+    if (child == 0) {
+        int g = 0;
+        long dropped_mnt = -2, dropped_user = -2;
+        if (unshare(CLONE_NEWNS) != 0 || mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0)
+            _exit(0x7f);
+        unsigned long long mnt = t_ns_id("mnt"), user = t_ns_id("user");
+        if (mnt == 0 || user == 0) _exit(0x7e);
+        /* Through the owner: nothing names the new mount namespace. */
+        if (mount("none", "/tmp/oc", "tmpfs", 0, NULL) != 0 || mkdir("/tmp/oc/new", 0755) != 0 ||
+            mount("none", "/tmp/oc/new", "tmpfs", 0, NULL) != 0 ||
+            mkdir("/tmp/oc/new/old", 0755) != 0)
+            g |= 1;
+        /* Opened now: after the drop no lookup succeeds (step 6). */
+        int info = open("/proc/self/mountinfo", O_RDONLY);
+        if (info < 0) g |= 1;
+        dropped_mnt = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, mnt, 0);
+        dropped_user = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, user, 0);
+        if (dropped_mnt != 0 || dropped_user != 1) g |= 2;
+        /* Still root with every POSIX capability, but no authority. The
+         * mount calls look their paths up first, as Linux's do, and with
+         * no READ on the mount namespace the lookup is EACCES (ADR 0024,
+         * step 6); chroot checks its capabilities first (EPERM). That
+         * MODIFY alone stops them is mount_modify_drop's. */
+        if (geteuid() != 0) g |= 4;
+        if (!(mount("none", "/tmp/oc", "tmpfs", 0, NULL) == -1 && errno == EACCES)) g |= 8;
+        if (!(mount(NULL, "/tmp/oc", NULL, MS_REMOUNT | MS_RDONLY, NULL) == -1 && errno == EACCES))
+            g |= 16;
+        if (!(umount2("/tmp/oc/new", MNT_DETACH) == -1 && errno == EACCES)) g |= 32;
+        if (!(syscall(SYS_pivot_root, "/tmp/oc/new", "/tmp/oc/new/old") == -1 && errno == EACCES))
+            g |= 64;
+        if (!(chroot("/tmp/oc") == -1 && errno == EPERM)) g |= 64;
+        /* The mounts made before the drop are still there. */
+        if (t_mounts_at_fd(info, "/tmp/oc") != 1 || t_mounts_at_fd(info, "/tmp/oc/new") != 1)
+            g |= 128;
+        if (info >= 0) close(info);
+        /* A selector naming nothing that can be dropped: EINVAL. */
+        if (!(syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, 0, 0) == -1 && errno == EINVAL)) g |= 256;
+        if (g != 0) {
+            printf("mount-object-cap g=%#x mnt=%ld user=%ld\n", g, dropped_mnt, dropped_user);
+            fflush(stdout);
+        }
+        _exit(g == 0 ? 0 : 1);
+    }
+    int f = 0, code = t_exit_status(child);
+    if (code == 0x7f || code == 0x7e)
+        f |= 1;
+    else if (code != 0)
+        f |= 2;
+    /* The parent's authority is untouched: it can still mount. */
+    if (mount("none", "/tmp/oc", "tmpfs", 0, NULL) != 0 || umount2("/tmp/oc", 0) != 0) f |= 4;
+    rmdir("/tmp/oc");
+    snprintf(why, sizeof(why), "f=%#x code=%d", f, code);
+    report("mount_object_cap", f == 0, why);
+}
+
+#define T_RIGHT_MODIFY VERIDIAN_RIGHT_MODIFY
+
+/* Dropping by rights (ADR 0026): root that drops MODIFY on its mount
+ * namespace and the user namespace above it cannot mount there but keeps
+ * the other rights, so files still work and it can still make namespaces
+ * (CREATE); with CREATE off the user namespace too it cannot make a user
+ * namespace of its own to mount in either. */
+static void test_mount_modify_drop(void)
+{
+    char why[160];
+    mkdir("/tmp", 01777);
+    rmdir("/tmp/omd");
+    if (mkdir("/tmp/omd", 0755) != 0) {
+        report("mount_modify_drop", 0, "setup");
+        return;
+    }
+    pid_t child = fork();
+    if (child == 0) {
+        int g = 0;
+        if (unshare(CLONE_NEWNS) != 0 || mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0)
+            _exit(0x7f);
+        unsigned long long mnt = t_ns_id("mnt"), user = t_ns_id("user");
+        if (mnt == 0 || user == 0) _exit(0x7e);
+        /* Nothing names the new mount namespace; the user namespace's one
+         * is narrowed, not removed, and a second drop finds nothing to take. */
+        long d_mnt = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, mnt, T_RIGHT_MODIFY);
+        long d_user = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, user, T_RIGHT_MODIFY);
+        /* The header's wrapper, as a launcher would call it. */
+        long again = veridian_capability_drop(VERIDIAN_CAP_NAMESPACE, user, VERIDIAN_RIGHT_MODIFY);
+        if (d_mnt != 0 || d_user != 1 || again != 0) g |= 1;
+        if (!(mount("none", "/tmp/omd", "tmpfs", 0, NULL) == -1 && errno == EPERM)) g |= 2;
+        if (!(chroot("/tmp/omd") == -1 && errno == EPERM)) g |= 2;
+        /* Files still work. */
+        int fd = open("/tmp/omd/f", O_CREAT | O_RDWR | O_TRUNC, 0644);
+        char buf[4] = {0};
+        if (fd < 0 || write(fd, "abc", 3) != 3 || pread(fd, buf, 3, 0) != 3 || memcmp(buf, "abc", 3))
+            g |= 4;
+        if (fd >= 0) close(fd);
+        if (unlink("/tmp/omd/f") != 0) g |= 4;
+        /* CREATE is kept: a new UTS namespace can still be made. */
+        if (unshare(CLONE_NEWUTS) != 0) g |= 8;
+        /* Rights bits above CREATE: EINVAL. */
+        if (!(veridian_capability_drop(VERIDIAN_CAP_NAMESPACE, user, 0x100) == -1 && errno == EINVAL))
+            g |= 16;
+        /* MODIFY alone still lets it make a user namespace, which its
+         * creator is granted, and mount in a mount namespace made inside
+         * it (a private one). Denying mounts takes CREATE off the user
+         * namespace too: then no new user namespace, while a new IPC one,
+         * on its own capability, still can be made. */
+        pid_t gc = fork();
+        if (gc == 0) _exit(unshare(CLONE_NEWUSER) == 0 ? 0 : 1);
+        if (gc < 0 || t_exit_status(gc) != 0) g |= 32;
+        if (veridian_capability_drop(VERIDIAN_CAP_NAMESPACE, user, VERIDIAN_RIGHT_CREATE) != 1) g |= 64;
+        if (!(unshare(CLONE_NEWUSER) == -1 && errno == EPERM)) g |= 64;
+        if (unshare(CLONE_NEWIPC) != 0) g |= 64;
+        if (g != 0) {
+            printf("mount-modify-drop g=%#x drops=%ld,%ld,%ld\n", g, d_mnt, d_user, again);
+            fflush(stdout);
+        }
+        _exit(g == 0 ? 0 : 1);
+    }
+    int f = 0, code = t_exit_status(child);
+    if (code == 0x7f || code == 0x7e)
+        f |= 1;
+    else if (code != 0)
+        f |= 2;
+    rmdir("/tmp/omd");
+    snprintf(why, sizeof(why), "f=%#x code=%d", f, code);
+    report("mount_modify_drop", f == 0, why);
+}
+
+/* File access behind the mount namespace (ADR 0024, step 6): root with
+ * every POSIX capability, narrowing its rights on its mount namespace and
+ * the user namespace above it (both stand for it). MODIFY off keeps files
+ * working; WRITE and CREATE off leave reading only (EACCES to write, EPERM
+ * to chmod, the owner included); everything off is EACCES for any lookup,
+ * though a descriptor opened before still reads. A sibling with only
+ * CREATE off makes files but no device node (EPERM). */
+static void test_fs_object_cap(void)
+{
+    char why[160];
+    mkdir("/tmp", 01777);
+    unlink("/tmp/foc/f");
+    unlink("/tmp/foc/r");
+    unlink("/tmp/foc/d");
+    rmdir("/tmp/foc");
+    int fd = -1;
+    if (mkdir("/tmp/foc", 0755) != 0 || (fd = open("/tmp/foc/f", O_CREAT | O_WRONLY, 0644)) < 0 ||
+        write(fd, "abc", 3) != 3) {
+        if (fd >= 0) close(fd);
+        report("fs_object_cap", 0, "setup");
+        return;
+    }
+    close(fd);
+    unsigned long long mnt = t_ns_id("mnt"), user = t_ns_id("user");
+    if (mnt == 0 || user == 0) {
+        report("fs_object_cap", 0, "ns ids");
+        return;
+    }
+    pid_t child = fork();
+    if (child == 0) {
+        int g = 0;
+        char buf[4] = {0};
+        long d1 = veridian_capability_drop(VERIDIAN_CAP_NAMESPACE, mnt, VERIDIAN_RIGHT_MODIFY);
+        long d2 = veridian_capability_drop(VERIDIAN_CAP_NAMESPACE, user, VERIDIAN_RIGHT_MODIFY);
+        if (d1 != 1 || d2 != 1) g |= 1;
+        /* "Cannot mount" still reads, writes and changes modes. */
+        int rw = open("/tmp/foc/f", O_RDWR);
+        if (rw < 0 || pread(rw, buf, 3, 0) != 3 || memcmp(buf, "abc", 3) != 0 ||
+            pwrite(rw, "x", 1, 3) != 1 || chmod("/tmp/foc/f", 0640) != 0)
+            g |= 2;
+        if (rw >= 0) close(rw);
+        unsigned w = VERIDIAN_RIGHT_WRITE | VERIDIAN_RIGHT_CREATE;
+        if (veridian_capability_drop(VERIDIAN_CAP_NAMESPACE, mnt, w) != 1 ||
+            veridian_capability_drop(VERIDIAN_CAP_NAMESPACE, user, w) != 1)
+            g |= 1;
+        /* Read only: reading works; writing, creating and removing are
+         * EACCES; chmod and chown are EPERM, root and owner as it is. */
+        int ro = open("/tmp/foc/f", O_RDONLY);
+        if (ro < 0 || read(ro, buf, 3) != 3) g |= 4;
+        if (!(open("/tmp/foc/f", O_WRONLY) == -1 && errno == EACCES)) g |= 8;
+        if (!(open("/tmp/foc/n", O_CREAT | O_WRONLY, 0644) == -1 && errno == EACCES)) g |= 8;
+        if (!(unlink("/tmp/foc/f") == -1 && errno == EACCES)) g |= 8;
+        if (!(chmod("/tmp/foc/f", 0644) == -1 && errno == EPERM)) g |= 16;
+        if (!(chown("/tmp/foc/f", 1, 1) == -1 && errno == EPERM)) g |= 16;
+        /* Nothing: no lookup at all, but the open descriptor still reads. */
+        if (veridian_capability_drop(VERIDIAN_CAP_NAMESPACE, mnt, 0) != 1 ||
+            veridian_capability_drop(VERIDIAN_CAP_NAMESPACE, user, 0) != 1)
+            g |= 1;
+        struct stat st;
+        if (!(open("/tmp/foc/f", O_RDONLY) == -1 && errno == EACCES)) g |= 32;
+        if (!(stat("/tmp/foc/f", &st) == -1 && errno == EACCES)) g |= 32;
+        /* No component to search: still a lookup (PR #39 review). */
+        if (!(stat("/", &st) == -1 && errno == EACCES)) g |= 128;
+        if (!(access("/", F_OK) == -1 && errno == EACCES)) g |= 128;
+        /* Listing attributes reads the inode, through a descriptor too. */
+        char names[64];
+        if (!(ro >= 0 && flistxattr(ro, names, sizeof(names)) == -1 && errno == EACCES)) g |= 256;
+        if (ro < 0 || pread(ro, buf, 3, 0) != 3 || memcmp(buf, "abc", 3) != 0) g |= 64;
+        if (g != 0) {
+            printf("fs-object-cap g=%#x drops=%ld,%ld\n", g, d1, d2);
+            fflush(stdout);
+        }
+        _exit(g == 0 ? 0 : 1);
+    }
+    pid_t sib = fork();
+    if (sib == 0) {
+        int g = 0;
+        if (veridian_capability_drop(VERIDIAN_CAP_NAMESPACE, mnt, VERIDIAN_RIGHT_CREATE) != 1 ||
+            veridian_capability_drop(VERIDIAN_CAP_NAMESPACE, user, VERIDIAN_RIGHT_CREATE) != 1)
+            g |= 1;
+        if (mknod("/tmp/foc/r", S_IFREG | 0600, 0) != 0) g |= 2;
+        if (!(mknod("/tmp/foc/d", S_IFCHR | 0600, makedev(1, 3)) == -1 && errno == EPERM)) g |= 4;
+        if (g != 0) {
+            printf("fs-object-cap create g=%#x\n", g);
+            fflush(stdout);
+        }
+        _exit(g == 0 ? 0 : 1);
+    }
+    int f = 0, code = t_exit_status(child), sib_code = t_exit_status(sib);
+    if (code != 0) f |= 1;
+    if (sib_code != 0) f |= 2;
+    /* The parent's own rights are untouched. */
+    if (unlink("/tmp/foc/f") != 0) f |= 4;
+    unlink("/tmp/foc/r");
+    unlink("/tmp/foc/d");
+    if (rmdir("/tmp/foc") != 0) f |= 4;
+    snprintf(why, sizeof(why), "f=%#x code=%d,%d", f, code, sib_code);
+    report("fs_object_cap", f == 0, why);
+}
+
+/* The namespace calls' object capabilities (ADR 0024, step 3): unshare and
+ * clone need CREATE on the namespace a new one is made from, setns EXECUTE
+ * on its target, sethostname MODIFY on the UTS namespace, each through the
+ * namespace itself or a user namespace above it. A root child that drops
+ * its UTS namespaces and its user namespace keeps every POSIX capability
+ * but can no longer name, join or make a UTS namespace, nor make a user
+ * namespace; a kind it still holds (IPC) it can still unshare. */
+static void test_ns_object_cap(void)
+{
+    char why[160];
+    pid_t child = fork();
+    if (child == 0) {
+        int g = 0;
+        unsigned long long old_uts = 0;
+        int old = open("/proc/self/ns/uts", O_RDONLY);
+        if (old < 0 || ioctl(old, T_NS_GET_ID, &old_uts) != 0) _exit(0x7f);
+        /* Through the owner: nothing names the new UTS namespace. */
+        if (unshare(CLONE_NEWUTS) != 0 || sethostname("ocap-a", 6) != 0) _exit(0x7e);
+        unsigned long long uts = t_ns_id("uts"), user = t_ns_id("user");
+        if (uts == 0 || user == 0 || uts == old_uts) _exit(0x7d);
+        long d_new = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, uts, 0);
+        long d_old = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, old_uts, 0);
+        long d_user = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, user, 0);
+        if (d_new != 0 || d_old != 1 || d_user != 1) g |= 1;
+        if (geteuid() != 0) g |= 2;
+        if (!(sethostname("ocap-b", 6) == -1 && errno == EPERM)) g |= 4;
+        if (!(setns(old, CLONE_NEWUTS) == -1 && errno == EPERM)) g |= 8;
+        if (!(unshare(CLONE_NEWUTS) == -1 && errno == EPERM)) g |= 16;
+        if (!(unshare(CLONE_NEWUSER) == -1 && errno == EPERM)) g |= 32;
+        long r = syscall(SYS_clone, CLONE_NEWUTS | SIGCHLD, 0, 0, 0, 0);
+        if (r == 0) _exit(0);
+        if (r > 0) {
+            waitpid((pid_t)r, NULL, 0);
+            g |= 64;
+        } else if (errno != EPERM) {
+            g |= 64;
+        }
+        /* Still in the UTS namespace it made, with its name. */
+        struct utsname u;
+        if (uname(&u) != 0 || strcmp(u.nodename, "ocap-a") != 0 || t_ns_id("uts") != uts) g |= 128;
+        /* An IPC namespace is still held, so a new one can be made. */
+        if (unshare(CLONE_NEWIPC) != 0) g |= 256;
+        if (g != 0) {
+            printf("ns-object-cap g=%#x drops=%ld,%ld,%ld\n", g, d_new, d_old, d_user);
+            fflush(stdout);
+        }
+        _exit(g == 0 ? 0 : 1);
+    }
+    int f = 0, code = t_exit_status(child);
+    if (code >= 0x7d && code <= 0x7f)
+        f |= 1;
+    else if (code != 0)
+        f |= 2;
+    snprintf(why, sizeof(why), "f=%#x code=%d", f, code);
+    report("ns_object_cap", f == 0, why);
+}
+
+/* Acting on another process (ADR 0024, step 5): signals need WRITE over
+ * it, tracing, scheduling and limits MODIFY, and set_tid MODIFY on the PID
+ * namespace, each on its PID namespace (itself or through a user
+ * namespace above it) or on the process. A root child that drops its PID
+ * namespace and its user namespace keeps every POSIX capability, and can
+ * still act on itself, but no longer on its own child: it can neither
+ * attach nor be asked to trace (PTRACE_TRACEME), and what it traced from
+ * before it can no longer read or write. */
+static long t_proc_cap_word = 0x5eed;
+
+static void test_proc_object_cap(void)
+{
+    char why[160];
+    pid_t child = fork();
+    if (child == 0) {
+        int g = 0, gate[2];
+        if (pipe(gate) != 0) _exit(0x7f);
+        pid_t victim = fork();
+        if (victim == 0) {
+            char c;
+            close(gate[1]);
+            /* Until its parent closes the pipe, which it can still do. */
+            (void)read(gate[0], &c, 1);
+            _exit(0);
+        }
+        /* A second one, traced from before the drop. */
+        pid_t traced = fork();
+        if (traced == 0) {
+            char c;
+            close(gate[1]);
+            (void)read(gate[0], &c, 1);
+            _exit(0);
+        }
+        close(gate[0]);
+        if (victim < 0 || traced < 0) _exit(0x7e);
+        unsigned long long pid_ns = t_ns_id("pid"), user = t_ns_id("user");
+        if (pid_ns == 0 || user == 0) _exit(0x7d);
+        /* Before the drop, all of it works: tracing and reading memory too. */
+        if (kill(victim, 0) != 0 || setpriority(PRIO_PROCESS, victim, 1) != 0) g |= 1;
+        long word = 0;
+        if (syscall(SYS_ptrace, 16 /* PTRACE_ATTACH */, traced, 0, 0) != 0 ||
+            syscall(SYS_ptrace, 2 /* PTRACE_PEEKDATA */, traced, &t_proc_cap_word, &word) != 0 ||
+            word != 0x5eed)
+            g |= 1;
+        long d_pid = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, pid_ns, 0);
+        long d_user = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, user, 0);
+        if (d_pid != 1 || d_user != 1) g |= 2;
+        if (geteuid() != 0) g |= 4;
+        /* Itself: no capability asked. */
+        if (kill(getpid(), 0) != 0 || setpriority(PRIO_PROCESS, 0, 2) != 0) g |= 8;
+        struct rlimit lim;
+        if (prlimit(0, RLIMIT_NOFILE, NULL, &lim) != 0) g |= 8;
+        /* Its child: EPERM for each, root or not. */
+        if (!(kill(victim, SIGTERM) == -1 && errno == EPERM)) g |= 16;
+        if (!(setpriority(PRIO_PROCESS, victim, 3) == -1 && errno == EPERM)) g |= 32;
+        struct sched_param sp = {0};
+        /* Raw: musl's sched_setscheduler is a stub returning ENOSYS. */
+        if (!(syscall(SYS_sched_setscheduler, victim, SCHED_OTHER, &sp) == -1 && errno == EPERM))
+            g |= 64;
+        if (!(prlimit(victim, RLIMIT_NOFILE, NULL, &lim) == -1 && errno == EPERM)) g |= 128;
+        if (!(syscall(SYS_ptrace, 16 /* PTRACE_ATTACH */, victim, 0, 0) == -1 && errno == EPERM))
+            g |= 256;
+        /* What it traced from before: no more reading or writing its memory
+         * (checked on each access), though it can still let go. */
+        if (!(syscall(SYS_ptrace, 2 /* PTRACE_PEEKDATA */, traced, &t_proc_cap_word, &word) == -1 &&
+              errno == EPERM))
+            g |= 2048;
+        if (!(syscall(SYS_ptrace, 5 /* PTRACE_POKEDATA */, traced, &t_proc_cap_word, 1L) == -1 &&
+              errno == EPERM))
+            g |= 2048;
+        if (syscall(SYS_ptrace, 17 /* PTRACE_DETACH */, traced, 0, 0) != 0) g |= 4096;
+        /* A child made after the drop cannot ask to be traced by it. */
+        pid_t asker = fork();
+        if (asker == 0)
+            _exit(syscall(SYS_ptrace, 0 /* PTRACE_TRACEME */, 0, 0, 0) == -1 && errno == EPERM ? 0 : 1);
+        if (asker < 0 || t_exit_status(asker) != 0) g |= 8192;
+        /* set_tid: choosing a number in the PID namespace. */
+        pid_t ids[1] = {getpid() + 7100};
+        struct t_clone_args a;
+        memset(&a, 0, sizeof(a));
+        a.exit_signal = SIGCHLD;
+        a.set_tid = (uintptr_t)ids;
+        a.set_tid_size = 1;
+        long r = t_clone3(&a, sizeof(a));
+        if (r == 0) _exit(0);
+        if (r > 0) {
+            waitpid((pid_t)r, NULL, 0);
+            g |= 512;
+        } else if (errno != EPERM) {
+            g |= 512;
+        }
+        /* Waiting needs nothing: the victim leaves once the pipe closes. */
+        close(gate[1]);
+        if (t_exit_status(victim) != 0 || t_exit_status(traced) != 0) g |= 1024;
+        if (g != 0) {
+            printf("proc-object-cap g=%#x drops=%ld,%ld\n", g, d_pid, d_user);
+            fflush(stdout);
+        }
+        _exit(g == 0 ? 0 : 1);
+    }
+    int f = 0, code = t_exit_status(child);
+    if (code >= 0x7d && code <= 0x7f)
+        f |= 1;
+    else if (code != 0)
+        f |= 2;
+    snprintf(why, sizeof(why), "f=%#x code=%d", f, code);
+    report("proc_object_cap", f == 0, why);
+}
+
+/* The clocks' object capabilities (ADR 0024, step 4): a root child that
+ * drops the system clock can still read it and the NTP state, and arm an
+ * alarm timer, but not set or steer the clock; dropping the alarm clocks
+ * too refuses the alarm timer. */
+#define T_CAP_CLOCK VERIDIAN_CAP_CLOCK
+static void test_clock_object_cap(void)
+{
+    char why[160];
+    pid_t child = fork();
+    if (child == 0) {
+        int g = 0;
+        struct timespec now;
+        struct timeval tv;
+        struct timex tx;
+        timer_t t;
+        if (geteuid() != 0) g |= 1;
+        long d_sys = syscall(T_SYS_CAPABILITY_DROP, T_CAP_CLOCK, 0, 0);
+        if (d_sys != 1) g |= 2;
+        if (clock_gettime(CLOCK_REALTIME, &now) != 0) g |= 4;
+        if (!(clock_settime(CLOCK_REALTIME, &now) == -1 && errno == EPERM)) g |= 8;
+        gettimeofday(&tv, NULL);
+        if (!(settimeofday(&tv, NULL) == -1 && errno == EPERM)) g |= 16;
+        memset(&tx, 0, sizeof(tx));
+        if (adjtimex(&tx) < 0) g |= 32;
+        memset(&tx, 0, sizeof(tx));
+        tx.modes = ADJ_MAXERROR;
+        tx.maxerror = 1000;
+        if (!(adjtimex(&tx) == -1 && errno == EPERM)) g |= 64;
+        if (timer_create(CLOCK_REALTIME_ALARM, NULL, &t) != 0)
+            g |= 128;
+        else
+            timer_delete(t);
+        long d_alarm = syscall(T_SYS_CAPABILITY_DROP, T_CAP_CLOCK, 1, 0);
+        if (d_alarm != 1) g |= 256;
+        if (!(timer_create(CLOCK_BOOTTIME_ALARM, NULL, &t) == -1 && errno == EPERM)) g |= 512;
+        if (timer_create(CLOCK_MONOTONIC, NULL, &t) != 0)
+            g |= 1024;
+        else
+            timer_delete(t);
+        if (g != 0) {
+            printf("clock-object-cap g=%#x drops=%ld,%ld\n", g, d_sys, d_alarm);
+            fflush(stdout);
+        }
+        _exit(g == 0 ? 0 : 1);
+    }
+    int code = t_exit_status(child);
+    snprintf(why, sizeof(why), "code=%d", code);
+    report("clock_object_cap", code == 0, why);
+}
+
+/* ADR 0024, step 7: changing the system as a whole needs MODIFY on the
+ * System object. Root keeps writing a sysctl and going past RLIMIT_NPROC
+ * until it drops that right; after the drop a sysctl write is EACCES, a
+ * fork past the limit EAGAIN, and the package calls EACCES. */
+static void test_system_object_cap(void)
+{
+    char why[160];
+    pid_t child = fork();
+    if (child == 0) {
+        int g = 0;
+        const char *path = "/proc/sys/fs/inotify/max_user_watches";
+        char val[32] = {0};
+        int fd = open(path, O_RDWR);
+        if (fd < 0 || read(fd, val, sizeof(val) - 1) <= 0)
+            g |= 1;
+        if (fd >= 0 && pwrite(fd, val, strlen(val), 0) != (ssize_t)strlen(val))
+            g |= 2;
+        struct rlimit one = {1, 1};
+        if (setrlimit(RLIMIT_NPROC, &one) != 0)
+            g |= 4;
+        pid_t gc = fork();
+        if (gc == 0)
+            _exit(0);
+        if (gc < 0 || t_exit_status(gc) != 0)
+            g |= 8;
+        long d = syscall(T_SYS_CAPABILITY_DROP, VERIDIAN_CAP_SYSTEM, 0, T_RIGHT_MODIFY);
+        if (d != 1)
+            g |= 16;
+        if (fd >= 0 && !(pwrite(fd, val, strlen(val), 0) == -1 && errno == EACCES))
+            g |= 32;
+        gc = fork();
+        if (gc == 0)
+            _exit(0);
+        if (gc > 0) {
+            t_exit_status(gc);
+            g |= 64;
+        } else if (errno != EAGAIN) {
+            g |= 128;
+        }
+        if (!(syscall(1114, "veridian-nonexistent", 0) == -1 && errno == EACCES))
+            g |= 256;
+        if (fd >= 0)
+            close(fd);
+        if (g != 0) {
+            printf("system-object-cap g=%#x drop=%ld\n", g, d);
+            fflush(stdout);
+        }
+        _exit(g == 0 ? 0 : 1);
+    }
+    int code = t_exit_status(child);
+    snprintf(why, sizeof(why), "code=%d", code);
+    report("system_object_cap", code == 0, why);
 }
 
 /* Write `text` to `path`; 0 or the errno. */
@@ -11070,6 +11635,13 @@ int main(int argc, char **argv)
     test_mount_flags();
     test_mount_no_escape();
     test_pivot_root();
+    test_mount_object_cap();
+    test_mount_modify_drop();
+    test_fs_object_cap();
+    test_ns_object_cap();
+    test_clock_object_cap();
+    test_system_object_cap();
+    test_proc_object_cap();
     test_user_ns();
     test_pid_ns();
     test_net_ns();

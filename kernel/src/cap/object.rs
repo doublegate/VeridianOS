@@ -71,7 +71,33 @@ pub enum ObjectRef {
     CapabilitySpace { pid: ProcessId },
     /// Hardware device
     Device { device_id: u64 },
+    /// A namespace (ADR 0022), by kind and 64-bit id: the authority over
+    /// it that Linux privilege checks also need (ADR 0024).
+    #[cfg(feature = "alloc")]
+    Namespace {
+        kind: crate::process::ns::NsKind,
+        id: u64,
+    },
+    /// A clock that can be set (ADR 0024).
+    Clock { clock: ClockObject },
+    /// The machine as a whole: sysctls, packages, limits beyond a user's
+    /// (ADR 0024).
+    System,
 }
+
+/// The clocks an object capability can name (ADR 0024).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClockObject {
+    /// The system clock (CLOCK_REALTIME and its steering).
+    System,
+    /// The alarm clocks (CLOCK_REALTIME_ALARM, CLOCK_BOOTTIME_ALARM).
+    Alarm,
+}
+
+/// Object type codes (the token's 4-bit type field).
+pub const TYPE_NAMESPACE: u8 = 9;
+pub const TYPE_CLOCK: u8 = 10;
+pub const TYPE_SYSTEM: u8 = 11;
 
 impl ObjectRef {
     /// Get the type code for this object
@@ -87,6 +113,10 @@ impl ObjectRef {
             ObjectRef::PageTable { .. } => 6,
             ObjectRef::CapabilitySpace { .. } => 7,
             ObjectRef::Device { .. } => 8,
+            #[cfg(feature = "alloc")]
+            ObjectRef::Namespace { .. } => TYPE_NAMESPACE,
+            ObjectRef::Clock { .. } => TYPE_CLOCK,
+            ObjectRef::System => TYPE_SYSTEM,
         }
     }
 
@@ -103,6 +133,9 @@ impl ObjectRef {
             ObjectRef::PageTable { .. } => true,
             ObjectRef::CapabilitySpace { pid } => pid.0 > 0,
             ObjectRef::Device { .. } => true,
+            #[cfg(feature = "alloc")]
+            ObjectRef::Namespace { id, .. } => *id > 0,
+            ObjectRef::Clock { .. } | ObjectRef::System => true,
         }
     }
 }
@@ -141,6 +174,13 @@ impl PartialEq for ObjectRef {
                 p1 == p2
             }
             (ObjectRef::Device { device_id: d1 }, ObjectRef::Device { device_id: d2 }) => d1 == d2,
+            #[cfg(feature = "alloc")]
+            (
+                ObjectRef::Namespace { kind: k1, id: i1 },
+                ObjectRef::Namespace { kind: k2, id: i2 },
+            ) => k1 == k2 && i1 == i2,
+            (ObjectRef::Clock { clock: c1 }, ObjectRef::Clock { clock: c2 }) => c1 == c2,
+            (ObjectRef::System, ObjectRef::System) => true,
             _ => false,
         }
     }
@@ -183,6 +223,14 @@ impl core::fmt::Debug for ObjectRef {
                 .debug_struct("Device")
                 .field("device_id", device_id)
                 .finish(),
+            #[cfg(feature = "alloc")]
+            ObjectRef::Namespace { kind, id } => f
+                .debug_struct("Namespace")
+                .field("kind", kind)
+                .field("id", id)
+                .finish(),
+            ObjectRef::Clock { clock } => f.debug_struct("Clock").field("clock", clock).finish(),
+            ObjectRef::System => f.write_str("System"),
         }
     }
 }

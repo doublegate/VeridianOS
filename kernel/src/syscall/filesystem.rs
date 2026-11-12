@@ -1092,6 +1092,13 @@ pub fn sys_rmdir(path: usize) -> SyscallResult {
     sys_unlinkat(AT_FDCWD, path, AT_REMOVEDIR)
 }
 
+/// What the private mount and umount calls check: CAP_SYS_ADMIN and the
+/// mount namespace's object capability with MODIFY, as mount(2) does.
+fn may_change_mounts() -> bool {
+    Caller::current().capable(crate::process::linux_caps::CAP_SYS_ADMIN)
+        && crate::cap::authority::current_may_change_mounts()
+}
+
 /// Mount a filesystem
 ///
 /// # Arguments
@@ -1100,7 +1107,7 @@ pub fn sys_rmdir(path: usize) -> SyscallResult {
 /// - fs_type: Filesystem type string
 /// - flags: Mount flags
 ///
-/// This is a privileged operation requiring a kernel-level capability.
+/// Privileged: see [`may_change_mounts`].
 pub fn sys_mount(
     _device: usize,
     mount_point: usize,
@@ -1111,33 +1118,11 @@ pub fn sys_mount(
     validate_user_string_ptr(mount_point)?;
     validate_user_string_ptr(fs_type)?;
 
-    // Mount needs CAP_SYS_ADMIN, as on Linux (EPERM), and, as a native
-    // authority over the VFS tree, a Memory object capability with WRITE
-    // and CREATE rights: both must hold (ADR 0020, decision 9).
-    let current = process::current_process().ok_or(SyscallError::InvalidState)?;
-    if !Caller::current().capable(crate::process::linux_caps::CAP_SYS_ADMIN) {
+    // Mount needs CAP_SYS_ADMIN, as on Linux, and a capability with MODIFY
+    // on the caller's mount namespace or a user namespace above it (ADR
+    // 0024, decision 8); EPERM for either.
+    if !may_change_mounts() {
         return Err(SyscallError::OperationNotPermitted);
-    }
-    let cap_space = current.capability_space.lock();
-    let has_mount_perm = {
-        let mut found = false;
-        #[cfg(feature = "alloc")]
-        {
-            let _ = cap_space.iter_capabilities(|entry| {
-                if matches!(entry.object, crate::cap::ObjectRef::Memory { .. })
-                    && entry.rights.contains(crate::cap::Rights::WRITE)
-                    && entry.rights.contains(crate::cap::Rights::CREATE)
-                {
-                    found = true;
-                    return false;
-                }
-                true
-            });
-        }
-        found
-    };
-    if !has_mount_perm {
-        return Err(SyscallError::PermissionDenied);
     }
 
     // Copied in through the fault-tolerant reader (N-43).
@@ -1160,34 +1145,14 @@ pub fn sys_mount(
 /// # Arguments
 /// - mount_point: Mount point to unmount
 ///
-/// This is a privileged operation requiring a kernel-level capability.
+/// Privileged: see [`may_change_mounts`].
 pub fn sys_unmount(mount_point: usize) -> SyscallResult {
     // Validate mount_point string pointer is in user space
     validate_user_string_ptr(mount_point)?;
 
-    // Unmount is a privileged operation - verify the calling process has
-    // a Memory capability with WRITE rights (needed to modify the VFS tree)
-    let current = process::current_process().ok_or(SyscallError::InvalidState)?;
-    let cap_space = current.capability_space.lock();
-    let has_unmount_perm = {
-        let mut found = false;
-        #[cfg(feature = "alloc")]
-        {
-            let _ = cap_space.iter_capabilities(|entry| {
-                if matches!(entry.object, crate::cap::ObjectRef::Memory { .. })
-                    && entry.rights.contains(crate::cap::Rights::WRITE)
-                    && entry.rights.contains(crate::cap::Rights::CREATE)
-                {
-                    found = true;
-                    return false;
-                }
-                true
-            });
-        }
-        found
-    };
-    if !has_unmount_perm {
-        return Err(SyscallError::PermissionDenied);
+    // The same rule as the private mount ([`may_change_mounts`]).
+    if !may_change_mounts() {
+        return Err(SyscallError::OperationNotPermitted);
     }
 
     // Copied in through the fault-tolerant reader (N-43).
@@ -1927,8 +1892,8 @@ pub fn sys_fchdir(fd: usize) -> SyscallResult {
 
 /// chroot (N-250): make `path` the root for every later lookup of this
 /// process's threads that share its filesystem state (and of children,
-/// which inherit it). CAP_SYS_CHROOT in the caller's own user namespace
-/// only (EPERM), as on Linux. The
+/// which inherit it). CAP_SYS_CHROOT in the caller's own user namespace, as
+/// on Linux, and MODIFY on its mount namespace (ADR 0024), EPERM. The
 /// working directory stays where it is if it is under the new
 /// root; otherwise it becomes the new root, where Linux would leave it
 /// outside (the classic way out of a chroot).
@@ -1936,6 +1901,12 @@ pub fn sys_chroot(path_ptr: usize) -> SyscallResult {
     let path = read_user_path(path_ptr)?;
     let caller = Caller::current();
     if !caller.ns_capable(&caller.userns, crate::process::linux_caps::CAP_SYS_CHROOT) {
+        return Err(SyscallError::OperationNotPermitted);
+    }
+    // And MODIFY on the mount namespace, or a user namespace above it, as
+    // for mount and pivot_root (ADR 0024's table; PR #39 review: chroot was
+    // left out of step 2).
+    if !crate::cap::authority::current_may_change_mounts() {
         return Err(SyscallError::OperationNotPermitted);
     }
     let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
@@ -2262,7 +2233,10 @@ pub fn sys_kill(pid: usize, signal: usize) -> SyscallResult {
 }
 
 /// Whether the calling thread of `caller` may send `sig` to `target`
-/// (Linux's check_kill_permission).
+/// (Linux's check_kill_permission), and, for another process, holds WRITE
+/// over it: on its PID namespace or on the process (ADR 0024, step 5).
+/// kill, tkill, tgkill, rt_sigqueueinfo, rt_tgsigqueueinfo and
+/// pidfd_send_signal all decide here (`kill_one`).
 fn may_signal(
     caller: &crate::process::Process,
     target: &crate::process::Process,
@@ -2277,7 +2251,8 @@ fn may_signal(
         caller.pid == target.pid,
         sig,
         same_session,
-    )
+    ) && (caller.pid == target.pid
+        || crate::cap::authority::current_may_act_on_process(target, crate::cap::Rights::WRITE))
 }
 
 /// Linux's kill rule: a process may always signal itself; otherwise the
@@ -4732,7 +4707,8 @@ fn chown_id(id: usize) -> Option<u32> {
 /// chgrp_ok with _POSIX_CHOWN_RESTRICTED: CAP_CHOWN over the file
 /// (capable_wrt_inode_uidgid), or in the initial user namespace, may do
 /// anything; the owner may keep the owner and set the group to one it
-/// belongs to.
+/// belongs to. Either way the caller needs WRITE on its mount namespace
+/// (ADR 0024, step 6).
 pub(crate) fn may_chown(
     caller: &Caller,
     file_uid: u32,
@@ -4741,6 +4717,9 @@ pub(crate) fn may_chown(
     gid: Option<u32>,
 ) -> bool {
     use crate::process::linux_caps::CAP_CHOWN;
+    if !caller.fs.write {
+        return false;
+    }
     if caller.capable_wrt_inode(file_uid, file_gid, CAP_CHOWN) || caller.capable(CAP_CHOWN) {
         return true;
     }
@@ -4879,7 +4858,13 @@ pub(crate) fn make_node(
             operation: "create directory entry",
         };
         check_dir_write(dir).map_err(|_| denied)?;
-        if device && !Caller::current().capable(crate::process::linux_caps::CAP_MKNOD) {
+        // A device also needs CREATE on the mount namespace (ADR 0024,
+        // step 6): a device node reaches hardware, not just a file.
+        let may_device = || {
+            let caller = Caller::current();
+            caller.fs.create && caller.capable(crate::process::linux_caps::CAP_MKNOD)
+        };
+        if device && !may_device() {
             return Err(crate::error::KernelError::FsError(
                 crate::error::FsError::OperationNotPermitted,
             ));
@@ -5206,6 +5191,7 @@ mod tests {
         c.setresgid(100, 100, 100, true).unwrap();
         c.setresuid(1000, 1000, 1000, true).unwrap();
         Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             creds: c,
             caps: caps.iter().fold(LinuxCaps::EMPTY, |s, &cap| s.with(cap)),
             userns: crate::process::userns::initial(),
@@ -5242,6 +5228,7 @@ mod tests {
         let both = user_with(&[CAP_FOWNER, CAP_FSETID]);
         assert_eq!(chmod_perms(&both, 0, 7, 0o2755).unwrap().to_mode(), 0o2755);
         let bare_root = Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             creds: Credentials::new(0, 0),
             caps: LinuxCaps::EMPTY,
             userns: crate::process::userns::initial(),
@@ -5276,11 +5263,30 @@ mod tests {
             Some(9)
         ));
         let bare_root = Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             creds: Credentials::new(0, 0),
             caps: LinuxCaps::EMPTY,
             userns: crate::process::userns::initial(),
         };
         assert!(!may_chown(&bare_root, 1001, 7, Some(5), None));
+        // Without WRITE on the mount namespace (ADR 0024, step 6) neither
+        // CAP_CHOWN nor the owner may, and chmod is EPERM.
+        let read_only = crate::process::creds::FsAuthority {
+            read: true,
+            write: false,
+            create: true,
+        };
+        let confined = Caller {
+            fs: read_only,
+            ..Caller::kernel()
+        };
+        assert!(!may_chown(&confined, 1001, 7, Some(5), Some(9)));
+        let owner = Caller { fs: read_only, ..u };
+        assert!(!may_chown(&owner, 1000, 100, None, Some(20)));
+        assert_eq!(
+            chmod_perms(&owner, 1000, 100, 0o644),
+            Err(SyscallError::OperationNotPermitted)
+        );
     }
 
     /// kill(2): uid matches or CAP_KILL, not uid 0; oneself always; SIGCONT
@@ -5310,6 +5316,7 @@ mod tests {
         assert!(kill_ok(&u, &target, &init, false, SIGCONT, true));
         assert!(!kill_ok(&u, &target, &init, false, SIGCONT, false));
         let bare_root = Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             creds: Credentials::new(0, 0),
             caps: LinuxCaps::EMPTY,
             userns: crate::process::userns::initial(),
@@ -5320,6 +5327,7 @@ mod tests {
         // over nothing outside (ADR 0022 H4c).
         let ns = crate::process::userns::test_child(b"0 1000 1\n1 2000 1", b"0 1000 1");
         let ns_root = Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             creds: Credentials::new(1000, 1000),
             caps: LinuxCaps::FULL,
             userns: ns.clone(),
@@ -5377,6 +5385,7 @@ mod tests {
     fn access_uses_owner_group_other_precedence() {
         let granted = |uid: u32, gid: u32, m: &crate::fs::Metadata, mode: u32| {
             let caller = Caller {
+                fs: crate::process::creds::FsAuthority::ALL,
                 creds: Credentials::new(uid, gid),
                 caps: crate::process::linux_caps::LinuxCaps::EMPTY,
                 userns: crate::process::userns::initial(),

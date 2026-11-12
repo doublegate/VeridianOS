@@ -195,6 +195,18 @@ fn uncharge(uid: u32) {
 
 static INITIAL: Once<Arc<UserNs>> = Once::new();
 
+/// The ids of the user namespaces below the initial one that exist, for
+/// [`is_live`]: from [`UserNs::create`] until the namespace is dropped.
+static LIVE: Mutex<alloc::collections::BTreeSet<u64>> =
+    Mutex::new(alloc::collections::BTreeSet::new());
+
+/// Whether the user namespace with id `id` exists (the initial one always
+/// does). A capability on one that does not names nothing, and never will:
+/// namespace ids are not reused (`cap::authority::drop_dead_user_ns`).
+pub fn is_live(id: u64) -> bool {
+    id == NsIdent::initial(NsKind::User).id || LIVE.lock().contains(&id)
+}
+
 /// The initial user namespace.
 pub fn initial() -> Arc<UserNs> {
     INITIAL
@@ -252,8 +264,10 @@ impl UserNs {
             uncharge(euid);
             return Err(CreateError::Permission);
         }
+        let ident = NsIdent::fresh(NsKind::User);
+        LIVE.lock().insert(ident.id);
         Ok(Arc::new(UserNs {
-            ident: NsIdent::fresh(NsKind::User),
+            ident,
             parent: Some(parent.clone()),
             level: parent.level + 1,
             owner: euid,
@@ -559,6 +573,7 @@ impl Drop for UserNs {
     fn drop(&mut self) {
         if self.parent.is_some() {
             uncharge(self.owner);
+            LIVE.lock().remove(&self.ident.id);
         }
     }
 }
@@ -630,6 +645,7 @@ pub(crate) fn test_child(uid_map: &[u8], gid_map: &[u8]) -> Arc<UserNs> {
     let init = initial();
     let ns = UserNs::create(&init, 1000, 1000, false, true).unwrap();
     let root = Caller {
+        fs: crate::process::creds::FsAuthority::ALL,
         creds: Credentials::new(0, 0),
         caps: LinuxCaps::FULL,
         userns: init,
@@ -649,6 +665,7 @@ mod tests {
 
     fn caller(uid: u32, caps: LinuxCaps, ns: &Arc<UserNs>) -> Caller {
         Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             creds: Credentials::new(uid, uid),
             caps,
             userns: ns.clone(),

@@ -177,8 +177,9 @@ fn unshare_checks(flags: u64, shared: Sharing) -> Result<(), SyscallError> {
 /// CLONE_NEWUSER makes a user namespace ([`new_user_ns`]), whose root may
 /// then make the others, which belong to it; any other namespace needs
 /// CAP_SYS_ADMIN over the user namespace that will own it, the new one or
-/// the caller's (EPERM; unshare_nsproxy_namespaces).
-/// Nothing changes unless everything succeeds.
+/// the caller's (EPERM; unshare_nsproxy_namespaces). Each new namespace
+/// also needs CREATE on the one it is made from, checked first (EPERM;
+/// ADR 0024, step 3). Nothing changes unless everything succeeds.
 pub fn sys_unshare(flags: usize) -> SyscallResult {
     let flags = unshare_implied(flags as u64);
     let current = process::current_process().ok_or(SyscallError::InvalidState)?;
@@ -193,6 +194,15 @@ pub fn sys_unshare(flags: usize) -> SyscallResult {
         return Err(SyscallError::InvalidArgument);
     }
     let caller = Caller::current();
+    // The object capabilities on what each new namespace is made from
+    // (ADR 0024, step 3), before anything is made.
+    if !crate::cap::authority::current_may_create_namespaces(
+        &thread.namespaces(),
+        &caller.userns,
+        flags,
+    ) {
+        return Err(SyscallError::OperationNotPermitted);
+    }
     let user_ns = if flags & CLONE_NEWUSER != 0 {
         Some(new_user_ns(&caller)?)
     } else {
@@ -221,6 +231,13 @@ pub fn sys_unshare(flags: usize) -> SyscallResult {
     } else {
         None
     };
+    // The creator gets authority over its new user namespace and what is
+    // made in it (ADR 0024, decision 7); a failed unshare leaves a harmless
+    // capability naming a namespace nobody is in.
+    if let Some(ns) = &user_ns {
+        crate::cap::authority::grant_user_ns(&current.capability_space.lock(), ns)
+            .map_err(|_| SyscallError::OutOfMemory)?;
+    }
     // The point of no return.
     if let Some(ns) = user_ns {
         enter_user_ns(ns)?;
@@ -281,8 +298,19 @@ fn namespaces_of(target: &process::Process) -> Option<Arc<ns::Namespaces>> {
 /// single-threaded caller with its own filesystem state (EINVAL), and
 /// CAP_SYS_ADMIN over it (EPERM). The checks after a user namespace in one
 /// pidfd setns use the caller's credentials from before, where Linux's use
-/// those it will have in the new namespace.
+/// those it will have in the new namespace. Then the caller must hold
+/// EXECUTE on the namespace, itself or through a user namespace above it
+/// (EPERM; ADR 0024, step 3).
 fn install_check(ns: &NsRef) -> Result<(), SyscallError> {
+    install_rule(ns)?;
+    if !crate::cap::authority::current_holds_namespace(ns, crate::cap::Rights::EXECUTE) {
+        return Err(SyscallError::OperationNotPermitted);
+    }
+    Ok(())
+}
+
+/// [`install_check`]'s POSIX part: the type's install rule.
+fn install_rule(ns: &NsRef) -> Result<(), SyscallError> {
     let caller = process::creds::Caller::current();
     // CAP_SYS_ADMIN over the namespace's owner and in the caller's own.
     let admin_over = |caller: &Caller| {
@@ -447,13 +475,19 @@ pub fn sys_setns(fd: usize, nstype: usize) -> SyscallResult {
 
 /// sethostname(name, len) and setdomainname(name, len), as Linux's
 /// kernel/sys.c: CAP_SYS_ADMIN over the user namespace that owns the
-/// caller's UTS namespace (EPERM), a length past 64 (or negative, as an
-/// int) EINVAL, an unreadable name EFAULT; the name is the caller's UTS
-/// namespace's.
+/// caller's UTS namespace and MODIFY on the namespace itself, or through a
+/// user namespace above it (EPERM; ADR 0024, step 3), a length past 64 (or
+/// negative, as an int) EINVAL, an unreadable name EFAULT; the name is the
+/// caller's UTS namespace's.
 fn set_uts_name(name: usize, len: usize, host: bool) -> SyscallResult {
     let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
     let uts = thread.namespaces().uts.clone();
-    if !Caller::current().ns_capable(&uts.owner, CAP_SYS_ADMIN) {
+    if !Caller::current().ns_capable(&uts.owner, CAP_SYS_ADMIN)
+        || !crate::cap::authority::current_holds_namespace(
+            &NsRef::Uts(uts.clone()),
+            crate::cap::Rights::MODIFY,
+        )
+    {
         return Err(SyscallError::OperationNotPermitted);
     }
     let len = len as u32 as i32;

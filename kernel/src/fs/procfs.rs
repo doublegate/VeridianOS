@@ -129,7 +129,8 @@ fn parse_offset_line(line: &str) -> Option<(i32, i64, i64)> {
 /// timens_offsets_write and proc_timens_set_offset: at the start of the
 /// file and under a page (EINVAL), up to two well-formed lines (EINVAL),
 /// the process there (ESRCH), the `opener`'s CAP_SYS_TIME over the user
-/// namespace owning the time namespace (EPERM), each
+/// namespace owning the time namespace and the writing process's MODIFY on
+/// it (EPERM; ADR 0024, step 4), each
 /// offset and the clock it moves within range (ERANGE), and a namespace no
 /// process has entered (EACCES).
 fn write_timens_offsets(
@@ -172,6 +173,14 @@ fn write_timens_offsets(
     // file_ns_capable: the opener's CAP_SYS_TIME over the user namespace
     // that owns the time namespace.
     if !opener.ns_capable(&ns.owner, crate::process::linux_caps::CAP_SYS_TIME) {
+        return Err(KernelError::FsError(FsError::OperationNotPermitted));
+    }
+    // And the writing process's MODIFY on the time namespace, itself or
+    // through a user namespace above it (ADR 0024, step 4).
+    if !crate::cap::authority::current_holds_namespace(
+        &crate::process::ns::NsRef::Time(ns.clone()),
+        crate::cap::Rights::MODIFY,
+    ) {
         return Err(KernelError::FsError(FsError::OperationNotPermitted));
     }
     // There is no suspend: the boot-time clock reads the monotonic one.
@@ -380,7 +389,9 @@ fn user_ns_of(pid: u64) -> Option<Arc<crate::process::userns::UserNs>> {
 /// H4a) through a descriptor `opener` opened, by `writer`, by the rules of
 /// [`UserNs::write_map`] and [`UserNs::write_setgroups`]; setgroups also
 /// needs the opener's CAP_SYS_ADMIN over the namespace (EPERM), which
-/// Linux's proc_setgroups_open checks.
+/// Linux's proc_setgroups_open checks. All three also need the writing
+/// process to hold MODIFY on the namespace, itself or through a user
+/// namespace above it (EPERM; ADR 0024, step 3).
 ///
 /// [`UserNs::write_map`]: crate::process::userns::UserNs::write_map
 /// [`UserNs::write_setgroups`]: crate::process::userns::UserNs::write_setgroups
@@ -394,6 +405,12 @@ fn write_id_map(
 ) -> Result<usize, KernelError> {
     use crate::process::userns::MapError;
     let ns = user_ns_of(pid).ok_or(KernelError::FsError(FsError::NoProcess))?;
+    if !crate::cap::authority::current_holds_namespace(
+        &crate::process::ns::NsRef::User(ns.clone()),
+        crate::cap::Rights::MODIFY,
+    ) {
+        return Err(KernelError::FsError(FsError::OperationNotPermitted));
+    }
     let done = if name == "setgroups" {
         if !opener.ns_capable(&ns, crate::process::linux_caps::CAP_SYS_ADMIN) {
             return Err(KernelError::FsError(FsError::OperationNotPermitted));
@@ -861,8 +878,11 @@ impl VfsNode for ProcNode {
         let limit = self
             .sysctl()
             .ok_or(KernelError::FsError(FsError::PermissionDenied))?;
-        // The writer, checked at every write (EACCES, as sysctl_perm).
-        if !limit.writer_may(&crate::process::creds::Caller::current()) {
+        // The writer, checked at every write (EACCES, as sysctl_perm), and
+        // MODIFY on the System object (ADR 0024, step 7).
+        if !limit.writer_may(&crate::process::creds::Caller::current())
+            || !crate::cap::authority::current_may_change_system()
+        {
             return Err(KernelError::FsError(FsError::PermissionDenied));
         }
         // sysctl_writes_strict: a numeric write past the start of the
@@ -1744,6 +1764,7 @@ mod tests {
             linux_caps::{LinuxCaps, CAP_DAC_OVERRIDE, CAP_SYS_RESOURCE},
         };
         let who = |uid, caps: &[u32]| Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             creds: Credentials::new(uid, uid),
             caps: caps.iter().fold(LinuxCaps::EMPTY, |s, &c| s.with(c)),
             userns: crate::process::userns::initial(),

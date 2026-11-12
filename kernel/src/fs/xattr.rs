@@ -96,14 +96,21 @@ fn refused(write: bool) -> KernelError {
 
 /// Whether `caller` may read (`write` false) or set and remove (`write`
 /// true) attribute `name` of a node with `meta`: Linux's xattr_permission,
-/// then the capability module's checks on `security.*`.
+/// then the capability module's checks on `security.*`. Every namespace
+/// first needs the mount namespace's READ, and WRITE to change anything
+/// (ADR 0024, step 6), as the mode-bit check does; EACCES without it,
+/// even where a capability alone would do.
 pub fn check_access(
     caller: &Caller,
     meta: &Metadata,
     name: &str,
     write: bool,
 ) -> Result<(), KernelError> {
-    match namespace(name)? {
+    let ns = namespace(name)?;
+    if !caller.fs.allows(if write { MAY_WRITE } else { MAY_READ }) {
+        return Err(KernelError::FsError(FsError::PermissionDenied));
+    }
+    match ns {
         Namespace::System => Err(KernelError::FsError(FsError::NotSupported)),
         // No check from the VFS; writing needs CAP_SYS_ADMIN in the
         // initial user namespace (the filesystems'), except the file
@@ -409,6 +416,7 @@ mod tests {
 
     fn user(caps: &[u32]) -> Caller {
         Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             creds: Credentials::new(1000, 1000),
             caps: caps.iter().fold(LinuxCaps::EMPTY, |s, &c| s.with(c)),
             userns: crate::process::userns::initial(),
@@ -619,6 +627,7 @@ mod tests {
         use crate::process::linux_caps::CAP_SETFCAP;
         let ns = crate::process::userns::test_child(b"0 1000 1\n1 2000 1", b"0 1000 1\n1 2000 1");
         let ns_root = Caller {
+            fs: crate::process::creds::FsAuthority::ALL,
             creds: Credentials::new(1000, 1000),
             caps: LinuxCaps::FULL,
             userns: ns,

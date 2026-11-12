@@ -68,6 +68,7 @@ memfd_create
 ## Capabilities
 CapabilityGrant         private 1054
 CapabilityRevoke        private 1055
+CapabilityDrop          private 1056
 
 ## Threads
 ThreadCreate            private 1064

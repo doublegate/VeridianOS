@@ -96,6 +96,11 @@ jobs:
                   cargo test --release
             - name: Conformance tooling tests
               run: python3 -I tools/compat/test_compat.py
+            # docs/adr/README.md is generated from the ADRs' own lines.
+            - name: ADR index is up to date
+              run: python3 tools/docs/gen_adr_index.py --check
+            - name: ADR index tooling tests
+              run: python3 -I tools/docs/test_gen_adr_index.py
             - name: Check vsh formatting
               run: cd userland/vsh && cargo fmt -- --check
             - name: Build vsh (x86_64)
