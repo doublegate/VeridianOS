@@ -184,11 +184,11 @@ impl ElfLoader {
             return Err(ElfError::InvalidMagic);
         }
 
-        // SAFETY: We verified data.len() >= size_of::<Elf64Header>() above.
-        // Elf64Header is #[repr(C)] with Copy, so reading it via pointer cast
-        // is valid as long as the data is large enough (which we checked).
-        // Alignment is not an issue because we dereference and copy immediately.
-        let header = unsafe { *(data.as_ptr() as *const Elf64Header) };
+        // SAFETY: data.len() >= size_of::<Elf64Header>() was checked above,
+        // and Elf64Header is #[repr(C)] plain data, valid for any bytes. A
+        // byte buffer has no alignment guarantee, so the read is unaligned
+        // (a plain dereference of a misaligned pointer is undefined).
+        let header = unsafe { core::ptr::read_unaligned(data.as_ptr() as *const Elf64Header) };
 
         Ok(header)
     }
@@ -236,21 +236,31 @@ impl ElfLoader {
     ) -> Result<Vec<Elf64ProgramHeader>, ElfError> {
         let mut headers = Vec::new();
 
-        let ph_offset = header.phoff as usize;
+        let ph_offset =
+            usize::try_from(header.phoff).map_err(|_| ElfError::InvalidProgramHeader)?;
         let ph_size = header.phentsize as usize;
         let ph_count = header.phnum as usize;
+        // Linux's elf_read_phdrs: e_phentsize must be the size of the
+        // structure read (ENOEXEC), or a small one reads past the table
+        // (PR #25 review).
+        if ph_count != 0 && ph_size != mem::size_of::<Elf64ProgramHeader>() {
+            return Err(ElfError::InvalidProgramHeader);
+        }
 
         for i in 0..ph_count {
-            let offset = ph_offset + (i * ph_size);
-            if offset + ph_size > data.len() {
-                return Err(ElfError::InvalidProgramHeader);
-            }
+            let offset = i
+                .checked_mul(ph_size)
+                .and_then(|o| o.checked_add(ph_offset))
+                .filter(|o| o.checked_add(ph_size).is_some_and(|e| e <= data.len()))
+                .ok_or(ElfError::InvalidProgramHeader)?;
 
-            // SAFETY: We verified offset + ph_size <= data.len() above.
-            // Elf64ProgramHeader is #[repr(C)] with Copy, so the pointer cast
-            // and dereference is valid for the checked bounds. The value is
-            // immediately copied out.
-            let ph = unsafe { *(data[offset..].as_ptr() as *const Elf64ProgramHeader) };
+            // SAFETY: offset + size_of::<Elf64ProgramHeader>() <= data.len()
+            // was checked above (ph_size is that size), and the header is
+            // #[repr(C)] plain data; the read is unaligned, as a byte buffer
+            // carries no alignment guarantee.
+            let ph = unsafe {
+                core::ptr::read_unaligned(data[offset..].as_ptr() as *const Elf64ProgramHeader)
+            };
 
             headers.push(ph);
         }
@@ -731,13 +741,18 @@ impl ElfLoader {
     ) -> Result<(), ElfError> {
         let entry_size = mem::size_of::<Elf64Rela>();
         for i in 0..count {
-            let pos = offset + i * entry_size;
-            if pos + entry_size > data.len() {
+            let Some(pos) = i
+                .checked_mul(entry_size)
+                .and_then(|o| o.checked_add(offset))
+                .filter(|p| p.checked_add(entry_size).is_some_and(|e| e <= data.len()))
+            else {
                 break;
-            }
-            // SAFETY: pos + entry_size <= data.len() was checked above.
-            // Elf64Rela is #[repr(C)] with Copy. The value is copied immediately.
-            let rela = unsafe { *(data[pos..].as_ptr() as *const Elf64Rela) };
+            };
+            // SAFETY: pos + entry_size <= data.len() was checked above, and
+            // Elf64Rela is #[repr(C)] plain data; read unaligned, as the
+            // buffer carries no alignment guarantee.
+            let rela =
+                unsafe { core::ptr::read_unaligned(data[pos..].as_ptr() as *const Elf64Rela) };
             out.push(ElfRelocation {
                 offset: rela.r_offset,
                 symbol: (rela.r_info >> 32) as u32,
@@ -1060,6 +1075,33 @@ mod tests {
     }
 
     // --- Header validation tests ---
+
+    /// e_phentsize must be the program header's size: a small one used to
+    /// read each 56-byte header past the bounds it was checked against, and
+    /// a table whose offsets overflow is refused (PR #25 review).
+    #[test]
+    fn program_header_size_and_offsets_are_checked() {
+        let loader = ElfLoader::new();
+        let good = make_minimal_elf(2, 62, 0x40_0000, 0x40_0000, 0x1000);
+        assert!(loader.parse(&good).is_ok());
+        let mut small = good.clone();
+        small[54] = 1;
+        small[55] = 0;
+        assert_eq!(
+            loader.parse(&small).err(),
+            Some(ElfError::InvalidProgramHeader)
+        );
+        let mut far = good.clone();
+        far[32..40].copy_from_slice(&u64::MAX.to_le_bytes()); // e_phoff
+        assert_eq!(
+            loader.parse(&far).err(),
+            Some(ElfError::InvalidProgramHeader)
+        );
+        // Misaligned buffer: the reads are unaligned, so this parses too.
+        let mut shifted = vec![0u8; good.len() + 1];
+        shifted[1..].copy_from_slice(&good);
+        assert!(loader.parse(&shifted[1..]).is_ok());
+    }
 
     #[test]
     fn test_parse_invalid_magic() {

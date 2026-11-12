@@ -615,6 +615,37 @@
 
 ### Fixed
 
+- Review points left open on merged pull requests (a sweep of PRs #1-#38):
+  - A freed BlockFS FIFO or socket inode is not handed out again until the FIFO and socket
+    tables have forgotten it; between the operation's end and that report a new file could
+    take the number and be found as the old, live FIFO or socket (#20).
+  - ELF: `e_phentsize` must be the program header's size (ENOEXEC otherwise, as Linux), and the
+    header table's offsets are checked without overflow; header, program header and relocation
+    reads are unaligned, as a byte buffer guarantees no alignment (#25).
+  - Package metadata, content and per-file ranges are checked without overflow, as the
+    signature's already were (#25).
+  - A pipe polls writable (POLLOUT) only with room for a whole PIPE_BUF write, as Linux; one free
+    byte made a poll writer spin on EAGAIN (#24).
+  - CLONE_PARENT is refused to the initial PID 1 too, as to any namespace's init (#37).
+  - The user-address translation behind zero-copy sends walks the user half on AArch64
+    (TTBR0_EL1), not the kernel's root (#33).
+  - tmpfs: a mount's `size=` near the largest value no longer wraps to an unlimited mount, and a
+    file grown past the largest file size is EFBIG before a size limit makes it ENOSPC (#28).
+  - An atomic DRM commit claims its page-flip event when it checks it can queue one, so a commit on
+    another CPU cannot take the slot between the check and the flip (#15).
+  - `sysctl -a` gives kernel.version as /proc/sys/kernel/version does (#34). RISC-V falls back to
+    the legacy SBI set_timer on firmware without the TIME extension and counts a refused call
+    instead of ignoring it (#11). The AArch64 boot-integrity hash reads the kernel at its link
+    address, not its physical load address (#18).
+  - The native libc defines the 18 `<wctype.h>` functions it declared (C locale), and
+    `scripts/cross-compile-test.sh` gives the no-libc test its include directory (#18).
+  - Tooling: a conformance guest that dies just before a range is sent is rebooted rather than
+    ending the run, and `--resume` refuses results from another kernel, image or test list
+    (#30); the BusyBox wrapper takes the toolchain from `VERIDIAN_PREFIX`, and interrupted
+    downloads and extractions are cleaned up (#29); `install-deps.sh` installs no default
+    toolchain before the pinned one, and `guest.py` takes `AARCH64_CPU` (#27); the reviewer
+    self-test checks that the workflow has one job timeout (#6); `musl_runtime_test --only
+    itimers N` resets its counters each run.
 - From the PR #37 review, after its merge, and the reviews of PR #38 that followed:
   - CLONE_PARENT_SETTID stores the child's TID after every step of a clone that can fail but
     the start of its thread, as Linux's put_user follows copy_process; a start that fails puts

@@ -92,10 +92,14 @@ phase_download() {
             # shares the cache) never sees or removes a partial archive.
             local part
             part="$(mktemp "${tarball}.XXXXXX")"
+            # Removed if the run is interrupted too, not only on failure
+            # (PR #29 review).
+            trap 'rm -f "$part"' EXIT
             curl -fsSL -o "$part" "$BUSYBOX_URL" || { rm -f "$part"; echo "  ERROR: download failed"; exit 1; }
             echo "${BUSYBOX_SHA256}  ${part}" | sha256sum -c --quiet - || { rm -f "$part"; echo "  ERROR: BusyBox checksum mismatch in the download"; exit 1; }
             chmod a+r "$part"  # mktemp creates it 0600
             mv "$part" "$tarball"
+            trap - EXIT
         fi
         # A bad tarball is removed, so the next run downloads it again.
         echo "${BUSYBOX_SHA256}  ${tarball}" | sha256sum -c --quiet - || { rm -f "$tarball"; echo "  ERROR: BusyBox checksum mismatch (removed $tarball)"; exit 1; }
@@ -103,11 +107,20 @@ phase_download() {
         # Into a scratch directory first: an interrupted extraction must not
         # leave a partial $BB_SRC that later runs take as complete.
         local staging="${WORK_DIR}/.extract.$$"
+        # An interrupted run's directory (~80 MB) goes once its process has
+        # (the suffix is its PID; PR #29 review).
+        local old
+        for old in "${WORK_DIR}"/.extract.*; do
+            [ -d "$old" ] || continue
+            kill -0 "${old##*.}" 2>/dev/null || rm -rf "$old"
+        done
         rm -rf "$staging"
         mkdir -p "$staging"
+        trap 'rm -rf "$staging"' EXIT
         tar xjf "$tarball" -C "$staging" || { rm -rf "$staging"; echo "  ERROR: extraction failed"; exit 1; }
         mv "${staging}/busybox-${BUSYBOX_VERSION}" "$BB_SRC"
         rm -rf "$staging"
+        trap - EXIT
     fi
 
     echo "  BusyBox source: $BB_SRC"

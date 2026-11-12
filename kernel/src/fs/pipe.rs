@@ -25,6 +25,14 @@ const PIPE_CAPACITY: usize = 64 * 1024;
 /// interleaved with another writer's data (POSIX PIPE_BUF, Linux 4096).
 pub const PIPE_BUF: usize = 4096;
 
+/// POLLOUT: room for a whole PIPE_BUF write (or the whole pipe, if it is
+/// smaller), as Linux's pipe_poll, which wants a free slot. With less, a
+/// write of up to PIPE_BUF bytes is EAGAIN, so reporting POLLOUT for one
+/// free byte made a poll writer spin (PR #24 review).
+fn room_for_atomic_write(len: usize, capacity: usize) -> bool {
+    capacity.saturating_sub(len) >= PIPE_BUF.min(capacity)
+}
+
 /// Internal shared state of a pipe.
 struct PipeInner {
     /// Data buffer.
@@ -507,8 +515,8 @@ impl VfsNode for PipeWriteNode {
         let mut events = 0u16;
         if pipe.read_closed {
             events |= 0x0008; // POLLERR -- broken pipe
-        } else if pipe.buffer.len() < pipe.capacity {
-            events |= 0x0004; // POLLOUT -- space available
+        } else if room_for_atomic_write(pipe.buffer.len(), pipe.capacity) {
+            events |= 0x0004; // POLLOUT -- room for a PIPE_BUF write
         }
         events
     }
@@ -569,6 +577,20 @@ impl VfsNode for PipeWriteNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// POLLOUT means a PIPE_BUF write would go in now (PR #24 review).
+    #[test]
+    fn pollout_needs_room_for_an_atomic_write() {
+        let cap = PIPE_CAPACITY;
+        assert!(room_for_atomic_write(0, cap));
+        assert!(room_for_atomic_write(cap - PIPE_BUF, cap));
+        assert!(!room_for_atomic_write(cap - PIPE_BUF + 1, cap));
+        assert!(!room_for_atomic_write(cap - 1, cap), "one free byte");
+        assert!(!room_for_atomic_write(cap, cap));
+        // A pipe smaller than PIPE_BUF: writable only when empty.
+        assert!(room_for_atomic_write(0, 1024));
+        assert!(!room_for_atomic_write(1, 1024));
+    }
 
     /// A write larger than PIPE_BUF into a full pipe is EAGAIN, not 0
     /// (PR #24 review).

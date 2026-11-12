@@ -5680,6 +5680,10 @@ static void test_itimers(void)
 {
     char why[200];
     struct sigaction sa, old_alrm, old_prof;
+    /* Fresh counts each run: with --only itimers N the repeats used to see
+     * the first run's signals and fail. */
+    alrm_count = 0;
+    prof_count = 0;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = count_alrm;
     sigaction(SIGALRM, &sa, &old_alrm);
