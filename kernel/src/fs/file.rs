@@ -622,10 +622,17 @@ impl FileTable {
     /// another open of it too (so this asks the lock table, not the open
     /// file).
     fn closing(&self, file: &File) {
+        self.closing_for(file, None);
+    }
+
+    /// [`Self::closing`] on behalf of process `closer` (None: the caller).
+    fn closing_for(&self, file: &File, closer: Option<u64>) {
         crate::fs::flock::release_owner(file.flock_key(), self.lock_owner());
         // A message queue's notification goes with its owner's close.
         #[cfg(feature = "alloc")]
-        crate::syscall::mqueue::flush_file(file);
+        crate::syscall::mqueue::flush_file(file, closer);
+        #[cfg(not(feature = "alloc"))]
+        let _ = closer;
     }
 
     /// Install `file` at exactly descriptor `fd`, replacing whatever was
@@ -1035,11 +1042,23 @@ impl FileTable {
     /// with it (Linux's put_files_struct), and every POSIX record lock it
     /// owns goes with it.
     pub fn close_all(&self) {
+        self.close_all_for(None);
+    }
+
+    /// Close every descriptor for exiting process `pid` (Linux's
+    /// exit_files, which runs in the exiting task): its message-queue
+    /// registrations go with them even when another process runs the
+    /// cleanup (PR #40 review).
+    pub fn close_all_as(&self, pid: u64) {
+        self.close_all_for(Some(pid));
+    }
+
+    fn close_all_for(&self, closer: Option<u64>) {
         let mut files = self.files.write();
 
         for slot in files.iter_mut() {
             if let Some(entry) = slot.take() {
-                self.closing(&entry.file);
+                self.closing_for(&entry.file, closer);
                 entry.file.dec_ref();
             }
         }

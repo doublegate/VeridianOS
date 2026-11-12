@@ -1635,11 +1635,14 @@ fn remap_locked(
             .map_err(|_| nomem)?;
         vas.set_may_exec(start, m.may_exec);
         if let Some(b) = &m.backing {
-            vas.set_backing(
+            // A System V attachment's copy is an attachment more (copy_vma
+            // runs vm_ops->open), which shmdt can take away.
+            vas.set_backing_hooked(
                 start,
                 b.node.clone(),
                 b.offset + first * PAGE_SIZE,
                 b.write.clone(),
+                b.hook.as_ref().map(crate::mm::vas::MappingHook::new_piece),
             );
         }
         return Ok(start.as_usize());
@@ -1794,7 +1797,15 @@ fn extend(
         vas.set_may_exec(start, m.may_exec);
     }
     if let (Some(b), Some(offset)) = (&m.backing, r.grow_offset) {
-        vas.set_backing(start, b.node.clone(), offset, b.write.clone());
+        // The grown part of an attachment is a piece of it: a hooked
+        // mapping is never merged, so it stays one of its own.
+        vas.set_backing_hooked(
+            start,
+            b.node.clone(),
+            offset,
+            b.write.clone(),
+            b.hook.as_ref().map(crate::mm::vas::MappingHook::new_piece),
+        );
     }
     vas.merge_with_next(m.start);
     Ok(())

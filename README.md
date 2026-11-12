@@ -59,7 +59,7 @@ VeridianOS intentionally prioritizes architectural clarity over feature velocity
 
 - **Networking** -- Protocol code for TCP/IP dual-stack (IPv4 + IPv6), E1000 and virtio-net drivers, TCP Reno/Cubic/SACK, DNS, DHCP, VLAN, bonding, netfilter firewall with conntrack/NAT, RIP/OSPF routing, WiFi 802.11, Bluetooth L2CAP/RFCOMM, VPN tunnels, TLS 1.3, SSH, HTTP, QUIC, WireGuard, mDNS. User-space INET sockets do not work yet and TCP is incomplete (N-64 to N-76, NET-INC-01); loopback and Unix sockets work
 - **Virtualization** -- Intel VMX hypervisor with VMCS/EPT, KVM API compatibility, QEMU device model with live migration, VFIO PCI passthrough, SR-IOV, CPU/memory/PCI hotplug
-- **Containers** -- Linux namespaces through clone, unshare and setns (ADR 0022, unreleased): UTS, time, mount, user, PID and network namespaces work, with the gaps listed in docs/KNOWN-LIMITATIONS.md; IPC and cgroup namespaces can be made but isolate nothing yet. Also OCI runtime structures, cgroup bookkeeping, overlay filesystem, seccomp BPF and veth code; the in-kernel container runtime does not use the namespaces yet (VIRT-INC-01) and the seccomp filter is never consulted
+- **Containers** -- Linux namespaces through clone, unshare and setns (ADR 0022, unreleased): UTS, time, mount, user, PID, network and IPC namespaces work (an IPC namespace has its own System V objects and POSIX message queues, ADR 0027), with the gaps listed in docs/KNOWN-LIMITATIONS.md; cgroup namespaces can be made but isolate nothing yet. Also OCI runtime structures, cgroup bookkeeping, overlay filesystem, seccomp BPF and veth code; the in-kernel container runtime does not use the namespaces yet (VIRT-INC-01) and the seccomp filter is never consulted
 - **Cloud-native** -- CRI/CNI/CSI interfaces, service mesh with mTLS and SPIFFE identity, L4/L7 load balancer, cloud-init metadata service
 - **Enterprise** -- LDAP v3, Kerberos v5, NFS v4, SMB2/3, iSCSI initiator, software RAID 0/1/5
 
@@ -97,7 +97,7 @@ The design goal is a microkernel that provides only memory management, schedulin
 | --- | --- |
 | Build | 0 errors, 0 warnings across all 3 architectures |
 | Boot tests | x86_64 43/43, AArch64 64/64, RISC-V 57/57 (Stage 6 BOOTOK); with `-smp 4` 47/47, 68/68, 61/61 |
-| Host-target unit tests | 5,100 passing |
+| Host-target unit tests | 5,102 passing |
 | In-guest runtime suites | BusyBox self-test, `audit_runtime_test` and `musl_runtime_test` all passing on the BlockFS root of each architecture (x86_64: 102/102 and 163/163; AArch64: 102/102 and 159/159; RISC-V: 100/100 and 159/159), on one and four CPUs |
 | CI pipeline | GitHub Actions + Codecov: builds, boots on 1 and 4 CPUs, and the x86_64 runtime suite; host-test line coverage 56.2% |
 | Unsafe code | 3 justified `static mut` (early serial, boot info, per-CPU data); unsafe blocks carry SAFETY comments |

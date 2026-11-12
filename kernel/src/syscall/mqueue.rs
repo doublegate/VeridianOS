@@ -125,16 +125,12 @@ impl Notify {
 }
 
 impl State {
-    /// The registration, dropped first if its process has died. Linux
-    /// drops it when the owner's exit closes its descriptors
-    /// (mqueue_flush_file, in the exiting task); a process killed here is
-    /// cleaned up in the killer's context, where that check cannot match
-    /// (PR #40 review).
-    fn live_notify(&mut self) -> Option<&Notify> {
-        if self.notify.as_ref().is_some_and(|n| !n.lives()) {
+    /// mqueue_flush_file's rule: a close by the registered process drops
+    /// its registration; anyone else's close leaves it.
+    fn closed_by(&mut self, closer: u64) {
+        if self.notify.as_ref().is_some_and(|n| n.pid == closer) {
             self.notify = None;
         }
-        self.notify.as_ref()
     }
 }
 
@@ -184,8 +180,8 @@ impl Drop for MqNode {
 
 impl MqNode {
     fn status(&self) -> String {
-        let mut s = self.state.lock();
-        let (kind, signo, pid) = s.live_notify().map_or((0, 0, 0), |n| {
+        let s = self.state.lock();
+        let (kind, signo, pid) = s.notify.as_ref().map_or((0, 0, 0), |n| {
             (
                 n.kind,
                 if n.kind == SIGEV_SIGNAL { n.signo } else { 0 },
@@ -822,7 +818,7 @@ pub fn sys_mq_notify(fd: usize, sev_ptr: usize) -> SyscallResult {
             }
         }
         Some((kind, signo, value)) => {
-            if s.live_notify().is_some() {
+            if s.notify.is_some() {
                 return Err(SyscallError::Busy);
             }
             s.notify = Some(Notify {
@@ -840,15 +836,16 @@ pub fn sys_mq_notify(fd: usize, sev_ptr: usize) -> SyscallResult {
 /// mqueue_flush_file: the registered process closing a descriptor of the
 /// queue (any, as on Linux) drops its notification. Called for every
 /// descriptor closed (`FileTable::closing`); other files are left alone.
-pub(crate) fn flush_file(file: &crate::fs::file::File) {
+/// `closer` is the process the close is for: the caller's, or for the
+/// descriptors an exiting process's table closes, that process, even when
+/// another (a killer) runs the cleanup, as Linux's exit_files runs in the
+/// exiting task (PR #40 review).
+pub(crate) fn flush_file(file: &crate::fs::file::File, closer: Option<u64>) {
     let Ok(node) = mq(file) else {
         return;
     };
-    let me = super::sysvipc::current_pid();
-    let mut s = node.state.lock();
-    if s.notify.as_ref().is_some_and(|n| n.pid == me) {
-        s.notify = None;
-    }
+    let closer = closer.unwrap_or_else(super::sysvipc::current_pid);
+    node.state.lock().closed_by(closer);
 }
 
 /// mq_getsetattr(fd, new, old): `old` gets mq_flags (O_NONBLOCK), the
@@ -1120,10 +1117,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_dead_owners_registration_is_gone() {
-        // A process killed by another closes its descriptors in the
-        // killer's context, where mqueue_flush_file's "the closer is the
-        // owner" never matches: the registration must not outlive it.
+    fn only_the_registered_process_closing_drops_the_registration() {
+        // An exiting process's table closes in its name even when a killer
+        // runs the cleanup; a close by anyone else leaves it, so a table
+        // shared by CLONE_FILES keeps it until it goes, as on Linux.
         let mut s = State {
             maxmsg: 1,
             msgsize: 1,
@@ -1139,7 +1136,9 @@ mod tests {
             }),
             receivers: 0,
         };
-        assert!(s.live_notify().is_none());
+        s.closed_by(78);
+        assert!(s.notify.is_some(), "another process's close");
+        s.closed_by(77);
         assert!(s.notify.is_none());
     }
 

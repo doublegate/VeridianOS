@@ -172,7 +172,13 @@ impl SemArray {
         Ok(Attempt::Done)
     }
 
-    fn count(&self, num: u16, zero: bool) -> usize {
+    /// GETNCNT/GETZCNT for semaphore `num`. One past u16::MAX (semmsl
+    /// raised that far, as Linux allows) has no waiter, as no sembuf can
+    /// name it; truncated, it would count another one's (PR #40 review).
+    fn count(&self, num: i32, zero: bool) -> usize {
+        let Ok(num) = u16::try_from(num) else {
+            return 0;
+        };
         self.waiting
             .iter()
             .filter(|w| w.num == num && w.zero == zero)
@@ -548,8 +554,8 @@ pub fn control(
                 let v = match cmd {
                     GETVAL => s.val as usize,
                     GETPID => pid_shown(s.pid) as usize,
-                    GETNCNT => arr.count(num as u16, false),
-                    _ => arr.count(num as u16, true),
+                    GETNCNT => arr.count(num, false),
+                    _ => arr.count(num, true),
                 };
                 (v, CtlOut::None)
             }
@@ -682,6 +688,15 @@ mod tests {
             adj: BTreeMap::new(),
             waiting: Vec::new(),
         }
+    }
+
+    #[test]
+    fn waiters_are_counted_for_their_own_semaphore() {
+        let mut a = array(1);
+        a.set_waiting(7, 0, false);
+        assert_eq!(a.count(0, false), 1);
+        assert_eq!(a.count(0, true), 0);
+        assert_eq!(a.count(65536, false), 0, "not semaphore 0's");
     }
 
     #[test]
