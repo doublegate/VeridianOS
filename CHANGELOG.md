@@ -120,7 +120,8 @@
   mlockall (MCL_CURRENT, MCL_FUTURE, MCL_ONFAULT) and munlockall, with RLIMIT_MEMLOCK, MAP_LOCKED
   and MCL_FUTURE applied to later mmap, brk and mremap growth (EAGAIN past the limit); locking
   past the limit takes CAP_IPC_LOCK and the `System` object (ADR 0024's new row). mseal, which
-  makes munmap, MAP_FIXED over, mremap, mprotect and discarding madvise of the range EPERM.
+  makes munmap, MAP_FIXED over, mremap, mprotect, discarding madvise, shmdt and shmat's
+  SHM_REMAP over the range EPERM.
   msync, which writes a MAP_SHARED regular file's copy back to the file (MS_SYNC and MS_ASYNC;
   EBUSY for MS_INVALIDATE over locked memory). mincore. remap_file_pages (Linux's emulation).
   membarrier: every command but the RSEQ ones (QUERY 639), the expedited ones by interrupting

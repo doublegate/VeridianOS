@@ -2890,7 +2890,10 @@ impl VirtualAddressSpace {
     /// msync's view of `[start, end)`: for each piece of a MAP_SHARED file
     /// mapping that holds a copy of its file (not a memfd's or tmpfs
     /// file's own pages) and was mapped from a descriptor open for writing,
-    /// the file, the file offset and the frames to write back.
+    /// the file, the file offset, the piece's first address in the range and
+    /// the frames to write back. The frames are only names: another thread
+    /// may unmap them once the lock is dropped, so each page is read through
+    /// [`Self::copy_mapped_page`], under the lock again.
     #[cfg(feature = "alloc")]
     #[allow(clippy::type_complexity)]
     pub fn shared_file_copies(
@@ -2900,6 +2903,7 @@ impl VirtualAddressSpace {
     ) -> Vec<(
         alloc::sync::Arc<dyn crate::fs::VfsNode>,
         usize,
+        u64,
         Vec<super::FrameNumber>,
     )> {
         let mappings = self.mappings.lock();
@@ -2918,9 +2922,54 @@ impl VirtualAddressSpace {
                 .physical_frames
                 .get(first..last.min(m.physical_frames.len()))
                 .map_or_else(Vec::new, <[super::FrameNumber]>::to_vec);
-            out.push((b.node.clone(), b.offset + first * 4096, frames));
+            out.push((
+                b.node.clone(),
+                b.offset + first * 4096,
+                m.start.0 + first as u64 * 4096,
+                frames,
+            ));
         }
         out
+    }
+
+    /// Whether the page at `addr` is still backed by `frame`: false once
+    /// it was unmapped or replaced (and the frame perhaps freed and reused).
+    #[cfg(feature = "alloc")]
+    pub fn still_maps(&self, addr: u64, frame: super::FrameNumber) -> bool {
+        Self::maps_frame(&self.mappings.lock(), addr, frame)
+    }
+
+    #[cfg(feature = "alloc")]
+    fn maps_frame(
+        mappings: &BTreeMap<VirtualAddress, VirtualMapping>,
+        addr: u64,
+        frame: super::FrameNumber,
+    ) -> bool {
+        Self::overlapping(mappings, addr, addr + 1).any(|m| {
+            m.physical_frames
+                .get(((addr - m.start.0) / 4096) as usize)
+                .is_some_and(|f| *f == frame)
+        })
+    }
+
+    /// Copy the start of the page at `addr` into `out` if `frame` still
+    /// backs it, under the mappings lock, so the frame cannot be freed
+    /// meanwhile; false (nothing copied) if it no longer does. The caller
+    /// holds the address space's lock, which munmap takes as well.
+    #[cfg(feature = "alloc")]
+    pub fn copy_mapped_page(&self, addr: u64, frame: super::FrameNumber, out: &mut [u8]) -> bool {
+        let n = out.len().min(4096);
+        let mappings = self.mappings.lock();
+        let mapped = Self::maps_frame(&mappings, addr, frame);
+        if mapped {
+            let virt = super::phys_to_virt_addr(frame.as_u64() << 12) as *const u8;
+            // SAFETY: `frame` backs a page of a live mapping, and the
+            // mappings lock is held, so nothing unmaps or frees it while the
+            // `n <= 4096` bytes are copied; the physical map makes it readable.
+            unsafe { core::ptr::copy_nonoverlapping(virt, out.as_mut_ptr(), n) };
+        }
+        drop(mappings);
+        mapped
     }
 
     /// Whether any mapping in `[start, end)` is locked (msync's
@@ -5142,6 +5191,31 @@ mod tests {
         assert!(vas.set_mlock(0x30000, 0x31000, Mlock::Locked).is_err());
         vas.set_mlock_all(Mlock::Unlocked);
         assert_eq!(vas.locked_pages(), 0);
+    }
+
+    /// msync names the frames to write back, then reads each page only if
+    /// the same frame still backs it: one unmapped (or remapped) by another
+    /// thread in between is never read (commit security review).
+    #[test]
+    fn msync_reads_only_frames_still_mapped() {
+        let vas = VirtualAddressSpace::new();
+        vas.mappings.lock().insert(
+            VirtualAddress(0x10000),
+            record(0x10000, 2, MappingType::Shared),
+        );
+        let f0 = FrameNumber::new(0x1000 + 0x10);
+        let f1 = FrameNumber::new(0x1000 + 0x11);
+        assert!(vas.still_maps(0x10000, f0));
+        assert!(vas.still_maps(0x11000, f1));
+        assert!(!vas.still_maps(0x11000, f0), "another frame backs it");
+        assert!(!vas.still_maps(0x12000, f1), "past the mapping");
+        // As if a sibling thread unmapped the mapping and the frames went
+        // back to the allocator.
+        vas.mappings.lock().clear();
+        assert!(!vas.still_maps(0x10000, f0));
+        let mut buf = [0u8; 16];
+        assert!(!vas.copy_mapped_page(0x10000, f0, &mut buf));
+        assert_eq!(buf, [0u8; 16], "nothing read from the stale frame");
     }
 
     /// mseal refuses a range with a hole, changing nothing; otherwise it

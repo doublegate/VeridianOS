@@ -1195,18 +1195,48 @@ pub fn barrier_cpus() {
     {
         return;
     }
+    /// Spins between two sends of the same interrupt, should one be lost.
+    const RESEND_SPINS: u32 = 1 << 20;
     let me = this_cpu();
     for cpu in 0..online {
         if Some(cpu) == me {
             continue;
         }
         let before = crate::arch::percpu::ipis_of(cpu);
-        kick_cpu(cpu);
+        // A CPU the interrupt cannot be addressed to (no APIC ID) runs
+        // nothing, so it has no barrier to pass; waiting for it would hang
+        // the caller for good (commit security review).
+        if !send_barrier_ipi(cpu) {
+            continue;
+        }
+        let mut spins = 0u32;
         while crate::arch::percpu::ipis_of(cpu) == before {
             core::hint::spin_loop();
+            spins += 1;
+            if spins == RESEND_SPINS {
+                spins = 0;
+                let _ = send_barrier_ipi(cpu);
+            }
         }
     }
     fence(Ordering::SeqCst);
+}
+
+/// [`kick_cpu`] for the barrier, saying whether the interrupt could be sent.
+fn send_barrier_ipi(cpu: usize) -> bool {
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    {
+        crate::arch::x86_64::apic::send_ipi_to_cpu(
+            cpu,
+            crate::arch::x86_64::apic::SCHED_WAKE_VECTOR,
+        )
+        .is_ok()
+    }
+    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+    {
+        kick_cpu(cpu);
+        true
+    }
 }
 
 /// Make `task` look at its signals now: wake it if it sleeps, or, if it is

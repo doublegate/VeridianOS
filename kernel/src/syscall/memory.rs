@@ -307,9 +307,8 @@ pub fn sys_remap_file_pages(
             .share_pages(offset / PAGE_SIZE, size / PAGE_SIZE, first.may_write)
             .ok_or(inval)?
             .map_err(super::map_kernel_error)?;
-        let vas = proc.memory_space.lock();
-        if vas.unmap(start as usize, size).is_err() {
-            for &frame in &frames {
+        let give_back = |frames: &[crate::mm::FrameNumber]| {
+            for &frame in frames {
                 if crate::mm::frame_refs::release(frame) {
                     crate::mm::note_free_failure(
                         crate::mm::FRAME_ALLOCATOR.lock().free_frames(frame, 1),
@@ -318,6 +317,16 @@ pub fn sys_remap_file_pages(
                     );
                 }
             }
+        };
+        let vas = proc.memory_space.lock();
+        // The lock was dropped since the checks: another thread may have
+        // remapped or sealed the range meanwhile (commit security review).
+        if !same_mappings(&vas.mappings_in(start, end), &found) {
+            give_back(&frames);
+            return Err(SyscallError::WouldBlock);
+        }
+        if vas.unmap(start as usize, size).is_err() {
+            give_back(&frames);
             return Err(SyscallError::OutOfMemory);
         }
         let at = vas
@@ -918,6 +927,11 @@ pub(super) fn map_hooked_shared(
             give_back(&frames);
             return Err(SyscallError::InvalidArgument);
         }
+        // SHM_REMAP over a sealed range: EPERM, as MAP_FIXED (mseal).
+        if replace && vas.sealed_in(a as u64, a as u64 + bytes) {
+            give_back(&frames);
+            return Err(SyscallError::OperationNotPermitted);
+        }
     }
     let skip = at.map_or((0, 0), |a| (a as u64, a as u64 + bytes));
     if let Err(e) = may_expand_vm(&proc, &vas, skip, bytes, false) {
@@ -1299,6 +1313,7 @@ fn same_mappings(
                 && x.mapping_type == y.mapping_type
                 && x.flags == y.flags
                 && x.may_write == y.may_write
+                && x.sealed == y.sealed
                 && file(x) == file(y)
         })
 }
@@ -1803,6 +1818,25 @@ pub fn sys_brk(addr: usize) -> SyscallResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A range sealed while the lock was dropped is not the range that was
+    /// checked: remap_file_pages and mremap look again before changing it
+    /// (commit security review).
+    #[test]
+    fn a_seal_since_the_check_is_a_change() {
+        use crate::mm::vas::{MappingType, VirtualMapping};
+        let m = VirtualMapping::new(VirtualAddress(0x10000), 0x2000, MappingType::Shared);
+        let mut sealed = m.snapshot();
+        assert!(same_mappings(
+            core::slice::from_ref(&m),
+            core::slice::from_ref(&sealed)
+        ));
+        sealed.sealed = true;
+        assert!(!same_mappings(
+            core::slice::from_ref(&m),
+            core::slice::from_ref(&sealed)
+        ));
+    }
 
     /// A file mapping reads no further than the file, so a huge length
     /// costs nothing to read; and an offset whose range wraps is refused

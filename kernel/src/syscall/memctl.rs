@@ -324,7 +324,13 @@ pub fn sys_msync(start: usize, len: usize, flags: usize) -> SyscallResult {
         return Err(SyscallError::Busy);
     }
     if flags & (MS_SYNC | MS_ASYNC) != 0 {
-        for (node, offset, frames) in copies {
+        // Each page is copied out under the address space's lock, checking
+        // that it is still mapped to the same frame: another thread may
+        // unmap it (and the frame be reused) once the lock is dropped, and
+        // only the copy goes to the file. A page unmapped meanwhile is
+        // skipped, as Linux's msync would no longer find it.
+        let mut buf = alloc::vec![0u8; PAGE as usize];
+        for (node, offset, addr, frames) in copies {
             let size = node.metadata().map_or(0, |m| m.size);
             for (i, frame) in frames.iter().enumerate() {
                 let at = offset + i * PAGE as usize;
@@ -332,13 +338,15 @@ pub fn sys_msync(start: usize, len: usize, flags: usize) -> SyscallResult {
                     break;
                 }
                 let n = (size - at).min(PAGE as usize);
-                let virt = crate::mm::phys_to_virt_addr(frame.as_u64() << 12) as *const u8;
-                // SAFETY: `frame` backs a page of this process's mapping,
-                // which holds an owner on it until it is unmapped; the
-                // physical map makes it readable; the bytes are copied out
-                // before anything else runs on this thread.
-                let page = unsafe { core::slice::from_raw_parts(virt, n) };
-                node.write(at, page).map_err(super::map_kernel_error)?;
+                let page = addr + i as u64 * PAGE;
+                if !proc
+                    .memory_space
+                    .lock()
+                    .copy_mapped_page(page, *frame, &mut buf[..n])
+                {
+                    continue;
+                }
+                node.write(at, &buf[..n]).map_err(super::map_kernel_error)?;
             }
         }
     }
