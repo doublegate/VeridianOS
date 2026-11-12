@@ -102,7 +102,7 @@
   and polls for a message or room; messages come out by priority, then in order; absolute
   CLOCK_REALTIME timeouts (ETIMEDOUT); O_NONBLOCK (EAGAIN) through mq_getsetattr; mq_notify by
   signal (si_code SI_MESGQ) or SIGEV_NONE, one registration per queue (EBUSY), sent only to the
-  process that registered and dropped when it closes a descriptor of the queue; the rights a
+  process that registered and dropped when it closes a descriptor of the queue or dies; the rights a
   queue's operations need are on the queue's own IPC namespace, which an open descriptor keeps
   alive (the queue works after every process has left it, as on Linux); queues_max checked and
   counted in one step; queue bytes charged to RLIMIT_MSGQUEUE per real user (EMFILE);

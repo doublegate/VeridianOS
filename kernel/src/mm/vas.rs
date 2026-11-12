@@ -2463,7 +2463,12 @@ impl VirtualAddressSpace {
         let at = ((addr - m.start.0) / 4096) as usize;
         let total = m.size / 4096;
         let back = m.piece(at, total);
-        mappings.insert(key, m.piece(0, at));
+        // The front keeps the record itself, hook included: a split makes
+        // one piece more (one `opened`) and closes none, as __split_vma.
+        let mut front = m;
+        front.size = at * 4096;
+        front.physical_frames.truncate(at);
+        mappings.insert(key, front);
         mappings.insert(back.start, back);
     }
 
@@ -5430,5 +5435,51 @@ mod tests {
         assert_eq!(owner.0.load(Ordering::SeqCst), 1, "no detach either");
         VirtualAddressSpace::split_at_locked(&mut vas.mappings.lock(), 0x11000);
         assert_eq!(owner.0.load(Ordering::SeqCst), 2, "a split is a piece more");
+    }
+
+    #[test]
+    fn a_split_opens_a_piece_and_closes_none() {
+        // Linux's __split_vma runs vm_ops->open on the new piece only; a
+        // close there would stamp a SysV segment's shm_dtime though nothing
+        // was detached (PR #40 review).
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        #[derive(Default)]
+        struct Calls {
+            opened: AtomicUsize,
+            closed: AtomicUsize,
+        }
+        impl MappingOwner for Calls {
+            fn opened(&self) {
+                self.opened.fetch_add(1, Ordering::SeqCst);
+            }
+            fn closed(&self) {
+                self.closed.fetch_add(1, Ordering::SeqCst);
+            }
+            fn as_any(&self) -> &dyn core::any::Any {
+                self
+            }
+        }
+        let owner = alloc::sync::Arc::new(Calls::default());
+        let mut m = device_mapping(0x10000, 2);
+        let node: alloc::sync::Arc<dyn crate::fs::VfsNode> = crate::fs::memfd::MemfdNode::new(
+            crate::fs::Permissions::from_mode(0o600),
+            0,
+            0,
+            false,
+            0,
+        );
+        m.backing = Some(FileBacking {
+            node,
+            offset: 0,
+            write: None,
+            hook: Some(MappingHook::adopt(owner.clone())),
+        });
+        let mut maps = BTreeMap::new();
+        maps.insert(VirtualAddress(0x10000), m);
+        VirtualAddressSpace::split_at_locked(&mut maps, 0x11000);
+        assert_eq!(owner.opened.load(Ordering::SeqCst), 1);
+        assert_eq!(owner.closed.load(Ordering::SeqCst), 0);
+        let sizes: Vec<_> = maps.values().map(|m| (m.start.0, m.size)).collect();
+        assert_eq!(sizes, [(0x10000, 0x1000), (0x11000, 0x1000)]);
     }
 }

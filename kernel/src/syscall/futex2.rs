@@ -41,10 +41,11 @@ pub fn fits(v: u64) -> bool {
 /// get_futex_key's checks of the address: aligned to the futex's size
 /// (doubled with FUTEX2_NUMA, EINVAL), and for FUTEX2_NUMA the node word:
 /// FUTEX_NO_NODE becomes node 0, the only node; any other node than 0 is
-/// EINVAL.
+/// EINVAL. NULL is aligned: as on Linux (access_ok accepts it), reading
+/// its word later is EFAULT, which LTP's futex_waitv01 checks.
 pub fn check_address(uaddr: usize, flags: u32) -> Result<(), SyscallError> {
     let size = if flags & FUTEX2_NUMA != 0 { 8 } else { 4 };
-    if uaddr == 0 || !uaddr.is_multiple_of(size) {
+    if !uaddr.is_multiple_of(size) {
         return Err(SyscallError::InvalidArgument);
     }
     if flags & FUTEX2_NUMA != 0 {
@@ -243,7 +244,8 @@ mod tests {
     fn addresses_must_be_aligned_to_the_futex_size() {
         assert_eq!(
             check_address(0, FUTEX2_SIZE_U32),
-            Err(SyscallError::InvalidArgument)
+            Ok(()),
+            "NULL is aligned; its read faults later (EFAULT)"
         );
         assert_eq!(
             check_address(0x1002, FUTEX2_SIZE_U32),
