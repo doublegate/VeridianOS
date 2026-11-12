@@ -37,7 +37,8 @@ pub(crate) fn sys_fork_with(opts: &crate::process::fork::ForkOptions) -> Syscall
     let current = current_process().ok_or(SyscallError::InvalidState)?;
 
     match crate::process::fork::fork_process_with(opts) {
-        Ok((child_pid, _)) => {
+        #[cfg_attr(not(feature = "alloc"), allow(unused_variables))]
+        Ok((child_pid, child_tid)) => {
             // The child's capabilities were copied by fork_process_with,
             // once (a second copy here inserted every token again and
             // failed on each; ADR 0024).
@@ -62,6 +63,44 @@ pub(crate) fn sys_fork_with(opts: &crate::process::fork::ForkOptions) -> Syscall
                     None => None,
                 };
 
+                // CLONE_PARENT_SETTID: the child's TID as the parent sees it
+                // (kernel_clone's pid_vnr), stored after every step that can
+                // fail but the thread's start, as Linux's put_user follows
+                // copy_process; a start that fails puts the old word back.
+                // As on Linux (result unused) a store that cannot be made is
+                // skipped.
+                #[cfg(feature = "alloc")]
+                let parent_tid = opts.parent_settid.map(|ptr| {
+                    let nr = crate::process::pidns::nr_in(child_tid.0, &current.pid_ns()) as u32;
+                    let space = current.memory_space.lock();
+                    crate::process::fork::StoredTid::store(
+                        |b| space.read_user_bytes(ptr as u64, b).is_ok(),
+                        |b| space.write_bytes_private(ptr as u64, b, false).is_ok(),
+                        nr,
+                    )
+                });
+
+                // CLONE_CHILD_SETTID: the TID as the child sees it, its
+                // number in its own namespace (schedule_tail's
+                // task_pid_vnr), in the child's memory. Linux stores it once
+                // the child runs; here it comes after the parent's store, so
+                // with both on one shared word (CLONE_VM) the child's number
+                // is what stays, and before the start, undone first if that
+                // fails. A copy-on-write page is copied first; a CLONE_VM
+                // child's writable page is the parent's frame, so the parent
+                // sees the store, as on Linux. Skipped when it cannot be made.
+                #[cfg(feature = "alloc")]
+                let child_tid_word = opts.child_settid.map(|ptr| {
+                    let nr =
+                        crate::process::pidns::nr_in(child_tid.0, &child_process.pid_ns()) as u32;
+                    let space = child_process.memory_space.lock();
+                    crate::process::fork::StoredTid::store(
+                        |b| space.read_user_bytes(ptr as u64, b).is_ok(),
+                        |b| space.write_bytes_private(ptr as u64, b, false).is_ok(),
+                        nr,
+                    )
+                });
+
                 // A dispatched parent's child runs as its own task, from the
                 // parent's registers at this syscall (rax = 0) and a copy of
                 // its vector state (on every architecture since sprint E).
@@ -72,8 +111,19 @@ pub(crate) fn sys_fork_with(opts: &crate::process::fork::ForkOptions) -> Syscall
                         crate::process::start_thread(&child_process, &t, true).is_ok()
                     });
                     if !started {
-                        // Freed whole, not just unlisted (N-46); then its
+                        // The TID words first, the child's then the
+                        // parent's (the reverse of their stores, so one
+                        // shared word ends as it was); then the child,
+                        // freed whole, not just unlisted (N-46); then its
                         // pidfd, which finds it gone and kills nothing.
+                        if let (Some(tid), Some(ptr)) = (child_tid_word, opts.child_settid) {
+                            let space = child_process.memory_space.lock();
+                            tid.undo(|b| space.write_bytes_private(ptr as u64, b, false).is_ok());
+                        }
+                        if let (Some(tid), Some(ptr)) = (parent_tid, opts.parent_settid) {
+                            let space = current.memory_space.lock();
+                            tid.undo(|b| space.write_bytes_private(ptr as u64, b, false).is_ok());
+                        }
                         crate::process::exit::discard_unstarted(&child_process);
                         if let Some(fd) = pidfd {
                             super::pidfd::uninstall(fd);
@@ -903,31 +953,24 @@ pub fn sys_setpriority(which: usize, who: usize, priority: usize) -> SyscallResu
     } else {
         let target_pid = ProcessId(who as u64);
 
-        // Modifying another process's priority requires MODIFY right
-        // on a Process capability for that process
+        // Another process's priority needs MODIFY over it: its Process
+        // capability or its PID namespace, through the one typed check
+        // (ADR 0024 decisions 5 and 6; the hand-written table scan skipped
+        // revocation, PR #39 review).
         if target_pid != current.pid {
-            let cap_space = current.capability_space.lock();
-            let has_permission = {
-                let mut found = false;
-                #[cfg(feature = "alloc")]
-                {
-                    let _ = cap_space.iter_capabilities(|entry| {
-                        if let crate::cap::ObjectRef::Process { pid: cap_pid } = &entry.object {
-                            if *cap_pid == target_pid
-                                && entry.rights.contains(crate::cap::Rights::MODIFY)
-                            {
-                                found = true;
-                                return false; // stop iteration
-                            }
-                        }
-                        true // continue
-                    });
+            #[cfg(feature = "alloc")]
+            {
+                let target = crate::process::table::get_process(target_pid)
+                    .ok_or(SyscallError::ResourceNotFound)?;
+                if !crate::cap::authority::current_may_act_on_process(
+                    &target,
+                    crate::cap::Rights::MODIFY,
+                ) {
+                    return Err(SyscallError::PermissionDenied);
                 }
-                found
-            };
-            if !has_permission {
-                return Err(SyscallError::PermissionDenied);
             }
+            #[cfg(not(feature = "alloc"))]
+            return Err(SyscallError::PermissionDenied);
         }
 
         target_pid

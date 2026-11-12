@@ -483,31 +483,11 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
             );
         }
 
-        // The TID stores happen before the child can run. CLONE_CHILD_SETTID
-        // writes the child's memory only: a copy-on-write page is copied first
-        // (a CLONE_VM child shares the frame, so the parent sees it too, as on
-        // Linux). They are ordinary user stores, so page protection applies,
-        // and as on Linux (put_user, result unused) a store that cannot be made
-        // is skipped rather than failing a clone whose child already exists.
-        // Each stores the TID as its reader sees it: the child its number
-        // in its own namespace (schedule_tail's task_pid_vnr), the parent
-        // its number in the parent's (kernel_clone's pid_vnr).
-        if let Some(ptr) = opts.child_settid {
-            let nr = super::pidns::nr_in(new_tid.0, &pid_ns) as u32;
-            let _ = new_process.memory_space.lock().write_bytes_private(
-                ptr as u64,
-                &nr.to_ne_bytes(),
-                false,
-            );
-        }
-        if let Some(ptr) = opts.parent_settid {
-            let nr = super::pidns::nr_in(new_tid.0, &current_process.pid_ns()) as u32;
-            let _ = current_process.memory_space.lock().write_bytes_private(
-                ptr as u64,
-                &nr.to_ne_bytes(),
-                false,
-            );
-        }
+        // Both SETTID stores (CLONE_PARENT_SETTID and CLONE_CHILD_SETTID)
+        // are the caller's, after every step here and the pidfd
+        // (sys_fork_with), so a clone failing here leaves user memory
+        // untouched, also where the child's word is shared with the parent
+        // (CLONE_VM, MAP_SHARED).
 
         // The calling thread's blocked mask (per thread, N-109), alternate
         // signal stack (N-222), command name (N-227), no_new_privs and
@@ -699,5 +679,181 @@ fn register_inherited_regions(child: &super::pcb::Process) {
                 e
             );
         }
+    }
+}
+
+/// A TID that CLONE_PARENT_SETTID (or the thread path's CLONE_CHILD_SETTID)
+/// stored at a user address, with the word it replaced, so a clone that
+/// fails after the store can put that word back. Linux's put_user comes
+/// after the last step that can fail (kernel_clone, `kernel/fork.c` 2800,
+/// before `wake_up_new_task`); ours comes before the child's thread is
+/// started, which can still fail for lack of memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StoredTid {
+    /// Whether the TID was written.
+    stored: bool,
+    /// The word it replaced, when it could be read back too.
+    old: Option<[u8; 4]>,
+}
+
+impl StoredTid {
+    /// Store `nr` with `write`, keeping what `read` finds there first. A
+    /// word that cannot be read is not written: every page user code may
+    /// write is readable to it too, so the write could only fail, and on a
+    /// word straddling a page boundary it would change the bytes on the
+    /// first page before failing on the second (PR #38 review). A word
+    /// read whole that the write changes in part before failing (a
+    /// read-only second page) has the bytes read before written back at
+    /// once. Either way a store that fails leaves the word as it was.
+    pub(crate) fn store(
+        read: impl FnOnce(&mut [u8; 4]) -> bool,
+        write: impl Fn(&[u8; 4]) -> bool,
+        nr: u32,
+    ) -> Self {
+        let mut old = [0u8; 4];
+        if !read(&mut old) {
+            return Self {
+                stored: false,
+                old: None,
+            };
+        }
+        let stored = write(&nr.to_ne_bytes());
+        if !stored {
+            let _ = write(&old);
+        }
+        Self {
+            stored,
+            old: stored.then_some(old),
+        }
+    }
+
+    /// Whether the TID reached user memory (the callers skip a store that
+    /// could not be made, as Linux does, and so never ask).
+    #[cfg(test)]
+    pub(crate) fn is_stored(&self) -> bool {
+        self.stored
+    }
+
+    /// Put the replaced word back (the clone failed after the store).
+    pub(crate) fn undo(self, write: impl FnOnce(&[u8; 4]) -> bool) {
+        if let Some(old) = self.old {
+            let _ = write(&old);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use core::cell::Cell;
+
+    use super::StoredTid;
+
+    fn memory(word: u32) -> Cell<[u8; 4]> {
+        Cell::new(word.to_ne_bytes())
+    }
+
+    #[test]
+    fn a_stored_tid_is_taken_back_when_the_clone_fails_after_it() {
+        let mem = memory(0xdead_beef);
+        let tid = StoredTid::store(
+            |b| {
+                *b = mem.get();
+                true
+            },
+            |b| {
+                mem.set(*b);
+                true
+            },
+            42,
+        );
+        assert!(tid.is_stored());
+        assert_eq!(u32::from_ne_bytes(mem.get()), 42);
+        tid.undo(|b| {
+            mem.set(*b);
+            true
+        });
+        assert_eq!(u32::from_ne_bytes(mem.get()), 0xdead_beef);
+    }
+
+    #[test]
+    fn a_tid_that_could_not_be_stored_is_not_undone() {
+        let mem = memory(7);
+        let tid = StoredTid::store(
+            |b| {
+                *b = mem.get();
+                true
+            },
+            |_| false,
+            42,
+        );
+        assert!(!tid.is_stored());
+        tid.undo(|b| {
+            mem.set(*b);
+            panic!("nothing to undo");
+        });
+        assert_eq!(u32::from_ne_bytes(mem.get()), 7);
+    }
+
+    #[test]
+    fn both_tids_on_one_word_are_undone_in_reverse() {
+        // CLONE_PARENT_SETTID and CLONE_CHILD_SETTID naming one word of
+        // memory the parent and a CLONE_VM child share (sys_fork_with).
+        let mem = memory(5);
+        let read = |b: &mut [u8; 4]| {
+            *b = mem.get();
+            true
+        };
+        let write = |b: &[u8; 4]| {
+            mem.set(*b);
+            true
+        };
+        let parent = StoredTid::store(read, write, 100);
+        let child = StoredTid::store(read, write, 1);
+        assert_eq!(u32::from_ne_bytes(mem.get()), 1, "the child's number stays");
+        child.undo(write);
+        parent.undo(write);
+        assert_eq!(u32::from_ne_bytes(mem.get()), 5);
+    }
+
+    #[test]
+    fn a_store_that_fails_part_way_puts_back_what_it_wrote() {
+        // The first two bytes are on a writable page, the rest on a
+        // read-only one: each write changes those two and then fails.
+        let mem = memory(0x0102_0304);
+        let tid = StoredTid::store(
+            |b| {
+                *b = mem.get();
+                true
+            },
+            |b| {
+                let mut w = mem.get();
+                w[..2].copy_from_slice(&b[..2]);
+                mem.set(w);
+                false
+            },
+            0xffff_ffff,
+        );
+        assert!(!tid.is_stored());
+        assert_eq!(u32::from_ne_bytes(mem.get()), 0x0102_0304);
+    }
+
+    #[test]
+    fn an_unreadable_word_is_not_written() {
+        // A writable first page and an unmapped second one: the read fails,
+        // and a write would change the first page's bytes before failing.
+        let mem = memory(0x0102_0304);
+        let tid = StoredTid::store(
+            |_| false,
+            |b| {
+                let mut w = mem.get();
+                w[..2].copy_from_slice(&b[..2]);
+                mem.set(w);
+                false
+            },
+            0xffff_ffff,
+        );
+        assert!(!tid.is_stored());
+        tid.undo(|_| panic!("nothing to undo"));
+        assert_eq!(u32::from_ne_bytes(mem.get()), 0x0102_0304);
     }
 }

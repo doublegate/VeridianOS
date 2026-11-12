@@ -158,7 +158,8 @@ There are two kinds of capability:
    EAGAIN, as without it) -- needs MODIFY on the `System` object. File access needs READ on the mount namespace, and WRITE as well to change anything
    (EACCES without; EPERM for chmod, chown and the other owner checks, the owner included); a
    device node from `mknod` needs CREATE (EPERM). A descriptor opened before a drop keeps
-   working, as one opened before a chmod does, so a launcher that wants a program to have no
+   reading and writing, as one opened before a chmod does (its attributes still need READ to
+   read and WRITE to change: fchmod, fchown, futimens, the f*xattr calls), so a launcher that wants a program to have no
    file access drops before opening what the program inherits, or closes it (or sets
    close-on-exec). A program the kernel starts holds all of them, so a Linux program sees no
    difference unless its launcher dropped some or some of their rights (`CapabilityDrop`;

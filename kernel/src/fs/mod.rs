@@ -1336,6 +1336,16 @@ impl MountTable {
         };
         let mut node = self.walk_canonical(&canon)?;
         let mut links = symlink_depth;
+        // READ on the mount namespace for any lookup (ADR 0024 step 6),
+        // also one with no component to search ("/", "." at the root),
+        // which the per-directory check below never reaches (PR #39 review).
+        if let Some(c) = &creds {
+            if !c.fs.read {
+                return Err(KernelError::FsError(
+                    crate::error::FsError::PermissionDenied,
+                ));
+            }
+        }
 
         while let Some(component) = pending.pop_front() {
             // Whatever is being searched -- for a name or for ".." -- must

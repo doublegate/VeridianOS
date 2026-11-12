@@ -149,6 +149,13 @@ finish
 
 status=PASS
 busybox="$(grep -aoE 'BUSYBOX_ALL_PASS|BUSYBOX_[A-Z_]*FAIL[A-Z_]*' "$log" | tail -1)"
+# On several CPUs a kernel message can land inside the marker's line
+# ("BUSYBO[PROCESS] ...\nX_ALL_PASS"): busybox_test.sh's summary line just
+# before it says the same, so a whole run with no failure counts too.
+summary="$(grep -aoE '^=== Results: [0-9]+/[0-9]+ passed, 0 failed ===' "$log" | tail -1)"
+if [[ -z $busybox && $summary =~ ([0-9]+)/([0-9]+) && ${BASH_REMATCH[1]} == "${BASH_REMATCH[2]}" ]]; then
+    busybox=BUSYBOX_ALL_PASS
+fi
 [[ $busybox == BUSYBOX_ALL_PASS ]] || status=FAIL
 audit="$(grep -aoE 'AUDIT-RUNTIME: [0-9]+/[0-9]+' "$log" | tail -1)"
 if [[ $audit =~ ([0-9]+)/([0-9]+) ]]; then

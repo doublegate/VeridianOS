@@ -197,7 +197,9 @@
   the set-group-ID bit, need WRITE too (EPERM), the file's owner included; every extended
   attribute (EACCES); open_by_handle_at, which skips the path walk, READ (EPERM); a device node
   from mknod CREATE besides CAP_MKNOD (EPERM). The rights are read once per call, not per path
-  component. A descriptor opened before a drop keeps working, as one opened before a chmod does. A
+  component, and a lookup with no component ("/") needs READ too. A descriptor opened before a
+  drop keeps reading and writing, as one opened before a chmod does; its attributes still need
+  READ to read (getxattr, listxattr) and WRITE to change (fchmod, fchown, futimens). A
   launcher can now run root that can read but not change files, or reach no file at all; one
   that only takes MODIFY (no mounting) leaves files as they were. The package calls no longer hold
   the capability space locked through the install, which file access now reads.
@@ -545,9 +547,11 @@
   deletes a leap second at midnight UTC for STA_INS/STA_DEL (CLOCK_REALTIME reads 23:59:59 twice,
   adjtimex reports TIME_OOP, TAI moves a second, timers on the wall clock follow). Clock reads take
   the rate and the raw clock in one sequence section, so CLOCK_MONOTONIC never goes back across a
-  rate change; a second `ktimerd` runs late delivers what the rate before it delivered, and
-  nothing runs each second while there is nothing to deliver (a synchronized clock's maxerror
-  still grows each second until it becomes unsynchronized). CPU time and scheduling stay on the
+  rate change; a second `ktimerd` runs late delivers what the rate before it delivered (after a
+  stall of more than 64 seconds, the late seconds past the first 64 are dropped, and the current
+  one runs on time with its own phase), and nothing runs each second while there is nothing to
+  deliver (a synchronized clock's maxerror still grows each second until it becomes
+  unsynchronized). CPU time and scheduling stay on the
   unsteered clock, as Linux's sched_clock; sleep deadlines run on CLOCK_MONOTONIC. Setting the
   clock (settimeofday, clock_settime, ADJ_SETOFFSET) clears the NTP state as on Linux: the slew
   and phase offset stop, the clock is unsynchronized and no leap second stays armed. CLOCK_TAI
@@ -741,6 +745,38 @@
   its high address: the first peek there panicked the kernel with a translation fault. PEEK now
   reads through the physical map on every architecture, as POKE does. No test peeked on those
   architectures before; `proc_object_cap` (musl runtime) now does.
+- From the PR #37 review, after its merge, and the reviews of PR #38 that followed:
+  - CLONE_PARENT_SETTID stores the child's TID after every step of a clone that can fail but
+    the start of its thread, as Linux's put_user follows copy_process; a start that fails puts
+    the old word back. A fork failing at the process table or a namespace whose init was
+    exiting used to leave the TID in the parent's memory behind an error. CLONE_CHILD_SETTID
+    is stored that late too, after the parent's word and undone before it, so a failed clone
+    leaves a word the child shares with the parent (CLONE_VM, MAP_SHARED) as it was, also when
+    both flags name the same word; a thread clone stores both TIDs that late. A store that
+    fails part-way, on a word straddling a page boundary, puts back the bytes it wrote, and a
+    word that cannot be read is not written at all (its first page's bytes were changed before
+    the write failed on an unmapped second page). As on Linux, a TID store that cannot be made
+    is skipped by a thread clone too, as by a fork: the clone used to fail with EFAULT after
+    the thread was listed and the CLONE_PIDFD number stored in user memory. A NULL, kernel or
+    PROT_NONE pointer for CLONE_PARENT_SETTID, CLONE_CHILD_SETTID or CLONE_CHILD_CLEARTID is
+    no longer EFAULT up front either: each store checks the address as it is made.
+  - A write the kernel makes into one address space (a SETTID store, ptrace POKE) to a
+    writable page a CLONE_VM child (vfork, posix_spawn) shares with its parent writes the
+    shared page; it used to give that address space a private copy, so the other side never
+    saw the store and the page stopped being shared.
+  - A fork by a CLONE_VM child (a vfork or posix_spawn child, before its exec) gives the new
+    process its own copy of the pages it shares with its parent. Only the forking side's page
+    became copy-on-write, so the new process saw the parent's later writes to that page, and the
+    CLONE_VM child's own next write took a private copy, leaving its parent behind.
+  - A fork child discarded before it ran gives up its process group's and session's numbers
+    when it was the last process naming them, as a reap does; only its own number was freed.
+    Taking it out of the process table wakes a namespace init waiting for its namespace to
+    empty (zap_pid_ns), which could otherwise sleep on with nothing left to wake it.
+  - One set_tid claim of a high ID no longer makes every later allocation below it scan the
+    process table: only the IDs claimed ahead of the counter are checked, each once, and a
+    claim whose clone3 failed is not checked at all.
+  - An exit whose descriptor table owns no record locks checks under the lock table's read
+    lock instead of taking the write lock, twice with the table's Drop.
 - From the PR #37 review:
   - A descriptor table closes its files and releases its record locks however its last
     reference goes: an exec or unshare(CLONE_FILES) copying a table while its other sharer

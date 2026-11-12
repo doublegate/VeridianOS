@@ -12,7 +12,7 @@ This directory contains TODO tracking for the VeridianOS project.
 - **[MASTER_TODO.md](MASTER_TODO.md)** - Master tracking document with overall project status
 
 ### Ongoing Activity Tracking
-- **[TESTING_TODO.md](TESTING_TODO.md)** - All testing activities (4,770 host tests; boot and runtime suites on all three architectures)
+- **[TESTING_TODO.md](TESTING_TODO.md)** - All testing activities (5,024 host tests; boot and runtime suites on all three architectures)
 - **[ISSUES_TODO.md](ISSUES_TODO.md)** - Bug and issue tracking (23 resolved, 0 open)
 - **[ENHANCEMENTS_TODO.md](ENHANCEMENTS_TODO.md)** - Future features and improvements
 - **[DOCUMENTATION_TODO.md](DOCUMENTATION_TODO.md)** - Documentation tasks
@@ -47,7 +47,7 @@ Completed phase TODOs have been moved to `archive/`:
 
 ## Key Metrics
 
-- **Host Tests**: 4,770 passing
+- **Host Tests**: 5,024 passing
 - **Boot Tests**: x86_64 43/43, AArch64 64/64, RISC-V 57/57 (47, 68 and 61 with four CPUs)
 - **Runtime Suites**: BusyBox self-test, `audit_runtime_test` and `musl_runtime_test` pass on every architecture
 - **CI Pipeline**: green (builds, clippy, host tests, coverage, boot tests on 1 and 4 CPUs, x86_64 runtime suite)

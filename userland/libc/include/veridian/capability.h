@@ -24,7 +24,9 @@
  *
  * File access is checked when a file is looked up or opened, so a
  * descriptor opened before a drop of READ or WRITE on the mount namespace
- * keeps working, as one opened before a chmod does on Linux. To leave a
+ * keeps reading and writing, as one opened before a chmod does on Linux;
+ * the inode's attributes (fchmod, fchown, futimens, the f*xattr calls)
+ * still need READ to read them and WRITE to change them. To leave a
  * program no file access at all, drop before opening anything it inherits,
  * or close (or mark close-on-exec) what it should not keep.
  *
