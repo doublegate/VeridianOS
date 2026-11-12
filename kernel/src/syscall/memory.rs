@@ -673,7 +673,18 @@ fn mmap_inner(
                     return Err(SyscallError::FileExists);
                 }
                 let skip = at.map_or((0, 0), |a| (a.0, a.0 + bytes));
-                if let Err(e) = may_expand_vm(&proc, &vas, skip, bytes, false) {
+                // mseal and the MCL_FUTURE limit again under this lock, as
+                // for any other mapping (commit security review).
+                let refused = if is_fixed && vas.sealed_in(addr as u64, addr as u64 + bytes) {
+                    Err(SyscallError::OperationNotPermitted)
+                } else if lock_state_of(flags, vas.mm_state().def_mlock).is_some()
+                    && !super::memctl::future_lock_allowed(&proc, &vas, bytes)
+                {
+                    Err(SyscallError::WouldBlock)
+                } else {
+                    may_expand_vm(&proc, &vas, skip, bytes, false)
+                };
+                if let Err(e) = refused {
                     // Give back the owners share_pages added (the memfd
                     // keeps its own).
                     for &frame in &frames {

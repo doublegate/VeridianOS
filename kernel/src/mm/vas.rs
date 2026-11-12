@@ -1991,6 +1991,14 @@ impl VirtualAddressSpace {
                 value: "part of a huge-page mapping",
             });
         }
+        // Nor replace a sealed mapping (mseal), whichever caller asks: the
+        // callers check first, and this holds the line under the lock the
+        // replacement is made under (commit security review).
+        if replace && Self::overlapping(&mappings, aligned_start.0, aligned_end).any(|m| m.sealed) {
+            return Err(KernelError::FsError(
+                crate::error::FsError::OperationNotPermitted,
+            ));
+        }
 
         // [a_start, a_end) and [b_start, b_end) overlap iff
         // a_start < b_end && b_start < a_end.
@@ -4714,6 +4722,21 @@ mod tests {
             vas.find_mapping(VirtualAddress(0x80_0000)).unwrap().size,
             0x4000
         );
+    }
+
+    #[test]
+    fn a_sealed_mapping_is_never_replaced() {
+        let vas = VirtualAddressSpace::new();
+        let mut m = record(0xA0_0000, 2, MappingType::Data);
+        m.sealed = true;
+        vas.mappings.lock().insert(m.start, m);
+        assert_eq!(
+            vas.map_region_fixed(VirtualAddress(0xA0_1000), 0x2000, MappingType::Data, None),
+            Err(KernelError::FsError(
+                crate::error::FsError::OperationNotPermitted
+            ))
+        );
+        assert!(vas.find_mapping(VirtualAddress(0xA0_1000)).unwrap().sealed);
     }
 
     #[test]
