@@ -380,7 +380,7 @@ ltp-syscalls	fork07	FLAKY	PASS locally in 36 s of the 60 s limit, failed once on
 ltp-syscalls	fork08	PASS	
 ltp-syscalls	fork09	HANG	no output
 ltp-syscalls	fork10	PASS	
-ltp-syscalls	fork11	FLAKY	TIMEOUT and WARN in two x86_64 runs (2026-10-22); last here: WARN; tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	fork11	FLAKY	TIMEOUT and WARN in two x86_64 runs (2026-10-22); the WARN was LTP's kernel-version check, gone since uname reports 7.3.0 (PR #34)
 ltp-syscalls	fork13	BROK	tst_sys_conf.c:118: TBROK: Failed to open '/proc/sys/kernel/pid_max' for writing: EACCES (13)
 ltp-syscalls	fork14	TIMEOUT	fork14.c:45: TINFO: mmap() failed
 ltp-syscalls	fpathconf01	PASS	
@@ -426,7 +426,7 @@ ltp-syscalls	futex_wait04	PASS
 ltp-syscalls	futex_wait05	FAIL	tst_timer_test.c:314: TFAIL: futex_wait() slept for too long
 ltp-syscalls	futex_wait06	PASS	
 ltp-syscalls	futex_wait07	BROK	futex_wait07.c:63: TBROK: Failed to open FILE '/proc/1852/stat' for reading: ENOENT (2)
-ltp-syscalls	futex_wait_bitset01	FLAKY	FAIL and WARN in two x86_64 runs (2026-10-22); last here: WARN; tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	futex_wait_bitset01	FLAKY	FAIL and WARN in two x86_64 runs (2026-10-22); the WARN was LTP's kernel-version check, gone since uname reports 7.3.0 (PR #34)
 ltp-syscalls	futex_waitv01	FAIL	futex_waitv01.c:75: TFAIL: futex_waitv address is NULL expected EFAULT: EINVAL (22)
 ltp-syscalls	futex_waitv02	PASS	
 ltp-syscalls	futex_waitv03	PASS	
@@ -877,7 +877,7 @@ ltp-syscalls	newuname01	FAIL	newuname01.c:32: TFAIL: name->sysname (VeridianOS) 
 ltp-syscalls	nftw01	FAIL	nftw01      3  TFAIL  :  tools.c:267: Test failed
 ltp-syscalls	nftw6401	FAIL	nftw6401    3  TFAIL  :  tools64.c:267: Test failed
 ltp-syscalls	nice01	PASS	
-ltp-syscalls	nice02	FLAKY	TIMEOUT and WARN in two x86_64 runs (2026-10-22); last here: WARN; tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	nice02	FLAKY	TIMEOUT and WARN in two x86_64 runs (2026-10-22); the WARN was LTP's kernel-version check, gone since uname reports 7.3.0 (PR #34)
 ltp-syscalls	nice03	PASS	
 ltp-syscalls	nice04	PASS	
 ltp-syscalls	nice05	PASS	
@@ -937,7 +937,7 @@ ltp-syscalls	pipe07	BROK	pipe07.c:28: TBROK: opendir(/proc/self/fd) failed: ENOE
 ltp-syscalls	pipe08	PASS	
 ltp-syscalls	pipe09	PASS	
 ltp-syscalls	pipe10	PASS	
-ltp-syscalls	pipe11	FLAKY	TIMEOUT and WARN in two x86_64 runs (2026-10-22); last here: WARN; tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	pipe11	FLAKY	TIMEOUT and WARN in two x86_64 runs (2026-10-22); the WARN was LTP's kernel-version check, gone since uname reports 7.3.0 (PR #34)
 ltp-syscalls	pipe12	BROK	pipe12.c:97: TBROK: fcntl(4,F_GETPIPE_SZ,...) failed: EINVAL (22)
 ltp-syscalls	pipe13	BROK	pipe13.c:78: TBROK: Failed to open FILE '/proc/1260/stat' for reading: ENOENT (2)
 ltp-syscalls	pipe14	PASS	
@@ -1455,7 +1455,7 @@ ltp-syscalls	timer_gettime01	PASS
 ltp-syscalls	timer_settime01	PASS	
 ltp-syscalls	timer_settime02	PASS	
 ltp-syscalls	timer_settime03	PASS	
-ltp-syscalls	timerfd01	FLAKY	FAIL and WARN in two x86_64 runs (2026-10-22); last here: WARN; tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	timerfd01	FLAKY	FAIL and WARN in two x86_64 runs (2026-10-22); the WARN was LTP's kernel-version check, gone since uname reports 7.3.0 (PR #34)
 ltp-syscalls	timerfd02	PASS	
 ltp-syscalls	timerfd04	FAIL	timerfd04.c:106: TFAIL: timerfd CLOCK_MONOTONIC slept too long 540730
 ltp-syscalls	timerfd_create01	PASS	
