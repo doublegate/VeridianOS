@@ -471,18 +471,16 @@ pub(crate) fn monotonic_ns() -> u64 {
 /// (`Ntp::clear`, TK_CLEAR_NTP): the slew and phase offset stop, the clock
 /// is unsynchronized and no leap second stays armed for a date the clock
 /// has jumped past. Returns how far the wall clock moved, for the timers on
-/// it to follow (the caller does, outside the lock).
+/// it to follow (the caller does, outside the lock, with
+/// `syscall::time::clock_was_set`, which also wakes ktimerd: a leap second
+/// still flagged is re-armed from the new date).
 pub(crate) fn set_wall_clock(wall_ns: i64) -> i64 {
-    let (moved, active) = ntp::with(|ntp| {
+    ntp::with(|ntp| {
         let moved = realtime::set_now_ns(wall_ns);
         ntp.clear();
-        (moved, steer::adjusted(ntp, true))
-    });
-    if active {
-        // A leap second still flagged: ktimerd re-arms it from the new date.
-        ktimerd::kick();
-    }
-    moved
+        steer::adjusted(ntp, true);
+        moved
+    })
 }
 
 /// The clock source unsteered (CLOCK_MONOTONIC_RAW), in nanoseconds.
