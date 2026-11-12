@@ -8958,6 +8958,15 @@ static void test_sysv_shm(void)
         f |= 1024;
     if (fd >= 0)
         close(fd);
+    /* mremap with old size 0 makes a second mapping of the attachment:
+     * it counts (copy_vma runs vm_ops->open) and shmdt takes it away. */
+    char *dup = mremap(p, 0, 8192, MREMAP_MAYMOVE);
+    if (dup == MAP_FAILED || strcmp(dup, "parent") != 0 || shmctl(id, IPC_STAT, &ds) != 0 ||
+        ds.shm_nattch != 2)
+        f |= 65536;
+    if (dup != MAP_FAILED &&
+        (shmdt(dup) != 0 || shmctl(id, IPC_STAT, &ds) != 0 || ds.shm_nattch != 1))
+        f |= 65536;
     /* Removed while attached: the key is free at once, the segment stays
      * until the detach, then the id is gone. */
     if (shmctl(id, IPC_RMID, NULL) != 0)

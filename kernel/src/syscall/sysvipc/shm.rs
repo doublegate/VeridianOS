@@ -9,8 +9,8 @@
 use alloc::sync::{Arc, Weak};
 
 use super::{
-    encode_perm, ipcget, now_secs, pid_shown, put_long, space_of, Asker, GetOutcome, Ids,
-    IpcObject, Perm, SysvSpace, IPC64_PERM_SIZE, IPC_INFO, IPC_RMID, IPC_SET, IPC_STAT,
+    encode_perm, ipcget, now_secs, pid_shown, put_long, Asker, GetOutcome, Ids, IpcObject, Perm,
+    SysvSpace, IPC64_PERM_SIZE, IPC_INFO, IPC_RMID, IPC_SET, IPC_STAT,
 };
 use crate::{
     fs::{memfd::MemfdNode, Permissions, VfsNode},
@@ -192,11 +192,6 @@ pub struct Attach {
 }
 
 impl Attach {
-    /// The segment this attaches, if its namespace is `space`.
-    pub fn segment_of(&self, space: &Arc<SysvSpace>) -> Option<i32> {
-        core::ptr::eq(self.space.as_ptr(), Arc::as_ptr(space)).then_some(self.id)
-    }
-
     fn with_segment(&self, f: impl FnOnce(&mut ShmTable, &SysvSpace)) {
         if let Some(space) = self.space.upgrade() {
             let mut table = space.shm.lock();
@@ -601,11 +596,6 @@ pub fn proc_lines(space: &SysvSpace, asker: &Asker) -> alloc::string::String {
         );
     }
     s
-}
-
-/// The namespace's space from an [`Attach`] owner, for tests and procfs.
-pub fn space(ns: &crate::process::ns::PlainNs) -> &Arc<SysvSpace> {
-    space_of(ns)
 }
 
 #[cfg(test)]

@@ -570,6 +570,18 @@ impl MappingHook {
         &self.owner
     }
 
+    /// A new piece of the same owner, counted ([`MappingOwner::opened`])
+    /// whether or not this hook is: for a mapping made from a snapshot's
+    /// record (mremap's copy or growth of an attachment, as copy_vma runs
+    /// vm_ops->open).
+    pub fn new_piece(&self) -> Self {
+        self.owner.opened();
+        Self {
+            owner: self.owner.clone(),
+            counted: true,
+        }
+    }
+
     /// The same owner, not counted: for a copy of a mapping's record that
     /// is no piece of it.
     pub fn snapshot(&self) -> Self {
@@ -4874,6 +4886,34 @@ mod tests {
         assert_eq!(owner.0.load(Ordering::SeqCst), 1, "no detach either");
         VirtualAddressSpace::split_at_locked(&mut vas.mappings.lock(), 0x11000);
         assert_eq!(owner.0.load(Ordering::SeqCst), 2, "a split is a piece more");
+    }
+
+    #[test]
+    fn a_new_piece_from_a_snapshot_counts() {
+        use core::sync::atomic::{AtomicIsize, Ordering};
+        struct Counter(AtomicIsize);
+        impl MappingOwner for Counter {
+            fn opened(&self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+            fn closed(&self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+            fn as_any(&self) -> &dyn core::any::Any {
+                self
+            }
+        }
+        let owner = alloc::sync::Arc::new(Counter(AtomicIsize::new(1)));
+        let hook = MappingHook::adopt(owner.clone());
+        let look = hook.snapshot();
+        let piece = look.new_piece();
+        assert_eq!(owner.0.load(Ordering::SeqCst), 2, "a second piece");
+        drop(look);
+        assert_eq!(owner.0.load(Ordering::SeqCst), 2, "a look is no piece");
+        drop(piece);
+        assert_eq!(owner.0.load(Ordering::SeqCst), 1);
+        drop(hook);
+        assert_eq!(owner.0.load(Ordering::SeqCst), 0);
     }
 
     #[test]
