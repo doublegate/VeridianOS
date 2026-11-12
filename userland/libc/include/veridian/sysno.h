@@ -290,8 +290,8 @@
 #define SYS_setpriority                  141
 /* Futexes */
 #define SYS_futex                        202
-#define SYS_FUTEX_WAIT                   1225
-#define SYS_FUTEX_WAKE                   1226
+#define SYS_NATIVE_FUTEX_WAIT            1225
+#define SYS_NATIVE_FUTEX_WAKE            1226
 /* Shared memory */
 #define SYS_SHM_OPEN                     1234
 #define SYS_SHM_UNLINK                   1235
@@ -369,6 +369,31 @@
 #define SYS_inotify_init1                294
 #define SYS_inotify_add_watch            254
 #define SYS_inotify_rm_watch             255
+/* System V IPC */
+#define SYS_shmget                       29
+#define SYS_shmat                        30
+#define SYS_shmdt                        67
+#define SYS_shmctl                       31
+#define SYS_semget                       64
+#define SYS_semop                        65
+#define SYS_semtimedop                   220
+#define SYS_semctl                       66
+#define SYS_msgget                       68
+#define SYS_msgsnd                       69
+#define SYS_msgrcv                       70
+#define SYS_msgctl                       71
+/* POSIX message queues */
+#define SYS_mq_open                      240
+#define SYS_mq_unlink                    241
+#define SYS_mq_timedsend                 242
+#define SYS_mq_timedreceive              243
+#define SYS_mq_notify                    244
+#define SYS_mq_getsetattr                245
+/* futex2 */
+#define SYS_futex_waitv                  449
+#define SYS_futex_wake                   454
+#define SYS_futex_wait                   455
+#define SYS_futex_requeue                456
 
 #elif defined(__riscv) && __riscv_xlen == 64
 
@@ -616,8 +641,8 @@
 #define SYS_setpriority                  140
 /* Futexes */
 #define SYS_futex                        98
-#define SYS_FUTEX_WAIT                   1225
-#define SYS_FUTEX_WAKE                   1226
+#define SYS_NATIVE_FUTEX_WAIT            1225
+#define SYS_NATIVE_FUTEX_WAKE            1226
 /* Shared memory */
 #define SYS_SHM_OPEN                     1234
 #define SYS_SHM_UNLINK                   1235
@@ -690,6 +715,31 @@
 #define SYS_inotify_init1                26
 #define SYS_inotify_add_watch            27
 #define SYS_inotify_rm_watch             28
+/* System V IPC */
+#define SYS_shmget                       194
+#define SYS_shmat                        196
+#define SYS_shmdt                        197
+#define SYS_shmctl                       195
+#define SYS_semget                       190
+#define SYS_semop                        193
+#define SYS_semtimedop                   192
+#define SYS_semctl                       191
+#define SYS_msgget                       186
+#define SYS_msgsnd                       189
+#define SYS_msgrcv                       188
+#define SYS_msgctl                       187
+/* POSIX message queues */
+#define SYS_mq_open                      180
+#define SYS_mq_unlink                    181
+#define SYS_mq_timedsend                 182
+#define SYS_mq_timedreceive              183
+#define SYS_mq_notify                    184
+#define SYS_mq_getsetattr                185
+/* futex2 */
+#define SYS_futex_waitv                  449
+#define SYS_futex_wake                   454
+#define SYS_futex_wait                   455
+#define SYS_futex_requeue                456
 
 #elif defined(__aarch64__)
 
@@ -938,8 +988,8 @@
 #define SYS_setpriority                  140
 /* Futexes */
 #define SYS_futex                        98
-#define SYS_FUTEX_WAIT                   1225
-#define SYS_FUTEX_WAKE                   1226
+#define SYS_NATIVE_FUTEX_WAIT            1225
+#define SYS_NATIVE_FUTEX_WAKE            1226
 /* Shared memory */
 #define SYS_SHM_OPEN                     1234
 #define SYS_SHM_UNLINK                   1235
@@ -1012,6 +1062,31 @@
 #define SYS_inotify_init1                26
 #define SYS_inotify_add_watch            27
 #define SYS_inotify_rm_watch             28
+/* System V IPC */
+#define SYS_shmget                       194
+#define SYS_shmat                        196
+#define SYS_shmdt                        197
+#define SYS_shmctl                       195
+#define SYS_semget                       190
+#define SYS_semop                        193
+#define SYS_semtimedop                   192
+#define SYS_semctl                       191
+#define SYS_msgget                       186
+#define SYS_msgsnd                       189
+#define SYS_msgrcv                       188
+#define SYS_msgctl                       187
+/* POSIX message queues */
+#define SYS_mq_open                      180
+#define SYS_mq_unlink                    181
+#define SYS_mq_timedsend                 182
+#define SYS_mq_timedreceive              183
+#define SYS_mq_notify                    184
+#define SYS_mq_getsetattr                185
+/* futex2 */
+#define SYS_futex_waitv                  449
+#define SYS_futex_wake                   454
+#define SYS_futex_wait                   455
+#define SYS_futex_requeue                456
 
 #else
 #error "<veridian/sysno.h>: no system call numbers for this architecture"

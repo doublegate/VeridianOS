@@ -68,15 +68,22 @@ fn task(id: usize) -> Result<(Arc<Process>, Arc<Thread>), SyscallError> {
 /// is the process's `vm_id` (a CLONE_VM child shares it until either
 /// execs), the file table and signal actions the process's (shared by its
 /// threads, and with another process by CLONE_FILES and CLONE_SIGHAND),
-/// the filesystem state the thread's (CLONE_FS shares it). No task has an I/O
-/// context or a System V semaphore undo list, so KCMP_IO and KCMP_SYSVSEM
-/// always find them equal, as Linux does for two tasks with none.
+/// the filesystem state the thread's (CLONE_FS shares it), the System V
+/// semaphore undo list the process's (its threads and a CLONE_SYSVSEM clone
+/// share it; none until the first SEM_UNDO, and two tasks with none are
+/// equal, as Linux's NULL lists). No task has an I/O context, so KCMP_IO
+/// always finds them equal, as Linux does for two tasks with none.
 fn object(kind: usize, process: &Process, thread: &Thread) -> usize {
     match kind {
         KCMP_VM => process.vm_id.load(core::sync::atomic::Ordering::Acquire) as usize,
         KCMP_FILES => Arc::as_ptr(&process.file_table.lock()) as usize,
         KCMP_FS => Arc::as_ptr(&thread.fs()) as usize,
         KCMP_SIGHAND => process.sighand_id(),
+        KCMP_SYSVSEM => process
+            .sem_undo
+            .lock()
+            .as_ref()
+            .map_or(0, |u| Arc::as_ptr(u) as usize),
         _ => 0,
     }
 }

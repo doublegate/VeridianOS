@@ -328,11 +328,39 @@ pub struct MntNs {
     pub mounts: Arc<crate::fs::mount::Mounts>,
 }
 
-/// A namespace that holds nothing yet besides its identity: IPC (no
-/// System V IPC or message queues exist) and cgroup (no hierarchy).
+/// An IPC namespace, which holds its System V objects and POSIX message
+/// queues, or a cgroup
+/// namespace, which holds nothing besides its identity (no hierarchy).
 pub struct PlainNs {
     pub ident: NsIdent,
     pub owner: Arc<UserNs>,
+    /// An IPC namespace's System V objects and limits (`None` for cgroup).
+    #[cfg(feature = "alloc")]
+    pub sysv: Option<Arc<crate::syscall::sysvipc::SysvSpace>>,
+    /// An IPC namespace's POSIX message queues (`None` for cgroup).
+    #[cfg(feature = "alloc")]
+    pub mq: Option<Arc<crate::syscall::mqueue::MqSpace>>,
+}
+
+impl PlainNs {
+    /// A new namespace of `kind` (IPC or cgroup) owned by `owner`, with
+    /// identity `ident`.
+    fn make(kind: NsKind, ident: NsIdent, owner: Arc<UserNs>) -> Arc<Self> {
+        Arc::new(Self {
+            ident,
+            owner,
+            #[cfg(feature = "alloc")]
+            sysv: (kind == NsKind::Ipc).then(crate::syscall::sysvipc::SysvSpace::new),
+            #[cfg(feature = "alloc")]
+            mq: (kind == NsKind::Ipc).then(crate::syscall::mqueue::MqSpace::new),
+        })
+    }
+
+    /// Whether this is the initial IPC namespace, whose limits are the
+    /// whole system's (every process not unshared from it shares them).
+    pub fn is_initial_ipc(&self) -> bool {
+        self.ident.id == NsKind::Ipc.init_id()
+    }
 }
 
 /// `/proc/sys/user/max_net_namespaces`: how many network namespaces one
@@ -479,12 +507,7 @@ static INITIAL: spin::Once<Initial> = spin::Once::new();
 fn initial_all() -> &'static Initial {
     INITIAL.call_once(|| {
         let owner = super::userns::initial();
-        let plain = |kind| {
-            Arc::new(PlainNs {
-                ident: NsIdent::initial(kind),
-                owner: owner.clone(),
-            })
-        };
+        let plain = |kind| PlainNs::make(kind, NsIdent::initial(kind), owner.clone());
         // The initial time namespace's offsets are 0 and fixed.
         let time = Arc::new(TimeNs {
             ident: NsIdent::initial(NsKind::Time),
@@ -585,12 +608,7 @@ impl Namespaces {
         creator: u32,
     ) -> Result<Namespaces, NsError> {
         let mut new = self.clone();
-        let plain = |kind| {
-            Arc::new(PlainNs {
-                ident: NsIdent::fresh(kind),
-                owner: owner.clone(),
-            })
-        };
+        let plain = |kind| PlainNs::make(kind, NsIdent::fresh(kind), owner.clone());
         if flags & CLONE_NEWUTS != 0 {
             new.uts = Arc::new(UtsNs {
                 ident: NsIdent::fresh(NsKind::Uts),

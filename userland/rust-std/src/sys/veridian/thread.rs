@@ -9,8 +9,8 @@
 //! - `clone`       -> SYS_clone (56)
 //! - `thread_exit` -> SYS_exit (60)
 //! - `gettid`      -> SYS_gettid (186)
-//! - `futex_wait`  -> SYS_FUTEX_WAIT (1225)
-//! - `futex_wake`  -> SYS_FUTEX_WAKE (1226)
+//! - `futex_wait`  -> SYS_NATIVE_FUTEX_WAIT (1225)
+//! - `futex_wake`  -> SYS_NATIVE_FUTEX_WAKE (1226)
 //! - `nanosleep`   -> SYS_nanosleep (35)
 
 extern crate alloc;
@@ -19,7 +19,7 @@ use core::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 
 use super::{
     syscall0, syscall1, syscall3, syscall5, syscall_result, time::Timespec, SyscallError,
-    SYS_FUTEX_WAIT, SYS_FUTEX_WAKE, SYS_nanosleep, SYS_clone, SYS_exit,
+    SYS_NATIVE_FUTEX_WAIT, SYS_NATIVE_FUTEX_WAKE, SYS_nanosleep, SYS_clone, SYS_exit,
     SYS_gettid,
 };
 
@@ -117,7 +117,7 @@ pub fn futex_wait(
     };
     let ret = unsafe {
         syscall5(
-            SYS_FUTEX_WAIT,
+            SYS_NATIVE_FUTEX_WAIT,
             uaddr as usize,
             expected as usize,
             timeout_ptr,
@@ -130,7 +130,7 @@ pub fn futex_wait(
 
 /// Futex wake: wake up to `count` threads waiting on `uaddr`.
 pub fn futex_wake(uaddr: *const i32, count: i32) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall3(SYS_FUTEX_WAKE, uaddr as usize, count as usize, 0) };
+    let ret = unsafe { syscall3(SYS_NATIVE_FUTEX_WAKE, uaddr as usize, count as usize, 0) };
     syscall_result(ret)
 }
 

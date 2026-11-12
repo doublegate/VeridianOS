@@ -167,13 +167,12 @@ their check, for a few shared reasons:
   system call groups.
 - **Kernel configuration.** `/boot/config-<release>` (ADR 0023) sets an option only where the
   kernel does what Linux built with it does, so the tests that need an option it leaves unset
-  (network namespaces until an interface can be configured, AIO, io_uring, keys, System V
-  IPC, loop devices, NUMA, swap, seccomp and the rest in `abi/kconfig.map`) are TCONF, as on a
+  (network namespaces until an interface can be configured, AIO, io_uring, keys, loop devices, NUMA, swap, seccomp and the rest in `abi/kconfig.map`) are TCONF, as on a
   Linux kernel built without them.
-- **Missing calls.** The System V IPC calls, message queues, mlock, msync, sched_getparam and
-  the other calls the coverage tables list as missing;
+- **Missing calls.** mlock, msync, sched_getparam and the other calls the
+  coverage tables list as missing (v0.28 item 5, ADR 0027);
   most of `/proc/sys` (it has `kernel/pid_max`, `kernel/cap_last_cap`, `kernel/core_pattern`,
-  `kernel/ostype`, `kernel/osrelease` and `kernel/version`), parts of `/proc/<pid>/stat` and `status`; `/proc/<pid>/exe` (only
+  `kernel/ostype`, `kernel/osrelease`, `kernel/version` and the System V limits), parts of `/proc/<pid>/stat` and `status`; `/proc/<pid>/exe` (only
   `/proc/self/exe` exists), and `/proc/<pid>/cmdline` holds the process name rather than its
   arguments.
 - **Memory exhaustion.** libc-test's `malloc-oom`, `malloc-brk-fail` and `pthread_create-oom`
@@ -337,16 +336,32 @@ What remains:
   CLONE_INTO_CGROUP is EBADF, since no descriptor can name a cgroup. CLONE_PTRACE and
   CLONE_UNTRACED are EINVAL from clone and clone3 alike (there is no ptrace auto-attach). Only a
   caller with CAP_CHECKPOINT_RESTORE or CAP_SYS_ADMIN can choose an ID.
+- **System V IPC (ADR 0027).** Shared memory, semaphores and message queues follow Linux, per
+  IPC namespace, with these differences: a segment's pages are allocated when it is made, not
+  when first touched, so a shmget of more memory than is free fails then (ENOMEM); SHM_HUGETLB
+  is EINVAL (no huge pages); SHM_LOCK only records the flag, as nothing is ever swapped out;
+  MSG_COPY is ENOSYS and there are no `*_next_id` sysctls, as without CONFIG_CHECKPOINT_RESTORE;
+  the semaphore undo list is the process's, not each thread's, so a thread's
+  unshare(CLONE_SYSVSEM), or its setns into another IPC namespace, applies and leaves the whole
+  process's; and waiters for a semaphore all try again after each change rather than in Linux's
+  queue order. Every access also needs the caller's rights over the IPC namespace, by intent:
+  READ to look, WRITE to change contents, CREATE to make an object, MODIFY to control one (ADR
+  0027).
+- **POSIX message queues (ADR 0027).** As Linux, per IPC namespace, but mq_notify's
+  SIGEV_THREAD fails (it needs a netlink socket, which do not exist yet: musl's mq_notify gets
+  EAFNOSUPPORT making one), and a notification registration is not removed when its owner closes a descriptor of the queue,
+  only when it fires or by mq_notify(fd, NULL).
 - **kcmp.** KCMP_FILES and KCMP_SIGHAND see the tables a CLONE_FILES or CLONE_SIGHAND clone
   shares, and a table's identity can be reused once its last user is gone, as on Linux. A
   CLONE_VM child counts as sharing its parent's
   address space until either execs, though each maps the memory through an address space of its
-  own (a mapping one makes later the other does not see). No task has an I/O context or a System V
-  semaphore undo list, so KCMP_IO and KCMP_SYSVSEM always answer 0, as Linux does for two tasks
-  with none.
-- **Namespaces are partial (ADR 0022).** UTS namespaces are complete. IPC and cgroup
-  namespaces can be created and joined but isolate nothing, as there is no System V IPC, message
-  queue or cgroup hierarchy. Time namespaces are complete but for the two points below. Mount
+  own (a mapping one makes later the other does not see). KCMP_SYSVSEM compares the processes'
+  semaphore undo lists (see System V IPC). No task has an I/O context, so KCMP_IO always answers
+  0, as Linux does for two tasks with none.
+- **Namespaces are partial (ADR 0022).** UTS namespaces are complete. IPC namespaces hold their
+  own System V objects, POSIX message queues and limits.
+  Cgroup namespaces can be created and joined but isolate nothing, as there is no cgroup
+  hierarchy. Time namespaces are complete but for the two points below. Mount
   namespaces can be created, emptied and joined, and Linux mount(2) and umount2 work in them
   (ADR 0022 H3b: new tmpfs, ramfs, proc and devtmpfs mounts, bind mounts with or without
   MS_REC, MS_MOVE, remounts, MS_UNBINDABLE; ro, nosuid, nodev, noexec and nosymfollow

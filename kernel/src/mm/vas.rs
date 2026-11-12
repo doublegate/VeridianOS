@@ -487,6 +487,55 @@ pub struct FileBacking {
     /// as Linux's vm_file keeps the file's, so the file cannot be executed
     /// meanwhile (ETXTBSY).
     pub write: Option<alloc::sync::Arc<crate::fs::write_access::WriteAccess>>,
+    /// Whoever counts the pieces of this mapping (Linux's vm_ops open and
+    /// close): a System V shared memory attachment. Each piece holds one
+    /// hook, so a split, a fork's copy and every unmap keep the count.
+    pub hook: Option<MappingHook>,
+}
+
+/// What a mapping's owner is told as pieces of the mapping come and go.
+#[cfg(feature = "alloc")]
+pub trait MappingOwner: core::any::Any + Send + Sync {
+    /// One more piece maps it (a split or a fork's copy).
+    fn opened(&self);
+    /// A piece went (unmapped, or its address space went).
+    fn closed(&self);
+    /// For a caller that knows the owner's type (shmdt).
+    fn as_any(&self) -> &dyn core::any::Any;
+}
+
+/// One piece's hold on its [`MappingOwner`]: a clone is a new piece
+/// ([`MappingOwner::opened`]), a drop a piece gone
+/// ([`MappingOwner::closed`]). Made with [`MappingHook::adopt`] for a piece
+/// the owner has already counted.
+#[cfg(feature = "alloc")]
+pub struct MappingHook(alloc::sync::Arc<dyn MappingOwner>);
+
+#[cfg(feature = "alloc")]
+impl MappingHook {
+    /// The hook of a piece `owner` has counted already.
+    pub fn adopt(owner: alloc::sync::Arc<dyn MappingOwner>) -> Self {
+        Self(owner)
+    }
+
+    pub fn owner(&self) -> &alloc::sync::Arc<dyn MappingOwner> {
+        &self.0
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl Clone for MappingHook {
+    fn clone(&self) -> Self {
+        self.0.opened();
+        Self(self.0.clone())
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl Drop for MappingHook {
+    fn drop(&mut self) {
+        self.0.closed();
+    }
 }
 
 #[cfg(feature = "alloc")]
@@ -2265,11 +2314,16 @@ impl VirtualAddressSpace {
         };
         let same_file = match (&left.backing, &right.backing) {
             (None, None) => true,
+            // A hooked mapping is never merged, as Linux never merges a
+            // mapping whose vm_ops have close: each piece is counted.
             (Some(a), Some(b)) => {
-                core::ptr::eq(
-                    alloc::sync::Arc::as_ptr(&a.node) as *const u8,
-                    alloc::sync::Arc::as_ptr(&b.node) as *const u8,
-                ) && b.offset == a.offset + left.size
+                a.hook.is_none()
+                    && b.hook.is_none()
+                    && core::ptr::eq(
+                        alloc::sync::Arc::as_ptr(&a.node) as *const u8,
+                        alloc::sync::Arc::as_ptr(&b.node) as *const u8,
+                    )
+                    && b.offset == a.offset + left.size
             }
             _ => false,
         };
@@ -2563,13 +2617,44 @@ impl VirtualAddressSpace {
         offset: usize,
         write: Option<alloc::sync::Arc<crate::fs::write_access::WriteAccess>>,
     ) {
+        self.set_backing_hooked(start, node, offset, write, None);
+    }
+
+    /// [`Self::set_backing`] with the hook of the mapping's owner (a System
+    /// V attachment), which the mapping then holds. Without a mapping at
+    /// `start` the hook is dropped, which tells the owner.
+    #[cfg(feature = "alloc")]
+    pub fn set_backing_hooked(
+        &self,
+        start: VirtualAddress,
+        node: alloc::sync::Arc<dyn crate::fs::VfsNode>,
+        offset: usize,
+        write: Option<alloc::sync::Arc<crate::fs::write_access::WriteAccess>>,
+        hook: Option<MappingHook>,
+    ) {
         if let Some(m) = self.mappings.lock().get_mut(&start) {
             m.backing = Some(FileBacking {
                 node,
                 offset,
                 write,
+                hook,
             });
         }
+    }
+
+    /// The hooked mappings, as (start, size, file offset, owner), in
+    /// address order (shmdt finds an attachment's pieces).
+    #[cfg(feature = "alloc")]
+    pub fn hooked_mappings(&self) -> Vec<(u64, usize, usize, alloc::sync::Arc<dyn MappingOwner>)> {
+        self.mappings
+            .lock()
+            .values()
+            .filter_map(|m| {
+                let b = m.backing.as_ref()?;
+                let owner = b.hook.as_ref()?.owner().clone();
+                Some((m.start.0, m.size, b.offset, owner))
+            })
+            .collect()
     }
 
     /// The physical address behind `addr` when it lies in a `MAP_SHARED`

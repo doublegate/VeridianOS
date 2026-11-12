@@ -245,6 +245,17 @@ pub fn sys_unshare(flags: usize) -> SyscallResult {
     if flags & CLONE_FILES != 0 {
         current.unshare_files();
     }
+    // CLONE_SYSVSEM (and CLONE_NEWIPC, which implies it here) is as an
+    // exit for the semaphore undo list; a new IPC namespace orphans the
+    // segments this process made in the old one (ksys_unshare).
+    if flags & (ns::CLONE_NEWIPC | CLONE_SYSVSEM) != 0 {
+        super::sysvipc::sem::exit_sem(&current);
+    }
+    if flags & ns::CLONE_NEWIPC != 0 {
+        if let Some(space) = thread.namespaces().ipc.sysv.as_ref() {
+            super::sysvipc::shm::creator_exited(space, current.pid.0);
+        }
+    }
     if flags & CLONE_FS != 0 {
         let fs = thread.fs();
         if fs.users.load(core::sync::atomic::Ordering::Acquire) > 1 {
@@ -388,6 +399,13 @@ fn install_rule(ns: &NsRef) -> Result<(), SyscallError> {
 fn commit(namespaces: ns::Namespaces, mnt: bool) -> Result<(), SyscallError> {
     let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
     namespaces.time.freeze();
+    // Into another IPC namespace: the semaphore undo list is applied as at
+    // exit (setns's exit_sem).
+    if !Arc::ptr_eq(&namespaces.ipc, &thread.namespaces().ipc) {
+        if let Some(current) = process::current_process() {
+            super::sysvipc::sem::exit_sem(&current);
+        }
+    }
     if mnt {
         thread.fs().move_to_root();
     }

@@ -552,6 +552,7 @@ fn process_clone(
         share_fs: on(CLONE_FS),
         share_files: on(CLONE_FILES),
         share_sighand: on(CLONE_SIGHAND),
+        share_sysvsem: on(CLONE_SYSVSEM),
         clone_parent: on(CLONE_PARENT),
         vfork: on(CLONE_VFORK),
         stack: (req.stack != 0).then_some(req.stack),

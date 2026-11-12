@@ -426,6 +426,11 @@ struct DWaiter {
     /// finds its entry there (PR #23 review: a scan of the buckets one by
     /// one could miss an entry a requeue moved behind it).
     bucket: alloc::sync::Arc<core::sync::atomic::AtomicUsize>,
+    /// The entry's place in a futex_waitv vector (0 for a single wait),
+    /// and where the waker records the first entry it took (`usize::MAX`
+    /// until then): futex_waitv returns that index.
+    slot: usize,
+    which: alloc::sync::Arc<core::sync::atomic::AtomicUsize>,
 }
 
 /// Move up to `nmove` waiters on `k1` in `lo` to `k2`: into `hi` (its
@@ -505,8 +510,16 @@ fn take_waiters(
     let mut i = 0;
     while i < list.len() && woken.len() < n {
         if list[i].key == key && list[i].bitset & bitset != 0 {
+            use core::sync::atomic::Ordering;
             let w = list.remove(i);
-            w.woken.store(true, core::sync::atomic::Ordering::Release);
+            // Another entry of the same futex_waitv was taken first: this
+            // one only goes (it is not a second task woken).
+            if w.woken.swap(true, Ordering::AcqRel) {
+                continue;
+            }
+            let _ =
+                w.which
+                    .compare_exchange(usize::MAX, w.slot, Ordering::AcqRel, Ordering::Acquire);
             woken.push(w.wq);
         } else {
             i += 1;
@@ -546,6 +559,8 @@ fn dwait(
             woken: woken.clone(),
             wq: wq.clone(),
             bucket: bucket.clone(),
+            slot: 0,
+            which: Arc::new(core::sync::atomic::AtomicUsize::new(usize::MAX)),
         });
     }
     let result = dispatch::wait_event(&wq, deadline, || woken.load(Ordering::Acquire));
@@ -574,6 +589,89 @@ fn dwait(
         Err(WaitError::TimedOut) => SyscallError::TimedOut,
         _ => SyscallError::Interrupted,
     })
+}
+
+/// futex_waitv for a dispatched thread (futex_wait_multiple): wait on
+/// every (address, value) of `entries` at once, each queued under its
+/// bucket's lock after its word is checked. A word that differs makes it
+/// EAGAIN -- unless an entry queued before it was woken meanwhile, whose
+/// index is returned. Otherwise asleep until a wake takes one entry (its
+/// index is returned), `deadline` (ETIMEDOUT) or a signal (EINTR); the
+/// other entries are taken out again either way.
+#[cfg(feature = "alloc")]
+pub(crate) fn dwait_multiple(
+    entries: &[(usize, u32)],
+    deadline: Option<u64>,
+) -> Result<usize, SyscallError> {
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use sched::dispatch::{self, WaitError};
+
+    let woken = Arc::new(AtomicBool::new(false));
+    let which = Arc::new(AtomicUsize::new(usize::MAX));
+    let wq = Arc::new(dispatch::WaitQueue::new());
+    let mut buckets: Vec<Arc<AtomicUsize>> = Vec::new();
+    // Take this waiter's entries out of wherever requeues put them.
+    let leave = |buckets: &[Arc<AtomicUsize>]| {
+        for b in buckets {
+            loop {
+                let at = b.load(Ordering::Acquire);
+                let mut list = DFUTEX[at].lock();
+                if let Some(i) = list.iter().position(|w| Arc::ptr_eq(&w.bucket, b)) {
+                    list.remove(i);
+                    break;
+                }
+                if b.load(Ordering::Acquire) == at {
+                    break;
+                }
+            }
+        }
+    };
+    let taken = |which: &AtomicUsize| match which.load(Ordering::Acquire) {
+        usize::MAX => None,
+        i => Some(i),
+    };
+    for (slot, &(uaddr, val)) in entries.iter().enumerate() {
+        let key = match futex_key(uaddr) {
+            Ok(k) => k,
+            Err(e) => {
+                leave(&buckets);
+                return Err(e);
+            }
+        };
+        let bucket = Arc::new(AtomicUsize::new(bucket_index(key)));
+        let mut list = DFUTEX[bucket_index(key)].lock();
+        let word = super::userspace::read_user::<u32>(uaddr);
+        if word.as_ref().map_or(true, |w| *w != val) {
+            drop(list);
+            leave(&buckets);
+            if let Some(i) = taken(&which) {
+                return Ok(i);
+            }
+            return Err(word.err().unwrap_or(SyscallError::WouldBlock));
+        }
+        list.push(DWaiter {
+            key,
+            bitset: FUTEX_WAIT_BITSET_MATCH_ANY,
+            woken: woken.clone(),
+            wq: wq.clone(),
+            bucket: bucket.clone(),
+            slot,
+            which: which.clone(),
+        });
+        buckets.push(bucket);
+    }
+    let result = dispatch::wait_event(&wq, deadline, || woken.load(Ordering::Acquire));
+    leave(&buckets);
+    if let Some(i) = taken(&which) {
+        return Ok(i);
+    }
+    match result {
+        Ok(()) => Ok(0),
+        Err(WaitError::TimedOut) => Err(SyscallError::TimedOut),
+        Err(_) => Err(SyscallError::Interrupted),
+    }
 }
 
 /// FUTEX_WAKE for dispatched waiters.
@@ -692,6 +790,8 @@ mod tests {
             woken: Arc::new(core::sync::atomic::AtomicBool::new(false)),
             wq: Arc::new(sched::dispatch::WaitQueue::new()),
             bucket: Arc::new(core::sync::atomic::AtomicUsize::new(0)),
+            slot: 0,
+            which: Arc::new(core::sync::atomic::AtomicUsize::new(usize::MAX)),
         }
     }
 

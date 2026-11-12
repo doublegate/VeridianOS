@@ -667,6 +667,76 @@ pub fn sys_mmap(
     Ok(mapped_addr)
 }
 
+/// Map `size` bytes of `node`'s own pages MAP_SHARED with `prot`, holding
+/// `hook` (System V shmat). `at` is where (MAP_FIXED; with `replace`
+/// unset, a range that overlaps a mapping is EINVAL, as do_shmat checks),
+/// or `None` for where the kernel chooses. `writable` is whether mprotect
+/// may make it writable later (a SHM_RDONLY attachment may not). Dropping
+/// `hook` on failure tells its owner. Returns the address.
+#[cfg(feature = "alloc")]
+pub(super) fn map_hooked_shared(
+    node: alloc::sync::Arc<crate::fs::memfd::MemfdNode>,
+    size: usize,
+    at: Option<usize>,
+    prot: usize,
+    replace: bool,
+    writable: bool,
+    hook: crate::mm::vas::MappingHook,
+) -> SyscallResult {
+    use crate::fs::VfsNode;
+    let pages = size.div_ceil(PAGE_SIZE);
+    let bytes = (pages * PAGE_SIZE) as u64;
+    if let Some(a) = at {
+        if !crate::mm::user_layout::is_user_range(a, pages * PAGE_SIZE) {
+            return Err(SyscallError::InvalidArgument);
+        }
+    }
+    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let frames = node
+        .share_pages(0, pages, prot & PROT_WRITE != 0)
+        .ok_or(SyscallError::InvalidArgument)?
+        .map_err(super::map_kernel_error)?;
+    let give_back = |frames: &[crate::mm::FrameNumber]| {
+        for &frame in frames {
+            if crate::mm::frame_refs::release(frame) {
+                crate::mm::note_free_failure(
+                    crate::mm::FRAME_ALLOCATOR.lock().free_frames(frame, 1),
+                    frame,
+                    "shmat",
+                );
+            }
+        }
+    };
+    let vas = proc.memory_space.lock();
+    if let Some(a) = at {
+        if !replace && !vas.range_is_free(a as u64, a as u64 + bytes) {
+            give_back(&frames);
+            return Err(SyscallError::InvalidArgument);
+        }
+    }
+    let skip = at.map_or((0, 0), |a| (a as u64, a as u64 + bytes));
+    if let Err(e) = may_expand_vm(&proc, &vas, skip, bytes, false) {
+        give_back(&frames);
+        return Err(e);
+    }
+    let page_flags = crate::mm::vas::user_prot_flags(prot);
+    let start = vas
+        .map_shared_frames(
+            at.map(|a| VirtualAddress(a as u64)),
+            &frames,
+            page_flags,
+            writable,
+        )
+        .map_err(|_| SyscallError::OutOfMemory)?;
+    vas.set_may_exec(start, true);
+    if prot & PROT_EXEC != 0 {
+        vas.sync_code_pages(start.0, bytes);
+    }
+    let node: alloc::sync::Arc<dyn VfsNode> = node;
+    vas.set_backing_hooked(start, node, 0, None, Some(hook));
+    Ok(start.as_usize())
+}
+
 /// Unmap a memory region (syscall 21).
 ///
 /// Walks the process's page tables, unmaps pages in the range

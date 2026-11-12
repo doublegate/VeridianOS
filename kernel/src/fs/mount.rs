@@ -308,7 +308,7 @@ pub fn linux_fs_type(name: &str) -> &str {
 
 /// The filesystem types mount(2) can make, as `/proc/filesystems` lists
 /// them (all `nodev`: none needs a block device).
-pub const MOUNTABLE: [&str; 4] = ["tmpfs", "ramfs", "proc", "devtmpfs"];
+pub const MOUNTABLE: [&str; 5] = ["tmpfs", "ramfs", "proc", "devtmpfs", "mqueue"];
 
 /// Why mount(2) could not make a filesystem.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -372,7 +372,7 @@ pub fn new_filesystem(
                 }
             }
         }
-        "proc" | "devtmpfs" => {
+        "proc" | "devtmpfs" | "mqueue" => {
             if options().next().is_some() {
                 return Err(NewFsError::BadOption);
             }
@@ -386,6 +386,9 @@ pub fn new_filesystem(
         }),
         "ramfs" => Arc::new(RamFs::new()),
         "proc" => Arc::new(ProcFs::new()),
+        // The mounter's IPC namespace's queues (mqueue_get_tree).
+        #[cfg(feature = "alloc")]
+        "mqueue" => Arc::new(crate::syscall::mqueue::MqueueFs::new()),
         _ => Arc::new(DevFs::new()),
     };
     if matches!(ty, "tmpfs" | "ramfs") {

@@ -800,6 +800,27 @@ pub fn cleanup_process(process: &Process) {
     crate::timer::ktimerd::cancel_owner(process.pid.0);
     super::posix_timer::delete_all(process);
 
+    // System V IPC (exit_sem, exit_shm): the semaphore adjustments of an
+    // undo list no other process shares are applied, and the segments this
+    // process made lose their creator (destroyed if unattached under
+    // shm_rmid_forced), in every IPC namespace its threads are in.
+    #[cfg(feature = "alloc")]
+    {
+        crate::syscall::sysvipc::sem::exit_sem(process);
+        let mut seen: Vec<alloc::sync::Arc<super::ns::PlainNs>> = Vec::new();
+        for thread in process.threads.lock().values() {
+            let ipc = thread.namespaces().ipc.clone();
+            if !seen.iter().any(|n| alloc::sync::Arc::ptr_eq(n, &ipc)) {
+                seen.push(ipc);
+            }
+        }
+        for ipc in seen {
+            if let Some(space) = ipc.sysv.as_ref() {
+                crate::syscall::sysvipc::shm::creator_exited(space, process.pid.0);
+            }
+        }
+    }
+
     // SCHED_DEADLINE reservations of every thread go back, whatever path
     // ended them (each thread's own exit already did; idempotent), so a
     // lost one can never hold admission control's bandwidth for good.

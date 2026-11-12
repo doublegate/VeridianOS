@@ -350,6 +350,9 @@ use self::multiplex::{sys_poll, sys_ppoll, sys_pselect6, sys_select};
 // Import user space utilities
 mod arch_prctl;
 mod futex;
+// futex_waitv, futex_wake, futex_wait, futex_requeue (v0.28 item 5)
+#[cfg(feature = "alloc")]
+mod futex2;
 #[cfg(feature = "alloc")]
 mod futex_pi;
 
@@ -388,6 +391,12 @@ mod namespaces;
 // mount(2) and umount2 (ADR 0022 H3b)
 #[cfg(feature = "alloc")]
 mod mount;
+// System V shared memory, semaphores and message queues (v0.28 item 5)
+#[cfg(feature = "alloc")]
+pub(crate) mod sysvipc;
+// POSIX message queues (v0.28 item 5)
+#[cfg(feature = "alloc")]
+pub(crate) mod mqueue;
 #[cfg(feature = "alloc")]
 pub(crate) use debug::may_read_process;
 pub(crate) use filesystem::rename_paths;
@@ -535,6 +544,15 @@ pub enum SyscallError {
     /// Too many users: joining a time namespace from a multi-threaded
     /// process (EUSERS, errno 87).
     TooManyUsers = -139,
+    /// The System V IPC object was removed, or removed while the caller
+    /// waited on it (EIDRM, errno 43).
+    IdRemoved = -141,
+    /// No message of the type asked for, with IPC_NOWAIT (ENOMSG, errno
+    /// 42).
+    NoMessage = -142,
+    /// A message longer than the queue's message size, or a buffer
+    /// shorter than it (EMSGSIZE, errno 90).
+    MessageTooLong = -143,
     /// The call was interrupted and left a restart block (`restart`):
     /// Linux -ERESTART_RESTARTBLOCK, turned into EINTR or restart_syscall
     /// on the way back to user mode and never seen there.
@@ -911,6 +929,11 @@ fn never_restarted(syscall: Syscall) -> bool {
             | Syscall::EpollWait
             | Syscall::EpollPwait
             | Syscall::EpollPwait2
+            // System V IPC waits (signal(7)): EINTR whatever SA_RESTART.
+            | Syscall::Semop
+            | Syscall::Semtimedop
+            | Syscall::Msgsnd
+            | Syscall::Msgrcv
     )
 }
 
@@ -1133,10 +1156,10 @@ fn handle_syscall(
         // pselect6(nfds, readfds, writefds, exceptfds, timeout, sig)
         Syscall::Pselect6 => sys_pselect6(arg1, arg2, arg3, arg4, arg5, syscall_arg6()?),
         // Futex entrypoint: dispatch all futex ops (wait/wake/requeue/bitset/wake_op)
-        Syscall::FutexWait => {
+        Syscall::NativeFutexWait => {
             futex::sys_futex_dispatch(arg1, arg2, arg3, arg4, arg5).map(|v| v as usize)
         }
-        Syscall::FutexWake => futex::sys_futex_wake(arg1, arg2, arg3).map(|v| v as usize),
+        Syscall::NativeFutexWake => futex::sys_futex_wake(arg1, arg2, arg3).map(|v| v as usize),
         Syscall::ArchPrctl => arch_prctl::sys_arch_prctl(arg1, arg2).map(|v| v as usize),
         Syscall::Uname => sys_uname(arg1),
         Syscall::ProcessGetenv => sys_getenv(arg1, arg2, arg3, arg4),
@@ -1541,6 +1564,53 @@ fn handle_syscall(
         Syscall::Umount2 => mount::sys_umount2(arg1, arg2),
         #[cfg(feature = "alloc")]
         Syscall::PivotRoot => mount::sys_pivot_root(arg1, arg2),
+        // System V IPC (v0.28 item 5)
+        #[cfg(feature = "alloc")]
+        Syscall::Shmget => sysvipc::calls::sys_shmget(arg1, arg2, arg3),
+        #[cfg(feature = "alloc")]
+        Syscall::Shmat => sysvipc::calls::sys_shmat(arg1, arg2, arg3),
+        #[cfg(feature = "alloc")]
+        Syscall::Shmdt => sysvipc::calls::sys_shmdt(arg1),
+        #[cfg(feature = "alloc")]
+        Syscall::Shmctl => sysvipc::calls::sys_shmctl(arg1, arg2, arg3),
+        #[cfg(feature = "alloc")]
+        Syscall::Semget => sysvipc::calls::sys_semget(arg1, arg2, arg3),
+        #[cfg(feature = "alloc")]
+        Syscall::Semop => sysvipc::calls::sys_semop(arg1, arg2, arg3),
+        #[cfg(feature = "alloc")]
+        Syscall::Semtimedop => sysvipc::calls::sys_semtimedop(arg1, arg2, arg3, arg4),
+        #[cfg(feature = "alloc")]
+        Syscall::Semctl => sysvipc::calls::sys_semctl(arg1, arg2, arg3, arg4),
+        #[cfg(feature = "alloc")]
+        Syscall::Msgget => sysvipc::calls::sys_msgget(arg1, arg2),
+        #[cfg(feature = "alloc")]
+        Syscall::Msgsnd => sysvipc::calls::sys_msgsnd(arg1, arg2, arg3, arg4),
+        #[cfg(feature = "alloc")]
+        Syscall::Msgrcv => sysvipc::calls::sys_msgrcv(arg1, arg2, arg3, arg4, arg5),
+        #[cfg(feature = "alloc")]
+        Syscall::Msgctl => sysvipc::calls::sys_msgctl(arg1, arg2, arg3),
+        // POSIX message queues
+        #[cfg(feature = "alloc")]
+        Syscall::MqOpen => mqueue::sys_mq_open(arg1, arg2, arg3, arg4),
+        #[cfg(feature = "alloc")]
+        Syscall::MqUnlink => mqueue::sys_mq_unlink(arg1),
+        #[cfg(feature = "alloc")]
+        Syscall::MqTimedsend => mqueue::sys_mq_timedsend(arg1, arg2, arg3, arg4, arg5),
+        #[cfg(feature = "alloc")]
+        Syscall::MqTimedreceive => mqueue::sys_mq_timedreceive(arg1, arg2, arg3, arg4, arg5),
+        #[cfg(feature = "alloc")]
+        Syscall::MqNotify => mqueue::sys_mq_notify(arg1, arg2),
+        #[cfg(feature = "alloc")]
+        Syscall::MqGetsetattr => mqueue::sys_mq_getsetattr(arg1, arg2, arg3),
+        // futex2 (v0.28 item 5)
+        #[cfg(feature = "alloc")]
+        Syscall::FutexWaitv => futex2::sys_futex_waitv(arg1, arg2, arg3, arg4, arg5),
+        #[cfg(feature = "alloc")]
+        Syscall::FutexWake => futex2::sys_futex_wake(arg1, arg2, arg3, arg4),
+        #[cfg(feature = "alloc")]
+        Syscall::FutexWait => futex2::sys_futex_wait(arg1, arg2, arg3, arg4, arg5),
+        #[cfg(feature = "alloc")]
+        Syscall::FutexRequeue => futex2::sys_futex_requeue(arg1, arg2, arg3, arg4),
         #[cfg(feature = "alloc")]
         Syscall::Sethostname => namespaces::sys_sethostname(arg1, arg2),
         #[cfg(feature = "alloc")]
