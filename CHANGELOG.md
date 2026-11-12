@@ -125,7 +125,7 @@
   msync, which writes a MAP_SHARED regular file's copy back to the file (MS_SYNC and MS_ASYNC;
   EBUSY for MS_INVALIDATE over locked memory). mincore. remap_file_pages (Linux's emulation).
   membarrier: every command but the RSEQ ones (QUERY 639), the expedited ones by interrupting
-  every other CPU and waiting for each (the RISC-V boot hart now takes IPIs, which it only woke
+  every other CPU and waiting for each, yielding while one is slow to answer (the RISC-V boot hart now takes IPIs, which it only woke
   from before, so the wait ends there too). process_madvise (another process needs ptrace read
   access, CAP_SYS_NICE and MODIFY over it) and process_mrelease. pkey_alloc, pkey_free and
   pkey_mprotect as without protection-key hardware (ENOSPC; keys -1 and 0). `/proc/<pid>/status`

@@ -1178,7 +1178,8 @@ fn kick_cpu(cpu: usize) {
 /// serialising instruction (iret, eret; fence.i on RISC-V). Every CPU, not
 /// just those running the caller's threads: more than Linux interrupts,
 /// never fewer. Waits however long it takes, as a missed barrier would be
-/// a silent memory-ordering bug.
+/// a silent memory-ordering bug, but yields while a CPU is slow to answer,
+/// and ends early only for a process being killed.
 pub fn barrier_cpus() {
     use core::sync::atomic::{fence, Ordering};
     fence(Ordering::SeqCst);
@@ -1197,9 +1198,9 @@ pub fn barrier_cpus() {
     }
     /// Spins between two sends of the same interrupt, should one be lost.
     const RESEND_SPINS: u32 = 1 << 20;
-    let me = this_cpu();
     for cpu in 0..online {
-        if Some(cpu) == me {
+        // Where the caller runs now (it may move while it yields below).
+        if Some(cpu) == this_cpu() {
             continue;
         }
         let before = crate::arch::percpu::ipis_of(cpu);
@@ -1210,13 +1211,36 @@ pub fn barrier_cpus() {
             continue;
         }
         let mut spins = 0u32;
+        let mut warned = false;
         while crate::arch::percpu::ipis_of(cpu) == before {
             core::hint::spin_loop();
             spins += 1;
-            if spins == RESEND_SPINS {
-                spins = 0;
-                let _ = send_barrier_ipi(cpu);
+            if spins < RESEND_SPINS {
+                continue;
             }
+            spins = 0;
+            // A CPU slow to answer costs only this thread: it never
+            // returns early (Linux's guarantee), but lets the others run
+            // meanwhile (the maintainer's choice over a time limit).
+            if !warned {
+                warned = true;
+                crate::println!("[MEMBARRIER] CPU {} has not taken its barrier IPI yet", cpu);
+            }
+            yield_now();
+            // Running on that CPU now passed its barrier (a context switch
+            // orders everything before it), and a CPU is never sent its
+            // own IPI.
+            if this_cpu() == Some(cpu) {
+                break;
+            }
+            // A process being killed does not wait for the barrier.
+            if crate::process::current_process()
+                .is_some_and(|p| p.kill_pending.load(Ordering::Acquire) != 0)
+            {
+                fence(Ordering::SeqCst);
+                return;
+            }
+            let _ = send_barrier_ipi(cpu);
         }
     }
     fence(Ordering::SeqCst);

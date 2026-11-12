@@ -137,7 +137,10 @@ The reference for every behaviour below is the Linux 7.3 source (kernel.org tarb
     lazy yet: LTP's mincore03 expects untouched pages to be absent).
 13. membarrier: every expedited command interrupts each other online CPU and waits until it has
     taken the interrupt, whose handler runs a full barrier, and whose return serialises the
-    core (iret, eret; fence.i on RISC-V), which also serves SYNC_CORE. MEMBARRIER_CMD_GLOBAL is
+    core (iret, eret; fence.i on RISC-V), which also serves SYNC_CORE. The wait never ends early,
+    as on Linux: a CPU slow to answer is sent the interrupt again and the caller yields its CPU
+    meanwhile, warning once (the maintainer's choice over a time limit with an error, which
+    Linux never returns); only a process being killed stops waiting. MEMBARRIER_CMD_GLOBAL is
     the same barrier. QUERY reports 639, as Linux built without CONFIG_RSEQ: rseq(2) is not
     implemented, so the RSEQ commands are EINVAL.
 14. process_madvise on another process needs PTRACE_MODE_READ access and CAP_SYS_NICE, with ADR
