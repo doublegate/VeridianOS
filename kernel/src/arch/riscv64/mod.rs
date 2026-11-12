@@ -401,6 +401,14 @@ pub fn init() {
     fpu::init_from_device_tree(dtb_pa);
     cmo::init_from_device_tree(dtb_pa);
     super::riscv::timer::start(1000);
+    // IPIs (SBI send_ipi sets sip.SSIP) are taken here too, as each AP
+    // enables them in `smp::ap_init`. Without SSIE the boot hart's IPIs
+    // only ended a `wfi`, never trapped, so membarrier's expedited
+    // barrier, which waits for every CPU to count one, waited for it
+    // forever on four CPUs.
+    // SAFETY: sets sie.SSIE; the handler (`ack_ipi`) is installed with the
+    // trap vector.
+    unsafe { core::arch::asm!("csrs sie, {0}", in(reg) 2usize, options(nomem, nostack)) };
 
     // SAFETY: the trap vector is installed (above), so supervisor
     // interrupts can be taken.
