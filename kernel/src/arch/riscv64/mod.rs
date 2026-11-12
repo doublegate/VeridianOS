@@ -252,6 +252,10 @@ extern "C" fn riscv_trap(scause: usize, sepc: usize, stval: usize, frame: *mut u
 fn ack_ipi() {
     // SAFETY: clears only the supervisor software-interrupt pending bit.
     unsafe { core::arch::asm!("csrc sip, {0}", in(reg) 2usize, options(nomem, nostack)) };
+    // sret does not synchronise instruction fetch: membarrier's SYNC_CORE
+    // asks for it, so an IPI does.
+    // SAFETY: fence.i only orders instruction fetch after earlier stores.
+    unsafe { core::arch::asm!("fence.i", options(nostack, preserves_flags)) };
     crate::arch::percpu::note_ipi();
 }
 

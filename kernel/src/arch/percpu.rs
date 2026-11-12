@@ -287,9 +287,26 @@ pub unsafe fn set_rsp0_slot(cpu: usize, slot: u64) {
 /// handler).
 pub fn note_ipi() {
     let cpu = this_arch_cpu();
+    // A full barrier before the count: a CPU that sees the count move knows
+    // this one has ordered everything it did before the interrupt
+    // (membarrier's expedited commands, `sched::dispatch::barrier_cpus`).
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
     // SAFETY: this CPU's own block, written only by this CPU's interrupt
-    // handlers.
-    unsafe { (*cpu).ipis = (*cpu).ipis.wrapping_add(1) };
+    // handlers; read by other CPUs with `ipis_of`.
+    unsafe {
+        core::ptr::write_volatile(
+            core::ptr::addr_of_mut!((*cpu).ipis),
+            (*cpu).ipis.wrapping_add(1),
+        )
+    };
+}
+
+/// How many IPIs CPU `cpu` has taken (another CPU's view, for
+/// `sched::dispatch::barrier_cpus`).
+pub fn ipis_of(cpu: usize) -> u64 {
+    // SAFETY: a read-only snapshot of a static per-CPU block; the field is
+    // written only by its own CPU (`note_ipi`).
+    unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*arch_cpu_ptr(cpu)).ipis)) }
 }
 
 /// Set this CPU's armed deadline (timer start).

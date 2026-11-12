@@ -1172,6 +1172,43 @@ fn kick_cpu(cpu: usize) {
     let _ = cpu;
 }
 
+/// membarrier's expedited barrier: interrupt every other online CPU and wait
+/// until each has taken the interrupt, whose handler runs a full barrier
+/// before counting it (`arch::percpu::note_ipi`), and, returning, a core
+/// serialising instruction (iret, eret; fence.i on RISC-V). Every CPU, not
+/// just those running the caller's threads: more than Linux interrupts,
+/// never fewer. Waits however long it takes, as a missed barrier would be
+/// a silent memory-ordering bug.
+pub fn barrier_cpus() {
+    use core::sync::atomic::{fence, Ordering};
+    fence(Ordering::SeqCst);
+    let online = crate::arch::smp_boot::online_cpus() as usize;
+    // Without the dispatcher's kick (only the boot CPU runs anything), or
+    // on one CPU, the fence is the whole barrier. System calls run with
+    // interrupts on (N-139), so two CPUs here at once each answer the
+    // other.
+    if online <= 1
+        || !cfg!(any(
+            all(target_arch = "x86_64", target_os = "none"),
+            dispatch
+        ))
+    {
+        return;
+    }
+    let me = this_cpu();
+    for cpu in 0..online {
+        if Some(cpu) == me {
+            continue;
+        }
+        let before = crate::arch::percpu::ipis_of(cpu);
+        kick_cpu(cpu);
+        while crate::arch::percpu::ipis_of(cpu) == before {
+            core::hint::spin_loop();
+        }
+    }
+    fence(Ordering::SeqCst);
+}
+
 /// Make `task` look at its signals now: wake it if it sleeps, or, if it is
 /// running on another CPU, interrupt that CPU (the reschedule IPI): the
 /// return to user mode from that interrupt delivers them. Without the

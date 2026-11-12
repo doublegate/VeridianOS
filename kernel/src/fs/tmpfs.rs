@@ -694,6 +694,10 @@ impl VfsNode for TmpNode {
         (self.node_type == NodeType::File).then(|| self.pages.read().share(first_page, count))
     }
 
+    fn maps_own_pages(&self) -> bool {
+        self.node_type == NodeType::File
+    }
+
     fn link(&self, name: &str, target: Arc<dyn VfsNode>) -> Result<(), KernelError> {
         if self.node_type != NodeType::Directory {
             return Err(KernelError::FsError(FsError::NotADirectory));

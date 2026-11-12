@@ -5603,6 +5603,7 @@ static void test_sysv_msg(void);
 static void test_posix_mq(void);
 static void test_posix_mq_fs(void);
 static void test_futex2(void);
+static void test_memctl(void);
 static void test_ipc_object_cap(void);
 
 /* Tests `--only NAME` can run alone (for debugging a single test). */
@@ -5617,6 +5618,7 @@ static const struct {
     {"posix_mq", test_posix_mq},
     {"posix_mq_fs", test_posix_mq_fs},
     {"futex2", test_futex2},
+    {"memctl", test_memctl},
     {"ipc_object_cap", test_ipc_object_cap},
     {"review_fixes", test_review_fixes},
     {"record_locks", test_record_locks},
@@ -9262,6 +9264,135 @@ static void test_futex2(void)
     report("futex2", f == 0, why);
 }
 
+/* The memory group (v0.28 item 5, ADR 0027 decisions 9-16): mlock and
+ * munlock count in VmLck, mlock2 refuses unknown flags, mlockall and
+ * munlockall; mseal makes munmap and mprotect EPERM and refuses a range with
+ * a hole (ENOMEM); msync writes a MAP_SHARED file copy back to the file;
+ * mincore reports mapped pages resident and a hole ENOMEM; membarrier's
+ * QUERY is 639 and PRIVATE_EXPEDITED needs its registration (EPERM);
+ * remap_file_pages shows another page of a /dev/shm file; process_mrelease
+ * refuses a live process (EINVAL); process_madvise advises its own memory. */
+static long t_vmlck_kb(void)
+{
+    FILE *f = fopen("/proc/self/status", "r");
+    char line[128];
+    long kb = -1;
+    while (f && fgets(line, sizeof(line), f))
+        if (sscanf(line, "VmLck: %ld kB", &kb) == 1)
+            break;
+    if (f)
+        fclose(f);
+    return kb;
+}
+
+static void test_memctl(void)
+{
+    char why[160];
+    long f = 0;
+    long page = sysconf(_SC_PAGESIZE);
+    char *m = mmap(NULL, 4 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (m == MAP_FAILED) {
+        report("memctl", 0, "mmap");
+        return;
+    }
+    long base = t_vmlck_kb();
+    if (mlock(m, 2 * page) != 0 || t_vmlck_kb() != base + 2 * page / 1024)
+        f |= 1;
+    if (munlock(m, 2 * page) != 0 || t_vmlck_kb() != base)
+        f |= 2;
+    if (syscall(SYS_mlock2, m, page, 2) != -1 || errno != EINVAL)
+        f |= 4;
+    if (syscall(SYS_mlock2, m, page, 1) != 0 || t_vmlck_kb() != base + page / 1024)
+        f |= 8;
+    if (mlockall(0) != -1 || errno != EINVAL)
+        f |= 16;
+    if (mlockall(MCL_CURRENT) != 0 || t_vmlck_kb() <= base + page / 1024 || munlockall() != 0 ||
+        t_vmlck_kb() != 0)
+        f |= 32;
+    /* mincore: all four pages resident; a hole after them is ENOMEM. */
+    unsigned char vec[4] = {0};
+    if (mincore(m, 4 * page, vec) != 0 || !(vec[0] & vec[1] & vec[2] & vec[3] & 1))
+        f |= 64;
+    /* mseal the second page: munmap and mprotect over it are EPERM. */
+    if (syscall(SYS_mseal, m + page, page, 0) != 0)
+        f |= 128;
+    if (munmap(m + page, page) != -1 || errno != EPERM)
+        f |= 256;
+    if (mprotect(m, 2 * page, PROT_READ) != -1 || errno != EPERM)
+        f |= 512;
+    if (syscall(SYS_mseal, m, page, 1) != -1 || errno != EINVAL)
+        f |= 1024;
+    /* membarrier */
+    long q = syscall(SYS_membarrier, 0, 0, 0);
+    if (q != 639)
+        f |= 2048;
+    if (syscall(SYS_membarrier, 8, 0, 0) != -1 || errno != EPERM)
+        f |= 4096;
+    if (syscall(SYS_membarrier, 16, 0, 0) != 0 || syscall(SYS_membarrier, 8, 0, 0) != 0 ||
+        syscall(SYS_membarrier, 512, 0, 0) != 16)
+        f |= 8192;
+    /* msync writes a MAP_SHARED copy of a regular file back. */
+    const char *path = "/tmp/veridian-msync";
+    int fd = open(path, O_CREAT | O_TRUNC | O_RDWR, 0600);
+    char *fm = MAP_FAILED;
+    if (fd >= 0 && ftruncate(fd, page) == 0)
+        fm = mmap(NULL, page, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    char back[4] = {0};
+    if (fm == MAP_FAILED) {
+        f |= 16384;
+    } else {
+        memcpy(fm, "abc", 3);
+        if (msync(fm, page, MS_SYNC) != 0 || pread(fd, back, 3, 0) != 3 || memcmp(back, "abc", 3))
+            f |= 16384;
+        munmap(fm, page);
+    }
+    if (fd >= 0)
+        close(fd);
+    unlink(path);
+    /* remap_file_pages: page 0 of a /dev/shm mapping shows the file's page 1. */
+    int sfd = shm_open("/veridian-rfp", O_CREAT | O_RDWR, 0600);
+    char *sm = MAP_FAILED;
+    if (sfd >= 0 && ftruncate(sfd, 2 * page) == 0)
+        sm = mmap(NULL, 2 * page, PROT_READ | PROT_WRITE, MAP_SHARED, sfd, 0);
+    if (sm == MAP_FAILED) {
+        f |= 32768;
+    } else {
+        sm[0] = 'A';
+        sm[page] = 'B';
+        if (syscall(SYS_remap_file_pages, sm, page, 0, 1, 0) != 0 || sm[0] != 'B')
+            f |= 32768;
+        if (syscall(SYS_remap_file_pages, sm, page, PROT_READ, 1, 0) != -1 || errno != EINVAL)
+            f |= 65536;
+        munmap(sm, 2 * page);
+    }
+    if (sfd >= 0)
+        close(sfd);
+    shm_unlink("/veridian-rfp");
+    /* process_mrelease of a live child: EINVAL; process_madvise of self. */
+    pid_t c = fork();
+    if (c == 0) {
+        pause();
+        _exit(0);
+    }
+    int pfd = syscall(SYS_pidfd_open, c, 0);
+    if (pfd < 0 || syscall(SYS_process_mrelease, pfd, 0) != -1 || errno != EINVAL)
+        f |= 131072;
+    kill(c, SIGKILL);
+    waitpid(c, NULL, 0);
+    if (pfd >= 0)
+        close(pfd);
+    int self = syscall(SYS_pidfd_open, getpid(), 0);
+    struct iovec iv = {m + 2 * page, page};
+    if (self < 0 || syscall(SYS_process_madvise, self, &iv, 1, MADV_WILLNEED, 0) != page)
+        f |= 262144;
+    if (self >= 0)
+        close(self);
+    munmap(m, page);
+    munmap(m + 2 * page, 2 * page);
+    snprintf(why, sizeof(why), "f=%#lx query=%ld", f, q);
+    report("memctl", f == 0, why);
+}
+
 /* The mqueue filesystem (ADR 0027): mounted, its root is sticky and open
  * to all and lists the namespace's queues; reading one gives its status
  * line; unlink there is mq_unlink; open(O_CREAT) there makes a queue that
@@ -11960,6 +12091,7 @@ int main(int argc, char **argv)
     test_posix_mq();
     test_posix_mq_fs();
     test_futex2();
+    test_memctl();
     test_ipc_object_cap();
     test_clone_share();
     test_personality();

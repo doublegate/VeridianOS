@@ -234,6 +234,126 @@ fn hinted_start(addr: usize, len: usize, is_free: impl FnOnce(u64, u64) -> bool)
     is_free(start as u64, (start + len) as u64).then_some(start)
 }
 
+/// remap_file_pages(start, size, prot, pgoff, flags), deprecated, as Linux
+/// emulates it (mm/mmap.c): `prot` must be 0 (EINVAL); the start and size
+/// are rounded down to pages and must give a non-empty range (EINVAL), as
+/// must the file offset `pgoff` pages in; the range must lie in one
+/// MAP_SHARED file mapping (EINVAL otherwise); it then shows the file from
+/// `pgoff` on, as a MAP_FIXED mmap of the file there would. A memfd or
+/// tmpfs file (`/dev/shm`) is mapped page by page from its own pages; a
+/// mapping that holds a copy of its file gets the file's contents from
+/// there. A sealed range is EPERM; a System V attachment is refused
+/// (EINVAL), where Linux would remap it.
+#[cfg(feature = "alloc")]
+pub fn sys_remap_file_pages(
+    start: usize,
+    size: usize,
+    prot: usize,
+    pgoff: usize,
+    _flags: usize,
+) -> SyscallResult {
+    use crate::mm::vas::MappingType as T;
+    let inval = SyscallError::InvalidArgument;
+    if prot != 0 {
+        return Err(inval);
+    }
+    let start = start & !(PAGE_SIZE - 1);
+    let size = size & !(PAGE_SIZE - 1);
+    let end = start
+        .checked_add(size)
+        .filter(|&e| e > start)
+        .ok_or(inval)?;
+    let offset = pgoff
+        .checked_mul(PAGE_SIZE)
+        .filter(|o| o.checked_add(size).is_some())
+        .ok_or(inval)?;
+    if !crate::mm::user_layout::is_user_range(start, size) {
+        return Err(inval);
+    }
+    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let (start, end) = (start as u64, end as u64);
+    let found = proc.memory_space.lock().mappings_in(start, end);
+    let first = found
+        .iter()
+        .find(|m| m.contains(VirtualAddress(start)))
+        .ok_or(inval)?
+        .clone();
+    let backing = first.backing.clone().ok_or(inval)?;
+    // One file, shared, with no gap: contiguous pieces of one mapping.
+    let mut covered = start;
+    for m in &found {
+        let same = m.mapping_type == T::Shared
+            && m.backing.as_ref().is_some_and(|b| {
+                b.hook.is_none()
+                    && core::ptr::eq(
+                        alloc::sync::Arc::as_ptr(&b.node) as *const u8,
+                        alloc::sync::Arc::as_ptr(&backing.node) as *const u8,
+                    )
+            });
+        if !same || m.start.0 > covered {
+            return Err(inval);
+        }
+        covered = covered.max(m.end().0);
+    }
+    if covered < end {
+        return Err(inval);
+    }
+    if proc.memory_space.lock().sealed_in(start, end) {
+        return Err(SyscallError::OperationNotPermitted);
+    }
+    let node = backing.node.clone();
+    if node.maps_own_pages() {
+        let frames = node
+            .share_pages(offset / PAGE_SIZE, size / PAGE_SIZE, first.may_write)
+            .ok_or(inval)?
+            .map_err(super::map_kernel_error)?;
+        let vas = proc.memory_space.lock();
+        if vas.unmap(start as usize, size).is_err() {
+            for &frame in &frames {
+                if crate::mm::frame_refs::release(frame) {
+                    crate::mm::note_free_failure(
+                        crate::mm::FRAME_ALLOCATOR.lock().free_frames(frame, 1),
+                        frame,
+                        "remap_file_pages",
+                    );
+                }
+            }
+            return Err(SyscallError::OutOfMemory);
+        }
+        let at = vas
+            .map_shared_frames(
+                Some(VirtualAddress(start)),
+                &frames,
+                first.flags,
+                first.may_write,
+            )
+            .map_err(|_| SyscallError::OutOfMemory)?;
+        vas.set_may_exec(at, first.may_exec);
+        vas.set_backing(at, node, offset, backing.write.clone());
+        if first.mlock.is_locked() {
+            let _ = vas.set_mlock(start, end, first.mlock);
+        }
+    } else {
+        // The file's bytes there, then zeros to the end of the range (a
+        // copy stops at the end of the file).
+        let FileData::Copy(mut buf) = FileData::copy(&*node, offset, size)? else {
+            return Err(inval);
+        };
+        buf.try_reserve_exact(size.saturating_sub(buf.len()))
+            .map_err(|_| SyscallError::OutOfMemory)?;
+        buf.resize(size, 0);
+        let vas = proc.memory_space.lock();
+        if !same_mappings(&vas.mappings_in(start, end), &found) {
+            return Err(SyscallError::WouldBlock);
+        }
+        vas.fill_owned_pages(start, &buf)
+            .map_err(super::map_kernel_error)?;
+        vas.split_range(start, end);
+        vas.set_backing(VirtualAddress(start), node, offset, backing.write.clone());
+    }
+    Ok(0)
+}
+
 /// Map memory into the process address space (syscall 20).
 ///
 /// Allocates physical frames, creates page table entries in the process's
@@ -252,6 +372,89 @@ fn hinted_start(addr: usize, len: usize, is_free: impl FnOnce(u64, u64) -> bool)
 /// # Returns
 /// Address of the new mapping on success.
 pub fn sys_mmap(
+    addr: usize,
+    length: usize,
+    prot: usize,
+    flags: usize,
+    fd_or_packed: usize,
+) -> SyscallResult {
+    let at = mmap_inner(addr, length, prot, flags, fd_or_packed)?;
+    // MAP_LOCKED, or mlockall(MCL_FUTURE): the new mapping is locked (its
+    // limit was checked before it was made, `mmap_lock_checks`).
+    #[cfg(feature = "alloc")]
+    if let Some(lock) = mmap_lock_state(flags) {
+        let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+        let unit = if flags & MAP_HUGETLB != 0 {
+            2 * 1024 * 1024
+        } else {
+            PAGE_SIZE
+        };
+        let end = at.saturating_add(length.div_ceil(unit) * unit);
+        let _ = proc
+            .memory_space
+            .lock()
+            .set_mlock(at as u64, end as u64, lock);
+    }
+    Ok(at)
+}
+
+/// MAP_LOCKED's flag bit.
+const MAP_LOCKED: usize = 0x2000;
+
+/// How a new mapping is locked: MAP_LOCKED (VM_LOCKED), else the default
+/// mlockall(MCL_FUTURE) set (mm->def_vma_flags).
+#[cfg(feature = "alloc")]
+fn mmap_lock_state(flags: usize) -> Option<crate::mm::vas::Mlock> {
+    let def = process::current_process()?
+        .memory_space
+        .lock()
+        .mm_state()
+        .def_mlock;
+    lock_state_of(flags, def)
+}
+
+/// [`mmap_lock_state`] given the mm's default.
+#[cfg(feature = "alloc")]
+fn lock_state_of(flags: usize, def: crate::mm::vas::Mlock) -> Option<crate::mm::vas::Mlock> {
+    use crate::mm::vas::Mlock;
+    if flags & MAP_LOCKED != 0 && def != Mlock::OnFault {
+        Some(Mlock::Locked)
+    } else {
+        def.is_locked().then_some(def)
+    }
+}
+
+/// do_mmap's lock and seal checks: MAP_LOCKED without the right to lock is
+/// EPERM; a locked mapping past RLIMIT_MEMLOCK is EAGAIN (mlock_future_ok);
+/// MAP_FIXED over a sealed mapping is EPERM.
+#[cfg(feature = "alloc")]
+fn mmap_lock_checks(
+    proc: &process::Process,
+    addr: usize,
+    length: usize,
+    flags: usize,
+    is_fixed: bool,
+) -> Result<(), SyscallError> {
+    if flags & MAP_LOCKED != 0 && !super::memctl::may_map_locked(proc) {
+        return Err(SyscallError::OperationNotPermitted);
+    }
+    let vas = proc.memory_space.lock();
+    if lock_state_of(flags, vas.mm_state().def_mlock).is_some()
+        && !super::memctl::future_lock_allowed(proc, &vas, length as u64)
+    {
+        return Err(SyscallError::WouldBlock);
+    }
+    if is_fixed {
+        let end = addr.saturating_add(length.div_ceil(PAGE_SIZE) * PAGE_SIZE);
+        if vas.sealed_in(addr as u64, end as u64) {
+            return Err(SyscallError::OperationNotPermitted);
+        }
+    }
+    Ok(())
+}
+
+/// The body of mmap(2), before a new mapping is locked.
+fn mmap_inner(
     addr: usize,
     length: usize,
     prot: usize,
@@ -324,6 +527,8 @@ pub fn sys_mmap(
 
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
     let caller_pid = proc.pid.0;
+    #[cfg(feature = "alloc")]
+    mmap_lock_checks(&proc, addr, length, flags, is_fixed)?;
 
     let is_anonymous = flags & MAP_ANONYMOUS != 0;
 
@@ -766,6 +971,11 @@ pub fn sys_munmap(addr: usize, length: usize) -> SyscallResult {
 
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
     let memory_space = proc.memory_space.lock();
+    // A sealed mapping cannot go (mseal; vms_gather_munmap_vmas).
+    #[cfg(feature = "alloc")]
+    if memory_space.sealed_in(addr as u64, (addr + len) as u64) {
+        return Err(SyscallError::OperationNotPermitted);
+    }
     let result = memory_space.unmap(addr, length);
     result.map_err(|_| SyscallError::InvalidArgument)?;
 
@@ -852,6 +1062,17 @@ pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> SyscallResult {
         }
     }
 
+    // A sealed mapping keeps its protection (mseal), after the ENOMEM of a
+    // hole, as Linux checks each VMA in turn.
+    #[cfg(feature = "alloc")]
+    {
+        let end = addr as u64 + len as u64;
+        if memory_space.hole_in(addr as u64, end).is_none()
+            && memory_space.sealed_in(addr as u64, end)
+        {
+            return Err(SyscallError::OperationNotPermitted);
+        }
+    }
     memory_space
         .protect_region(VirtualAddress(addr as u64), length, prot)
         .map_err(|e| match e {
@@ -924,6 +1145,20 @@ pub fn sys_madvise(addr: usize, len: usize, advice: usize) -> SyscallResult {
     let end = addr.checked_add(len).ok_or(inval)?;
     let (start, end) = (addr as u64, end as u64);
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+    // mseal: the advice that discards contents is EPERM on sealed memory
+    // that could not be written anyway.
+    if matches!(
+        advice,
+        madv::DONTNEED
+            | madv::DONTNEED_LOCKED
+            | madv::FREE
+            | madv::REMOVE
+            | madv::DONTFORK
+            | madv::WIPEONFORK
+    ) && proc.memory_space.lock().sealed_discard_refused(start, end)
+    {
+        return Err(SyscallError::OperationNotPermitted);
+    }
 
     for _ in 0..8 {
         let found = proc.memory_space.lock().mappings_in(start, end);
@@ -1096,6 +1331,37 @@ pub fn sys_mremap(
     flags: usize,
     new_addr: usize,
 ) -> SyscallResult {
+    // A locked mapping stays locked as it grows or moves (Linux grows the
+    // VMA itself; here the new part is a piece of its own).
+    #[cfg(feature = "alloc")]
+    let lock = process::current_process().and_then(|p| {
+        p.memory_space
+            .lock()
+            .find_mapping(VirtualAddress(old_addr as u64))
+            .map(|m| m.mlock)
+            .filter(|l| l.is_locked())
+    });
+    let at = mremap_inner(old_addr, old_len, new_len, flags, new_addr)?;
+    #[cfg(feature = "alloc")]
+    if let Some(lock) = lock {
+        let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+        let len = new_len.div_ceil(PAGE_SIZE) * PAGE_SIZE;
+        let _ = proc
+            .memory_space
+            .lock()
+            .set_mlock(at as u64, (at + len) as u64, lock);
+    }
+    Ok(at)
+}
+
+/// The body of mremap(2), before a grown or moved locked mapping is locked.
+fn mremap_inner(
+    old_addr: usize,
+    old_len: usize,
+    new_len: usize,
+    flags: usize,
+    new_addr: usize,
+) -> SyscallResult {
     use crate::mm::user_layout::is_user_range;
     let inval = SyscallError::InvalidArgument;
     let may_move = flags & MREMAP_MAYMOVE != 0;
@@ -1131,6 +1397,28 @@ pub fn sys_mremap(
     };
 
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+    // mseal: a sealed source cannot be moved or resized, nor a sealed
+    // target replaced (EPERM). Growing a locked mapping is counted
+    // against RLIMIT_MEMLOCK (EAGAIN, vma_to_resize).
+    #[cfg(feature = "alloc")]
+    {
+        let vas = proc.memory_space.lock();
+        let span = old_len.max(PAGE_SIZE) as u64;
+        if vas.sealed_in(old_addr as u64, old_addr as u64 + span)
+            || target.is_some_and(|t| vas.sealed_in(t as u64, (t + new_len) as u64))
+        {
+            return Err(SyscallError::OperationNotPermitted);
+        }
+        let locked = vas
+            .find_mapping(VirtualAddress(old_addr as u64))
+            .is_some_and(|m| m.mlock.is_locked());
+        if locked
+            && new_len > old_len
+            && !super::memctl::future_lock_allowed(&proc, &vas, (new_len - old_len) as u64)
+        {
+            return Err(SyscallError::WouldBlock);
+        }
+    }
     // The mapping is looked at, the file's pages for any growth are read
     // with the address space unlocked (N-118), and then, locked again, the
     // change is made if the mapping is still the one looked at. Another
@@ -1477,6 +1765,17 @@ pub fn sys_brk(addr: usize) -> SyscallResult {
             if grow > 0 && may_expand_vm(&proc, &memory_space, (0, 0), grow, true).is_err() {
                 return Ok(memory_space.brk(None).as_usize());
             }
+            // MCL_FUTURE: the heap grows locked, within RLIMIT_MEMLOCK
+            // (brk's mlock_future_ok); it cannot shrink over a sealed page.
+            let locked = memory_space.mm_state().def_mlock.is_locked();
+            if grow > 0 && locked && !super::memctl::future_lock_allowed(&proc, &memory_space, grow)
+            {
+                return Ok(memory_space.brk(None).as_usize());
+            }
+            let shrink_from = requested.div_ceil(page) * page;
+            if shrink_from < current * page && memory_space.sealed_in(shrink_from, current * page) {
+                return Ok(memory_space.brk(None).as_usize());
+            }
         }
 
         // Page-align the request upward for efficiency.
@@ -1485,7 +1784,18 @@ pub fn sys_brk(addr: usize) -> SyscallResult {
         Some(VirtualAddress(addr as u64))
     };
 
+    #[cfg(feature = "alloc")]
+    let before = memory_space.brk(None).0;
     let result = memory_space.brk(new_break);
+    #[cfg(feature = "alloc")]
+    {
+        let def = memory_space.mm_state().def_mlock;
+        let page = PAGE_SIZE as u64;
+        let (from, to) = (before.div_ceil(page) * page, result.0.div_ceil(page) * page);
+        if def.is_locked() && to > from {
+            let _ = memory_space.set_mlock(from, to, def);
+        }
+    }
 
     Ok(result.as_usize())
 }
