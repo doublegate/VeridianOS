@@ -953,31 +953,24 @@ pub fn sys_setpriority(which: usize, who: usize, priority: usize) -> SyscallResu
     } else {
         let target_pid = ProcessId(who as u64);
 
-        // Modifying another process's priority requires MODIFY right
-        // on a Process capability for that process
+        // Another process's priority needs MODIFY over it: its Process
+        // capability or its PID namespace, through the one typed check
+        // (ADR 0024 decisions 5 and 6; the hand-written table scan skipped
+        // revocation, PR #39 review).
         if target_pid != current.pid {
-            let cap_space = current.capability_space.lock();
-            let has_permission = {
-                let mut found = false;
-                #[cfg(feature = "alloc")]
-                {
-                    let _ = cap_space.iter_capabilities(|entry| {
-                        if let crate::cap::ObjectRef::Process { pid: cap_pid } = &entry.object {
-                            if *cap_pid == target_pid
-                                && entry.rights.contains(crate::cap::Rights::MODIFY)
-                            {
-                                found = true;
-                                return false; // stop iteration
-                            }
-                        }
-                        true // continue
-                    });
+            #[cfg(feature = "alloc")]
+            {
+                let target = crate::process::table::get_process(target_pid)
+                    .ok_or(SyscallError::ResourceNotFound)?;
+                if !crate::cap::authority::current_may_act_on_process(
+                    &target,
+                    crate::cap::Rights::MODIFY,
+                ) {
+                    return Err(SyscallError::PermissionDenied);
                 }
-                found
-            };
-            if !has_permission {
-                return Err(SyscallError::PermissionDenied);
             }
+            #[cfg(not(feature = "alloc"))]
+            return Err(SyscallError::PermissionDenied);
         }
 
         target_pid

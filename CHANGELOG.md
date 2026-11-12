@@ -142,7 +142,9 @@
   the set-group-ID bit, need WRITE too (EPERM), the file's owner included; every extended
   attribute (EACCES); open_by_handle_at, which skips the path walk, READ (EPERM); a device node
   from mknod CREATE besides CAP_MKNOD (EPERM). The rights are read once per call, not per path
-  component. A descriptor opened before a drop keeps working, as one opened before a chmod does. A
+  component, and a lookup with no component ("/") needs READ too. A descriptor opened before a
+  drop keeps reading and writing, as one opened before a chmod does; its attributes still need
+  READ to read (getxattr, listxattr) and WRITE to change (fchmod, fchown, futimens). A
   launcher can now run root that can read but not change files, or reach no file at all; one
   that only takes MODIFY (no mounting) leaves files as they were. The package calls no longer hold
   the capability space locked through the install, which file access now reads.

@@ -454,7 +454,12 @@ fn kernel_clone(mut req: CloneRequest) -> Result<usize, SyscallError> {
     let may_choose = |owner: &process::userns::UserNs| {
         caller.ns_capable(owner, CAP_CHECKPOINT_RESTORE) || caller.ns_capable(owner, CAP_SYS_ADMIN)
     };
-    let (numbers, claim) = pid_numbers(&req, &namespaces.pid_for_children, may_choose)?;
+    let (numbers, claim) = pid_numbers(
+        &req,
+        &namespaces.pid_for_children,
+        may_choose,
+        user_ns.as_ref(),
+    )?;
     if req.on(CLONE_INTO_CGROUP) {
         return Err(SyscallError::BadFileDescriptor);
     }
@@ -474,15 +479,25 @@ fn pid_numbers(
     req: &CloneRequest,
     ns: &alloc::sync::Arc<process::pidns::PidNs>,
     may_choose: impl Fn(&process::userns::UserNs) -> bool,
+    creating: Option<&alloc::sync::Arc<process::userns::UserNs>>,
 ) -> Result<(process::pidns::Reservation, Option<process::IdClaim>), SyscallError> {
     let levels = req.set_tid_levels as usize;
     if levels > ns.level + 1 {
         return Err(SyscallError::InvalidArgument);
     }
+    // An ID out of range is EINVAL before any permission check, as
+    // alloc_pid checks each level's ID before checkpoint_restore_ns_capable
+    // (PR #39 review); each namespace's own pid_max is `pidns::reserve`'s.
+    if req.set_tid[..levels]
+        .iter()
+        .any(|&t| t < 1 || t as u64 >= crate::process::PID_MAX)
+    {
+        return Err(SyscallError::InvalidArgument);
+    }
     // Choosing a number also needs MODIFY on each PID namespace it is
-    // chosen in (ADR 0024, step 5); EPERM before any number is looked at,
-    // as alloc_pid's capability check precedes its EEXIST.
-    if !crate::cap::authority::current_may_choose_pids(ns, levels) {
+    // chosen in (ADR 0024, step 5); EPERM before any number is taken, as
+    // alloc_pid's capability check precedes its EEXIST.
+    if !crate::cap::authority::current_may_choose_pids(ns, levels, creating) {
         return Err(SyscallError::OperationNotPermitted);
     }
     let chosen: alloc::vec::Vec<u64> = req.set_tid[..levels.min(ns.level)]
@@ -1158,31 +1173,31 @@ mod tests {
         };
         let init = pidns::initial();
         assert!(matches!(
-            pid_numbers(&with(&[400, 401]), &init, |_| true),
+            pid_numbers(&with(&[400, 401]), &init, |_| true, None),
             Err(SyscallError::InvalidArgument)
         ));
         let ns = PidNs::create(&init, &crate::process::userns::initial(), 0).unwrap();
         assert!(matches!(
-            pid_numbers(&with(&[1, 2, 3]), &ns, |_| true),
+            pid_numbers(&with(&[1, 2, 3]), &ns, |_| true, None),
             Err(SyscallError::InvalidArgument)
         ));
         // Only the namespace's own entry: no kernel id is chosen.
-        let (r, claim) = pid_numbers(&with(&[1]), &ns, |_| true).unwrap();
+        let (r, claim) = pid_numbers(&with(&[1]), &ns, |_| true, None).unwrap();
         assert_eq!(r.innermost(), Some(1));
         assert!(claim.is_none());
         r.commit(3_900_001);
         // Both: a kernel id too, checked last.
-        let (r, claim) = pid_numbers(&with(&[5, 3_900_002]), &ns, |_| true).unwrap();
+        let (r, claim) = pid_numbers(&with(&[5, 3_900_002]), &ns, |_| true, None).unwrap();
         assert_eq!(r.innermost(), Some(5));
         assert_eq!(claim.as_ref().map(|c| c.id()), Some(3_900_002));
         drop(r);
         assert!(matches!(
-            pid_numbers(&with(&[5, 0]), &ns, |_| true),
+            pid_numbers(&with(&[5, 0]), &ns, |_| true, None),
             Err(SyscallError::InvalidArgument)
         ));
         assert!(ns.find(5).is_none(), "a failed walk frees what it reserved");
         assert!(matches!(
-            pid_numbers(&with(&[1]), &ns, |_| true),
+            pid_numbers(&with(&[1]), &ns, |_| true, None),
             Err(SyscallError::FileExists)
         ));
         pidns::release(3_900_001);

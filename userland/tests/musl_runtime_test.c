@@ -10369,6 +10369,12 @@ static void test_fs_object_cap(void)
         struct stat st;
         if (!(open("/tmp/foc/f", O_RDONLY) == -1 && errno == EACCES)) g |= 32;
         if (!(stat("/tmp/foc/f", &st) == -1 && errno == EACCES)) g |= 32;
+        /* No component to search: still a lookup (PR #39 review). */
+        if (!(stat("/", &st) == -1 && errno == EACCES)) g |= 128;
+        if (!(access("/", F_OK) == -1 && errno == EACCES)) g |= 128;
+        /* Listing attributes reads the inode, through a descriptor too. */
+        char names[64];
+        if (!(ro >= 0 && flistxattr(ro, names, sizeof(names)) == -1 && errno == EACCES)) g |= 256;
         if (ro < 0 || pread(ro, buf, 3, 0) != 3 || memcmp(buf, "abc", 3) != 0) g |= 64;
         if (g != 0) {
             printf("fs-object-cap g=%#x drops=%ld,%ld\n", g, d1, d2);

@@ -195,7 +195,7 @@ launcher can hand one out):
 
 | Object | Type code | Checked for |
 | --- | --- | --- |
-| `Namespace { kind, id }`, each namespace by its NS_GET_ID id | 9 | mounting (MODIFY on the mount namespace), file access (READ on the mount namespace for lookups, reads and executing, WRITE too for any change, CREATE for device nodes; read once per call, at lookup and open, so a descriptor opened before a drop is not checked again), the namespace calls (CREATE, EXECUTE for setns, MODIFY for hostnames and ID maps), the time namespace's offsets, acting on processes through their PID namespace |
+| `Namespace { kind, id }`, each namespace by its NS_GET_ID id | 9 | mounting (MODIFY on the mount namespace), file access (READ on the mount namespace for lookups, reads and executing, WRITE too for any change, CREATE for device nodes; read once per call, at lookup and open, so a descriptor opened before a drop keeps reading and writing; its attributes are still checked), the namespace calls (CREATE, EXECUTE for setns, MODIFY for hostnames and ID maps), the time namespace's offsets, acting on processes through their PID namespace |
 | `Clock { System \| Alarm }` (id 0 and 1) | 10 | setting or steering the system clock (MODIFY), arming an alarm-clock timer (WRITE) |
 | `System` (id 0) | 11 | the system as a whole (MODIFY: writing a sysctl, the package calls, going past RLIMIT_NPROC; ADR 0024 step 7) |
 | `Process { pid }` | 1 | acting on one process without its PID namespace: signals (WRITE), tracing, scheduling, limits (MODIFY) |
