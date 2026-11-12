@@ -2229,6 +2229,44 @@ static void test_waitid(void)
     report("musl_waitid_echild", ok && none == -1 && errno == ECHILD, why);
 }
 
+/* The SIGCHLD a child's exit sends lands while its parent is in waitpid:
+ * with a handler and no SA_RESTART the wait still returns the child, as
+ * on Linux, which reaps before it looks at signals (LTP clone301). */
+static volatile sig_atomic_t chld_seen;
+static void count_chld(int sig)
+{
+    (void)sig;
+    chld_seen++;
+}
+
+static void test_wait_beats_its_sigchld(void)
+{
+    struct sigaction sa, old;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = count_chld;
+    sigaction(SIGCHLD, &sa, &old);
+    chld_seen = 0;
+    int eintr = 0, wrong = 0;
+    for (int i = 0; i < 50; i++) {
+        pid_t pid = fork();
+        if (pid == 0)
+            _exit(3);
+        int status = 0;
+        pid_t r = waitpid(pid, &status, __WALL);
+        if (r == -1 && errno == EINTR) {
+            eintr++;
+            waitpid(pid, &status, 0);
+        } else if (r != pid || !WIFEXITED(status) || WEXITSTATUS(status) != 3) {
+            wrong++;
+        }
+    }
+    sigaction(SIGCHLD, &old, NULL);
+    static char why[96];
+    snprintf(why, sizeof(why), "eintr=%d wrong=%d sigchld=%d of 50", eintr, wrong,
+             (int)chld_seen);
+    report("wait_beats_its_sigchld", eintr == 0 && wrong == 0, why);
+}
+
 /* Memory protections as musl requests them (N-132). */
 static void test_mprotect(void)
 {
@@ -12015,6 +12053,7 @@ int main(int argc, char **argv)
     test_prctl();
     test_raise_abort();
     test_waitid();
+    test_wait_beats_its_sigchld();
     test_mprotect();
     test_wx_default();
     test_wx_opt_in();
