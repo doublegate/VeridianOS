@@ -717,6 +717,10 @@
 
 ### Fixed
 
+- wait4/waitpid looks for a child to report once more before answering a signal with EINTR, as
+  Linux's do_wait does: the SIGCHLD of a child's exit, caught without SA_RESTART, could end the
+  wait as EINTR although the child was already a zombie (LTP clone301, intermittently; runtime
+  test wait_beats_its_sigchld).
 - PTRACE_PEEKTEXT/PEEKDATA on AArch64 and RISC-V read the tracee's frame at its physical
   address, as if physical memory were identity-mapped, which it is not once the kernel runs at
   its high address: the first peek there panicked the kernel with a translation fault. PEEK now

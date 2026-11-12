@@ -159,6 +159,12 @@ pub fn wait_children(filter: WaitFilter, options: WaitOptions) -> Result<Waited,
         subsystem: "current process",
     })?;
     let current_pid = current.pid;
+    // A signal ended the last wait: report it only if this scan finds no
+    // child to report, as Linux's do_wait checks signal_pending after the
+    // scan. A child's exit signals the parent once it is a zombie, so a
+    // parent woken by that SIGCHLD reaps the child rather than taking
+    // EINTR (LTP clone301, whose SIGCHLD handler has no SA_RESTART).
+    let mut interrupted = false;
 
     loop {
         // Check for zombie children
@@ -253,6 +259,9 @@ pub fn wait_children(filter: WaitFilter, options: WaitOptions) -> Result<Waited,
             // WNOHANG: return immediately with (0, 0) to indicate no child changed state
             return Ok(Waited::NOTHING);
         }
+        if interrupted {
+            return Err(KernelError::WouldBlock);
+        }
 
         // A dispatched process waits for a child to change state; its
         // children run as tasks of their own. A fatal signal for this
@@ -278,10 +287,8 @@ pub fn wait_children(filter: WaitFilter, options: WaitOptions) -> Result<Waited,
                         })
             });
             // A signal to act on (fatal, or caught: EINTR, or a restart
-            // with SA_RESTART).
-            if super::wait_interrupted() {
-                return Err(KernelError::WouldBlock);
-            }
+            // with SA_RESTART), once the children have been looked at again.
+            interrupted = super::wait_interrupted();
             continue;
         }
 
