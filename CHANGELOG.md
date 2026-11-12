@@ -2,6 +2,18 @@
 
 ### Changed
 
+- The gate (`scripts/dev/gate.sh`) runs its emulated guests side by side: the AArch64, RISC-V and
+  Sv39 runtime suites, the x86_64 suite and the conformance smoke run at once, and the release
+  kernels build while the debug kernels boot. One guest uses one host CPU, so back to back they took
+  hours; the four-CPU round's guests run side by side too. A full gate went from about five hours
+  to about one. `ONLY="name ..." [REPEAT=n] scripts/run-rootfs-tests.sh` reruns just the named
+  `musl_runtime_test` checks, to confirm a fix confined to them without the whole suite.
+- The boot tests `timer_interrupts_and_clock` and `smp_cpus_online_and_ticking` wait up to a
+  second for the timer ticks they count (they gave 50 and 20 ms): a loaded host can deschedule a
+  guest's CPU while its clock runs on, and a four-CPU x86_64 boot failed that way with the gate's
+  guests side by side. The second waits only until every CPU has ticked. For the same reason
+  `tlb_shootdown_confirmed` counts a shootdown acknowledgement as slow after a second (the serial
+  warning still comes at 100 ms; the wait itself was and is unbounded).
 - uname reports the release `7.3.0-veridian` (the Linux version whose sources are the kernel's
   specification) instead of the crate version, which LTP read as older than its minimum (4.4) and
   answered with a warning in every new-API test; the version field carries the VeridianOS version

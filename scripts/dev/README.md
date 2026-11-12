@@ -7,7 +7,7 @@ otherwise.
 
 | Script | What it does |
 |---|---|
-| `gate.sh [--boot] [--rootfs]` | The pre-commit gate: fmt, clippy `-D warnings` on the three bare-metal targets and the host library, host unit tests; `--boot` adds the tri-arch build and QEMU boot tests, `--rootfs` the x86_64 runtime suite. Non-zero exit if any step fails. |
+| `gate.sh [--boot] [--rootfs] [--no-smp] [--compat]` | The gate: fmt, clippy `-D warnings` on the three bare-metal targets and the host library, host unit tests; `--boot` adds the tri-arch build and QEMU boot tests, `--rootfs` the runtime suites on all three architectures (the emulated ones side by side), both again on four CPUs unless `--no-smp`, `--compat` the conformance suites. Non-zero exit if any step fails. |
 | `runtime-tests.sh` | Rebuild the dev kernel, the rootfs staging tree (which compiles the runtime test programs) and the BlockFS image, then run `scripts/run-rootfs-tests.sh` with the musl checks required. |
 | `guest.py ARCH LOG CMD...` | Boot the AArch64 or RISC-V musl root (`target/rootfs-musl-ARCH.img`, snapshot mode) and type each command at the shell, waiting for the prompt after each; the serial output goes to LOG. `SMP`, `RISCV_CPU` and `PROMPT_TIMEOUT` adjust the run. |
 | `rootfs-monitor.sh` | The same suite under QEMU with an HMP monitor socket, QEMU left running afterwards, for inspecting a stall (`info registers`, then `addr2line` on the kernel ELF). |

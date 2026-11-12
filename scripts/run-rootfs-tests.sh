@@ -27,7 +27,9 @@
 #        120), MUSL_WAIT (seconds for the musl suite, 600; it runs for
 #        several minutes, and a result ends the wait at once), SMP (CPU
 #        count, default 1), RISCV_CPU (QEMU -cpu for RISC-V, default QEMU's;
-#        `rv64,sv48=off` leaves Sv39 as the only paging mode, ADR 0018)
+#        `rv64,sv48=off` leaves Sv39 as the only paging mode, ADR 0018),
+#        ONLY ("name ..." of musl_runtime_test checks: run just those, each
+#        REPEAT times, default 1, and skip the rest of the suite)
 set -u
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -123,6 +125,32 @@ if ! wait_for 'root@veridian' "$prompt_wait"; then
     exit 1
 fi
 sleep 2
+# ONLY="name ...": run just those musl_runtime_test checks (REPEAT times
+# each, default 1) and stop; for a change confined to them, instead of the
+# whole suite.
+if [[ -n ${ONLY:-} ]]; then
+    status=PASS
+    for t in $ONLY; do
+        printf '/bin/musl_runtime_test --only %s %s\r' "$t" "${REPEAT:-1}" >&3
+        wait_for "MUSL-ONLY $t: " "$musl_wait" || true
+        sleep 1
+        r="$(grep -aoE "MUSL-ONLY $t: [0-9]+/[0-9]+" "$log" | tail -1)"
+        if [[ $r =~ ([0-9]+)/([0-9]+)$ ]] && [[ ${BASH_REMATCH[1]} == "${BASH_REMATCH[2]}" ]]; then
+            echo "PASS $r"
+        else
+            echo "FAIL ${r:-MUSL-ONLY $t: no result}"
+            status=FAIL
+        fi
+    done
+    finish
+    grep -aqE 'KERNEL PANIC|panicked at' "$log" && status=FAIL
+    if [[ $status != PASS ]]; then
+        grep -aE '^FAIL|KERNEL PANIC|panicked at' "$log" | head -30
+        echo "log: $log"
+        exit 1
+    fi
+    exit 0
+fi
 # Only x86_64's kernel runs the BusyBox self-test at boot.
 if [[ $arch != x86_64 ]]; then
     printf '/bin/ash /usr/src/busybox_test.sh\r' >&3

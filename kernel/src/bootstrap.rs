@@ -3305,12 +3305,16 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
     // Test 34: the monotonic clock advances and the 1000 Hz timer interrupt
     // is delivered (LAPIC on x86_64, EL1 virtual timer on AArch64,
     // stimecmp/SBI on RISC-V). Before, uptime never advanced and AArch64 /
-    // RISC-V took no interrupts at all.
+    // RISC-V took no interrupts at all. Five ticks take 5 ms; the window is
+    // a second because a guest's vCPU can be descheduled by a loaded host
+    // (the gate runs its guests side by side) while uptime, read from the
+    // TSC, keeps advancing: with 50 ms, a four-CPU boot failed under load.
     {
+        const WINDOW_MS: u64 = 1000;
         let start_ms = crate::timer::get_uptime_ms();
         let start_ticks = crate::arch::timer::get_ticks();
         let mut spins = 0u64;
-        while crate::timer::get_uptime_ms().saturating_sub(start_ms) < 50
+        while crate::timer::get_uptime_ms().saturating_sub(start_ms) < WINDOW_MS
             && crate::arch::timer::get_ticks().wrapping_sub(start_ticks) < 5
             && spins < 2_000_000_000
         {
@@ -3319,7 +3323,7 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
         }
         let ticks = crate::arch::timer::get_ticks().wrapping_sub(start_ticks);
         let elapsed = crate::timer::get_uptime_ms().saturating_sub(start_ms);
-        let ok = ticks >= 5 && elapsed < 50;
+        let ok = ticks >= 5 && elapsed < WINDOW_MS;
         report_test("timer_interrupts_and_clock", ok, passed, failed);
     }
 
@@ -3330,13 +3334,26 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
     {
         use crate::arch::percpu::arch_cpu_ptr;
         let online = crate::arch::smp_boot::online_cpus() as usize;
-        // Time for the secondaries to tick, only if there are any, and
-        // bounded as tests 34 and 36 are: a clock that does not advance
-        // must not hang the boot (PR #25 review).
+        // Time for the secondaries to tick, only if there are any: until
+        // each has, up to a second (a loaded host can deschedule a vCPU for
+        // longer than the 20 ms this once waited), and bounded as tests 34
+        // and 36 are: a clock that does not advance must not hang the boot
+        // (PR #25 review).
         if online > 1 {
+            let all_ticked = || {
+                for cpu in 1..online {
+                    // SAFETY: read-only snapshot of a static per-CPU block;
+                    // the field is written only by its own CPU.
+                    if unsafe { core::ptr::read_volatile(&(*arch_cpu_ptr(cpu)).local_ticks) } == 0 {
+                        return false;
+                    }
+                }
+                true
+            };
             let start_ms = crate::timer::get_uptime_ms();
             let mut spins = 0u64;
-            while crate::timer::get_uptime_ms().saturating_sub(start_ms) < 20
+            while crate::timer::get_uptime_ms().saturating_sub(start_ms) < 1000
+                && !all_ticked()
                 && spins < 2_000_000_000
             {
                 core::hint::spin_loop();
@@ -3402,7 +3419,10 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
             crate::mm::tlb::flush_all();
             crate::mm::tlb::flush_page(crate::mm::user_layout::UNMAPPED_TEST_ADDR as u64);
         }
-        let quick = crate::arch::timer::monotonic_ns().saturating_sub(start) < 500_000_000;
+        // Generous, as the slow mark (1 s per flush in `mm::tlb`): a loaded
+        // host can deschedule a guest's CPU, and a lost acknowledgement
+        // would hang here rather than finish late.
+        let quick = crate::arch::timer::monotonic_ns().saturating_sub(start) < 5_000_000_000;
         let ok = quick && crate::mm::tlb::remote_flushes_confirmed();
         report_test("tlb_shootdown_confirmed", ok, passed, failed);
     }
