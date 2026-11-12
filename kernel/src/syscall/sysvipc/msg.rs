@@ -291,6 +291,12 @@ pub fn control(
     cmd: i32,
     set: Option<(u32, u32, u32, u64)>,
 ) -> Result<(usize, Option<Vec<u8>>), SyscallError> {
+    // The commands that look without an object's own permission check
+    // need READ on the namespace, as every look does (ADR 0027; PR #40
+    // review).
+    if matches!(cmd, IPC_INFO | MSG_INFO | MSG_STAT_ANY) && !asker.may_read {
+        return Err(SyscallError::PermissionDenied);
+    }
     let load = core::sync::atomic::Ordering::Relaxed;
     let mut ids = space.msg.lock();
     match cmd {
@@ -365,6 +371,10 @@ pub fn proc_lines(space: &SysvSpace, asker: &Asker) -> alloc::string::String {
             "       key      msqid perms      cbytes       qnum lspid lrpid   uid   gid  cuid  \
              cgid      stime      rtime      ctime\n",
         );
+    // No READ on the namespace: the header and nothing else (ADR 0027).
+    if !asker.may_read {
+        return s;
+    }
     for q in space.msg.lock().iter() {
         let p = asker.shown(&q.perm);
         let _ = writeln!(

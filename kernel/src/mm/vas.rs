@@ -509,32 +509,57 @@ pub trait MappingOwner: core::any::Any + Send + Sync {
 /// ([`MappingOwner::closed`]). Made with [`MappingHook::adopt`] for a piece
 /// the owner has already counted.
 #[cfg(feature = "alloc")]
-pub struct MappingHook(alloc::sync::Arc<dyn MappingOwner>);
+pub struct MappingHook {
+    owner: alloc::sync::Arc<dyn MappingOwner>,
+    /// Whether this hook is a piece the owner counts. A snapshot's
+    /// ([`VirtualMapping::snapshot`]) is not: a look at the mappings must
+    /// not count as an attach and a detach (PR #40 review).
+    counted: bool,
+}
 
 #[cfg(feature = "alloc")]
 impl MappingHook {
     /// The hook of a piece `owner` has counted already.
     pub fn adopt(owner: alloc::sync::Arc<dyn MappingOwner>) -> Self {
-        Self(owner)
+        Self {
+            owner,
+            counted: true,
+        }
     }
 
     pub fn owner(&self) -> &alloc::sync::Arc<dyn MappingOwner> {
-        &self.0
+        &self.owner
+    }
+
+    /// The same owner, not counted: for a copy of a mapping's record that
+    /// is no piece of it.
+    pub fn snapshot(&self) -> Self {
+        Self {
+            owner: self.owner.clone(),
+            counted: false,
+        }
     }
 }
 
 #[cfg(feature = "alloc")]
 impl Clone for MappingHook {
     fn clone(&self) -> Self {
-        self.0.opened();
-        Self(self.0.clone())
+        if self.counted {
+            self.owner.opened();
+        }
+        Self {
+            owner: self.owner.clone(),
+            counted: self.counted,
+        }
     }
 }
 
 #[cfg(feature = "alloc")]
 impl Drop for MappingHook {
     fn drop(&mut self) {
-        self.0.closed();
+        if self.counted {
+            self.owner.closed();
+        }
     }
 }
 
@@ -548,6 +573,31 @@ impl core::fmt::Debug for FileBacking {
 }
 
 impl VirtualMapping {
+    /// A copy of this record for looking at, not a piece of the mapping:
+    /// its hook, if any, is not counted ([`MappingHook::snapshot`]), so
+    /// `find_mapping` and `mappings_in` leave a System V segment's
+    /// shm_nattch, atime, dtime and lpid alone.
+    #[cfg(feature = "alloc")]
+    pub fn snapshot(&self) -> Self {
+        Self {
+            start: self.start,
+            size: self.size,
+            mapping_type: self.mapping_type,
+            flags: self.flags,
+            physical_frames: self.physical_frames.clone(),
+            may_write: self.may_write,
+            may_exec: self.may_exec,
+            backing: self.backing.as_ref().map(|b| FileBacking {
+                node: b.node.clone(),
+                offset: b.offset,
+                write: b.write.clone(),
+                hook: b.hook.as_ref().map(MappingHook::snapshot),
+            }),
+            dont_fork: self.dont_fork,
+            wipe_on_fork: self.wipe_on_fork,
+        }
+    }
+
     /// Create a new virtual mapping
     pub fn new(start: VirtualAddress, size: usize, mapping_type: MappingType) -> Self {
         let flags = match mapping_type {
@@ -2359,7 +2409,7 @@ impl VirtualAddressSpace {
             .range(..VirtualAddress(end))
             .rev()
             .take_while(|(_, m)| m.end().0 > start)
-            .map(|(_, m)| m.clone())
+            .map(|(_, m)| m.snapshot())
             .collect();
         out.reverse();
         out
@@ -2686,7 +2736,7 @@ impl VirtualAddressSpace {
             .range(..=addr)
             .next_back()
             .filter(|(_, m)| m.contains(addr))
-            .map(|(_, m)| m.clone())
+            .map(|(_, m)| m.snapshot())
     }
 
     /// Resolve a write fault at `vaddr` on a copy-on-write page.
@@ -4663,5 +4713,53 @@ mod tests {
         assert_eq!(ranges(&vas), vec![(0x10000, 1), (0x20_0000, 512)]);
         assert_eq!(vas.unmap(0x10000, 0x40_0000 - 0x10000), Ok(()));
         assert!(ranges(&vas).is_empty());
+    }
+
+    /// Looking at the mappings is no attach or detach: find_mapping and
+    /// mappings_in return snapshots whose hook is not counted, while a split
+    /// still counts its new piece (PR #40 review).
+    #[test]
+    fn queries_do_not_count_as_pieces() {
+        use core::sync::atomic::{AtomicIsize, Ordering};
+        struct Counter(AtomicIsize);
+        impl MappingOwner for Counter {
+            fn opened(&self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+            fn closed(&self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+            fn as_any(&self) -> &dyn core::any::Any {
+                self
+            }
+        }
+        let owner = alloc::sync::Arc::new(Counter(AtomicIsize::new(1)));
+        let vas = VirtualAddressSpace::new();
+        let mut m = device_mapping(0x10000, 2);
+        let node: alloc::sync::Arc<dyn crate::fs::VfsNode> = crate::fs::memfd::MemfdNode::new(
+            crate::fs::Permissions::from_mode(0o600),
+            0,
+            0,
+            false,
+            0,
+        );
+        m.backing = Some(FileBacking {
+            node,
+            offset: 0,
+            write: None,
+            hook: Some(MappingHook::adopt(owner.clone())),
+        });
+        vas.mappings.lock().insert(VirtualAddress(0x10000), m);
+        let seen = vas.find_mapping(VirtualAddress(0x10000)).unwrap();
+        let all = vas.mappings_in(0x10000, 0x12000);
+        assert!(
+            seen.backing.as_ref().unwrap().hook.is_some(),
+            "still says hooked"
+        );
+        assert_eq!(owner.0.load(Ordering::SeqCst), 1);
+        drop((seen, all));
+        assert_eq!(owner.0.load(Ordering::SeqCst), 1, "no detach either");
+        VirtualAddressSpace::split_at_locked(&mut vas.mappings.lock(), 0x11000);
+        assert_eq!(owner.0.load(Ordering::SeqCst), 2, "a split is a piece more");
     }
 }

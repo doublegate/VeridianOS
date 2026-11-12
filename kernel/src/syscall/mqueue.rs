@@ -116,6 +116,25 @@ pub struct MqNode {
     /// The real user charged for it, and how much.
     charge: (u32, u64),
     space: Weak<MqSpace>,
+    /// The IPC namespace it belongs to, whose rights every operation on
+    /// it checks: a descriptor carried into another namespace (setns,
+    /// unshare, SCM_RIGHTS) still answers to the queue's own (PR #40
+    /// review).
+    ns: Weak<PlainNs>,
+}
+
+/// The caller's rights over the namespace `node` belongs to; none if the
+/// namespace is gone (no capability can name it any more).
+fn queue_rights(node: &MqNode) -> super::sysvipc::NsRights {
+    node.ns.upgrade().map_or(
+        super::sysvipc::NsRights {
+            read: false,
+            write: false,
+            create: false,
+            modify: false,
+        },
+        |ns| rights(&ns),
+    )
 }
 
 impl Drop for MqNode {
@@ -161,8 +180,14 @@ impl VfsNode for MqNode {
         NodeType::File
     }
 
-    /// The status line (mqueue_read_file), from `offset`.
+    /// The status line (mqueue_read_file), from `offset`: READ on the
+    /// queue's namespace (ADR 0027).
     fn read(&self, offset: usize, buffer: &mut [u8]) -> Result<usize, KernelError> {
+        if !queue_rights(self).read {
+            return Err(KernelError::FsError(
+                crate::error::FsError::PermissionDenied,
+            ));
+        }
         let text = self.status();
         let bytes = text.as_bytes();
         if offset >= bytes.len() {
@@ -340,13 +365,22 @@ pub(crate) fn create_queue(
         return Err(SyscallError::PermissionDenied);
     }
     let sys_resource = caller.ns_capable(&ns.owner, linux_caps::CAP_SYS_RESOURCE);
-    let count = space.count.load(Ordering::Relaxed);
-    if count >= space.queues_max.load(Ordering::Relaxed)
-        && !caller.capable(linux_caps::CAP_SYS_RESOURCE)
-    {
-        return Err(SyscallError::NoSpace);
-    }
-    let (maxmsg, msgsize) = new_attr(&space, attr, sys_resource)?;
+    // queues_max, checked and counted in one step (Linux holds its lock
+    // over both), so concurrent creators cannot all pass the check (PR #40
+    // review). The queue's drop gives the slot back; so does a failure
+    // before the queue exists.
+    let unlimited = caller.capable(linux_caps::CAP_SYS_RESOURCE);
+    let max = space.queues_max.load(Ordering::Relaxed);
+    space
+        .count
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |c| {
+            (c < max || unlimited).then_some(c + 1)
+        })
+        .map_err(|_| SyscallError::NoSpace)?;
+    let unreserve = || {
+        space.count.fetch_sub(1, Ordering::AcqRel);
+    };
+    let (maxmsg, msgsize) = new_attr(&space, attr, sys_resource).inspect_err(|_| unreserve())?;
     let bytes = charge_of(maxmsg, msgsize);
     let ruid = caller.creds.ruid;
     let limit = proc.limits().cur(crate::process::rlimit::RLIMIT_MSGQUEUE);
@@ -355,7 +389,10 @@ pub(crate) fn create_queue(
         let used = c.entry(ruid).or_insert(0);
         match used.checked_add(bytes) {
             Some(t) if t <= limit => *used = t,
-            _ => return Err(SyscallError::ResourceLimitExceeded),
+            _ => {
+                unreserve();
+                return Err(SyscallError::ResourceLimitExceeded);
+            }
         }
     }
     let umask =
@@ -385,8 +422,8 @@ pub(crate) fn create_queue(
         waiters: crate::sched::dispatch::WaitQueue::new(),
         charge: (ruid, bytes),
         space: Arc::downgrade(&space),
+        ns: Arc::downgrade(ns),
     });
-    space.count.fetch_add(1, Ordering::Relaxed);
     let mut names = space.names.lock();
     // Another creator first: theirs stands.
     if names.contains_key(name) {
@@ -424,15 +461,24 @@ pub fn sys_mq_open(name_ptr: usize, oflag: usize, mode: usize, attr_ptr: usize) 
     // Linux holds the mqueue root's lock across the lookup and the create;
     // here a create that loses the race (EEXIST) looks again, so the queue
     // another caller made is opened only through the access checks below.
+    let mut created = false;
     let node = loop {
         let existing = space.names.lock().get(&name).cloned();
         let Some(node) = existing else {
             if oflag & O_CREAT == 0 {
                 return Err(SyscallError::ResourceNotFound);
             }
+            // A mode no descriptor can have, checked before anything is
+            // made, so a failing call leaves no queue (PR #40 review).
+            if oflag & O_ACCMODE == O_ACCMODE {
+                return Err(SyscallError::InvalidArgument);
+            }
             match create_queue(&ns, &name, mode as u32, attr) {
                 Err(SyscallError::FileExists) if oflag & O_EXCL == 0 => continue,
-                r => break r?,
+                r => {
+                    created = true;
+                    break r?;
+                }
             }
         };
         if oflag & (O_CREAT | O_EXCL) == O_CREAT | O_EXCL {
@@ -461,12 +507,23 @@ pub fn sys_mq_open(name_ptr: usize, oflag: usize, mode: usize, attr_ptr: usize) 
         _ => crate::fs::OpenFlags::read_only(),
     };
     flags.nonblock = oflag & O_NONBLOCK != 0;
-    let file = crate::fs::file::File::new_with_path(node, flags, alloc::format!("/{}", name));
+    let file =
+        crate::fs::file::File::new_with_path(node.clone(), flags, alloc::format!("/{}", name));
     let fd = proc
         .file_table
         .lock()
         .open_with_flags(Arc::new(file), oflag & O_CLOEXEC != 0)
-        .map_err(super::map_kernel_error)?;
+        .map_err(|e| {
+            // No descriptor (EMFILE): the queue this call made goes again,
+            // if the name still names it.
+            if created {
+                let mut names = space.names.lock();
+                if names.get(&name).is_some_and(|n| Arc::ptr_eq(n, &node)) {
+                    names.remove(&name);
+                }
+            }
+            super::map_kernel_error(e)
+        })?;
     Ok(fd)
 }
 
@@ -549,8 +606,7 @@ pub fn sys_mq_timedsend(
         return Err(SyscallError::MessageTooLong);
     }
     let text = super::userspace::read_user_vec(msg_ptr, len, len)?;
-    let ns = super::sysvipc::current_ns();
-    if !rights(&ns).write {
+    if !queue_rights(node).write {
         return Err(SyscallError::PermissionDenied);
     }
     let mut text = Some(text);
@@ -636,8 +692,7 @@ pub fn sys_mq_timedreceive(
     if len < node.state.lock().msgsize {
         return Err(SyscallError::MessageTooLong);
     }
-    let ns = super::sysvipc::current_ns();
-    if !rights(&ns).write {
+    if !queue_rights(node).write {
         return Err(SyscallError::PermissionDenied);
     }
     let take = || -> Option<(u32, Vec<u8>)> {
@@ -722,7 +777,7 @@ pub fn sys_mq_notify(fd: usize, sev_ptr: usize) -> SyscallResult {
     let file = queue_file(fd)?;
     let node = mq(&file)?;
     // A registration changes the queue (ADR 0027): WRITE.
-    if !rights(&super::sysvipc::current_ns()).write {
+    if !queue_rights(node).write {
         return Err(SyscallError::PermissionDenied);
     }
     let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
@@ -930,6 +985,12 @@ impl VfsNode for MqRoot {
     }
 
     fn readdir(&self) -> Result<Vec<crate::fs::DirEntry>, KernelError> {
+        // Listing the queues looks at the namespace: READ (ADR 0027).
+        if !rights(&self.ns).read {
+            return Err(KernelError::FsError(
+                crate::error::FsError::PermissionDenied,
+            ));
+        }
         Ok(space_of(&self.ns)
             .names
             .lock()
@@ -943,6 +1004,13 @@ impl VfsNode for MqRoot {
     }
 
     fn lookup(&self, name: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
+        // Opening a queue through the mount is opening it: READ, as
+        // mq_open checks (PR #40 review).
+        if !rights(&self.ns).read {
+            return Err(KernelError::FsError(
+                crate::error::FsError::PermissionDenied,
+            ));
+        }
         space_of(&self.ns)
             .names
             .lock()
@@ -967,6 +1035,10 @@ impl VfsNode for MqRoot {
                     KernelError::FsError(crate::error::FsError::AlreadyExists)
                 }
                 SyscallError::NoSpace => KernelError::FsError(crate::error::FsError::NoSpace),
+                // RLIMIT_MSGQUEUE: EMFILE, as mq_open reports it.
+                SyscallError::ResourceLimitExceeded => {
+                    KernelError::FsError(crate::error::FsError::TooManyOpenFiles)
+                }
                 _ => KernelError::FsError(crate::error::FsError::PermissionDenied),
             })
     }

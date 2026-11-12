@@ -304,10 +304,13 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
         // pending signals are not. CLONE_SIGHAND shares the actions.
         new_process
             .set_sighand(current_process.sighand_for_child(opts.share_sighand, opts.clear_sighand));
-        // CLONE_SYSVSEM shares the semaphore undo list (copy_semundo).
+        // CLONE_SYSVSEM shares the semaphore undo list (copy_semundo),
+        // made now if the parent has none yet, so both use one list from
+        // their first SEM_UNDO on (PR #40 review).
         #[cfg(feature = "alloc")]
         if opts.share_sysvsem {
-            *new_process.sem_undo.lock() = current_process.sem_undo.lock().clone();
+            *new_process.sem_undo.lock() =
+                Some(crate::syscall::sysvipc::sem::undo_of(&current_process));
         }
         new_process.signal_mask.store(
             current_process

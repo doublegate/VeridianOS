@@ -82,13 +82,16 @@
   namespace with its own objects (`kernel/src/syscall/sysvipc/`): identifiers with a sequence
   number, ipcperms and ipcget's order of checks, IPC_STAT/IPC_SET/IPC_RMID/IPC_INFO and each
   kind's own commands, SEM_UNDO applied when the last process sharing the undo list exits
-  (CLONE_SYSVSEM shares it; unshare and setns apply it as Linux does), semtimedop's timeout,
+  (CLONE_SYSVSEM shares it, made at the clone if need be; unshare and setns apply it as Linux
+  does), semtimedop's timeout,
   message selection by type with MSG_EXCEPT and MSG_NOERROR, `/proc/sysvipc/{shm,sem,msg}`, and
   the per-namespace limits in `/proc/sys/kernel` (`shmmax`, `shmall`, `shmmni`,
   `shm_rmid_forced`, `sem`, `msgmax`, `msgmnb`, `msgmni`). A segment is a memfd's pages mapped
   MAP_SHARED; each piece of an attachment holds a hook on it (`mm::vas::MappingHook`, Linux's
-  vm_ops open and close), so splits, fork, munmap, exit and exec keep `shm_nattch`. Every access
-  also needs the caller's rights over the IPC namespace, by intent (ADR 0027): READ to look,
+  vm_ops open and close), so splits, fork, munmap, exit and exec keep `shm_nattch` (and a look at
+  the mappings does not count). Every access
+  also needs the caller's rights over the IPC namespace, by intent (ADR 0027): READ to look
+  (IPC_STAT, the *_STAT_ANY and *_INFO commands, `/proc/sysvipc`, the mqueue filesystem),
   WRITE to change contents (send, receive, alter, attach writable), CREATE to make an object
   (EACCES without), MODIFY to control one (IPC_SET, IPC_RMID, SHM_LOCK, mq_unlink, the limits;
   EPERM without); ADR 0024's table has the rows. `CONFIG_SYSVIPC` is set; kcmp's KCMP_SYSVSEM compares undo lists. The differences from
@@ -99,7 +102,9 @@
   and polls for a message or room; messages come out by priority, then in order; absolute
   CLOCK_REALTIME timeouts (ETIMEDOUT); O_NONBLOCK (EAGAIN) through mq_getsetattr; mq_notify by
   signal (si_code SI_MESGQ) or SIGEV_NONE, one registration per queue (EBUSY), sent only to the
-  process that registered and dropped when it closes a descriptor of the queue; queue bytes
+  process that registered and dropped when it closes a descriptor of the queue; the rights a
+  queue's operations need are on the queue's own IPC namespace; queues_max checked and counted
+  in one step; queue bytes
   charged to RLIMIT_MSGQUEUE per real user (EMFILE); `/proc/sys/fs/mqueue` per namespace. New
   errno EMSGSIZE. The `mqueue` filesystem mounts (usually on /dev/mqueue): its root lists the
   namespace's queues, reading one shows its status, unlink and open(O_CREAT) there are
