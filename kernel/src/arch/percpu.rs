@@ -43,8 +43,10 @@ pub struct ArchCpu {
     pub timer_next: u64,
     /// Timer interrupts this CPU has taken.
     pub local_ticks: u64,
-    /// Inter-processor interrupts this CPU has taken.
-    pub ipis: u64,
+    /// Inter-processor interrupts this CPU has taken: written by this CPU,
+    /// read by others (`ipis_of`), so atomic (a volatile read racing a
+    /// write is still a data race; PR #41 review). Same size and offset.
+    pub ipis: core::sync::atomic::AtomicU64,
     /// x86_64: address of this CPU's TSS.RSP0 slot (`gs:[0x40]`), the stack
     /// the CPU switches to for an interrupt or exception from ring 3. Kept
     /// equal to `kernel_rsp` by [`set_entry_stack`].
@@ -85,7 +87,7 @@ impl ArchCpuCell {
             hw_id: 0,
             timer_next: 0,
             local_ticks: 0,
-            ipis: 0,
+            ipis: core::sync::atomic::AtomicU64::new(0),
             rsp0_slot: 0,
         }))
     }
@@ -291,22 +293,27 @@ pub fn note_ipi() {
     // this one has ordered everything it did before the interrupt
     // (membarrier's expedited commands, `sched::dispatch::barrier_cpus`).
     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-    // SAFETY: this CPU's own block, written only by this CPU's interrupt
-    // handlers; read by other CPUs with `ipis_of`.
+    // SAFETY: `cpu` is this CPU's started block (`this_arch_cpu`); only a
+    // shared reference to the atomic field is made, which other CPUs read
+    // the same way, and no `&mut` to the whole block is ever held across
+    // an interrupt.
     unsafe {
-        core::ptr::write_volatile(
-            core::ptr::addr_of_mut!((*cpu).ipis),
-            (*cpu).ipis.wrapping_add(1),
-        )
+        (*cpu)
+            .ipis
+            .fetch_add(1, core::sync::atomic::Ordering::Release)
     };
 }
 
 /// How many IPIs CPU `cpu` has taken (another CPU's view, for
 /// `sched::dispatch::barrier_cpus`).
 pub fn ipis_of(cpu: usize) -> u64 {
-    // SAFETY: a read-only snapshot of a static per-CPU block; the field is
-    // written only by its own CPU (`note_ipi`).
-    unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*arch_cpu_ptr(cpu)).ipis)) }
+    // SAFETY: a static per-CPU block; a shared reference to its atomic
+    // field, which only its own CPU changes (`note_ipi`).
+    unsafe {
+        (*arch_cpu_ptr(cpu))
+            .ipis
+            .load(core::sync::atomic::Ordering::Acquire)
+    }
 }
 
 /// Set this CPU's armed deadline (timer start).

@@ -9363,6 +9363,13 @@ static void test_memctl(void)
         f |= 4;
     if (syscall(SYS_mlock2, m, page, 1) != 0 || t_vmlck_kb() != base + page / 1024)
         f |= 8;
+    /* Locked: MADV_DONTNEED and MADV_FREE are EINVAL, MADV_DONTNEED_LOCKED
+     * (24) discards anyway, as Linux. */
+    m[0] = 'L';
+    if (madvise(m, page, MADV_DONTNEED) != -1 || errno != EINVAL || m[0] != 'L' ||
+        madvise(m, page, 8 /* MADV_FREE */) != -1 || errno != EINVAL ||
+        madvise(m, page, 24 /* MADV_DONTNEED_LOCKED */) != 0 || m[0] != 0)
+        f |= 1048576;
     if (mlockall(0) != -1 || errno != EINVAL)
         f |= 16;
     if (mlockall(MCL_CURRENT) != 0 || t_vmlck_kb() <= base + page / 1024 || munlockall() != 0 ||
@@ -9427,6 +9434,41 @@ static void test_memctl(void)
     if (sfd >= 0)
         close(sfd);
     shm_unlink("/veridian-rfp");
+    /* The same for a regular file whose mapping a fork child shares: the
+     * caller's page 0 shows page 1, the child's still shows page 0 (a new
+     * mapping, as Linux's MAP_FIXED emulation; the frames used to be
+     * refused, EFAULT, as shared with the child). */
+    int rfd = open("/tmp/veridian-rfp", O_CREAT | O_RDWR | O_TRUNC, 0600);
+    char two[2] = {'C', 'D'};
+    char *rm = MAP_FAILED;
+    if (rfd >= 0 && ftruncate(rfd, 2 * page) == 0 && pwrite(rfd, &two[0], 1, 0) == 1 &&
+        pwrite(rfd, &two[1], 1, page) == 1)
+        rm = mmap(NULL, 2 * page, PROT_READ | PROT_WRITE, MAP_SHARED, rfd, 0);
+    if (rm == MAP_FAILED) {
+        f |= 524288;
+    } else {
+        int go[2];
+        pid_t rc = pipe(go) == 0 ? fork() : -1;
+        if (rc == 0) {
+            char c;
+            close(go[1]);
+            read(go[0], &c, 1);
+            _exit(rm[0] == 'C' ? 0 : 1);
+        }
+        if (syscall(SYS_remap_file_pages, rm, page, 0, 1, 0) != 0 || rm[0] != 'D')
+            f |= 524288;
+        if (rc > 0) {
+            close(go[0]);
+            write(go[1], "g", 1);
+            close(go[1]);
+            if (t_exit_status(rc) != 0)
+                f |= 524288;
+        }
+        munmap(rm, 2 * page);
+    }
+    if (rfd >= 0)
+        close(rfd);
+    unlink("/tmp/veridian-rfp");
     /* process_mrelease of a live child: EINVAL; process_madvise of self. */
     pid_t c = fork();
     if (c == 0) {

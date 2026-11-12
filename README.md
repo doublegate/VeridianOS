@@ -97,7 +97,7 @@ The design goal is a microkernel that provides only memory management, schedulin
 | --- | --- |
 | Build | 0 errors, 0 warnings across all 3 architectures |
 | Boot tests | x86_64 43/43, AArch64 64/64, RISC-V 57/57 (Stage 6 BOOTOK); with `-smp 4` 47/47, 68/68, 61/61 |
-| Host-target unit tests | 5,098 passing |
+| Host-target unit tests | 5,100 passing |
 | In-guest runtime suites | BusyBox self-test, `audit_runtime_test` and `musl_runtime_test` all passing on the BlockFS root of each architecture (x86_64: 102/102 and 163/163; AArch64: 102/102 and 159/159; RISC-V: 100/100 and 159/159), on one and four CPUs |
 | CI pipeline | GitHub Actions + Codecov: builds, boots on 1 and 4 CPUs, and the x86_64 runtime suite; host-test line coverage 56.2% |
 | Unsafe code | 3 justified `static mut` (early serial, boot info, per-CPU data); unsafe blocks carry SAFETY comments |

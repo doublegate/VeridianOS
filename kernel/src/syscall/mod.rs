@@ -1714,6 +1714,9 @@ fn handle_syscall(
         #[cfg(feature = "alloc")]
         Syscall::TimerDelete => time::sys_timer_delete(arg1),
         Syscall::Rseq => Err(SyscallError::NotImplemented),
+        // Until the physical map can be split (ADR 0027): ENOSYS, and the
+        // coverage table says so (a stub, not an implementation).
+        Syscall::MemfdSecret => Err(SyscallError::NotImplemented),
         #[cfg(feature = "alloc")]
         Syscall::Clone3 => thread_clone::sys_clone3(arg1, arg2),
         Syscall::Statx => sys_statx(arg1, arg2, arg3, arg4, arg5),

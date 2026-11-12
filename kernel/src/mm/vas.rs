@@ -797,6 +797,25 @@ impl VirtualMapping {
     }
 }
 
+/// Whether heap mapping `m`, the one below the break at `at`, grows in
+/// place by brk's new pages (do_brk_flags expanding a VMA whose flags are
+/// the new pages'): it ends there, is heap memory with the heap's
+/// protection and a frame for every page, and is in the state the new
+/// pages get (lock `def`, no seal, key 0, no fork advice). Otherwise the
+/// pages are a heap mapping of their own (PR #41 review).
+fn heap_grows_in_place(m: &VirtualMapping, at: VirtualAddress, def: Mlock) -> bool {
+    let rw = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER | PageFlags::NO_EXECUTE;
+    m.end() == at
+        && m.mapping_type == MappingType::Heap
+        && m.flags == rw
+        && m.physical_frames.len() == m.size / 4096
+        && !m.dont_fork
+        && !m.wipe_on_fork
+        && m.mlock == def
+        && !m.sealed
+        && m.pkey == 0
+}
+
 /// Virtual Address Space for a process
 pub struct VirtualAddressSpace {
     /// Page table root (CR3 on x86_64)
@@ -2915,6 +2934,18 @@ impl VirtualAddressSpace {
         }
     }
 
+    /// mremap's lock of a locked mapping it grew in place: `[start, end)`
+    /// gets `lock`, then the mapping at `start` joins the grown part after
+    /// it, which `extend` mapped unlocked and so could not merge. Linux
+    /// grows the VMA itself; left as two pieces, a later mremap of the
+    /// whole range found no single mapping (EFAULT; PR #41 review).
+    #[cfg(feature = "alloc")]
+    pub fn lock_grown(&self, start: u64, end: u64, lock: Mlock) -> Result<(), KernelError> {
+        let r = self.set_mlock(start, end, lock);
+        self.merge_with_next(VirtualAddress(start));
+        r
+    }
+
     /// mlockall(MCL_CURRENT) and munlockall: every user mapping.
     #[cfg(feature = "alloc")]
     pub fn set_mlock_all(&self, lock: Mlock) {
@@ -3842,20 +3873,15 @@ impl VirtualAddressSpace {
         // their own, as Linux merges or adds a brk VMA. (It used to extend
         // whatever was keyed at the heap start: once mprotect had split the
         // heap, that was its first piece, stretched over the others.)
-        let rw = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER | PageFlags::NO_EXECUTE;
+        // The new pages get the default lock state (MCL_FUTURE, applied
+        // by sys_brk), no seal and key 0: only an end in that state grows.
+        let def = self.mm_state().def_mlock;
         let mut mappings = self.mappings.lock();
         let last = mappings
             .range_mut(..start_addr)
             .next_back()
             .map(|(_, m)| m)
-            .filter(|m| {
-                m.end() == start_addr
-                    && m.mapping_type == MappingType::Heap
-                    && m.flags == rw
-                    && m.physical_frames.len() == m.size / 4096
-                    && !m.dont_fork
-                    && !m.wipe_on_fork
-            });
+            .filter(|m| heap_grows_in_place(m, start_addr, def));
         if let Some(mapping) = last {
             mapping.size += delta_pages * 4096;
             mapping.physical_frames.extend_from_slice(&new_frames);
@@ -3863,7 +3889,8 @@ impl VirtualAddressSpace {
             let mut mapping =
                 VirtualMapping::new(start_addr, delta_pages * 4096, MappingType::Heap);
             mapping.physical_frames = new_frames;
-            mapping.flags = rw;
+            mapping.flags =
+                PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER | PageFlags::NO_EXECUTE;
             mappings.insert(start_addr, mapping);
         }
 
@@ -4677,6 +4704,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_locked_mapping_grown_by_mremap_is_one_mapping() {
+        let vas = VirtualAddressSpace::new();
+        let mut m = record(0x90_0000, 2, MappingType::Data);
+        m.mlock = Mlock::Locked;
+        vas.mappings.lock().insert(m.start, m);
+        // The part mremap's extend maps after it, still unlocked.
+        let grown = record(0x90_2000, 2, MappingType::Data);
+        vas.mappings.lock().insert(grown.start, grown);
+        vas.merge_with_next(VirtualAddress(0x90_0000));
+        assert_eq!(
+            vas.find_mapping(VirtualAddress(0x90_0000)).unwrap().size,
+            0x2000
+        );
+        vas.lock_grown(0x90_0000, 0x90_4000, Mlock::Locked).unwrap();
+        let one = vas.find_mapping(VirtualAddress(0x90_3000)).unwrap();
+        assert_eq!(
+            (one.start.0, one.size, one.mlock),
+            (0x90_0000, 0x4000, Mlock::Locked)
+        );
+    }
+
     /// WIPEONFORK is for private anonymous memory; the setting splits the
     /// mapping at the range's ends.
     #[test]
@@ -5072,6 +5121,37 @@ mod tests {
         // Verify it persisted
         let current = vas.brk(None);
         assert_eq!(current, new_addr);
+    }
+
+    #[test]
+    fn brk_grows_in_place_only_a_heap_end_in_the_new_pages_state() {
+        // do_brk_flags expands the last VMA only if its flags are the new
+        // pages': an mlocked, sealed or keyed end must not hand its state
+        // to them (locking past RLIMIT_MEMLOCK unchecked; PR #41 review).
+        let rw = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER | PageFlags::NO_EXECUTE;
+        let at = VirtualAddress(0x2000_0000_2000);
+        let mut m =
+            VirtualMapping::new(VirtualAddress(0x2000_0000_0000), 0x2000, MappingType::Heap);
+        m.flags = rw;
+        m.physical_frames = alloc::vec![FrameNumber::new(1), FrameNumber::new(2)];
+        assert!(heap_grows_in_place(&m, at, Mlock::Unlocked));
+        assert!(!heap_grows_in_place(
+            &m,
+            VirtualAddress(0x2000_0000_3000),
+            Mlock::Unlocked
+        ));
+        m.mlock = Mlock::Locked;
+        assert!(!heap_grows_in_place(&m, at, Mlock::Unlocked), "mlocked end");
+        assert!(
+            heap_grows_in_place(&m, at, Mlock::Locked),
+            "MCL_FUTURE locks both"
+        );
+        m.mlock = Mlock::Unlocked;
+        m.sealed = true;
+        assert!(!heap_grows_in_place(&m, at, Mlock::Unlocked), "sealed end");
+        m.sealed = false;
+        m.pkey = 1;
+        assert!(!heap_grows_in_place(&m, at, Mlock::Unlocked), "keyed end");
     }
 
     #[test]

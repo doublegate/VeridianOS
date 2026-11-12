@@ -293,6 +293,11 @@ pub fn msync_range(
         .checked_next_multiple_of(PAGE)
         .ok_or(SyscallError::OutOfMemory)?;
     let end = start.checked_add(len).ok_or(SyscallError::OutOfMemory)?;
+    // Nothing a user mapping can be past user space: ENOMEM, as the other
+    // calls answer (PR #41 review).
+    if end != start && !in_user_space(end) {
+        return Err(SyscallError::OutOfMemory);
+    }
     Ok((end != start).then_some((start, end)))
 }
 
@@ -446,6 +451,10 @@ fn remote_hint(target: &process::Process, base: usize, len: usize) -> Result<(),
     let end = (base as u64)
         .checked_add(len)
         .ok_or(SyscallError::InvalidArgument)?;
+    // The target's user space only (PR #41 review).
+    if !in_user_space(end) {
+        return Err(SyscallError::OutOfMemory);
+    }
     if target
         .memory_space
         .lock()
@@ -588,6 +597,12 @@ mod tests {
             Err(SyscallError::InvalidArgument)
         );
         assert_eq!(msync_range(0x1000, 0, MS_SYNC), Ok(None));
+        let kernel = crate::mm::user_layout::user_space_end() & !0xfff;
+        assert_eq!(
+            msync_range(kernel, 0x1000, MS_SYNC),
+            Err(SyscallError::OutOfMemory),
+            "past user space"
+        );
         assert_eq!(
             msync_range(usize::MAX & !0xfff, 0x2000, MS_SYNC),
             Err(SyscallError::OutOfMemory)

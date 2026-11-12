@@ -325,10 +325,8 @@ pub fn sys_remap_file_pages(
             give_back(&frames);
             return Err(SyscallError::WouldBlock);
         }
-        if vas.unmap(start as usize, size).is_err() {
-            give_back(&frames);
-            return Err(SyscallError::OutOfMemory);
-        }
+        // map_shared_frames replaces the range itself, refusing before it
+        // unmaps anything: on failure the old mapping is still there.
         let at = vas
             .map_shared_frames(
                 Some(VirtualAddress(start)),
@@ -355,10 +353,21 @@ pub fn sys_remap_file_pages(
         if !same_mappings(&vas.mappings_in(start, end), &found) {
             return Err(SyscallError::WouldBlock);
         }
+        // A new mapping of the file at `offset` over the range, with frames
+        // of its own (Linux's emulation is a MAP_FIXED mmap). Filling the
+        // old frames failed after fork, which shares them with the child
+        // (and would change the child's view), and set the offset of only
+        // the first of several pieces (PR #41 review).
+        vas.map_region_fixed(VirtualAddress(start), size, T::Shared, Some(first.flags))
+            .map_err(|_| SyscallError::OutOfMemory)?;
+        vas.set_may_write(VirtualAddress(start), first.may_write);
+        vas.set_may_exec(VirtualAddress(start), first.may_exec);
         vas.fill_owned_pages(start, &buf)
             .map_err(super::map_kernel_error)?;
-        vas.split_range(start, end);
         vas.set_backing(VirtualAddress(start), node, offset, backing.write.clone());
+        if first.mlock.is_locked() {
+            let _ = vas.set_mlock(start, end, first.mlock);
+        }
     }
     Ok(0)
 }
@@ -769,6 +778,30 @@ fn mmap_inner(
     #[cfg(feature = "alloc")]
     {
         if let Err(e) = may_expand_vm(&proc, &memory_space, vm_skip, vm_bytes, vm_data) {
+            if let Some(file_data) = file_data {
+                file_data.release();
+            }
+            return Err(e);
+        }
+    }
+
+    // mseal and the MCL_FUTURE limit again, under the lock the mapping is
+    // made under: `mmap_lock_checks` looked before the file was read, and
+    // another thread may have sealed the range or locked more since
+    // (Linux checks both under mmap_lock; PR #41 review).
+    #[cfg(feature = "alloc")]
+    {
+        let end = addr.saturating_add(length.div_ceil(PAGE_SIZE) * PAGE_SIZE) as u64;
+        let refused = if is_fixed && memory_space.sealed_in(addr as u64, end) {
+            Some(SyscallError::OperationNotPermitted)
+        } else if lock_state_of(flags, memory_space.mm_state().def_mlock).is_some()
+            && !super::memctl::future_lock_allowed(&proc, &memory_space, length as u64)
+        {
+            Some(SyscallError::WouldBlock)
+        } else {
+            None
+        };
+        if let Some(e) = refused {
             if let Some(file_data) = file_data {
                 file_data.release();
             }
@@ -1195,7 +1228,11 @@ pub fn sys_madvise(addr: usize, len: usize, advice: usize) -> SyscallResult {
         };
         match advice {
             madv::DONTNEED | madv::DONTNEED_LOCKED => {
-                if found.iter().any(borrowed) {
+                // A locked range is EINVAL except for DONTNEED_LOCKED
+                // (madvise_dontneed_free_valid_vma; PR #41 review).
+                if found.iter().any(borrowed)
+                    || advice == madv::DONTNEED && found.iter().any(|m| m.mlock.is_locked())
+                {
                     return Err(inval);
                 }
                 // The file contents of private file mappings, read unlocked.
@@ -1212,6 +1249,13 @@ pub fn sys_madvise(addr: usize, len: usize, advice: usize) -> SyscallResult {
                     drop(vas);
                     restore.into_iter().for_each(|(_, data)| data.release());
                     continue;
+                }
+                // Sealed since the check before the loop (the snapshot
+                // would carry the seal too, so it compares equal).
+                if vas.sealed_discard_refused(start, end) {
+                    drop(vas);
+                    restore.into_iter().for_each(|(_, data)| data.release());
+                    return Err(SyscallError::OperationNotPermitted);
                 }
                 if let Err(e) = vas.discard_private_pages(start, end) {
                     restore.into_iter().for_each(|(_, data)| data.release());
@@ -1233,7 +1277,10 @@ pub fn sys_madvise(addr: usize, len: usize, advice: usize) -> SyscallResult {
                 }
             }
             madv::FREE => {
-                if found.iter().any(|m| !private(m) || m.backing.is_some()) {
+                if found
+                    .iter()
+                    .any(|m| !private(m) || m.backing.is_some() || m.mlock.is_locked())
+                {
                     return Err(inval);
                 }
             }
@@ -1260,9 +1307,15 @@ pub fn sys_madvise(addr: usize, len: usize, advice: usize) -> SyscallResult {
                     madv::WIPEONFORK => (None, Some(true)),
                     _ => (None, Some(false)),
                 };
-                proc.memory_space
-                    .lock()
-                    .set_fork_behaviour(start, end, dont_fork, wipe)
+                let vas = proc.memory_space.lock();
+                // DONTFORK and WIPEONFORK on a range sealed since the
+                // check before the loop.
+                if matches!(advice, madv::DONTFORK | madv::WIPEONFORK)
+                    && vas.sealed_discard_refused(start, end)
+                {
+                    return Err(SyscallError::OperationNotPermitted);
+                }
+                vas.set_fork_behaviour(start, end, dont_fork, wipe)
                     .map_err(|_| inval)?;
             }
             madv::POPULATE_READ | madv::POPULATE_WRITE => {
@@ -1364,7 +1417,7 @@ pub fn sys_mremap(
         let _ = proc
             .memory_space
             .lock()
-            .set_mlock(at as u64, (at + len) as u64, lock);
+            .lock_grown(at as u64, (at + len) as u64, lock);
     }
     Ok(at)
 }
@@ -1525,6 +1578,18 @@ fn remap_locked(
     };
     let nomem = SyscallError::OutOfMemory;
     let grow = (r.new_len.saturating_sub(r.old_len)) as u64;
+
+    // mseal again, under the lock this change is made under: sys_mremap
+    // looked in an earlier hold, and another thread may have sealed the
+    // source or the MREMAP_FIXED target since (PR #41 review).
+    let span = r.old_len.max(PAGE_SIZE) as u64;
+    if vas.sealed_in(r.old as u64, r.old as u64 + span)
+        || r.target
+            .is_some_and(|t| vas.sealed_in(t as u64, (t + r.new_len) as u64))
+    {
+        release(growth);
+        return Err(SyscallError::OperationNotPermitted);
+    }
 
     // A second mapping of a shared mapping's pages (old length 0).
     if r.old_len == 0 {
