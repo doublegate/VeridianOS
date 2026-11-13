@@ -106,7 +106,9 @@ fi
 # rustup, and rustup-init reports a conflicting installation itself.)
 if ! command -v rustup &> /dev/null; then
     echo "Installing rustup..."
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    # No default toolchain: the pinned one is installed just below, and
+    # fetching stable first only costs a download (PR #27 review).
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
     source "$HOME/.cargo/env"
 else
     echo "rustup is already installed"

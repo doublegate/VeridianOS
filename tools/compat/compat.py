@@ -960,10 +960,18 @@ class Worker:
             if self.guest is None:
                 self._boot()
             parser = SerialParser()
-            self.guest.send(
-                f"/bin/ash /usr/lib/compat/run.sh /usr/lib/compat/{list_name}.list "
-                f"{first} {run.limit} {last}"
-            )
+            try:
+                self.guest.send(
+                    f"/bin/ash /usr/lib/compat/run.sh /usr/lib/compat/{list_name}.list "
+                    f"{first} {run.limit} {last}"
+                )
+            except OSError:
+                # It died between alive() and the send (BrokenPipeError):
+                # nothing ran, so boot another and send the range again,
+                # rather than abort the whole run (PR #30 review).
+                self.guest.stop()
+                self.guest = None
+                continue
             print(f"{tag} tests {first}-{last} (boot {self.boot})", flush=True)
             seen, since = 0, time.monotonic()
             heard = since  # the last serial output of any kind
@@ -1117,6 +1125,23 @@ class Worker:
                 self.guest.stop()
 
 
+def run_fingerprint(cmd, lists):
+    """What a run's results depend on: every file the QEMU command names
+    (kernel, firmware, image) and the test lists, by path, size and mtime.
+    `--resume` refuses results from a different set (PR #30 review)."""
+    paths = set(lists)
+    for arg in cmd:
+        for part in str(arg).split(","):
+            name = part.removeprefix("file=")
+            if "/" in name and Path(name).is_file():
+                paths.add(Path(name))
+    out = []
+    for p in sorted(paths):
+        st = p.stat() if p.exists() else None
+        out.append(f"{p}\t{st.st_size if st else '-'}\t{st.st_mtime_ns if st else '-'}")
+    return "\n".join(out) + "\n"
+
+
 def cmd_run(args):
     arch = args.arch
     tcg = arch != "x86_64" or args.tcg
@@ -1173,9 +1198,26 @@ def cmd_run(args):
                 )
 
     have = set()
+    fingerprint = run_fingerprint(
+        run.cmd, [root / "usr" / "lib" / "compat" / f"{x}.list" for x in suites]
+    )
+    fingerprint_file = run.out / "run.fingerprint"
     if args.resume:
         if args.smoke or args.first:
             sys.exit("FAIL: --resume goes with neither --smoke nor --first")
+        if not fingerprint_file.exists():
+            print(
+                "warning: no run.fingerprint (an older run): resuming unchecked",
+                flush=True,
+            )
+        elif fingerprint_file.read_text() != fingerprint:
+            sys.exit(
+                "FAIL: --resume: the kernel, image or lists changed since the run "
+                f"in {run.out} (see run.fingerprint); start a new run"
+            )
+    if not args.smoke:
+        fingerprint_file.write_text(fingerprint)
+    if args.resume:
         previous = run.out / "results.tsv"
         if previous.exists():
             kept = {
