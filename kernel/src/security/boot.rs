@@ -237,7 +237,11 @@ fn get_kernel_extent() -> (usize, usize) {
     let kernel_start: usize = 0xFFFFFFFF80100000;
 
     #[cfg(target_arch = "aarch64")]
-    let kernel_start: usize = 0x40200000; // aarch64 link.ld base
+    // link.ld's KERNEL_VMA: the kernel runs at its link address in the
+    // upper half (TTBR1); the physical load address (0x4020_0000 on QEMU
+    // virt, anywhere when relocated) is not mapped once TTBR0 holds user
+    // tables (PR #18 review).
+    let kernel_start: usize = 0xFFFF_FFFF_8020_0000;
 
     #[cfg(target_arch = "riscv64")]
     let kernel_start: usize = 0xFFFF_FFFF_8020_0000; // link address (ADR 0013)

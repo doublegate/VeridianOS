@@ -73,14 +73,24 @@ fn sbi_call(extension: usize, function: usize, arg0: usize, arg1: usize, arg2: u
 /// Sets the timer to trigger an interrupt at the specified time value.
 /// Time is measured in implementation-defined units (typically CPU cycles).
 pub fn set_timer(stime_value: u64) -> SbiRet {
+    /// SBI_ERR_NOT_SUPPORTED.
+    const NOT_SUPPORTED: isize = -2;
+    /// The v0.1 legacy SET_TIMER extension.
+    const SBI_EXT_LEGACY_SET_TIMER: usize = 0;
     // For 64-bit RISC-V, the time value fits in a single register
-    sbi_call(
+    let ret = sbi_call(
         SBI_EXT_TIMER,
         SBI_TIMER_SET_TIMER,
         stime_value as usize,
         0,
         0,
-    )
+    );
+    if ret.error != NOT_SUPPORTED {
+        return ret;
+    }
+    // Firmware without the TIME extension (SBI v0.1): the legacy call, as
+    // Linux's __sbi_set_timer_v01 (PR #11 review).
+    sbi_call(SBI_EXT_LEGACY_SET_TIMER, 0, stime_value as usize, 0, 0)
 }
 
 /// Get SBI implementation ID

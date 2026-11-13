@@ -136,7 +136,11 @@ unsafe extern "C" fn user_trampoline() {
     naked_asm!(
         "call {finish}",
         "call {check}",
-        "j veridian_riscv_return_to_user",
+        // `tail` (auipc + jalr through t1), not `j`: a JAL reaches only
+        // +-1 MiB, and a debug kernel's text outgrew that (PR #41 CI:
+        // R_RISCV_JAL out of range). t1 is free here: the return path
+        // restores every register from the frame at sp.
+        "tail veridian_riscv_return_to_user",
         finish = sym crate::sched::dispatch::finish_switch,
         check = sym crate::process::user_return_check,
     );

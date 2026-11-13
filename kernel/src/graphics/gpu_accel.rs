@@ -1903,6 +1903,44 @@ impl PageFlipManager {
         queued < MAX_PENDING_EVENTS_PER_OWNER
     }
 
+    /// Check and claim a flip on `crtc_id` in one step: if one could be
+    /// queued, mark the CRTC pending (so no other commit passes the check
+    /// meanwhile, PR #15 review) and return its state before; then either
+    /// [`Self::commit_reserved_flip`] or [`Self::cancel_reserved_flip`].
+    pub(crate) fn reserve_flip(&mut self, crtc_id: u32, owner_pid: u64) -> Option<FlipState> {
+        if !self.can_queue_flip(crtc_id, owner_pid) {
+            return None;
+        }
+        let state = self.flip_states.iter_mut().find(|(id, _)| *id == crtc_id)?;
+        let before = state.1;
+        state.1 = FlipState::Pending;
+        Some(before)
+    }
+
+    /// Queue the flip a [`Self::reserve_flip`] claimed.
+    pub(crate) fn commit_reserved_flip(&mut self, request: PageFlipRequest) {
+        if let Some(back) = self
+            .back_buffers
+            .iter_mut()
+            .find(|(id, _)| *id == request.crtc_id)
+        {
+            back.1 = request.fb_id;
+        }
+        self.pending_flips.push(request);
+    }
+
+    /// Give back a claim that was not committed: the CRTC's state as it was.
+    pub(crate) fn cancel_reserved_flip(&mut self, crtc_id: u32, before: FlipState) {
+        if self.pending_flips.iter().any(|f| f.crtc_id == crtc_id) {
+            return;
+        }
+        if let Some(state) = self.flip_states.iter_mut().find(|(id, _)| *id == crtc_id) {
+            if state.1 == FlipState::Pending {
+                state.1 = before;
+            }
+        }
+    }
+
     /// Request a page flip (swap back buffer to front on next vblank)
     pub(crate) fn request_flip(&mut self, request: PageFlipRequest) -> bool {
         if !self.can_queue_flip(request.crtc_id, request.owner_pid) {
@@ -2886,6 +2924,27 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].user_data, 0xAA);
         assert!(!pfm.has_events_for(7));
+    }
+
+    /// The atomic commit's claim: while one commit holds it no other passes
+    /// the check (PR #15 review); a cancelled claim restores the state, a
+    /// committed one completes at the vblank.
+    #[test]
+    fn a_reserved_flip_excludes_others_until_committed_or_cancelled() {
+        let mut pfm = PageFlipManager::new();
+        pfm.register_crtc(1, 10);
+        let before = pfm.reserve_flip(1, 7).expect("free CRTC");
+        assert_eq!(pfm.reserve_flip(1, 8), None, "a second commit waits");
+        assert!(!pfm.request_flip(flip(8, 1)));
+        pfm.cancel_reserved_flip(1, before);
+        let again = pfm.reserve_flip(1, 8).expect("given back");
+        pfm.commit_reserved_flip(flip(8, 0x42));
+        pfm.cancel_reserved_flip(1, again); // a late cancel is a no-op
+        assert_eq!(pfm.reserve_flip(1, 9), None, "still pending");
+        pfm.handle_vblank(1, 5);
+        assert!(pfm.has_events_for(8));
+        assert!(pfm.reserve_flip(1, 9).is_some());
+        assert_eq!(pfm.reserve_flip(2, 9), None, "unregistered CRTC");
     }
 
     /// W-10: a process that never reads cannot grow the queue without bound.

@@ -9,26 +9,54 @@ pub fn is_user_addr_valid(addr: usize) -> bool {
     addr < crate::mm::user_layout::user_space_end()
 }
 
+/// The physical root of the active lower (user) half: CR3 and satp hold
+/// the whole address space, AArch64's TTBR0_EL1 the user half (ADR 0015).
+fn user_half_root() -> u64 {
+    #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+    {
+        let ttbr0: u64;
+        // SAFETY: reading TTBR0_EL1 has no side effects at EL1.
+        unsafe { core::arch::asm!("mrs {}, TTBR0_EL1", out(reg) ttbr0) };
+        // The base address field; the ASID bits (63:48) are not part of it.
+        ttbr0 & 0x0000_FFFF_FFFF_F000
+    }
+    // The low 12 bits are x86_64 CR3 flags (PCID, PWT, PCD); the RISC-V
+    // root is already page-aligned.
+    #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+    {
+        crate::mm::get_kernel_page_table() as u64 & 0x000F_FFFF_FFFF_F000
+    }
+}
+
 /// Translate a virtual address to its page table entry
 ///
 /// Returns None if the address is not mapped
 pub fn translate_address(addr: usize) -> Option<PageTableEntry> {
+    // Only user addresses: the walk below starts at the user half's root
+    // (PR #42 review).
+    if !is_user_addr_valid(addr) {
+        return None;
+    }
     // Get current process's page table
     let _current_process = crate::process::current_process()?;
 
     // Get the active page table base address (CR3 on x86_64).
     // In VeridianOS, syscalls run with the process's page tables loaded
     // (CR3 switching was removed from syscalls in v0.4.9 for performance).
-    // The kernel half is shared by every process's page table, so the
-    // active root translates both user and kernel addresses.
-    // The root's low 12 bits are flags (PCID, PWT, PCD on x86_64).
-    let root = crate::mm::get_kernel_page_table() as u64 & 0x000F_FFFF_FFFF_F000;
+    // This translates user addresses: the lower half's root.
+    // On AArch64 the user half is TTBR0_EL1's, not the kernel root in
+    // TTBR1_EL1 (PR #33 review).
+    let root = user_half_root();
     // The mapper reaches every table through the physical-memory map
     // (INC-MEM-03) and walks as deep as the paging mode (three levels under
     // RISC-V Sv39, ADR 0018).
-    // SAFETY: get_kernel_page_table() returns the physical address of the
-    // active page table root, mapped by the physical-memory map for the
-    // kernel's lifetime; the mapper only reads here.
+    // SAFETY: `root` is the physical address of the current address
+    // space's user-half root (CR3 or satp, or TTBR0_EL1 on AArch64), read
+    // while that address space is the active one on this CPU, so its tables
+    // stay allocated for this walk: a process's tables are freed only after
+    // no CPU runs it. The tables are reached through the physical-memory map,
+    // which covers all RAM for the kernel's lifetime, and the mapper only
+    // reads (PR #42 review: the comment named the kernel root).
     let mapper = unsafe { crate::mm::vas::create_mapper_from_root_pub(root) };
     // The 4 KiB frame holding `addr`, also inside a 2 MiB or 1 GiB page.
     let (frame, flags) = mapper
@@ -53,17 +81,7 @@ pub fn translate_address(addr: usize) -> Option<PageTableEntry> {
 /// (PR #33 review).
 #[cfg(target_os = "none")]
 pub fn active_user_page(addr: usize) -> (Option<PageFlags>, usize) {
-    #[cfg(target_arch = "aarch64")]
-    let root = {
-        let ttbr0: u64;
-        // SAFETY: reading TTBR0_EL1 has no side effects at EL1.
-        unsafe { core::arch::asm!("mrs {}, TTBR0_EL1", out(reg) ttbr0) };
-        ttbr0 & 0x0000_FFFF_FFFF_F000
-    };
-    // The low 12 bits are x86_64 CR3 flags (PCID, PWT, PCD); the RISC-V
-    // root is already page-aligned.
-    #[cfg(not(target_arch = "aarch64"))]
-    let root = crate::mm::get_kernel_page_table() as u64 & 0x000F_FFFF_FFFF_F000;
+    let root = user_half_root();
     let root = crate::mm::phys_to_virt_addr(root) as *const crate::mm::page_table::PageTable;
     // SAFETY: the active root, mapped by the physical-memory map for the
     // kernel's lifetime. The user half's table frames are freed only at

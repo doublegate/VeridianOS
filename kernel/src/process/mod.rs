@@ -140,10 +140,13 @@ pub(crate) fn published(id: u64) {
 static PENDING_IDS: spin::Mutex<alloc::collections::BTreeSet<u64>> =
     spin::Mutex::new(alloc::collections::BTreeSet::new());
 
-/// The IDs clone3's set_tid has claimed (`IdClaims`). Lock order: this,
-/// then PENDING_IDS, then what [`id_in_use`] takes (the process table, the
-/// reap list, the pidfd table, a process's threads); never the other way
-/// (`IdClaim::new`, `IdClaim::drop` and `alloc_id` keep it).
+/// The IDs clone3's set_tid has claimed (`IdClaims`). Lock order: this
+/// before both PENDING_IDS and what [`id_in_use`] takes (the process table,
+/// the reap list, the pidfd table, a process's threads), and those before
+/// PENDING_IDS, a leaf: it is taken under the process table and a
+/// process's threads (`published`, `IdReservation::drop`), and nothing is
+/// taken while it is held. Never the other way (`IdClaim::new`,
+/// `IdClaim::drop` and `alloc_id` keep it; PR #38 review).
 #[cfg(feature = "alloc")]
 static CLAIMED_IDS: spin::Mutex<IdClaims> = spin::Mutex::new(IdClaims {
     held: alloc::vec::Vec::new(),

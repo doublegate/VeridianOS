@@ -210,6 +210,10 @@ mod x86 {
     /// Wait after which a missing acknowledgement is reported (and still
     /// waited for).
     const ACK_WARN_MS: u64 = 100;
+    /// Wait after which the boot test counts it as slow: a loaded host can
+    /// deschedule a guest's CPU for longer than the warning's 100 ms, as a
+    /// four-CPU boot beside the gate's other guests did.
+    const ACK_SLOW_MS: u64 = 1000;
 
     pub(super) fn service_pending() {
         let me = crate::arch::percpu::this_cpu_id() as usize;
@@ -262,6 +266,7 @@ mod x86 {
         }
         let start = crate::arch::timer::monotonic_ns();
         let mut warned = false;
+        let mut slow = false;
         // Fail closed: wait until every CPU has flushed, however long that
         // takes. The caller is about to reuse the frames, and giving up
         // here (as a timeout once did) let a slow CPU keep a translation to
@@ -269,12 +274,13 @@ mod x86 {
         // acknowledgement wrap the counter.
         while ACKS_OUTSTANDING.load(Ordering::Acquire) != 0 {
             service_pending();
-            if !warned
-                && crate::arch::timer::monotonic_ns().saturating_sub(start)
-                    > ACK_WARN_MS * 1_000_000
-            {
-                warned = true;
+            let waited = crate::arch::timer::monotonic_ns().saturating_sub(start);
+            if !slow && waited > ACK_SLOW_MS * 1_000_000 {
+                slow = true;
                 REMOTE_SLOW.store(true, Ordering::Release);
+            }
+            if !warned && waited > ACK_WARN_MS * 1_000_000 {
+                warned = true;
                 // SAFETY: raw COM1 output, no locks taken.
                 unsafe {
                     crate::arch::x86_64::idt::raw_serial_str(

@@ -2612,7 +2612,8 @@ impl BuiltinCommand for SysctlCommand {
             let mem = crate::mm::get_memory_stats();
             let total_kb = mem.total_frames * 4;
 
-            crate::println!("kernel.version = {}", env!("CARGO_PKG_VERSION"));
+            // What /proc/sys/kernel/version says (PR #34 review).
+            crate::println!("kernel.version = {}", crate::utils::uname::VERSION);
 
             #[cfg(target_arch = "x86_64")]
             crate::println!("kernel.arch = x86_64");

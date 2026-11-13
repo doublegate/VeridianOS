@@ -4,8 +4,8 @@
  * Copyright (c) 2025-2026 VeridianOS Contributors
  * SPDX-License-Identifier: MIT OR Apache-2.0
  *
- * Wide character classification and mapping (implemented in
- * src/posix_stubs2.c).
+ * Wide character classification and mapping in the C locale (implemented
+ * in src/wctype.c).
  */
 
 #ifndef _WCTYPE_H

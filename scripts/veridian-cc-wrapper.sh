@@ -9,7 +9,9 @@
 # We detect which mode by checking for '-c' (compile) or the
 # presence of '-o busybox' / '.o' files (link).
 
-TOOLCHAIN="/opt/veridian/toolchain"
+# The same toolchain the build scripts use (VERIDIAN_PREFIX), so headers and
+# link never come from two different ones (PR #29 review).
+TOOLCHAIN="${VERIDIAN_PREFIX:-/opt/veridian}/toolchain"
 CC="${TOOLCHAIN}/bin/x86_64-veridian-gcc"
 SYSROOT="${TOOLCHAIN}/sysroot"
 # The compiler's own version (its private headers and libgcc), not hardcoded.

@@ -399,11 +399,11 @@ fn kernel_clone(mut req: CloneRequest) -> Result<usize, SyscallError> {
     use crate::process::linux_caps::{CAP_CHECKPOINT_RESTORE, CAP_SYS_ADMIN};
     let caller = process::creds::Caller::current();
     request_checks(&mut req, caller.ns_capable(&caller.userns, CAP_SYS_ADMIN))?;
-    // copy_process: an init (SIGNAL_UNKILLABLE), or a process with no
-    // parent, makes no siblings, which nothing would reap.
+    // copy_process: an init (SIGNAL_UNKILLABLE, the initial PID 1 too), or
+    // a process with no parent, makes no siblings, which nothing would reap.
     if req.on(CLONE_PARENT) {
         let current = process::current_process().ok_or(SyscallError::InvalidState)?;
-        if current.is_ns_init() || current.parent().is_none() {
+        if current.is_child_reaper() || current.parent().is_none() {
             return Err(SyscallError::InvalidArgument);
         }
     }

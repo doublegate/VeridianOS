@@ -9,9 +9,12 @@
 #   also run the user-space runtime suites (scripts/run-rootfs-tests.sh,
 #   musl checks required): x86_64's, then AArch64's and RISC-V's musl roots
 #   (scripts/build-musl-rootfs.sh), then the conformance tests x86_64 is
-#   expected to pass (tests/compat). The boots (and with --rootfs the runtime suite)
-#   then run again on four CPUs, since the `smp` feature is on by default;
-#   --no-smp skips that second round (--smp is accepted and is the default).
+#   expected to pass (tests/compat). The emulated runs (and the release
+#   build, beside the debug boots) go side by side: one guest uses one host
+#   CPU, and back to back they took hours. The boots (and with --rootfs the
+#   runtime suites) run again on four CPUs, since the `smp` feature is on
+#   by default; --no-smp skips that round (--smp is accepted and is the
+#   default).
 #   --compat (after the rootfs stage; implies building x86_64's base root)
 #   builds the x86_64 compat root and runs the conformance suites against
 #   tests/compat/expected-x86_64.tsv (scripts/run-compat-tests.sh, about
@@ -50,6 +53,33 @@ step() {
         tail -30 "$log_dir/$name.log"
     fi
 }
+# pstep NAME COMMAND...: as step, started in the background (each such
+# step needs its own files: runs of one script get their own LOG_DIR);
+# pwait waits for them and reports each, in the order they were started,
+# with its last line.
+pnames=()
+pstep() {
+    local name=$1
+    shift
+    rm -f "$log_dir/$name.rc"
+    ("$@" >"$log_dir/$name.log" 2>&1; echo $? >"$log_dir/$name.rc") &
+    pnames+=("$name")
+}
+pwait() {
+    wait
+    local name r
+    for name in "${pnames[@]}"; do
+        r=$(cat "$log_dir/$name.rc" 2>/dev/null || echo 1)
+        echo "=== rc=$r: $name"
+        if [ "$r" -ne 0 ]; then
+            rc=1
+            tail -30 "$log_dir/$name.log"
+        else
+            tail -1 "$log_dir/$name.log"
+        fi
+    done
+    pnames=()
+}
 step fmt cargo fmt --all --check
 # Inline assembly that claims preserves_flags must not set the flags: a
 # block that did made release AArch64 boot tests report passes as failures.
@@ -87,6 +117,11 @@ if [ $boot -eq 1 ] || [ $rootfs -eq 1 ] || [ $compat -eq 1 ]; then
     step build ./build-kernel.sh all dev
 fi
 if [ $boot -eq 1 ]; then
+    # Release kernels too, as CI boots them: optimisation exposes what a
+    # debug build hides (an asm block's false preserves_flags made release
+    # AArch64 report passing tests as failed). Built while the debug
+    # kernels boot.
+    pstep build-release ./build-kernel.sh all release
     for arch in x86_64 aarch64 riscv64; do
         step "boot-$arch" scripts/boot-test.sh "$arch"
         tail -1 "$log_dir/boot-$arch.log"
@@ -122,10 +157,7 @@ if [ $boot -eq 1 ]; then
     AARCH64_CPU=max step boot-aarch64-max scripts/boot-test.sh aarch64
     tail -1 "$log_dir/boot-aarch64-max.log"
     step boot-aarch64-max-bti grep -q "guarded pages for user programs: enforced" "$root/target/boot-logs/boot-aarch64.log"
-    # Release kernels too, as CI boots them: optimisation exposes what a
-    # debug build hides (an asm block's false preserves_flags made release
-    # AArch64 report passing tests as failed).
-    step build-release ./build-kernel.sh all release
+    pwait
     for arch in x86_64 aarch64 riscv64; do
         PROFILE=release step "boot-release-$arch" scripts/boot-test.sh "$arch"
         tail -1 "$log_dir/boot-release-$arch.log"
@@ -136,46 +168,52 @@ if [ $rootfs -eq 1 ]; then
     # their sources is tested (blockfs alone packs the old binaries).
     step rootfs-stage scripts/build-busybox-rootfs.sh rootfs
     step rootfs-image scripts/build-busybox-rootfs.sh blockfs
-    REQUIRE_MUSL=1 step rootfs-tests scripts/run-rootfs-tests.sh 900
-    tail -1 "$log_dir/rootfs-tests.log"
     # AArch64 and RISC-V: the musl BusyBox root (built from source, so the
-    # test programs are current) under TCG.
+    # test programs are current), run under TCG.
     for arch in aarch64 riscv64; do
         step "rootfs-stage-$arch" scripts/build-musl-rootfs.sh "$arch"
-        ARCH=$arch REQUIRE_MUSL=1 step "rootfs-tests-$arch" scripts/run-rootfs-tests.sh
-        tail -1 "$log_dir/rootfs-tests-$arch.log"
     done
-    # The RISC-V root again under Sv39: 256 GiB of user space (ADR 0018).
-    ARCH=riscv64 RISCV_CPU=rv64,sv48=off REQUIRE_MUSL=1 step rootfs-tests-riscv64-sv39 scripts/run-rootfs-tests.sh
-    tail -1 "$log_dir/rootfs-tests-riscv64-sv39.log"
     # The conformance tests expected to pass on x86_64 (tests/compat/README.md):
     # a regression in any of them fails the step. --retry runs a test that
     # regressed once more, so one whose result varies (timing) is reported
     # as a FLAKY candidate instead of costing a whole gate run.
     # (--compat runs all of them anyway.)
-    if [ $compat -eq 0 ]; then
-        step compat-image-x86_64 scripts/build-compat-rootfs.sh x86_64
-        step compat-smoke-x86_64 scripts/run-compat-tests.sh x86_64 --smoke --jobs 3 --retry
-        grep -aE '^(COMPAT |PASS compat|FAIL compat)' "$log_dir/compat-smoke-x86_64.log"
-    fi
+    [ $compat -eq 0 ] && step compat-image-x86_64 scripts/build-compat-rootfs.sh x86_64
+    # Every guest at once (each opens its images with snapshot=on, so they
+    # can share them), each run in its own log directory.
+    LOG_DIR="$root/target/boot-logs/rootfs" REQUIRE_MUSL=1 pstep rootfs-tests scripts/run-rootfs-tests.sh 900
+    for arch in aarch64 riscv64; do
+        LOG_DIR="$root/target/boot-logs/rootfs-$arch" ARCH=$arch REQUIRE_MUSL=1 \
+            pstep "rootfs-tests-$arch" scripts/run-rootfs-tests.sh
+    done
+    # The RISC-V root again under Sv39: 256 GiB of user space (ADR 0018).
+    LOG_DIR="$root/target/boot-logs/rootfs-riscv64-sv39" ARCH=riscv64 RISCV_CPU=rv64,sv48=off REQUIRE_MUSL=1 \
+        pstep rootfs-tests-riscv64-sv39 scripts/run-rootfs-tests.sh
+    [ $compat -eq 0 ] && pstep compat-smoke-x86_64 scripts/run-compat-tests.sh x86_64 --smoke --jobs 3 --retry
 fi
 if [ $smp -eq 1 ] && { [ $boot -eq 1 ] || [ $rootfs -eq 1 ]; }; then
-    # The same kernel (the `smp` feature is on by default) on four CPUs.
+    # The same kernels (the `smp` feature is on by default) on four CPUs,
+    # in the same batch: the one-CPU RISC-V suites take longest, so these
+    # add no time.
     if [ $boot -eq 1 ]; then
         for arch in x86_64 aarch64 riscv64; do
-            SMP=4 EXPECT_CPUS=4 step "boot-smp-$arch" scripts/boot-test.sh "$arch"
-            tail -1 "$log_dir/boot-smp-$arch.log"
+            LOG_DIR="$root/target/boot-logs/smp-$arch" SMP=4 EXPECT_CPUS=4 \
+                pstep "boot-smp-$arch" scripts/boot-test.sh "$arch"
         done
     fi
     if [ $rootfs -eq 1 ]; then
-        SMP=4 REQUIRE_MUSL=1 step rootfs-tests-smp scripts/run-rootfs-tests.sh 900
-        tail -1 "$log_dir/rootfs-tests-smp.log"
+        LOG_DIR="$root/target/boot-logs/rootfs-smp" SMP=4 REQUIRE_MUSL=1 \
+            pstep rootfs-tests-smp scripts/run-rootfs-tests.sh 900
         # The musl roots the rootfs stage built, on four emulated CPUs.
         for arch in aarch64 riscv64; do
-            ARCH=$arch SMP=4 REQUIRE_MUSL=1 step "rootfs-tests-smp-$arch" scripts/run-rootfs-tests.sh
-            tail -1 "$log_dir/rootfs-tests-smp-$arch.log"
+            LOG_DIR="$root/target/boot-logs/rootfs-smp-$arch" ARCH=$arch SMP=4 REQUIRE_MUSL=1 \
+                pstep "rootfs-tests-smp-$arch" scripts/run-rootfs-tests.sh
         done
     fi
+fi
+pwait
+if [ $rootfs -eq 1 ] && [ $compat -eq 0 ]; then
+    grep -aE '^(COMPAT |PASS compat|FAIL compat)' "$log_dir/compat-smoke-x86_64.log"
 fi
 if [ $compat -eq 1 ]; then
     # The conformance suites (tests/compat/README.md): a test expected to

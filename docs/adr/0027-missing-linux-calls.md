@@ -114,8 +114,9 @@ The reference for every behaviour below is the Linux 7.3 source (kernel.org tarb
    default, the membarrier registrations and the allocated keys. A fork child keeps seals, keys
    and registrations but not locks or MCL_FUTURE; exec clears all of it. Pages here are never
    paged out, so a lock changes what is counted (VmLck in `/proc/<pid>/status`, Locked and the
-   `lo`/`lf` VmFlags in `/proc/self/smaps`, RLIMIT_MEMLOCK), what MAP_LOCKED, MCL_FUTURE growth
-   (mmap, brk, mremap; EAGAIN past the limit) and msync's MS_INVALIDATE (EBUSY) do.
+   `lo`/`lf` VmFlags in `/proc/self/smaps`, RLIMIT_MEMLOCK), what MAP_LOCKED, MCL_FUTURE
+   (later mmap and brk), the growth of a locked mapping by mremap (EAGAIN past the limit each) and
+   msync's MS_INVALIDATE (EBUSY) do.
 10. Locking past RLIMIT_MEMLOCK, or at all while it is 0, needs CAP_IPC_LOCK and, as ADR 0024's
     RLIMIT_NPROC override, the `System` object with MODIFY (the maintainer's choice, 2026-11-12,
     over CAP_IPC_LOCK alone, which would let a sandboxed root pin unbounded memory, and over no

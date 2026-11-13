@@ -60,10 +60,13 @@ build_busybox() {
         # shared cache (build-busybox-rootfs.sh downloads there too).
         local part
         part="$(mktemp "${tarball}.XXXXXX")"
+        # Removed if the run is interrupted too (PR #29 review).
+        trap 'rm -f -- "${part:-}"' EXIT
         curl -fsSL -o "${part}" "${BUSYBOX_URL}" || { rm -f "${part}"; die "download failed"; }
         echo "${BUSYBOX_SHA256}  ${part}" | sha256sum -c --quiet - || { rm -f "${part}"; die "BusyBox checksum mismatch in the download"; }
         chmod a+r "${part}"  # mktemp creates it 0600
         mv "${part}" "${tarball}"
+        trap - EXIT
     fi
     # A bad tarball is removed, so the next run downloads it again.
     echo "${BUSYBOX_SHA256}  ${tarball}" | sha256sum -c --quiet - || { rm -f "${tarball}"; die "BusyBox checksum mismatch (removed ${tarball})"; }
