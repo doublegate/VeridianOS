@@ -81,8 +81,9 @@
 
 - fchroot (Linux 7.3): chroot to a directory by descriptor, and with `FD_FAILFS_ROOT` to failfs,
   from whose root no absolute path resolves (EOPNOTSUPP) while lookups from real directories go on;
-  unprivileged with no_new_privs, unshared filesystem state and no earlier chroot, as on Linux.
-  fchdir takes `FD_FAILFS_ROOT` too, and getcwd reports a working directory the root cannot reach
+  unprivileged with no_new_privs, unshared filesystem state and no earlier chroot, as on Linux;
+  a privileged caller leaving a chroot for failfs needs MODIFY on the mount namespace, as chroot
+  does (ADR 0024). fchdir takes `FD_FAILFS_ROOT` too, and getcwd reports a working directory the root cannot reach
   as `(unreachable)`. Runtime test failfs, ported from Linux's failfs selftest.
 - System V IPC (v0.28 item 5, ADR 0027, proposed): shmget, shmat, shmdt, shmctl, semget, semop,
   semtimedop, semctl, msgget, msgsnd, msgrcv and msgctl, with Linux's semantics, each IPC

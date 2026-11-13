@@ -2000,8 +2000,10 @@ fn set_root(thread: &process::Thread, new_root: alloc::string::String) {
 /// the check) and not chrooted already (EPERM: failfs would lift the old
 /// root's ".." barrier). A real directory takes what chroot takes: search
 /// permission on it (EACCES), CAP_SYS_CHROOT (EPERM) and, as ADR 0024's
-/// chroot row, MODIFY on the mount namespace; entering failfs only takes
-/// authority away and needs neither.
+/// chroot row, MODIFY on the mount namespace. Entering failfs from the
+/// top of the tree only takes authority away and needs neither; from a
+/// chroot it lifts the jail's ".." barrier, so a privileged caller needs
+/// MODIFY there as for chroot (EPERM without it).
 pub fn sys_fchroot(fd: usize, flags: usize) -> SyscallResult {
     if flags as u32 != 0 {
         return Err(SyscallError::InvalidArgument);
@@ -2025,6 +2027,16 @@ pub fn sys_fchroot(fd: usize, flags: usize) -> SyscallResult {
             if *fs.root.lock() != "/" {
                 return Err(SyscallError::OperationNotPermitted);
             }
+        }
+        // From a chroot, failfs's relative lookups walk the whole tree: as
+        // leaving the jail by chroot, that needs MODIFY on the mount
+        // namespace too (ADR 0024), not CAP_SYS_CHROOT alone.
+        let jailed = !matches!(
+            thread.fs().root.lock().as_str(),
+            "/" | crate::fs::FAILFS_ROOT
+        );
+        if jailed && !crate::cap::authority::current_may_change_mounts() {
+            return Err(SyscallError::OperationNotPermitted);
         }
         set_root(&thread, alloc::string::String::from(crate::fs::FAILFS_ROOT));
         return Ok(0);

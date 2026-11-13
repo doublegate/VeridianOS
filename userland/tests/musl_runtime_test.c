@@ -7333,6 +7333,9 @@ static int failfs_chrooted_case(void)
     return failfs_errno_is(failfs_fchroot(FAILFS_FD, 0), EPERM) ? 0 : 4;
 }
 
+/* Defined with the capability tests below (it drops MODIFY). */
+static int failfs_jail_modify_case(void);
+
 static int failfs_shared_fs_case(void)
 {
     static char stack[64 * 1024];
@@ -7350,16 +7353,18 @@ static int failfs_shared_fs_case(void)
 static void test_failfs(void)
 {
     static char why[160];
-    int r[7] = {
+    int r[8] = {
         failfs_case(failfs_fchdir_case),     failfs_case(failfs_args_case),
         failfs_case(failfs_realfd_case),     failfs_case(failfs_sentinel_case),
         failfs_case(failfs_unprivileged_case), failfs_case(failfs_chrooted_case),
-        failfs_case(failfs_shared_fs_case),
+        failfs_case(failfs_shared_fs_case),  failfs_case(failfs_jail_modify_case),
     };
-    snprintf(why, sizeof(why), "fchdir=%#x args=%#x realfd=%#x sentinel=%#x unpriv=%#x chrooted=%#x shared=%#x",
-             r[0], r[1], r[2], r[3], r[4], r[5], r[6]);
+    snprintf(why, sizeof(why),
+             "fchdir=%#x args=%#x realfd=%#x sentinel=%#x unpriv=%#x chrooted=%#x shared=%#x "
+             "jail=%#x",
+             r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
     int ok = 1;
-    for (int i = 0; i < 7; i++)
+    for (int i = 0; i < 8; i++)
         ok &= r[i] == 0;
     unlink("/tmp/failfs_real/canary");
     rmdir("/tmp/failfs_real");
@@ -10972,6 +10977,21 @@ static unsigned long long t_ns_id(const char *name)
  * a namespace, named by its NS_GET_ID id. Rights 0 drops the capability
  * whole; otherwise those rights (the token's encoding) go. */
 #include <veridian/capability.h>
+
+/* failfs from a chroot (ADR 0024): leaving the jail for failfs, whose
+ * relative lookups walk the whole tree, needs MODIFY on the mount
+ * namespace as chroot does; with CAP_SYS_CHROOT alone it is EPERM. */
+static int failfs_jail_modify_case(void)
+{
+    unsigned long long mnt = t_ns_id("mnt"), user = t_ns_id("user");
+    if (mnt == 0 || user == 0) return 1;
+    mkdir("/tmp/failfs_jail", 0755);
+    if (chroot("/tmp/failfs_jail") != 0 || chdir("/") != 0) return 2;
+    if (veridian_capability_drop(VERIDIAN_CAP_NAMESPACE, mnt, VERIDIAN_RIGHT_MODIFY) != 1 ||
+        veridian_capability_drop(VERIDIAN_CAP_NAMESPACE, user, VERIDIAN_RIGHT_MODIFY) != 1)
+        return 4;
+    return failfs_errno_is(failfs_fchroot(FAILFS_FD, 0), EPERM) ? 0 : 8;
+}
 #define T_SYS_CAPABILITY_DROP VERIDIAN_SYS_CAPABILITY_DROP
 #define T_CAP_NAMESPACE VERIDIAN_CAP_NAMESPACE
 

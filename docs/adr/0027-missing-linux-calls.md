@@ -116,7 +116,10 @@ The reference for every behaviour below is the Linux 7.3 source (kernel.org tarb
     as working directory no relative one (EOPNOTSUPP), while lookups anchored at real
     directories go on and `..` stops at the top of the tree. An unprivileged caller may enter it
     with no_new_privs, unshared filesystem state and no earlier chroot (EPERM, EINVAL, EPERM),
-    as on Linux; entering it takes authority away, so it needs no object capability. Kept in the
+    as on Linux; entering it from the top of the tree takes authority away, so it needs no
+    object capability, but a privileged caller entering it from a chroot leaves the jail (its
+    relative lookups walk the whole tree) and needs MODIFY on the mount namespace, as chroot
+    does (EPERM; Linux asks only for CAP_SYS_CHROOT there). Kept in the
     path-string model as a sentinel root no user path can hold (`fs::FAILFS_ROOT`). Not yet:
     `/proc/self/root` and `/proc/self/cwd`, which do not exist.
 
