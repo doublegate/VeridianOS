@@ -160,6 +160,8 @@ A survey of the tree on 2026-11-05 found the following:
    | sysctls: unprivileged_userns_clone, pid_max, other writes (the initial IPC namespace's too; a new IPC namespace's, below) | SYS_ADMIN | `System`, MODIFY |
    | the package calls | (native) | `System`, MODIFY (replacing the check that accepts any type) |
    | RLIMIT_NPROC override | SYS_RESOURCE, SYS_ADMIN | `System`, MODIFY |
+   | RLIMIT_MEMLOCK override: mlock, mlock2, mlockall, MAP_LOCKED and MCL_FUTURE growth past the limit, or with it 0 (item 5) | IPC_LOCK | `System`, MODIFY |
+   | process_madvise on another process (item 5) | SYS_NICE, PTRACE_MODE_READ | the target's PID namespace, MODIFY; or `Process { pid }` with MODIFY (the ptrace row) |
    | native account calls (`veridian_auth`) on another user | DAC_OVERRIDE | the mount namespace, WRITE (the account store is a file) |
    | System V IPC and POSIX message queues: reading, waiting for zero, a read-only attachment, opening a queue (item 5) | the mode bits, IPC_OWNER | the IPC namespace, READ |
    | the same: sending, receiving, altering a semaphore, a writable attachment, mq_notify (item 5) | the mode bits, IPC_OWNER | the IPC namespace, WRITE |

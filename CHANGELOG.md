@@ -137,6 +137,27 @@
   Linux; FUTEX2_NUMA's node word, with one node. The private calls 1225 and 1226 are renamed
   NativeFutexWait and NativeFutexWake (`SYS_NATIVE_FUTEX_WAIT`, `SYS_NATIVE_FUTEX_WAKE`;
   numbers unchanged), as Linux's names take theirs. Runtime test futex2.
+- Memory calls (v0.28 item 5, ADR 0027 decisions 9-18): mlock, mlock2 (MLOCK_ONFAULT), munlock,
+  mlockall (MCL_CURRENT, MCL_FUTURE, MCL_ONFAULT) and munlockall, with RLIMIT_MEMLOCK, MAP_LOCKED
+  and MCL_FUTURE applied to later mmap and brk (the limit checked and the mapping locked under one
+  lock, so concurrent mmaps cannot pass it together), and a locked mapping staying locked as mremap
+  grows or moves it (EAGAIN past the limit; MREMAP_DONTUNMAP leaves the old range unlocked, as
+  Linux); locking
+  past the limit takes CAP_IPC_LOCK and the `System` object (ADR 0024's new row). mseal, which
+  makes munmap, MAP_FIXED over, mremap, mprotect, discarding madvise, shmdt and shmat's
+  SHM_REMAP over the range EPERM.
+  msync, which writes a MAP_SHARED regular file's copy back to the file (MS_SYNC and MS_ASYNC;
+  EBUSY for MS_INVALIDATE over locked memory), from mappings that have ever been writable only,
+  so a read-only mapping's copy never overwrites newer file contents. mincore. remap_file_pages (Linux's emulation).
+  membarrier: every command but the RSEQ ones (QUERY 639), the expedited ones by interrupting
+  every other CPU and waiting for each, yielding while one is slow to answer, then every CPU the
+  caller left while yielding, so SYNC_CORE serialises them too (the RISC-V boot hart now takes IPIs, which it only woke
+  from before, so the wait ends there too). process_madvise (another process needs ptrace read
+  access, CAP_SYS_NICE and MODIFY over it) and process_mrelease. pkey_alloc, pkey_free and
+  pkey_mprotect as without protection-key hardware (ENOSPC; keys -1 and 0). `/proc/<pid>/status`
+  gains VmSize, VmLck, VmPin and VmRSS (huge pages counted in full); `/proc/self/smaps` is new (Rss, Locked, VmFlags with lo,
+  lf, sl). memfd_secret is ENOSYS until the physical map can be split (its own pull request).
+  Runtime test memctl.
 
 - `docs/adr/README.md`, an index of the architecture decision records (number, title, status and
   date), generated from each ADR's own lines by `tools/docs/gen_adr_index.py`; gate.sh and CI fail

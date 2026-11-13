@@ -106,6 +106,61 @@ The reference for every behaviour below is the Linux 7.3 source (kernel.org tarb
    `SYS_NATIVE_FUTEX_WAKE`), as Linux's futex_wait and futex_wake take the names; their numbers
    are unchanged.
 
+### Memory (mlock, mlock2, munlock, mlockall, munlockall, mseal, msync, mincore, remap_file_pages, membarrier, process_madvise, process_mrelease, memfd_secret, pkey_*)
+
+9. Implemented with Linux 7.3's argument checks in Linux's order (`kernel/src/syscall/memctl.rs`,
+   `membarrier.rs`, `memory.rs`). A mapping records its mlock state (VM_LOCKED, VM_LOCKONFAULT),
+   whether it is sealed and its protection key; the address space records mlockall(MCL_FUTURE)'s
+   default, the membarrier registrations and the allocated keys. A fork child keeps seals, keys
+   and registrations but not locks or MCL_FUTURE; exec clears all of it. Pages here are never
+   paged out, so a lock changes what is counted (VmLck in `/proc/<pid>/status`, Locked and the
+   `lo`/`lf` VmFlags in `/proc/self/smaps`, RLIMIT_MEMLOCK), what MAP_LOCKED, MCL_FUTURE
+   (later mmap and brk), the growth of a locked mapping by mremap (EAGAIN past the limit each) and
+   msync's MS_INVALIDATE (EBUSY) do.
+10. Locking past RLIMIT_MEMLOCK, or at all while it is 0, needs CAP_IPC_LOCK and, as ADR 0024's
+    RLIMIT_NPROC override, the `System` object with MODIFY (the maintainer's choice, 2026-11-12,
+    over CAP_IPC_LOCK alone, which would let a sandboxed root pin unbounded memory, and over no
+    exemption at all). ADR 0024's table gains the row.
+11. mseal refuses, with EPERM, munmap, a MAP_FIXED mapping over a sealed range, mremap of or onto
+    one, mprotect and pkey_mprotect, and the madvise advice that discards contents on sealed
+    anonymous memory that is not writable, as Linux; a range with a hole is ENOMEM with nothing
+    sealed.
+12. msync: a MAP_SHARED mapping of a regular file holds a copy of it until the v0.29 page cache,
+    so MS_SYNC and MS_ASYNC both write that copy back within the file's size (the maintainer's
+    choice); a memfd's or tmpfs file's mapping maps its pages and needs nothing. mincore reports
+    each page that has a frame, which every page of an anonymous mapping has (memory is not
+    lazy yet: LTP's mincore03 expects untouched pages to be absent).
+13. membarrier: every expedited command interrupts each other online CPU and waits until it has
+    taken the interrupt, whose handler runs a full barrier, and whose return serialises the
+    core (iret, eret; fence.i on RISC-V), which also serves SYNC_CORE. The wait never ends early,
+    as on Linux: a CPU slow to answer is sent the interrupt again and the caller yields its CPU
+    meanwhile, warning once (the maintainer's choice over a time limit with an error, which
+    Linux never returns); only a process being killed stops waiting. MEMBARRIER_CMD_GLOBAL is
+    the same barrier. QUERY reports 639, as Linux built without CONFIG_RSEQ: rseq(2) is not
+    implemented, so the RSEQ commands are EINVAL.
+14. process_madvise on another process needs PTRACE_MODE_READ access and CAP_SYS_NICE, with ADR
+    0024's ptrace/scheduling row (MODIFY over the target; the maintainer's choice, 2026-11-12),
+    and takes only the advice Linux allows remotely (COLD, PAGEOUT, WILLNEED), which are hints
+    here. process_mrelease accepts a dying process and returns 0: its memory goes as it exits.
+15. remap_file_pages is Linux's emulation, a MAP_FIXED remapping of the same shared file at
+    another offset; a System V attachment is refused (EINVAL) rather than losing its count.
+16. Without hardware or support, as Linux built without the option: the NUMA calls (mbind,
+    set_mempolicy, get_mempolicy, migrate_pages, move_pages, set_mempolicy_home_node),
+    userfaultfd and map_shadow_stack are ENOSYS.
+17. memfd_secret is ENOSYS for now, as Linux answers where the architecture cannot take pages
+    out of its direct map (`can_set_direct_map`). Nothing here can split the physical map yet
+    (x86_64 maps it with 1 GiB pages in tables every address space shares); a following pull
+    request builds that on all three architectures, guards every kernel path that reaches user
+    frames through the physical map, and implements memfd_secret on it (the maintainer's
+    choice, 2026-11-12, over doing it inside this group and over leaving it for v0.29).
+18. Protection keys answer as Linux does without the hardware (x86 without OSPKE, arm64 without
+    POE), on every architecture: pkey_alloc checks its flags and access bits (EINVAL) and has no
+    key to give (ENOSPC), pkey_free is EINVAL, pkey_mprotect makes mprotect's checks and takes
+    only keys -1 and 0. LTP's mseal01, which calls pkey_mprotect, runs, and pkey01 ends in a
+    clean TCONF. Real keys (x86_64 PKU: key bits in user PTEs, CR4.PKE, PKRU per thread in the
+    XSAVE state; AArch64 POE) follow in their own pull request (the maintainer's choice,
+    2026-11-12).
+
 ### fchroot and failfs (Linux 7.3)
 
 23. fchroot (472, new in Linux 7.3; the vendored tables move to v7.3 with it, `abi/linux/VERSION`)
