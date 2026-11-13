@@ -1606,6 +1606,12 @@ impl<'a> CallerView<'a> {
     /// has `start` as its root.
     pub fn resolving(mut self, resolve: u32, start: &str) -> Self {
         self.ctx.resolve = resolve;
+        // From failfs nothing resolves, scoped or not: the start stays
+        // failfs, so the walk refuses (EOPNOTSUPP; PR #44 review).
+        if start == FAILFS_ROOT {
+            self.ctx.cwd = String::from(FAILFS_ROOT);
+            return self;
+        }
         if resolve & resolve_flags::SCOPED != 0 {
             self.ctx.root = if self.ctx.root == "/" || self.ctx.root == FAILFS_ROOT {
                 String::from(start)

@@ -3843,9 +3843,9 @@ pub(crate) fn link_at(
     let mut old_canonical: Option<alloc::string::String> = None;
     let target = if old.is_empty() {
         if olddirfd as u32 as i32 == AT_FDCWD as u32 as i32 {
-            let (node, canonical) = vfs
-                .resolve_canonical(&vfs.get_cwd(), "/", true)
-                .map_err(map_resolve_err)?;
+            // "." from the working directory, as open_empty_path does, so
+            // a failfs root or working directory is handled (PR #44).
+            let (node, canonical) = vfs.resolve_path_canonical(".").map_err(map_resolve_err)?;
             old_canonical = Some(canonical);
             node
         } else {

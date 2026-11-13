@@ -7224,6 +7224,10 @@ static int failfs_fchdir_case(void)
     if (!failfs_errno_is(openat(AT_FDCWD, ".", O_RDONLY), EOPNOTSUPP)) bad |= 8;
     if (!failfs_errno_is(openat(AT_FDCWD, "..", O_RDONLY), EOPNOTSUPP)) bad |= 16;
     if (!failfs_errno_is(openat(AT_FDCWD, "foo", O_WRONLY | O_CREAT, 0600), EOPNOTSUPP)) bad |= 32;
+    /* Scoped lookups from it fail too (PR #44 review). */
+    if (!failfs_errno_is(o2(AT_FDCWD, "etc", O_RDONLY, 0, MUSL_RESOLVE_BENEATH), EOPNOTSUPP) ||
+        !failfs_errno_is(o2(AT_FDCWD, "etc", O_RDONLY, 0, MUSL_RESOLVE_IN_ROOT), EOPNOTSUPP))
+        bad |= 128;
     /* Absolute lookups still work: the root is real. */
     if (chdir("/") != 0 || syscall(SYS_getcwd, buf, sizeof(buf)) <= 0 || strcmp(buf, "/")) bad |= 64;
     return bad;
