@@ -499,6 +499,13 @@ not refused. System calls, page faults and the return to user mode run with inte
 so TLB shootdowns are always answered (N-139, ADR 0012 rule 6).
 
 Still open:
+- An intermittent hang on four CPUs, seen twice in CI (x86_64 runtime suite, both on one PR #40
+  commit, GitHub's runners) and never locally. It happened in `musl_runtime_test`'s `pid_ns` check,
+  after a PID namespace's init exited. In one run the init was never reaped; in the other its
+  parent stopped partway through its own exit cleanup, and the guest printed nothing more. 100
+  runs of the check alone, 100 rounds of the namespace checks and 10 full suites on four CPUs
+  under KVM did not reproduce it. The cause is not known; a CPU stopped answering IPIs is one
+  candidate.
 - Lock-free structures (`sync/`, N-59) have not run on more than one CPU.
 - Secondaries copy the boot CPU's CR4, so they match it, including SMEP and SMAP being off (N-15,
   below).
