@@ -5627,6 +5627,7 @@ static void test_splice_family(void);
 static void test_statx(void);
 static void test_openat2(void);
 static void test_execveat(void);
+static void test_failfs(void);
 static void test_fhandle(void);
 static void test_ioctl(void);
 #if defined(__x86_64__)
@@ -5719,6 +5720,7 @@ static const struct {
     {"statx", test_statx},
     {"openat2", test_openat2},
     {"execveat", test_execveat},
+    {"failfs", test_failfs},
     {"fhandle", test_fhandle},
     {"ioctl", test_ioctl},
     {"mount_no_escape", test_mount_no_escape},
@@ -7147,6 +7149,228 @@ static int execveat_status(int dfd, const char *path, char *const *argv, int fla
  * in Linux's order. execve of a relative name runs it from the working
  * directory, without a PATH search.
  */
+/*
+ * fchroot and failfs (Linux 7.3, ported from the kernel's selftest
+ * tools/testing/selftests/filesystems/failfs): fchroot(fd, 0) to a
+ * directory, and FD_FAILFS_ROOT, under whose root no absolute lookup
+ * succeeds while lookups anchored at real directories go on; fchdir into
+ * failfs; the unprivileged rules (no_new_privs, no shared filesystem
+ * state, not chrooted). Each case runs in a child: a root cannot be undone.
+ * Not covered yet: /proc/self/root and /proc/self/cwd, which do not exist.
+ */
+#define FAILFS_FD (-10004)
+#define FAILFS_PIDFS_FD (-10002)
+#define FAILFS_NSFS_FD (-10003)
+
+static long failfs_fchroot(int fd, unsigned flags)
+{
+    return syscall(472, fd, flags);
+}
+
+static int failfs_nobody(void)
+{
+    return setgroups(0, NULL) == 0 && setresgid(65534, 65534, 65534) == 0 &&
+           setresuid(65534, 65534, 65534) == 0;
+}
+
+static int failfs_errno_is(long r, int e)
+{
+    return r == -1 && errno == e;
+}
+
+static int failfs_park(void *arg)
+{
+    (void)arg;
+    for (;;)
+        pause();
+    return 0;
+}
+
+/* Run `fn` in a child and return what it returned, whole: the result goes
+ * through a pipe, as an exit status keeps only 8 bits. A child that dies
+ * or writes nothing is -1. */
+static int failfs_case(int (*fn)(void))
+{
+    int p[2];
+    if (pipe(p) != 0)
+        return -1;
+    pid_t pid = fork();
+    if (pid == 0) {
+        close(p[0]);
+        int r = fn();
+        _exit(write(p[1], &r, sizeof(r)) == sizeof(r) ? 0 : 1);
+    }
+    close(p[1]);
+    int r = -1, st;
+    if (pid < 0 || read(p[0], &r, sizeof(r)) != sizeof(r))
+        r = -1;
+    close(p[0]);
+    if (pid > 0)
+        waitpid(pid, &st, 0);
+    return r;
+}
+
+static int failfs_fchdir_case(void)
+{
+    char buf[256];
+    int bad = 0;
+    if (fchdir(FAILFS_FD) != 0) return 1;
+    if (syscall(SYS_getcwd, buf, sizeof(buf)) <= 0 || strncmp(buf, "(unreachable)", 13)) bad |= 2;
+    if (!failfs_errno_is(openat(AT_FDCWD, "foo", O_RDONLY), EOPNOTSUPP)) bad |= 4;
+    if (!failfs_errno_is(openat(AT_FDCWD, ".", O_RDONLY), EOPNOTSUPP)) bad |= 8;
+    if (!failfs_errno_is(openat(AT_FDCWD, "..", O_RDONLY), EOPNOTSUPP)) bad |= 16;
+    if (!failfs_errno_is(openat(AT_FDCWD, "foo", O_WRONLY | O_CREAT, 0600), EOPNOTSUPP)) bad |= 32;
+    /* Absolute lookups still work: the root is real. */
+    if (chdir("/") != 0 || syscall(SYS_getcwd, buf, sizeof(buf)) <= 0 || strcmp(buf, "/")) bad |= 64;
+    return bad;
+}
+
+static int failfs_args_case(void)
+{
+    int bad = 0;
+    if (!failfs_errno_is(fchdir(FAILFS_PIDFS_FD), EBADF) ||
+        !failfs_errno_is(fchdir(FAILFS_NSFS_FD), EBADF) || !failfs_errno_is(fchdir(-10009), EBADF))
+        bad |= 1;
+    if (!failfs_errno_is(failfs_fchroot(FAILFS_FD, 1), EINVAL)) bad |= 2;
+    int d = open("/tmp", O_RDONLY | O_DIRECTORY);
+    if (d < 0 || !failfs_errno_is(failfs_fchroot(d, 1), EINVAL)) bad |= 4;
+    if (d >= 0) close(d);
+    if (!failfs_errno_is(failfs_fchroot(-1, 0), EBADF) ||
+        !failfs_errno_is(failfs_fchroot(FAILFS_PIDFS_FD, 0), EBADF) ||
+        !failfs_errno_is(failfs_fchroot(FAILFS_NSFS_FD, 0), EBADF))
+        bad |= 8;
+    int f = open("/tmp/failfs_notdir", O_CREAT | O_WRONLY | O_TRUNC, 0600);
+    if (f < 0 || !failfs_errno_is(failfs_fchroot(f, 0), ENOTDIR)) bad |= 16;
+    if (f >= 0) close(f);
+    unlink("/tmp/failfs_notdir");
+    return bad;
+}
+
+static int failfs_realfd_case(void)
+{
+    struct stat st;
+    mkdir("/tmp/failfs_real", 0755);
+    int f = open("/tmp/failfs_real/canary", O_CREAT | O_WRONLY | O_TRUNC, 0600);
+    if (f < 0) return 1;
+    close(f);
+    int d = open("/tmp/failfs_real", O_RDONLY | O_DIRECTORY);
+    if (d < 0) return 2;
+    /* Without CAP_SYS_CHROOT: EPERM, in a child that dropped root. */
+    pid_t pid = fork();
+    if (pid == 0)
+        _exit(failfs_nobody() && failfs_errno_is(failfs_fchroot(d, 0), EPERM) ? 0 : 1);
+    int ws;
+    if (pid < 0 || waitpid(pid, &ws, 0) != pid || !WIFEXITED(ws) || WEXITSTATUS(ws)) return 4;
+    if (failfs_fchroot(d, 0) != 0) return 8;
+    close(d);
+    return stat("/canary", &st) == 0 ? 0 : 16;
+}
+
+static int failfs_sentinel_case(void)
+{
+    struct stat real, st;
+    struct statfs sfs;
+    char buf[256];
+    int bad = 0;
+    if (stat("/", &real) != 0) return 1;
+    mkdir("/tmp/failfs_s", 0755);
+    int dfd = open("/tmp/failfs_s", O_RDONLY | O_DIRECTORY);
+    if (dfd < 0) return 1;
+    unlinkat(dfd, "rel", 0);
+    unlinkat(dfd, "abs", 0);
+    int t = openat(dfd, "target", O_CREAT | O_WRONLY | O_TRUNC, 0600);
+    if (t >= 0) close(t);
+    if (symlinkat("target", dfd, "rel") || symlinkat("/etc", dfd, "abs")) return 1;
+    if (chdir("/tmp") != 0) return 1;
+    if (failfs_fchroot(FAILFS_FD, 0) != 0) return 2;
+    if (!failfs_errno_is(open("/etc/passwd", O_RDONLY), EOPNOTSUPP)) bad |= 4;
+    if (!failfs_errno_is(mkdir("/foo", 0700), EOPNOTSUPP)) bad |= 8;
+    if (!failfs_errno_is(open("/", O_RDONLY | O_DIRECTORY), EOPNOTSUPP) ||
+        !failfs_errno_is(open("/", O_PATH), EOPNOTSUPP))
+        bad |= 16;
+    if (!failfs_errno_is(statfs("/", &sfs), EOPNOTSUPP)) bad |= 32;
+    if (syscall(SYS_getcwd, buf, sizeof(buf)) <= 0 || strncmp(buf, "(unreachable)", 13)) bad |= 64;
+    int fd = openat(AT_FDCWD, ".", O_RDONLY | O_DIRECTORY);
+    if (fd < 0) bad |= 128 | (errno & 0xff) << 16; else close(fd);
+    fd = openat(dfd, "canary", O_WRONLY | O_CREAT, 0600);
+    if (fd < 0 || write(fd, "x", 1) != 1) bad |= 256;
+    if (fd >= 0) close(fd);
+    /* ".." stops at the top of the tree, not at failfs. */
+    fd = openat(AT_FDCWD, "../../../../../../../../../..", O_PATH);
+    if (fd < 0 || fstat(fd, &st) != 0 || st.st_dev != real.st_dev || st.st_ino != real.st_ino)
+        bad |= 512;
+    if (fd >= 0) close(fd);
+    /* A relative symlink resolves; an absolute one starts at failfs. */
+    fd = openat(dfd, "rel", O_RDONLY);
+    if (fd < 0) bad |= 1024; else close(fd);
+    if (!failfs_errno_is(openat(dfd, "abs", O_RDONLY), EOPNOTSUPP)) bad |= 2048;
+    unlinkat(dfd, "canary", 0);
+    close(dfd);
+    return bad;
+}
+
+static int failfs_unprivileged_case(void)
+{
+    char buf[256];
+    int bad = 0;
+    if (!failfs_nobody()) return 1;
+    if (!failfs_errno_is(failfs_fchroot(FAILFS_FD, 0), EPERM)) bad |= 2;
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) return bad | 4;
+    if (failfs_fchroot(FAILFS_FD, 0) != 0) return bad | 8;
+    if (!failfs_errno_is(open("/etc/passwd", O_RDONLY), EOPNOTSUPP)) bad |= 16;
+    /* Chrooted now: no new user namespace (Linux's current_chrooted). */
+    if (!failfs_errno_is(unshare(CLONE_NEWUSER), EPERM)) bad |= 32;
+    if (fchdir(FAILFS_FD) != 0 || syscall(SYS_getcwd, buf, sizeof(buf)) <= 0 || strcmp(buf, "/"))
+        bad |= 64;
+    return bad;
+}
+
+static int failfs_chrooted_case(void)
+{
+    mkdir("/tmp/failfs_jail", 0755);
+    if (chroot("/tmp/failfs_jail") != 0 || chdir("/") != 0) return 1;
+    if (!failfs_nobody() || prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) return 2;
+    return failfs_errno_is(failfs_fchroot(FAILFS_FD, 0), EPERM) ? 0 : 4;
+}
+
+static int failfs_shared_fs_case(void)
+{
+    static char stack[64 * 1024];
+    if (!failfs_nobody()) return 1;
+    pid_t pid = clone(failfs_park, stack + sizeof(stack), CLONE_FS | SIGCHLD, NULL);
+    if (pid < 0) return 2;
+    int bad = 0;
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) bad |= 4;
+    if (!failfs_errno_is(failfs_fchroot(FAILFS_FD, 0), EINVAL)) bad |= 8;
+    kill(pid, SIGKILL);
+    waitpid(pid, NULL, 0);
+    return bad;
+}
+
+static void test_failfs(void)
+{
+    static char why[160];
+    int r[7] = {
+        failfs_case(failfs_fchdir_case),     failfs_case(failfs_args_case),
+        failfs_case(failfs_realfd_case),     failfs_case(failfs_sentinel_case),
+        failfs_case(failfs_unprivileged_case), failfs_case(failfs_chrooted_case),
+        failfs_case(failfs_shared_fs_case),
+    };
+    snprintf(why, sizeof(why), "fchdir=%#x args=%#x realfd=%#x sentinel=%#x unpriv=%#x chrooted=%#x shared=%#x",
+             r[0], r[1], r[2], r[3], r[4], r[5], r[6]);
+    int ok = 1;
+    for (int i = 0; i < 7; i++)
+        ok &= r[i] == 0;
+    unlink("/tmp/failfs_real/canary");
+    rmdir("/tmp/failfs_real");
+    unlink("/tmp/failfs_s/rel");
+    unlink("/tmp/failfs_s/abs");
+    unlink("/tmp/failfs_s/target");
+    rmdir("/tmp/failfs_s");
+    rmdir("/tmp/failfs_jail");
+    report("failfs", ok, why);
+}
+
 static void test_execveat(void)
 {
     const char *plain = "/tmp/musl_execveat_plain", *script = "/tmp/musl_execveat.sh";
@@ -12267,6 +12491,7 @@ int main(int argc, char **argv)
     test_statx();
     test_openat2();
     test_execveat();
+    test_failfs();
     test_fhandle();
     test_ioctl();
     test_record_locks();

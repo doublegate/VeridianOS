@@ -38,6 +38,7 @@
 #define SYS_chdir                        80
 #define SYS_fchdir                       81
 #define SYS_chroot                       161
+#define SYS_fchroot                      472
 #define SYS_kill                         62
 #define SYS_umask                        95
 #define SYS_uname                        63
@@ -421,6 +422,7 @@
 #define SYS_chdir                        49
 #define SYS_fchdir                       50
 #define SYS_chroot                       51
+#define SYS_fchroot                      472
 #define SYS_kill                         129
 #define SYS_umask                        166
 #define SYS_uname                        160
@@ -767,6 +769,7 @@
 #define SYS_chdir                        49
 #define SYS_fchdir                       50
 #define SYS_chroot                       51
+#define SYS_fchroot                      472
 #define SYS_kill                         129
 #define SYS_umask                        166
 #define SYS_uname                        160

@@ -2,6 +2,8 @@
 
 ### Changed
 
+- The Linux system call tables are Linux 7.3's (`abi/linux/VERSION`, read by `gen_syscalls.py`
+  and `syscall_coverage.py`, which named v7.2 in their code): 7.3 adds fchroot (472).
 - uname reports the release `7.3.0-veridian` (the Linux version whose sources are the kernel's
   specification) instead of the crate version, which LTP read as older than its minimum (4.4) and
   answered with a warning in every new-API test; the version field carries the VeridianOS version
@@ -77,6 +79,11 @@
 
 ### Added
 
+- fchroot (Linux 7.3): chroot to a directory by descriptor, and with `FD_FAILFS_ROOT` to failfs,
+  from whose root no absolute path resolves (EOPNOTSUPP) while lookups from real directories go on;
+  unprivileged with no_new_privs, unshared filesystem state and no earlier chroot, as on Linux.
+  fchdir takes `FD_FAILFS_ROOT` too, and getcwd reports a working directory the root cannot reach
+  as `(unreachable)`. Runtime test failfs, ported from Linux's failfs selftest.
 - System V IPC (v0.28 item 5, ADR 0027, proposed): shmget, shmat, shmdt, shmctl, semget, semop,
   semtimedop, semctl, msgget, msgsnd, msgrcv and msgctl, with Linux's semantics, each IPC
   namespace with its own objects (`kernel/src/syscall/sysvipc/`): identifiers with a sequence

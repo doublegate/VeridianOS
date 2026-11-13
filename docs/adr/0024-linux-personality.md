@@ -146,7 +146,7 @@ A survey of the tree on 2026-11-05 found the following:
    |---|---|---|
    | Inode access: `fs::permission`, the xattr rules, O_NOATIME, utimes, chmod, chown, sticky removal, linkat AT_EMPTY_PATH, open_by_handle_at | DAC_*, FOWNER, FSETID, CHOWN, SETFCAP, SYS_ADMIN (trusted.*) | the mount namespace the path resolves through: READ for lookups and reads, WRITE for any change |
    | mknod of a device | MKNOD | mount namespace, CREATE |
-   | mount, umount2, pivot_root, chroot; private mount and umount; the new mount API (item 5) | SYS_ADMIN, SYS_CHROOT | mount namespace, MODIFY |
+   | mount, umount2, pivot_root, chroot, fchroot (to a directory; to failfs, none); private mount and umount; the new mount API (item 5) | SYS_ADMIN, SYS_CHROOT | mount namespace, MODIFY |
    | kill and every signal sent to another process | KILL, uid match | the target's PID namespace, WRITE; or a `Process { pid }` capability with WRITE |
    | ptrace, `/proc/<pid>` access, scheduling, setpriority, prlimit | SYS_PTRACE, SYS_NICE, SYS_RESOURCE, uid match | the target's PID namespace, MODIFY; or `Process { pid }` with MODIFY (as setpriority checks today) |
    | clone3 set_tid | CHECKPOINT_RESTORE, SYS_ADMIN | the PID namespace, MODIFY |

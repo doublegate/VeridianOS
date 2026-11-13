@@ -1048,6 +1048,12 @@ pub const PSEUDO_MOUNT: MountIds = MountIds {
 /// components lexically. `..` at the root stays at the root. The result
 /// always starts with `/` and never ends with one (except `/` itself).
 pub(crate) fn normalize_path(path: &str, cwd: &str) -> String {
+    // A whole-tree path (failfs) stays one.
+    if let Some(rest) = path.strip_prefix(WHOLE_TREE) {
+        let mut out = String::from(WHOLE_TREE);
+        out.push_str(&normalize_path(rest, "/"));
+        return out;
+    }
     let mut parts: Vec<&str> = Vec::new();
     let joined = if path.starts_with('/') {
         None
@@ -1297,6 +1303,27 @@ impl MountTable {
     ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
         use alloc::collections::VecDeque;
 
+        // failfs (Linux 7.3, `FAILFS_ROOT`): no walk starts there. An
+        // absolute path or symlink under a failfs root, and a relative path
+        // from a failfs working directory, fail; a relative path from a
+        // real working directory under a failfs root walks the whole tree.
+        let unsupported = || KernelError::FsError(crate::error::FsError::NotSupported);
+        // A relative path made absolute under a failfs root (`WHOLE_TREE`)
+        // starts at the top of the whole tree.
+        let (path, whole) = match path.strip_prefix(WHOLE_TREE) {
+            Some("") => ("/", true),
+            Some(rest) => (rest, true),
+            None => (path, false),
+        };
+        if cwd == FAILFS_ROOT && !path.starts_with('/') {
+            return Err(unsupported());
+        }
+        let failfs_root = root == FAILFS_ROOT;
+        if failfs_root && path.starts_with('/') && !whole {
+            return Err(unsupported());
+        }
+        let root = if failfs_root || whole { "/" } else { root };
+
         let split = |p: &str| -> VecDeque<String> {
             p.split('/')
                 .filter(|c| !c.is_empty() && *c != ".")
@@ -1434,6 +1461,9 @@ impl MountTable {
                     }
                 }
                 if target.starts_with('/') {
+                    if failfs_root {
+                        return Err(unsupported());
+                    }
                     canon = root_canon.clone();
                 }
                 let mut spliced = split(&target);
@@ -1574,7 +1604,7 @@ impl<'a> CallerView<'a> {
     pub fn resolving(mut self, resolve: u32, start: &str) -> Self {
         self.ctx.resolve = resolve;
         if resolve & resolve_flags::SCOPED != 0 {
-            self.ctx.root = if self.ctx.root == "/" {
+            self.ctx.root = if self.ctx.root == "/" || self.ctx.root == FAILFS_ROOT {
                 String::from(start)
             } else if start == "/" {
                 self.ctx.root.clone()
@@ -1789,12 +1819,33 @@ impl<'a> CallerView<'a> {
     }
 }
 
+/// The root (or working directory) of failfs (Linux 7.3), the filesystem
+/// `fchroot(FD_FAILFS_ROOT)` and `fchdir(FD_FAILFS_ROOT)` move a thread
+/// into: every lookup that starts there fails (EOPNOTSUPP). Kept in place
+/// of a path, it starts with a NUL, which no user path holds. While the
+/// root is failfs the working directory is a canonical path in the whole
+/// tree (it is unreachable from the root, as Linux's getcwd reports), and
+/// relative lookups from it walk the whole tree, `..` stopping at its top.
+pub const FAILFS_ROOT: &str = "\0failfs:/";
+
+/// What a magic link or the kernel's own messages call failfs (d_dname).
+pub const FAILFS_NAME: &str = "failfs:/";
+
+/// Marks a path made absolute from a relative one under a failfs root
+/// (`syscall::filesystem::resolve_at_path`: the working directory or a
+/// descriptor's directory, joined with the path): it is absolute in the
+/// whole tree, so it resolves from the tree's top, where a path the program
+/// gave as absolute does not resolve at all. Like `FAILFS_ROOT` it starts
+/// with a NUL, which no user path holds.
+pub const WHOLE_TREE: &str = "\0wt:";
+
 /// `path`, a canonical path in the whole tree, as seen from inside `root`
 /// (the inverse of `resolve_in`'s mapping): "/jail/a" is "/a" under root
 /// "/jail". A path outside the root (which a lookup never produces) is
 /// returned whole.
 pub(crate) fn root_relative(path: &str, root: &str) -> String {
-    if root == "/" {
+    // Under a failfs root nothing is inside the root: paths stay whole.
+    if root == "/" || root == FAILFS_ROOT {
         return String::from(path);
     }
     if path == root {
@@ -3655,6 +3706,59 @@ pub(crate) mod tests {
         assert_eq!(root_relative("/jail", "/jail"), "/");
         assert_eq!(root_relative("/jailbreak", "/jail"), "/jailbreak");
         assert_eq!(root_relative("/a/b", "/"), "/a/b");
+    }
+
+    /// failfs (Linux 7.3 fchroot FD_FAILFS_ROOT): under a failfs root no
+    /// absolute path or absolute symlink resolves, relative lookups from a
+    /// real working directory walk the whole tree with `..` stopping at its
+    /// top, and from a failfs working directory nothing relative resolves.
+    #[test]
+    fn a_failfs_root_resolves_no_absolute_path() {
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        let tmp = root.mkdir("tmp", Permissions::default()).unwrap();
+        tmp.create("f", Permissions::default()).unwrap();
+        tmp.symlink("rel", "f").unwrap();
+        tmp.symlink("abs", "/tmp/f").unwrap();
+        let table = vfs.snapshot();
+        let r = |path: &str, cwd: &str, root: &str| {
+            table
+                .resolve_in(path, cwd, root, true, 0, None, 0)
+                .map(|(_, canon)| canon)
+        };
+        let unsupported = Err(KernelError::FsError(FsError::NotSupported));
+        assert_eq!(r("/tmp/f", "/tmp", FAILFS_ROOT), unsupported);
+        assert_eq!(r("/", "/tmp", FAILFS_ROOT), unsupported);
+        assert_eq!(r("f", "/tmp", FAILFS_ROOT), Ok(String::from("/tmp/f")));
+        assert_eq!(r("rel", "/tmp", FAILFS_ROOT), Ok(String::from("/tmp/f")));
+        assert_eq!(r("abs", "/tmp", FAILFS_ROOT), unsupported);
+        assert_eq!(r("../../../..", "/tmp", FAILFS_ROOT), Ok(String::from("/")));
+        // A failfs working directory, under a real or a failfs root.
+        assert_eq!(r("f", FAILFS_ROOT, "/"), unsupported);
+        assert_eq!(r(".", FAILFS_ROOT, "/"), unsupported);
+        assert_eq!(r("/tmp/f", FAILFS_ROOT, "/"), Ok(String::from("/tmp/f")));
+        assert_eq!(r("f", FAILFS_ROOT, FAILFS_ROOT), unsupported);
+        // Seen from a failfs root, paths stay whole.
+        assert_eq!(root_relative("/tmp/f", FAILFS_ROOT), "/tmp/f");
+        // A relative path joined to its start directory (`WHOLE_TREE`)
+        // resolves from the top of the tree; an absolute symlink on its way
+        // still does not.
+        let whole = |p: &str| alloc::format!("{}{}", WHOLE_TREE, p);
+        assert_eq!(
+            r(&whole("/tmp/f"), "/tmp", FAILFS_ROOT),
+            Ok(String::from("/tmp/f"))
+        );
+        assert_eq!(
+            r(&whole("/tmp/../../.."), "/tmp", FAILFS_ROOT),
+            Ok(String::from("/"))
+        );
+        assert_eq!(
+            r(&whole("/tmp/rel"), "/tmp", FAILFS_ROOT),
+            Ok(String::from("/tmp/f"))
+        );
+        assert_eq!(r(&whole("/tmp/abs"), "/tmp", FAILFS_ROOT), unsupported);
+        assert_eq!(r(&whole(""), "/tmp", FAILFS_ROOT), Ok(String::from("/")));
+        assert_eq!(normalize_path(&whole("/tmp/./x/.."), "/"), whole("/tmp"));
     }
 
     #[test]
