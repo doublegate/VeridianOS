@@ -268,8 +268,8 @@ pub mod sysno {
     pub const SYS_getpriority: usize = 140;
     pub const SYS_setpriority: usize = 141;
     pub const SYS_futex: usize = 202;
-    pub const SYS_FUTEX_WAIT: usize = 1225;
-    pub const SYS_FUTEX_WAKE: usize = 1226;
+    pub const SYS_NATIVE_FUTEX_WAIT: usize = 1225;
+    pub const SYS_NATIVE_FUTEX_WAKE: usize = 1226;
     pub const SYS_SHM_OPEN: usize = 1234;
     pub const SYS_SHM_UNLINK: usize = 1235;
     pub const SYS_SHM_TRUNCATE: usize = 1236;
@@ -337,6 +337,28 @@ pub mod sysno {
     pub const SYS_inotify_init1: usize = 294;
     pub const SYS_inotify_add_watch: usize = 254;
     pub const SYS_inotify_rm_watch: usize = 255;
+    pub const SYS_shmget: usize = 29;
+    pub const SYS_shmat: usize = 30;
+    pub const SYS_shmdt: usize = 67;
+    pub const SYS_shmctl: usize = 31;
+    pub const SYS_semget: usize = 64;
+    pub const SYS_semop: usize = 65;
+    pub const SYS_semtimedop: usize = 220;
+    pub const SYS_semctl: usize = 66;
+    pub const SYS_msgget: usize = 68;
+    pub const SYS_msgsnd: usize = 69;
+    pub const SYS_msgrcv: usize = 70;
+    pub const SYS_msgctl: usize = 71;
+    pub const SYS_mq_open: usize = 240;
+    pub const SYS_mq_unlink: usize = 241;
+    pub const SYS_mq_timedsend: usize = 242;
+    pub const SYS_mq_timedreceive: usize = 243;
+    pub const SYS_mq_notify: usize = 244;
+    pub const SYS_mq_getsetattr: usize = 245;
+    pub const SYS_futex_waitv: usize = 449;
+    pub const SYS_futex_wake: usize = 454;
+    pub const SYS_futex_wait: usize = 455;
+    pub const SYS_futex_requeue: usize = 456;
 }
 
 // Linux's generic table: calls RISC-V leaves to user space are absent.
@@ -569,8 +591,8 @@ pub mod sysno {
     pub const SYS_getpriority: usize = 141;
     pub const SYS_setpriority: usize = 140;
     pub const SYS_futex: usize = 98;
-    pub const SYS_FUTEX_WAIT: usize = 1225;
-    pub const SYS_FUTEX_WAKE: usize = 1226;
+    pub const SYS_NATIVE_FUTEX_WAIT: usize = 1225;
+    pub const SYS_NATIVE_FUTEX_WAKE: usize = 1226;
     pub const SYS_SHM_OPEN: usize = 1234;
     pub const SYS_SHM_UNLINK: usize = 1235;
     pub const SYS_SHM_TRUNCATE: usize = 1236;
@@ -633,6 +655,28 @@ pub mod sysno {
     pub const SYS_inotify_init1: usize = 26;
     pub const SYS_inotify_add_watch: usize = 27;
     pub const SYS_inotify_rm_watch: usize = 28;
+    pub const SYS_shmget: usize = 194;
+    pub const SYS_shmat: usize = 196;
+    pub const SYS_shmdt: usize = 197;
+    pub const SYS_shmctl: usize = 195;
+    pub const SYS_semget: usize = 190;
+    pub const SYS_semop: usize = 193;
+    pub const SYS_semtimedop: usize = 192;
+    pub const SYS_semctl: usize = 191;
+    pub const SYS_msgget: usize = 186;
+    pub const SYS_msgsnd: usize = 189;
+    pub const SYS_msgrcv: usize = 188;
+    pub const SYS_msgctl: usize = 187;
+    pub const SYS_mq_open: usize = 180;
+    pub const SYS_mq_unlink: usize = 181;
+    pub const SYS_mq_timedsend: usize = 182;
+    pub const SYS_mq_timedreceive: usize = 183;
+    pub const SYS_mq_notify: usize = 184;
+    pub const SYS_mq_getsetattr: usize = 185;
+    pub const SYS_futex_waitv: usize = 449;
+    pub const SYS_futex_wake: usize = 454;
+    pub const SYS_futex_wait: usize = 455;
+    pub const SYS_futex_requeue: usize = 456;
 }
 
 // Linux's generic table with arm64's ABIs (renameat included).
@@ -866,8 +910,8 @@ pub mod sysno {
     pub const SYS_getpriority: usize = 141;
     pub const SYS_setpriority: usize = 140;
     pub const SYS_futex: usize = 98;
-    pub const SYS_FUTEX_WAIT: usize = 1225;
-    pub const SYS_FUTEX_WAKE: usize = 1226;
+    pub const SYS_NATIVE_FUTEX_WAIT: usize = 1225;
+    pub const SYS_NATIVE_FUTEX_WAKE: usize = 1226;
     pub const SYS_SHM_OPEN: usize = 1234;
     pub const SYS_SHM_UNLINK: usize = 1235;
     pub const SYS_SHM_TRUNCATE: usize = 1236;
@@ -930,4 +974,26 @@ pub mod sysno {
     pub const SYS_inotify_init1: usize = 26;
     pub const SYS_inotify_add_watch: usize = 27;
     pub const SYS_inotify_rm_watch: usize = 28;
+    pub const SYS_shmget: usize = 194;
+    pub const SYS_shmat: usize = 196;
+    pub const SYS_shmdt: usize = 197;
+    pub const SYS_shmctl: usize = 195;
+    pub const SYS_semget: usize = 190;
+    pub const SYS_semop: usize = 193;
+    pub const SYS_semtimedop: usize = 192;
+    pub const SYS_semctl: usize = 191;
+    pub const SYS_msgget: usize = 186;
+    pub const SYS_msgsnd: usize = 189;
+    pub const SYS_msgrcv: usize = 188;
+    pub const SYS_msgctl: usize = 187;
+    pub const SYS_mq_open: usize = 180;
+    pub const SYS_mq_unlink: usize = 181;
+    pub const SYS_mq_timedsend: usize = 182;
+    pub const SYS_mq_timedreceive: usize = 183;
+    pub const SYS_mq_notify: usize = 184;
+    pub const SYS_mq_getsetattr: usize = 185;
+    pub const SYS_futex_waitv: usize = 449;
+    pub const SYS_futex_wake: usize = 454;
+    pub const SYS_futex_wait: usize = 455;
+    pub const SYS_futex_requeue: usize = 456;
 }

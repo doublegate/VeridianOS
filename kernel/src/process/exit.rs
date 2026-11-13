@@ -159,6 +159,12 @@ pub fn wait_children(filter: WaitFilter, options: WaitOptions) -> Result<Waited,
         subsystem: "current process",
     })?;
     let current_pid = current.pid;
+    // A signal ended the last wait: report it only if this scan finds no
+    // child to report, as Linux's do_wait checks signal_pending after the
+    // scan. A child's exit signals the parent once it is a zombie, so a
+    // parent woken by that SIGCHLD reaps the child rather than taking
+    // EINTR (LTP clone301, whose SIGCHLD handler has no SA_RESTART).
+    let mut interrupted = false;
 
     loop {
         // Check for zombie children
@@ -253,6 +259,9 @@ pub fn wait_children(filter: WaitFilter, options: WaitOptions) -> Result<Waited,
             // WNOHANG: return immediately with (0, 0) to indicate no child changed state
             return Ok(Waited::NOTHING);
         }
+        if interrupted {
+            return Err(KernelError::WouldBlock);
+        }
 
         // A dispatched process waits for a child to change state; its
         // children run as tasks of their own. A fatal signal for this
@@ -278,10 +287,8 @@ pub fn wait_children(filter: WaitFilter, options: WaitOptions) -> Result<Waited,
                         })
             });
             // A signal to act on (fatal, or caught: EINTR, or a restart
-            // with SA_RESTART).
-            if super::wait_interrupted() {
-                return Err(KernelError::WouldBlock);
-            }
+            // with SA_RESTART), once the children have been looked at again.
+            interrupted = super::wait_interrupted();
             continue;
         }
 
@@ -800,6 +807,27 @@ pub fn cleanup_process(process: &Process) {
     crate::timer::ktimerd::cancel_owner(process.pid.0);
     super::posix_timer::delete_all(process);
 
+    // System V IPC (exit_sem, exit_shm): the semaphore adjustments of an
+    // undo list no other process shares are applied, and the segments this
+    // process made lose their creator (destroyed if unattached under
+    // shm_rmid_forced), in every IPC namespace its threads are in.
+    #[cfg(feature = "alloc")]
+    {
+        crate::syscall::sysvipc::sem::exit_sem(process);
+        let mut seen: Vec<alloc::sync::Arc<super::ns::PlainNs>> = Vec::new();
+        for thread in process.threads.lock().values() {
+            let ipc = thread.namespaces().ipc.clone();
+            if !seen.iter().any(|n| alloc::sync::Arc::ptr_eq(n, &ipc)) {
+                seen.push(ipc);
+            }
+        }
+        for ipc in seen {
+            if let Some(space) = ipc.sysv.as_ref() {
+                crate::syscall::sysvipc::shm::creator_exited(space, process.pid.0);
+            }
+        }
+    }
+
     // SCHED_DEADLINE reservations of every thread go back, whatever path
     // ended them (each thread's own exit already did; idempotent), so a
     // lost one can never hold admission control's bandwidth for good.
@@ -926,9 +954,11 @@ pub fn cleanup_process(process: &Process) {
                     process.pid.0, open_fds
                 );
             }
-            // Dropping it closes its files and releases its POSIX record
-            // locks (`FileTable`'s Drop runs `close_all`), not the process:
-            // a table still shared keeps its locks (N-120, PR #35 review).
+            // Closing it releases its files and POSIX record locks, not
+            // the process: a table still shared keeps its locks (N-120, PR
+            // #35 review). Closed in this process's name, which a killer
+            // running the cleanup is not (mq_notify, PR #40 review).
+            file_table.close_all_as(process.pid.0);
             drop(file_table);
         }
     }

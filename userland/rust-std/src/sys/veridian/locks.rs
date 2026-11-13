@@ -1,7 +1,7 @@
 //! Futex-based synchronization primitives for VeridianOS.
 //!
 //! Provides `Mutex`, `RwLock`, `Condvar`, and `Once` -- all built on top
-//! of the VeridianOS futex syscalls (`SYS_FUTEX_WAIT` / `SYS_FUTEX_WAKE`).
+//! of the VeridianOS futex syscalls (`SYS_NATIVE_FUTEX_WAIT` / `SYS_NATIVE_FUTEX_WAKE`).
 //!
 //! These are designed to be used in user-space Rust programs running on
 //! VeridianOS.  They mirror the semantics of `std::sync` primitives.

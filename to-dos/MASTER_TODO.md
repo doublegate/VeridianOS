@@ -415,12 +415,12 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
      or answers what Linux built without the feature answers (ENOSYS, EPERM or EOPNOTSUPP, as its
      `kernel/sys_ni.c` or stub says), with the option left unset; each such choice is recorded in an
      ADR for the group, not made silently.
-     - [ ] System V IPC: shmget, shmat, shmdt, shmctl (on `fs::shmem` pages), semget, semop,
+     - [x] System V IPC: shmget, shmat, shmdt, shmctl (on `fs::shmem` pages), semget, semop,
        semtimedop, semctl (with SEM_UNDO), msgget, msgsnd, msgrcv, msgctl; per IPC namespace (ADR
        0022 H1), `/proc/sysvipc/*` and the `/proc/sys/kernel` limits; CONFIG_SYSVIPC.
-     - [ ] POSIX message queues: mq_open, mq_unlink, mq_timedsend, mq_timedreceive, mq_notify,
+     - [x] POSIX message queues: mq_open, mq_unlink, mq_timedsend, mq_timedreceive, mq_notify,
        mq_getsetattr on an mqueue filesystem, per IPC namespace; CONFIG_POSIX_MQUEUE.
-     - [ ] futex2: futex_waitv, futex_wake, futex_wait, futex_requeue on the existing futex table.
+     - [x] futex2: futex_waitv, futex_wake, futex_wait, futex_requeue on the existing futex table.
      - [ ] Memory: msync, mincore, the mlock family (mlock, mlock2, munlock, mlockall, munlockall;
        RLIMIT_MEMLOCK and CAP_IPC_LOCK), membarrier, mseal, remap_file_pages, process_madvise,
        process_mrelease; decided per call: the NUMA calls (mbind, set_mempolicy, get_mempolicy,

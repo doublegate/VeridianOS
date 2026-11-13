@@ -122,7 +122,7 @@ Each group lands with its LTP cases. The counts are "missing" entries in the cov
     the NUMA calls.
   - A page cache, so shared file mappings stay coherent.
   - Enforced mprotect.
-- **ipc (22):** SysV shm/sem/msg, POSIX mqueues, and futex2.
+- **ipc (22):** SysV shm/sem/msg, POSIX mqueues and futex2 (done in v0.28, ADR 0027).
 - **events (14):** the epoll variants, pselect6, eventfd, signalfd, Linux AIO and io_uring.
 - **network (3) plus the stack**
   - shutdown, recvmmsg and sendmmsg.

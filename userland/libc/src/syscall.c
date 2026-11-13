@@ -620,7 +620,7 @@ int futex_wait(int *uaddr, int expected, const struct timespec *timeout)
                 (uint64_t)(timeout->tv_nsec / 1000000ULL);
     }
     return (int)__syscall_ret(
-        veridian_syscall5(SYS_FUTEX_WAIT,
+        veridian_syscall5(SYS_NATIVE_FUTEX_WAIT,
                           uaddr,
                           expected,
                           timeout ? &ticks : 0,
@@ -631,13 +631,13 @@ int futex_wait(int *uaddr, int expected, const struct timespec *timeout)
 int futex_wake(int *uaddr, int count)
 {
     return (int)__syscall_ret(
-        veridian_syscall3(SYS_FUTEX_WAKE, uaddr, count, 0));
+        veridian_syscall3(SYS_NATIVE_FUTEX_WAKE, uaddr, count, 0));
 }
 
 int futex_requeue(int *uaddr, int wake_count, int *uaddr2, int requeue_count)
 {
     return (int)__syscall_ret(
-        veridian_syscall5(SYS_FUTEX_WAIT,
+        veridian_syscall5(SYS_NATIVE_FUTEX_WAIT,
                           uaddr,
                           wake_count,
                           uaddr2,

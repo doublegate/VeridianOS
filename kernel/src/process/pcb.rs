@@ -157,6 +157,12 @@ pub struct Process {
     /// exec, the one thread that stays (N-101).
     pub exec_tid: AtomicU64,
 
+    /// System V semaphore undo list (`sysvsem.undo_list`): made by the
+    /// first semop with SEM_UNDO, shared by a CLONE_SYSVSEM clone, applied
+    /// when the last process holding it exits.
+    #[cfg(feature = "alloc")]
+    pub sem_undo: Mutex<Option<Arc<crate::syscall::sysvipc::sem::UndoList>>>,
+
     /// The signal the parent gets when this process exits: SIGCHLD, or
     /// clone's low byte (0: none) (N-210).
     pub exit_signal: AtomicU32,
@@ -604,6 +610,8 @@ impl Process {
             dispatched: core::sync::atomic::AtomicBool::new(false),
             kill_pending: AtomicU32::new(0),
             exec_tid: AtomicU64::new(0),
+            #[cfg(feature = "alloc")]
+            sem_undo: Mutex::new(None),
             exit_signal: AtomicU32::new(super::signals::SIGCHLD as u32),
             autoreap: core::sync::atomic::AtomicBool::new(false),
             vm_id: AtomicU64::new(new_vm_id()),
