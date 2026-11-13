@@ -133,7 +133,7 @@ pub fn changing() -> bool {
     CHANGING.load(core::sync::atomic::Ordering::SeqCst) != 0
 }
 
-/// Bumped as each change begins: a fork that copied its parent's mappings
+/// Bumped as each change begins and ends: a fork that copied its parent's mappings
 /// before a change could have been missed by the change's passes over the
 /// process table, and checks this once its child is in it.
 static GENERATION: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -153,6 +153,10 @@ pub struct ChangeGuard;
 
 impl Drop for ChangeGuard {
     fn drop(&mut self) {
+        // Bumped at the end too: a fork whose window held the whole rest of
+        // a change (it began before the fork looked) sees the value move
+        // (commit security review).
+        GENERATION.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
         CHANGING.fetch_sub(1, core::sync::atomic::Ordering::SeqCst);
     }
 }
