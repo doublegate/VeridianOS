@@ -58,10 +58,16 @@ GitHub Actions (`.github/workflows/ci.yml`) runs:
 - The x86_64 rootfs runtime suite
 - `cargo audit` and the documentation build
 
-`scripts/dev/gate.sh --boot --rootfs` runs before every commit: fmt, clippy on every target, the
+`scripts/dev/gate.sh --boot --rootfs` runs before every push: fmt, clippy on every target, the
 system call checks, the native libc and host tests, the builds, the boot tests (with more variants
-than CI) and the runtime suites on all three architectures. It does not run `cargo audit`, build
-the documentation or measure coverage; those run in CI only.
+than CI) and the runtime suites on all three architectures, the emulated ones side by side. It is
+the only place the AArch64 and RISC-V runtime suites run (CI runs x86_64's). The boots and runtime
+suites run again on four CPUs (`--no-smp` skips that round). It does not run `cargo audit`, build the documentation or measure coverage; those run in CI only.
+
+After a fix confined to a few runtime checks (the kernel unchanged), rebuild the roots and rerun
+just those checks, on each architecture, before the full gate:
+`ONLY="sysv_sem futex2" REPEAT=10 ARCH=aarch64 scripts/run-rootfs-tests.sh` (each run in its own
+`LOG_DIR` when several go at once).
 
 ## Writing Tests
 

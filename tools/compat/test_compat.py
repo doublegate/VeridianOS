@@ -691,5 +691,29 @@ class GuestRunner(unittest.TestCase):
         self.assertNotIn("$((", self.RUN_SH.read_text())
 
 
+class RunFingerprint(unittest.TestCase):
+    """--resume compares a fingerprint of the kernel, image and lists: a
+    changed file is noticed, an unchanged set matches (PR #30 review)."""
+
+    def test_follows_the_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            kernel, image, lst = (
+                Path(d) / n for n in ("kernel", "image.img", "a.list")
+            )
+            for f in (kernel, image, lst):
+                f.write_bytes(b"x")
+            cmd = ["qemu", "-kernel", str(kernel), "-drive", f"file={image},if=none"]
+            first = compat.run_fingerprint(cmd, [lst])
+            for f in (kernel, image, lst):
+                self.assertIn(str(f), first)
+            self.assertEqual(compat.run_fingerprint(cmd, [lst]), first)
+            image.write_bytes(b"xy")
+            self.assertNotEqual(compat.run_fingerprint(cmd, [lst]), first)
+            again = compat.run_fingerprint(cmd, [lst])
+            st = lst.stat()
+            os.utime(lst, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+            self.assertNotEqual(compat.run_fingerprint(cmd, [lst]), again)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -604,31 +604,33 @@ impl PackageManager {
             unsafe { core::ptr::read_unaligned(package_data.as_ptr() as *const PackageHeader) };
 
         // Step 2: Extract and parse metadata (JSON)
-        let meta_offset = header.metadata_offset as usize;
-        let meta_size = header.metadata_size as usize;
+        // Offsets and sizes come from the package: checked without overflow
+        // (signature_range), as the signature's are (PR #25 review).
+        let meta_range = signature_range(
+            header.metadata_offset as u64,
+            header.metadata_size as u64,
+            package_data.len(),
+        )
+        .ok_or(KernelError::InvalidArgument {
+            name: "metadata_offset",
+            value: "out_of_bounds",
+        })?;
 
-        if meta_offset + meta_size > package_data.len() {
-            return Err(KernelError::InvalidArgument {
-                name: "metadata_offset",
-                value: "out_of_bounds",
-            });
-        }
-
-        let meta_bytes = &package_data[meta_offset..meta_offset + meta_size];
+        let meta_bytes = &package_data[meta_range];
         let metadata = parse_package_metadata(meta_bytes)?;
 
         // Step 3: Extract content section
-        let content_offset = header.content_offset as usize;
-        let content_size = header.content_size as usize;
+        let content_range = signature_range(
+            header.content_offset as u64,
+            header.content_size as u64,
+            package_data.len(),
+        )
+        .ok_or(KernelError::InvalidArgument {
+            name: "content_offset",
+            value: "out_of_bounds",
+        })?;
 
-        if content_offset + content_size > package_data.len() {
-            return Err(KernelError::InvalidArgument {
-                name: "content_offset",
-                value: "out_of_bounds",
-            });
-        }
-
-        let content_bytes = &package_data[content_offset..content_offset + content_size];
+        let content_bytes = &package_data[content_range];
 
         // Step 4: Decompress content
         let compression = header.get_compression().unwrap_or(Compression::None);
@@ -1052,7 +1054,7 @@ fn extract_package_files(package_id: &str, data: &[u8]) -> PkgResult<()> {
             data[pos + 5],
             data[pos + 6],
             data[pos + 7],
-        ]) as usize;
+        ]);
         pos += 8;
 
         // Read file mode
@@ -1067,14 +1069,14 @@ fn extract_package_files(package_id: &str, data: &[u8]) -> PkgResult<()> {
         pos += 4;
 
         // Read file data
-        if pos + file_size > data.len() {
-            return Err(KernelError::InvalidArgument {
+        let file_range = signature_range(pos as u64, file_size, data.len()).ok_or(
+            KernelError::InvalidArgument {
                 name: "file_entry",
                 value: "truncated_data",
-            });
-        }
-        let file_data = &data[pos..pos + file_size];
-        pos += file_size;
+            },
+        )?;
+        pos = file_range.end;
+        let file_data = &data[file_range];
 
         // Install file to filesystem
         let full_path = alloc::format!("{}/{}", install_base, path);
@@ -1165,6 +1167,26 @@ mod tests {
         assert_eq!(signature_range(u64::MAX, 2, 100), None);
         assert_eq!(signature_range(1, u64::MAX, 100), None);
         assert_eq!(signature_range(100, 0, 100), Some(100..100));
+    }
+
+    /// A file entry whose size would overflow the position is refused,
+    /// not wrapped into a slice past the end (PR #25 review).
+    #[test]
+    fn a_file_size_that_overflows_is_refused() {
+        let mut data = alloc::vec::Vec::new();
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.push(b'a');
+        data.extend_from_slice(&u64::MAX.to_le_bytes());
+        data.extend_from_slice(&0o644u32.to_le_bytes());
+        data.extend_from_slice(b"xyz");
+        assert!(matches!(
+            extract_package_files("t", &data),
+            Err(KernelError::InvalidArgument {
+                name: "file_entry",
+                value: "truncated_data"
+            })
+        ));
     }
 
     #[allow(unused_imports)]

@@ -199,6 +199,7 @@ esac
 set -x
 "${CC}" \
     -nostdlib -nostdinc -ffreestanding -static \
+    -I "${LIBC_INCDIR}" \
     -Wall -Wextra -O2 -g \
     ${ARCH_FLAGS} \
     -o "${BUILD_DIR}/minimal" \

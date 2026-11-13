@@ -564,11 +564,21 @@ impl BlockFsNode {
         let result = op(&mut fs);
         fs.writeback_if_over_limit();
         let freed = core::mem::take(&mut fs.freed_special);
+        if freed.is_empty() {
+            return result;
+        }
+        // Outside the lock (the FIFO and socket tables are locked after
+        // it), but the numbers stay unallocatable until reported: each is
+        // reported once, before any new file can have it.
+        fs.reporting_special.extend_from_slice(&freed);
         drop(fs);
-        // Outside the lock: the FIFO and socket tables are locked after it.
-        for inode in freed {
+        for &inode in &freed {
             super::special_inode_freed((Arc::as_ptr(&self.fs) as u64, inode as u64));
         }
+        self.fs
+            .write()
+            .reporting_special
+            .retain(|i| !freed.contains(i));
         result
     }
 }
@@ -855,6 +865,10 @@ pub struct BlockFsInner {
     /// found by that inode number must not be found by the next file to get
     /// it (`fs::special_inode_freed`).
     freed_special: Vec<u32>,
+    /// Those being reported now, with the lock released: not given to a
+    /// new file until the FIFO and socket tables have forgotten them, or a
+    /// new FIFO or socket could be found as the old one (PR #20 review).
+    reporting_special: Vec<u32>,
 }
 
 /// The wall clock in seconds since 1970, as the inode times are stored
@@ -903,6 +917,7 @@ impl BlockFsInner {
             disk_writable: false,
             page_cache: crate::mm::page_cache::PageCacheTable::new(),
             freed_special: Vec::new(),
+            reporting_special: Vec::new(),
         };
 
         // Create "." and ".." entries in the root directory (both point to inode 0)
@@ -937,9 +952,15 @@ impl BlockFsInner {
         Ok(())
     }
 
+    /// Whether `inode` is a freed special inode not yet forgotten by the
+    /// FIFO and socket tables ([`BlockFsNode::mutate`]).
+    fn special_unreported(&self, inode: u32) -> bool {
+        self.freed_special.contains(&inode) || self.reporting_special.contains(&inode)
+    }
+
     fn allocate_inode(&mut self) -> Option<u32> {
         for (idx, inode) in self.inode_table.iter().enumerate() {
-            if inode.links_count == 0 && idx > 0 {
+            if inode.links_count == 0 && idx > 0 && !self.special_unreported(idx as u32) {
                 // Don't allocate root. A cache of the inode's previous file
                 // must not serve the new one.
                 self.superblock.free_inodes -= 1;
@@ -1465,6 +1486,7 @@ impl BlockFsInner {
             disk_writable: false,
             page_cache: crate::mm::page_cache::PageCacheTable::new(),
             freed_special: Vec::new(),
+            reporting_special: Vec::new(),
         };
         fs.attach_disk(backend)?;
 
@@ -3292,6 +3314,29 @@ pub fn attach_virtio_backend(fs: &BlockFs, load_from_disk: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A freed FIFO or socket inode is not handed out again while its
+    /// number is still being reported to the FIFO and socket tables (the
+    /// window after `mutate` drops the lock; PR #20 review), and is once
+    /// the report is done.
+    #[test]
+    fn a_special_inode_is_not_reused_before_it_is_forgotten() {
+        let fs = BlockFs::format(1024, 64).unwrap();
+        let root = fs.root();
+        let perms = Permissions::from_mode(0o666);
+        let old = root.mknod("p", NodeType::Pipe, perms, 0).unwrap();
+        let old_ino = crate::fs::inode_key(&old).1 as u32;
+        root.unlink("p").unwrap();
+        // As if another CPU's mutate were between dropping the lock and
+        // reporting the number.
+        fs.inner.write().reporting_special.push(old_ino);
+        let other = root.mknod("q", NodeType::Pipe, perms, 0).unwrap();
+        assert_ne!(crate::fs::inode_key(&other).1 as u32, old_ino);
+        fs.inner.write().reporting_special.clear();
+        let reused = root.mknod("r", NodeType::Pipe, perms, 0).unwrap();
+        assert_eq!(crate::fs::inode_key(&reused).1 as u32, old_ino);
+        assert!(fs.inner.read().reporting_special.is_empty());
+    }
 
     /// statfs reports the superblock's counts, and they move as a file
     /// takes an inode and blocks.
