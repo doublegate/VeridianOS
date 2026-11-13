@@ -52,7 +52,7 @@ CONFIG_TMPFS y
 CONFIG_TMPFS_XATTR y needs=setxattr,getxattr,listxattr,removexattr
 CONFIG_FILE_LOCKING y needs=flock,fcntl
 CONFIG_FHANDLE y needs=name_to_handle_at,open_by_handle_at
-CONFIG_ADVISE_SYSCALLS y needs=madvise,fadvise64
+CONFIG_ADVISE_SYSCALLS y needs=madvise,fadvise64,process_madvise
 CONFIG_EPOLL y needs=epoll_create1,epoll_ctl,epoll_pwait
 CONFIG_EVENTFD y needs=eventfd2
 CONFIG_SIGNALFD y needs=signalfd4
@@ -64,6 +64,9 @@ CONFIG_FANOTIFY n  # no fanotify_init(2)
 CONFIG_AIO n  # no io_setup(2)
 CONFIG_IO_URING n  # no io_uring_setup(2)
 CONFIG_USERFAULTFD n  # no userfaultfd(2)
+CONFIG_MEMBARRIER y needs=membarrier  # v0.28 item 5; no RSEQ commands (no rseq)
+CONFIG_SECRETMEM n  # memfd_secret ENOSYS until the physical map can be split
+CONFIG_ARCH_HAS_PKEYS n  # pkeys as without the hardware (pkey_alloc ENOSPC)
 CONFIG_SYSVIPC y needs=shmget,shmat,shmdt,shmctl,semget,semop,semtimedop,semctl,msgget,msgsnd,msgrcv,msgctl  # v0.28 item 5; per IPC namespace
 CONFIG_POSIX_MQUEUE y needs=mq_open,mq_unlink,mq_timedsend,mq_timedreceive,mq_notify,mq_getsetattr  # v0.28 item 5; per IPC namespace, no SIGEV_THREAD (no netlink sockets)
 CONFIG_BLK_DEV_LOOP n  # no loop devices

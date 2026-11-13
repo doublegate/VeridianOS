@@ -247,6 +247,10 @@ impl VfsNode for MemfdNode {
         }
         Some(pages.share(first_page, count))
     }
+
+    fn maps_own_pages(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

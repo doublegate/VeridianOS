@@ -154,7 +154,8 @@ There are two kinds of capability:
    signalling, tracing, rescheduling or limiting another process need theirs likewise (EPERM
    without), and changing the machine as a whole -- writing a sysctl other than a new IPC
    namespace's own limits (EACCES), the package calls, going past RLIMIT_NPROC as root or with
-   CAP_SYS_RESOURCE (EAGAIN) -- needs MODIFY on the `System` object. File access needs READ on the mount namespace, and WRITE as well to change anything
+   CAP_SYS_RESOURCE (EAGAIN), locking memory past RLIMIT_MEMLOCK with CAP_IPC_LOCK (ENOMEM or
+   EAGAIN, as without it) -- needs MODIFY on the `System` object. File access needs READ on the mount namespace, and WRITE as well to change anything
    (EACCES without; EPERM for chmod, chown and the other owner checks, the owner included); a
    device node from `mknod` needs CREATE (EPERM). A descriptor opened before a drop keeps
    reading and writing, as one opened before a chmod does (its attributes still need READ to

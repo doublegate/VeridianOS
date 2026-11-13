@@ -421,17 +421,22 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
      - [x] POSIX message queues: mq_open, mq_unlink, mq_timedsend, mq_timedreceive, mq_notify,
        mq_getsetattr on an mqueue filesystem, per IPC namespace; CONFIG_POSIX_MQUEUE.
      - [x] futex2: futex_waitv, futex_wake, futex_wait, futex_requeue on the existing futex table.
-     - [ ] Memory: msync, mincore, the mlock family (mlock, mlock2, munlock, mlockall, munlockall;
-       RLIMIT_MEMLOCK and CAP_IPC_LOCK), membarrier, mseal, remap_file_pages, process_madvise,
-       process_mrelease; decided per call: the NUMA calls (mbind, set_mempolicy, get_mempolicy,
-       set_mempolicy_home_node, migrate_pages, move_pages), the pkey calls, userfaultfd and
-       map_shadow_stack.
+     - [x] Memory: msync, mincore, the mlock family (mlock, mlock2, munlock, mlockall, munlockall;
+       RLIMIT_MEMLOCK, CAP_IPC_LOCK with `System`), membarrier, mseal, remap_file_pages,
+       process_madvise, process_mrelease, `/proc/<pid>/status` memory lines and
+       `/proc/self/smaps`; pkey calls as without the hardware; ENOSYS: the NUMA calls (mbind,
+       set_mempolicy, get_mempolicy, set_mempolicy_home_node, migrate_pages, move_pages),
+       userfaultfd, map_shadow_stack (ADR 0027 decisions 9-18).
+       - [ ] Real protection keys: x86_64 PKU (key bits in user PTEs, CR4.PKE, PKRU per thread in
+         XSAVE) and AArch64 POE, its own PR.
+       - [ ] memfd_secret on a splittable physical map (all three architectures, guards on every
+         kernel path to user frames through it), its own PR; ENOSYS until then.
      - [ ] The new mount API on H3's mount objects: open_tree, open_tree_attr, move_mount, fsopen,
        fsconfig, fsmount, fspick, mount_setattr, statmount, listmount, listns; decided:
        quotactl and quotactl_fd.
      - [ ] Sockets: shutdown, recvmmsg, sendmmsg.
      - [ ] Files and scheduling: cachestat, file_getattr, file_setattr, ioprio_get, ioprio_set;
-       decided: memfd_secret. fanotify and rseq (with rseq_slice_yield) stay ENOSYS, as decided
+       memfd_secret moved to the memory group's follow-up. fanotify and rseq (with rseq_slice_yield) stay ENOSYS, as decided
        in group 3.
      - [ ] The system tier, decided per call: syslog, vhangup, acct, reboot, swapon, swapoff,
        seccomp (filter mode), the landlock and lsm calls, add_key, request_key, keyctl,

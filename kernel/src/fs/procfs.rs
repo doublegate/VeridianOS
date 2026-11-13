@@ -846,6 +846,10 @@ impl VfsNode for ProcNode {
                     name if name.starts_with("sysvipc/") => {
                         crate::syscall::sysvipc::proc_text(&name["sysvipc/".len()..])
                     }
+                    #[cfg(feature = "alloc")]
+                    "self/smaps" => crate::process::current_process()
+                        .map(|p| generate_smaps(p.pid.0))
+                        .unwrap_or_default(),
                     "self/maps" => crate::process::current_process()
                         .map(|p| generate_maps(p.pid.0))
                         .unwrap_or_default(),
@@ -887,13 +891,14 @@ impl VfsNode for ProcNode {
                                 .unwrap_or_default();
 
                             format!(
-                                "Name:\t{}\nPid:\t{}\nPPid:\t{}\nState:\t{}\n{}{}{}",
+                                "Name:\t{}\nPid:\t{}\nPPid:\t{}\nState:\t{}\n{}{}{}{}",
                                 name,
                                 self.nr(*pid),
                                 parent,
                                 state,
                                 status_ids(&process.credentials(), &viewer),
                                 status_nspids(&process, &self.ns),
+                                status_mem(&process),
                                 caps
                             )
                         } else {
@@ -1435,8 +1440,10 @@ impl VfsNode for ProcNode {
                                     as Arc<dyn VfsNode>
                             })
                             .ok_or(KernelError::FsError(FsError::NotFound)),
-                        "maps" => Ok(Arc::new(self.system_file(format!("self/{}", name)))
-                            as Arc<dyn VfsNode>),
+                        "maps" | "smaps" => {
+                            Ok(Arc::new(self.system_file(format!("self/{}", name)))
+                                as Arc<dyn VfsNode>)
+                        }
                         _ => Err(KernelError::FsError(FsError::NotFound)),
                     },
                     _ => Err(KernelError::FsError(FsError::NotFound)),
@@ -1526,6 +1533,108 @@ fn format_maps_line(
         "{:08x}-{:08x} r{}{}{} 00000000 00:00 0{}\n",
         start, end, write, exec, share, label
     )
+}
+
+/// The memory lines of `/proc/<pid>/status` (task_mem): the address
+/// space's size, what is locked (mlock), pinned (nothing here) and
+/// resident, in kB. Empty while the address space is busy.
+fn status_mem(process: &crate::process::Process) -> String {
+    #[cfg(feature = "alloc")]
+    if let Some(space) = process.memory_space.try_lock() {
+        let kb = |pages: usize| pages * 4;
+        return format!(
+            "VmSize:\t{:8} kB\nVmLck:\t{:8} kB\nVmPin:\t{:8} kB\nVmRSS:\t{:8} kB\n",
+            kb(space.total_pages()),
+            kb(space.locked_pages()),
+            0,
+            kb(space.resident_pages())
+        );
+    }
+    let _ = process;
+    String::new()
+}
+
+/// `/proc/self/smaps` (show_smap): each mapping's maps line, its sizes in
+/// kB -- every resident page is private and dirty here, nothing is swapped
+/// -- `Locked:` (its resident size when mlocked) and `VmFlags:` with the
+/// mnemonics LTP reads: rd wr ex sh, mr mw me, dc (MADV_DONTFORK), lo
+/// (VM_LOCKED), wf (MADV_WIPEONFORK), sl (mseal), lf (VM_LOCKONFAULT).
+#[cfg(feature = "alloc")]
+fn generate_smaps(pid: u64) -> String {
+    use crate::mm::{vas::MappingType, PageFlags};
+    let Some(process) = crate::process::get_process(crate::process::ProcessId(pid)) else {
+        return String::new();
+    };
+    let Some(space) = process.memory_space.try_lock() else {
+        return String::new();
+    };
+    let Some(mappings) = space.mappings_ref().try_lock() else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for m in mappings.values() {
+        if m.start.as_u64() >= crate::mm::user_layout::user_space_end() as u64 {
+            continue;
+        }
+        out.push_str(&format_maps_line(
+            m.start.as_u64(),
+            m.size,
+            m.flags,
+            m.mapping_type,
+        ));
+        let size = m.size / 1024;
+        let rss = if m.flags.contains(PageFlags::HUGE) {
+            if m.physical_frames.is_empty() {
+                0
+            } else {
+                size
+            }
+        } else {
+            m.physical_frames.len().min(m.size / 4096) * 4
+        };
+        let anon = if m.backing.is_none() { rss } else { 0 };
+        let locked = if m.mlock.is_locked() { rss } else { 0 };
+        let page = if m.flags.contains(PageFlags::HUGE) {
+            2048
+        } else {
+            4
+        };
+        out.push_str(&format!(
+            "Size:           {:8} kB\nKernelPageSize: {:8} kB\nMMUPageSize:    {:8} kB\n\
+             Rss:            {:8} kB\nPss:            {:8} kB\nShared_Clean:   {:8} kB\n\
+             Shared_Dirty:   {:8} kB\nPrivate_Clean:  {:8} kB\nPrivate_Dirty:  {:8} kB\n\
+             Referenced:     {:8} kB\nAnonymous:      {:8} kB\nSwap:           {:8} kB\n\
+             SwapPss:        {:8} kB\nLocked:         {:8} kB\n",
+            size, page, page, rss, rss, 0, 0, 0, rss, rss, anon, 0, 0, locked
+        ));
+        let user = m.flags.contains(PageFlags::USER) && m.flags.contains(PageFlags::PRESENT);
+        let shared = matches!(
+            m.mapping_type,
+            MappingType::Shared | MappingType::SharedRegion | MappingType::Device
+        );
+        let mut flags = String::from("VmFlags:");
+        let mut flag = |on: bool, name: &str| {
+            if on {
+                flags.push(' ');
+                flags.push_str(name);
+            }
+        };
+        flag(user, "rd");
+        flag(m.flags.contains(PageFlags::WRITABLE), "wr");
+        flag(user && !m.flags.contains(PageFlags::NO_EXECUTE), "ex");
+        flag(shared, "sh");
+        flag(true, "mr");
+        flag(m.may_write, "mw");
+        flag(m.may_exec, "me");
+        flag(m.dont_fork, "dc");
+        flag(m.mlock.is_locked(), "lo");
+        flag(m.wipe_on_fork, "wf");
+        flag(m.sealed, "sl");
+        flag(m.mlock == crate::mm::vas::Mlock::OnFault, "lf");
+        flags.push('\n');
+        out.push_str(&flags);
+    }
+    out
 }
 
 /// Generate `/proc/<pid>/maps` from the process's virtual address space.

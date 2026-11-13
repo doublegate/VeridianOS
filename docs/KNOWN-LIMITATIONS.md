@@ -353,6 +353,16 @@ What remains:
 - **POSIX message queues (ADR 0027).** As Linux, per IPC namespace, but mq_notify's
   SIGEV_THREAD fails (it needs a netlink socket, which do not exist yet: musl's mq_notify gets
   EAFNOSUPPORT making one).
+- **Memory calls (ADR 0027 decisions 9-18).** Pages are never paged out, so mlock only changes
+  what is counted and refused. mincore reports every page of a mapping resident (anonymous
+  memory is not lazy; LTP's mincore03 expects untouched pages to be absent). msync writes a
+  MAP_SHARED regular file's private copy back (MS_ASYNC too), within the file's size; another
+  process's mapping of the file still has its own copy until the v0.29 page cache.
+  process_mrelease reaps nothing ahead of the exit (memory goes as the process exits).
+  remap_file_pages refuses a System V attachment (EINVAL). membarrier's expedited commands
+  interrupt every other CPU, not only those running the caller's threads; the RSEQ commands are
+  EINVAL (no rseq). Protection keys behave as without the hardware on every architecture
+  (pkey_alloc ENOSPC), and memfd_secret is ENOSYS: both get their own pull requests.
 - **kcmp.** KCMP_FILES and KCMP_SIGHAND see the tables a CLONE_FILES or CLONE_SIGHAND clone
   shares, and a table's identity can be reused once its last user is gone, as on Linux. A
   CLONE_VM child counts as sharing its parent's
@@ -489,6 +499,13 @@ not refused. System calls, page faults and the return to user mode run with inte
 so TLB shootdowns are always answered (N-139, ADR 0012 rule 6).
 
 Still open:
+- An intermittent hang on four CPUs, seen twice in CI (x86_64 runtime suite, both on one PR #40
+  commit, GitHub's runners) and never locally. It happened in `musl_runtime_test`'s `pid_ns` check,
+  after a PID namespace's init exited. In one run the init was never reaped; in the other its
+  parent stopped partway through its own exit cleanup, and the guest printed nothing more. 100
+  runs of the check alone, 100 rounds of the namespace checks and 10 full suites on four CPUs
+  under KVM did not reproduce it. The cause is not known; a CPU stopped answering IPIs is one
+  candidate.
 - Lock-free structures (`sync/`, N-59) have not run on more than one CPU.
 - Secondaries copy the boot CPU's CR4, so they match it, including SMEP and SMAP being off (N-15,
   below).

@@ -801,6 +801,13 @@ pub trait VfsNode: Send + Sync {
         None
     }
 
+    /// Whether [`VfsNode::share_pages`] gives this node's own pages, so a
+    /// MAP_SHARED mapping of it is the file (and msync has nothing to
+    /// write back), without the side effect of asking for them.
+    fn maps_own_pages(&self) -> bool {
+        false
+    }
+
     /// Whether every readiness change of this node calls
     /// [`crate::sched::dispatch::io_event`]. Waiters on such a node sleep
     /// until woken; on any other they also re-check periodically.

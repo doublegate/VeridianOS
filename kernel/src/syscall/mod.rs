@@ -354,7 +354,12 @@ mod futex;
 #[cfg(feature = "alloc")]
 mod futex2;
 #[cfg(feature = "alloc")]
+pub(crate) mod memctl;
+// membarrier (v0.28 item 5)
+#[cfg(feature = "alloc")]
 mod futex_pi;
+#[cfg(feature = "alloc")]
+mod membarrier;
 
 /// A thread is exiting: hand on the PI futexes it holds (futex_pi.rs).
 #[cfg(feature = "alloc")]
@@ -1625,6 +1630,36 @@ fn handle_syscall(
         }
         #[cfg(feature = "alloc")]
         Syscall::Madvise => memory::sys_madvise(arg1, arg2, arg3),
+        #[cfg(feature = "alloc")]
+        Syscall::Mlock => memctl::sys_mlock(arg1, arg2),
+        #[cfg(feature = "alloc")]
+        Syscall::Mlock2 => memctl::sys_mlock2(arg1, arg2, arg3),
+        #[cfg(feature = "alloc")]
+        Syscall::Munlock => memctl::sys_munlock(arg1, arg2),
+        #[cfg(feature = "alloc")]
+        Syscall::Mlockall => memctl::sys_mlockall(arg1),
+        #[cfg(feature = "alloc")]
+        Syscall::Munlockall => memctl::sys_munlockall(),
+        #[cfg(feature = "alloc")]
+        Syscall::Mseal => memctl::sys_mseal(arg1, arg2, arg3),
+        #[cfg(feature = "alloc")]
+        Syscall::Mincore => memctl::sys_mincore(arg1, arg2, arg3),
+        #[cfg(feature = "alloc")]
+        Syscall::Msync => memctl::sys_msync(arg1, arg2, arg3),
+        #[cfg(feature = "alloc")]
+        Syscall::Membarrier => membarrier::sys_membarrier(arg1, arg2, arg3),
+        #[cfg(feature = "alloc")]
+        Syscall::ProcessMadvise => memctl::sys_process_madvise(arg1, arg2, arg3, arg4, arg5),
+        #[cfg(feature = "alloc")]
+        Syscall::ProcessMrelease => memctl::sys_process_mrelease(arg1, arg2),
+        #[cfg(feature = "alloc")]
+        Syscall::RemapFilePages => memory::sys_remap_file_pages(arg1, arg2, arg3, arg4, arg5),
+        #[cfg(feature = "alloc")]
+        Syscall::PkeyAlloc => memctl::sys_pkey_alloc(arg1, arg2),
+        #[cfg(feature = "alloc")]
+        Syscall::PkeyFree => memctl::sys_pkey_free(arg1),
+        #[cfg(feature = "alloc")]
+        Syscall::PkeyMprotect => memctl::sys_pkey_mprotect(arg1, arg2, arg3, arg4),
 
         // *at() syscalls -- dirfd-relative path operations for musl
         Syscall::Fchmodat => sys_fchmodat(arg1, arg2, arg3),
@@ -1679,6 +1714,9 @@ fn handle_syscall(
         #[cfg(feature = "alloc")]
         Syscall::TimerDelete => time::sys_timer_delete(arg1),
         Syscall::Rseq => Err(SyscallError::NotImplemented),
+        // Until the physical map can be split (ADR 0027): ENOSYS, and the
+        // coverage table says so (a stub, not an implementation).
+        Syscall::MemfdSecret => Err(SyscallError::NotImplemented),
         #[cfg(feature = "alloc")]
         Syscall::Clone3 => thread_clone::sys_clone3(arg1, arg2),
         Syscall::Statx => sys_statx(arg1, arg2, arg3, arg4, arg5),
@@ -5017,7 +5055,7 @@ mod tests {
     fn test_syscall_try_from_gap_value() {
         // Linux numbers with no call yet, and the gap below the private
         // range, are not decoded.
-        assert!(Syscall::try_from(26).is_err()); // msync
+        assert!(Syscall::try_from(179).is_err()); // quotactl
         assert!(Syscall::try_from(153).is_err()); // vhangup
         assert!(Syscall::try_from(500).is_err());
         assert!(Syscall::try_from(1023).is_err());

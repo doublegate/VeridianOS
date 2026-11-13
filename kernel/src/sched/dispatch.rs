@@ -1172,6 +1172,151 @@ fn kick_cpu(cpu: usize) {
     let _ = cpu;
 }
 
+/// membarrier's expedited barrier: interrupt every other online CPU and wait
+/// until each has taken the interrupt, whose handler runs a full barrier
+/// before counting it (`arch::percpu::note_ipi`), and, returning, a core
+/// serialising instruction (iret, eret; fence.i on RISC-V). Every CPU, not
+/// just those running the caller's threads: more than Linux interrupts,
+/// never fewer. Waits however long it takes, as a missed barrier would be
+/// a silent memory-ordering bug, but yields while a CPU is slow to answer,
+/// and ends early only for a process being killed.
+pub fn barrier_cpus() {
+    use core::sync::atomic::{fence, Ordering};
+    fence(Ordering::SeqCst);
+    let online = (crate::arch::smp_boot::online_cpus() as usize).min(crate::sched::smp::MAX_CPUS);
+    // Without the dispatcher's kick (only the boot CPU runs anything), or
+    // on one CPU, the fence is the whole barrier. System calls run with
+    // interrupts on (N-139), so two CPUs here at once each answer the
+    // other.
+    if online <= 1
+        || !cfg!(any(
+            all(target_arch = "x86_64", target_os = "none"),
+            dispatch
+        ))
+    {
+        return;
+    }
+    // CPUs the caller ran on during the barrier (it yields, so it may
+    // move): each is passed by a context switch, which orders memory but on
+    // x86_64 (no CR3 reload between threads of one process, sysret) and
+    // RISC-V (no fence.i) does not serialise instruction fetch. Any of them
+    // the caller has left by the end gets the interrupt as well, so
+    // SYNC_CORE covers it; the one it ends on is the caller's to serialise
+    // (PR #41 review).
+    let mut ran_on = 0u64;
+    let note_here = |ran_on: &mut u64| {
+        if let Some(c) = this_cpu() {
+            *ran_on |= 1 << (c % 64);
+        }
+    };
+    note_here(&mut ran_on);
+    for cpu in 0..online {
+        if Some(cpu) == this_cpu() {
+            continue;
+        }
+        if barrier_one(cpu, &mut ran_on) == Barrier::Killed {
+            fence(Ordering::SeqCst);
+            return;
+        }
+        note_here(&mut ran_on);
+    }
+    // The CPUs the caller has left, until none is left behind (sending to
+    // one may move the caller again).
+    loop {
+        let here = this_cpu().map_or(0, |c| 1u64 << (c % 64));
+        let left = ran_on & !here;
+        if left == 0 {
+            break;
+        }
+        let cpu = left.trailing_zeros() as usize;
+        // Done with it whatever happens: taking the interrupt passes it.
+        ran_on &= !(1 << cpu);
+        if barrier_one(cpu, &mut ran_on) == Barrier::Killed {
+            break;
+        }
+        note_here(&mut ran_on);
+    }
+    fence(Ordering::SeqCst);
+}
+
+/// How [`barrier_one`] ended.
+#[derive(PartialEq, Eq)]
+enum Barrier {
+    /// `cpu` took the interrupt, cannot be sent one (it runs nothing), or
+    /// is where the caller runs now (noted in `ran_on`).
+    Passed,
+    /// The calling process is being killed and does not wait.
+    Killed,
+}
+
+/// Interrupt `cpu` and wait until it has taken the interrupt (see
+/// [`barrier_cpus`]). Should the caller move onto `cpu` meanwhile, it stops
+/// waiting (a CPU is never sent its own interrupt) and notes `cpu` in
+/// `ran_on`.
+fn barrier_one(cpu: usize, ran_on: &mut u64) -> Barrier {
+    use core::sync::atomic::Ordering;
+    /// Spins between two sends of the same interrupt, should one be lost.
+    const RESEND_SPINS: u32 = 1 << 20;
+    let before = crate::arch::percpu::ipis_of(cpu);
+    // A CPU the interrupt cannot be addressed to (no APIC ID) runs
+    // nothing, so it has no barrier to pass; waiting for it would hang the
+    // caller for good (commit security review).
+    if !send_barrier_ipi(cpu) {
+        return Barrier::Passed;
+    }
+    let mut spins = 0u32;
+    let mut warned = false;
+    while crate::arch::percpu::ipis_of(cpu) == before {
+        // Moved onto `cpu`: the interrupt was never sent to it (a kick to
+        // the CPU itself is dropped), so there is nothing to wait for.
+        if this_cpu() == Some(cpu) {
+            *ran_on |= 1 << (cpu % 64);
+            return Barrier::Passed;
+        }
+        core::hint::spin_loop();
+        spins += 1;
+        if spins < RESEND_SPINS {
+            continue;
+        }
+        spins = 0;
+        // A CPU slow to answer costs only this thread: it never returns
+        // early (Linux's guarantee), but lets the others run meanwhile (the
+        // maintainer's choice over a time limit).
+        if !warned {
+            warned = true;
+            crate::println!("[MEMBARRIER] CPU {} has not taken its barrier IPI yet", cpu);
+        }
+        yield_now();
+        // A process being killed does not wait for the barrier.
+        if crate::process::current_process()
+            .is_some_and(|p| p.kill_pending.load(Ordering::Acquire) != 0)
+        {
+            return Barrier::Killed;
+        }
+        if this_cpu() != Some(cpu) {
+            let _ = send_barrier_ipi(cpu);
+        }
+    }
+    Barrier::Passed
+}
+
+/// [`kick_cpu`] for the barrier, saying whether the interrupt could be sent.
+fn send_barrier_ipi(cpu: usize) -> bool {
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    {
+        crate::arch::x86_64::apic::send_ipi_to_cpu(
+            cpu,
+            crate::arch::x86_64::apic::SCHED_WAKE_VECTOR,
+        )
+        .is_ok()
+    }
+    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+    {
+        kick_cpu(cpu);
+        true
+    }
+}
+
 /// Make `task` look at its signals now: wake it if it sleeps, or, if it is
 /// running on another CPU, interrupt that CPU (the reschedule IPI): the
 /// return to user mode from that interrupt delivers them. Without the
