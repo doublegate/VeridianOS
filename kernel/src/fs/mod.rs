@@ -2306,12 +2306,28 @@ impl Vfs {
             let (parent, canonical) = self.lookup(ctx, parent_path, &ctx.cwd, true)?;
             (parent, canonical, String::from(name))
         } else {
-            let path = normalize_path(path, &ctx.cwd);
-            if path == "/" {
+            let relative = !path.starts_with('/') && !path.starts_with('\0');
+            // From a failfs working directory nothing relative resolves.
+            if relative && ctx.cwd == FAILFS_ROOT {
+                return Err(KernelError::FsError(crate::error::FsError::NotSupported));
+            }
+            let mut path = normalize_path(path, &ctx.cwd);
+            // Under a failfs root a relative path joined to the working
+            // directory still resolves (from the top of the tree), where an
+            // absolute one does not.
+            if relative && ctx.root == FAILFS_ROOT {
+                path.insert_str(0, WHOLE_TREE);
+            }
+            if path == "/" || path.strip_prefix(WHOLE_TREE) == Some("/") {
                 return Err(KernelError::FsError(crate::error::FsError::AlreadyExists));
             }
             let pos = path.rfind('/').unwrap_or(0);
-            let (parent_path, name) = (&path[..pos.max(1)], &path[pos + 1..]);
+            // The parent keeps a WHOLE_TREE prefix ("\0wt:" alone is its top).
+            let (parent_path, name) = if path.starts_with(WHOLE_TREE) {
+                (&path[..pos], &path[pos + 1..])
+            } else {
+                (&path[..pos.max(1)], &path[pos + 1..])
+            };
             let (parent, canonical) = self.lookup(ctx, parent_path, "/", true)?;
             (parent, canonical, String::from(name))
         };
@@ -3759,6 +3775,32 @@ pub(crate) mod tests {
         assert_eq!(r(&whole("/tmp/abs"), "/tmp", FAILFS_ROOT), unsupported);
         assert_eq!(r(&whole(""), "/tmp", FAILFS_ROOT), Ok(String::from("/")));
         assert_eq!(normalize_path(&whole("/tmp/./x/.."), "/"), whole("/tmp"));
+
+        // Creating by a relative name under a failfs root (mkdir "new"
+        // from /tmp) works; by an absolute one, or from a failfs working
+        // directory, it does not (PR #44 review).
+        let mut ctx = vfs.kernel_context();
+        ctx.root = String::from(FAILFS_ROOT);
+        ctx.cwd = String::from("/tmp");
+        let mkdir = |ctx: &PathContext, path: &str| {
+            vfs.create_in(
+                ctx,
+                path,
+                |_| Ok(()),
+                |p, n| p.mkdir(n, Permissions::default()),
+            )
+            .map(|_| ())
+        };
+        assert_eq!(mkdir(&ctx, "new"), Ok(()));
+        assert!(vfs.resolve_path("/tmp/new").is_ok());
+        assert_eq!(mkdir(&ctx, "../top"), Ok(()));
+        assert!(vfs.resolve_path("/top").is_ok());
+        assert_eq!(
+            mkdir(&ctx, "/tmp/abs"),
+            unsupported.clone().map(|_: String| ())
+        );
+        ctx.cwd = String::from(FAILFS_ROOT);
+        assert_eq!(mkdir(&ctx, "rel"), unsupported.map(|_: String| ()));
     }
 
     #[test]

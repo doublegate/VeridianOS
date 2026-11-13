@@ -1861,11 +1861,15 @@ fn fd_directory_path(file: &crate::fs::file::File) -> Result<alloc::string::Stri
     let root = vfs.get_root();
     let path = crate::fs::root_relative(global, &root);
     // Under a failfs root no absolute lookup succeeds, but a descriptor
-    // still names its directory (Linux 7.3): check it in the whole tree.
+    // still names its directory (Linux 7.3): check it in the whole tree of
+    // the caller's mount namespace (`WHOLE_TREE`), not the initial one's
+    // (PR #44 review).
     let found = if root == crate::fs::FAILFS_ROOT {
-        vfs.global()
-            .resolve_from(global, "/")
-            .map(|n| (n, alloc::string::String::from(global)))
+        vfs.resolve_canonical(
+            &alloc::format!("{}{}", crate::fs::WHOLE_TREE, global),
+            "/",
+            true,
+        )
     } else {
         vfs.resolve_canonical(&path, "/", true)
     };

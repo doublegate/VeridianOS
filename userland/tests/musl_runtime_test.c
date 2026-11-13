@@ -7333,6 +7333,27 @@ static int failfs_chrooted_case(void)
     return failfs_errno_is(failfs_fchroot(FAILFS_FD, 0), EPERM) ? 0 : 4;
 }
 
+/* A directory of a private mount namespace's mount still serves
+ * descriptor-relative lookups under failfs: the descriptor is checked in
+ * the caller's namespace, not the initial one (PR #44 review). */
+static int failfs_mntns_case(void)
+{
+    mkdir("/tmp/failfs_ns", 0755);
+    if (unshare(CLONE_NEWNS) != 0) return 1;
+    if (mount("none", "/tmp/failfs_ns", "tmpfs", 0, "size=64k") != 0) return 2;
+    int f = open("/tmp/failfs_ns/f", O_CREAT | O_WRONLY, 0644);
+    if (f < 0) return 4;
+    close(f);
+    int dfd = open("/tmp/failfs_ns", O_RDONLY | O_DIRECTORY);
+    if (dfd < 0 || failfs_fchroot(FAILFS_FD, 0) != 0) return 8;
+    int bad = 0;
+    f = openat(dfd, "f", O_RDONLY);
+    if (f < 0) bad |= 16; else close(f);
+    if (mkdirat(dfd, "d", 0755) != 0) bad |= 32;
+    close(dfd);
+    return bad;
+}
+
 /* Defined with the capability tests below (it drops MODIFY). */
 static int failfs_jail_modify_case(void);
 
@@ -7352,22 +7373,24 @@ static int failfs_shared_fs_case(void)
 
 static void test_failfs(void)
 {
-    static char why[160];
-    int r[8] = {
+    static char why[224];
+    int r[9] = {
         failfs_case(failfs_fchdir_case),     failfs_case(failfs_args_case),
         failfs_case(failfs_realfd_case),     failfs_case(failfs_sentinel_case),
         failfs_case(failfs_unprivileged_case), failfs_case(failfs_chrooted_case),
         failfs_case(failfs_shared_fs_case),  failfs_case(failfs_jail_modify_case),
+        failfs_case(failfs_mntns_case),
     };
     snprintf(why, sizeof(why),
              "fchdir=%#x args=%#x realfd=%#x sentinel=%#x unpriv=%#x chrooted=%#x shared=%#x "
-             "jail=%#x",
-             r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
+             "jail=%#x ns=%#x",
+             r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8]);
     int ok = 1;
-    for (int i = 0; i < 8; i++)
+    for (int i = 0; i < 9; i++)
         ok &= r[i] == 0;
     unlink("/tmp/failfs_real/canary");
     rmdir("/tmp/failfs_real");
+    rmdir("/tmp/failfs_ns");
     unlink("/tmp/failfs_s/rel");
     unlink("/tmp/failfs_s/abs");
     unlink("/tmp/failfs_s/target");
