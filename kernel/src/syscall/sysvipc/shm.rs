@@ -384,6 +384,15 @@ pub fn detach(addr: usize) -> SyscallResult {
         .collect();
     drop(pieces);
     let vas = proc.memory_space.lock();
+    // mseal: a sealed attachment cannot be detached (Linux's munmap path,
+    // which shmdt takes, is EPERM over a sealed VMA), and nothing goes if
+    // any piece is sealed.
+    if doomed
+        .iter()
+        .any(|(start, len)| vas.sealed_in(*start, *start + *len as u64))
+    {
+        return Err(SyscallError::OperationNotPermitted);
+    }
     for (start, len) in doomed {
         vas.unmap(start as usize, len)
             .map_err(|_| SyscallError::InvalidArgument)?;

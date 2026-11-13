@@ -64,6 +64,22 @@ brk
 madvise
 mremap
 memfd_create
+msync
+mincore
+mlock
+munlock
+mlockall
+munlockall
+mlock2
+remap_file_pages
+membarrier
+process_madvise
+process_mrelease
+mseal
+memfd_secret
+pkey_mprotect
+pkey_alloc
+pkey_free
 
 ## Capabilities
 CapabilityGrant         private 1054

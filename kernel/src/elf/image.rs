@@ -333,6 +333,8 @@ pub fn load(
     // W^X follows the new program's note (the interpreter's does not
     // count), and PR_SET_MDWE the old program's (ADR 0017).
     vas.set_wx_policy(vas.wx_policy().exec(wants_wx(binary, data)));
+    // A new mm: no MCL_FUTURE, membarrier registrations or keys but 0.
+    vas.reset_mm_state();
     map_image(vas, node, data, program_plan, program_guarded, private)?;
     let mut interpreter_plan = None;
     let (start, base) = match interpreter {

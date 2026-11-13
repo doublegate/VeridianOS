@@ -513,6 +513,66 @@ pub struct VirtualMapping {
     /// MADV_WIPEONFORK: a fork child gets zero pages here instead of the
     /// parent's (private anonymous memory only).
     pub wipe_on_fork: bool,
+    /// mlock(2): VM_LOCKED, or VM_LOCKED | VM_LOCKONFAULT.
+    pub mlock: Mlock,
+    /// mseal(2): VM_SEALED. The mapping cannot be unmapped, moved,
+    /// replaced, reprotected or discarded any more; a fork child keeps it.
+    pub sealed: bool,
+    /// The protection key of its pages (pkey_mprotect), 0 by default.
+    pub pkey: u16,
+}
+
+/// A mapping's mlock state (Linux's VM_LOCKED and VM_LOCKONFAULT). Pages
+/// here are never paged out, so the state is what mlock reports and counts
+/// (VmLck, smaps' Locked, RLIMIT_MEMLOCK).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Mlock {
+    #[default]
+    Unlocked,
+    /// VM_LOCKED: locked, its pages faulted in.
+    Locked,
+    /// VM_LOCKED | VM_LOCKONFAULT: locked as its pages are faulted in.
+    OnFault,
+}
+
+impl Mlock {
+    pub fn is_locked(self) -> bool {
+        self != Self::Unlocked
+    }
+}
+
+/// What a process's memory has beyond its mappings (Linux keeps it in the
+/// mm): mlockall(MCL_FUTURE)'s default for new mappings, the membarrier
+/// registrations and the allocated protection keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MmState {
+    /// mm->def_vma_flags' VM_LOCKED and VM_LOCKONFAULT.
+    pub def_mlock: Mlock,
+    /// membarrier registrations (the MEMBARRIER_CMD_REGISTER_* bits).
+    pub membarrier: u32,
+    /// Allocated protection keys, a bit each; key 0 always is.
+    pub pkeys: u16,
+}
+
+impl Default for MmState {
+    fn default() -> Self {
+        Self {
+            def_mlock: Mlock::Unlocked,
+            membarrier: 0,
+            pkeys: 1,
+        }
+    }
+}
+
+impl MmState {
+    /// A fork child's (dup_mm): MCL_FUTURE is not inherited, the
+    /// registrations and the protection keys are.
+    pub fn forked(self) -> Self {
+        Self {
+            def_mlock: Mlock::Unlocked,
+            ..self
+        }
+    }
 }
 
 /// A file mapping's file, and the file offset of the mapping's first page.
@@ -530,6 +590,13 @@ pub struct FileBacking {
     /// close): a System V shared memory attachment. Each piece holds one
     /// hook, so a split, a fork's copy and every unmap keep the count.
     pub hook: Option<MappingHook>,
+    /// Whether this piece has ever been writable (mapped with PROT_WRITE or
+    /// made so by mprotect). Shared file mappings are copies of the file
+    /// here (no page cache yet, N-125), and only a piece that could be
+    /// written holds changes: msync writes back no other, so a read-only
+    /// mapping's stale copy never overwrites what write(2) put in the file
+    /// since (PR #41 review).
+    pub written: bool,
 }
 
 /// What a mapping's owner is told as pieces of the mapping come and go.
@@ -643,9 +710,13 @@ impl VirtualMapping {
                 offset: b.offset,
                 write: b.write.clone(),
                 hook: b.hook.as_ref().map(MappingHook::snapshot),
+                written: b.written,
             }),
             dont_fork: self.dont_fork,
             wipe_on_fork: self.wipe_on_fork,
+            mlock: self.mlock,
+            sealed: self.sealed,
+            pkey: self.pkey,
         }
     }
 
@@ -685,6 +756,9 @@ impl VirtualMapping {
             backing: None,
             dont_fork: false,
             wipe_on_fork: false,
+            mlock: Mlock::Unlocked,
+            sealed: false,
+            pkey: 0,
         }
     }
 
@@ -743,6 +817,25 @@ impl VirtualMapping {
     }
 }
 
+/// Whether heap mapping `m`, the one below the break at `at`, grows in
+/// place by brk's new pages (do_brk_flags expanding a VMA whose flags are
+/// the new pages'): it ends there, is heap memory with the heap's
+/// protection and a frame for every page, and is in the state the new
+/// pages get (lock `def`, no seal, key 0, no fork advice). Otherwise the
+/// pages are a heap mapping of their own (PR #41 review).
+fn heap_grows_in_place(m: &VirtualMapping, at: VirtualAddress, def: Mlock) -> bool {
+    let rw = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER | PageFlags::NO_EXECUTE;
+    m.end() == at
+        && m.mapping_type == MappingType::Heap
+        && m.flags == rw
+        && m.physical_frames.len() == m.size / 4096
+        && !m.dont_fork
+        && !m.wipe_on_fork
+        && m.mlock == def
+        && !m.sealed
+        && m.pkey == 0
+}
+
 /// Virtual Address Space for a process
 pub struct VirtualAddressSpace {
     /// Page table root (CR3 on x86_64)
@@ -771,6 +864,9 @@ pub struct VirtualAddressSpace {
 
     /// Which memory may be writable and executable (`mm::wx`, ADR 0017).
     wx_policy: AtomicU32,
+
+    /// MCL_FUTURE, membarrier registrations, protection keys.
+    mm_state: Mutex<MmState>,
 }
 
 /// Batched TLB flush accumulator.
@@ -859,6 +955,11 @@ impl Default for VirtualAddressSpace {
             stack_size: AtomicU64::new(8 * 1024 * 1024),
             tlb_generation: AtomicU64::new(0),
             wx_policy: AtomicU32::new(0),
+            mm_state: Mutex::new(MmState {
+                def_mlock: Mlock::Unlocked,
+                membarrier: 0,
+                pkeys: 1,
+            }),
         }
     }
 }
@@ -1020,6 +1121,13 @@ impl VirtualAddressSpace {
         let result = self.clone_from_inner(other, false);
         if result.is_err() {
             self.discard_partial_clone();
+            return result;
+        }
+        // dup_mmap: the child's mappings are not locked (seals and keys
+        // stay), and MCL_FUTURE is not inherited.
+        *self.mm_state.lock() = other.mm_state().forked();
+        for m in self.mappings.lock().values_mut() {
+            m.mlock = Mlock::Unlocked;
         }
         result
     }
@@ -1038,8 +1146,27 @@ impl VirtualAddressSpace {
         let result = self.clone_from_inner(other, true);
         if result.is_err() {
             self.discard_partial_clone();
+            return result;
         }
+        // The same mm on Linux: everything it holds comes along.
+        *self.mm_state.lock() = other.mm_state();
         result
+    }
+
+    /// MCL_FUTURE, the membarrier registrations and the protection keys.
+    pub fn mm_state(&self) -> MmState {
+        *self.mm_state.lock()
+    }
+
+    /// Change them (mlockall, membarrier, pkey_alloc and pkey_free).
+    pub fn update_mm_state<R>(&self, f: impl FnOnce(&mut MmState) -> R) -> R {
+        f(&mut self.mm_state.lock())
+    }
+
+    /// exec: a new mm has none of them (membarrier_exec_mmap, and key 0
+    /// the only key).
+    pub fn reset_mm_state(&self) {
+        *self.mm_state.lock() = MmState::default();
     }
 
     /// The user pages this address space has frames for (its resident set:
@@ -1051,7 +1178,15 @@ impl VirtualAddressSpace {
             .lock()
             .values()
             .filter(|m| m.start.0 < KERNEL_SPACE_START)
-            .map(|m| m.physical_frames.len())
+            // A huge mapping keeps one frame per 2 MiB page: count its 4 KiB
+            // pages, as smaps' Rss does (PR #41 review).
+            .map(|m| {
+                if m.flags.contains(PageFlags::HUGE) && !m.physical_frames.is_empty() {
+                    m.size / 4096
+                } else {
+                    m.physical_frames.len()
+                }
+            })
             .sum()
     }
 
@@ -1872,6 +2007,14 @@ impl VirtualAddressSpace {
                 value: "part of a huge-page mapping",
             });
         }
+        // Nor replace a sealed mapping (mseal), whichever caller asks: the
+        // callers check first, and this holds the line under the lock the
+        // replacement is made under (commit security review).
+        if replace && Self::overlapping(&mappings, aligned_start.0, aligned_end).any(|m| m.sealed) {
+            return Err(KernelError::FsError(
+                crate::error::FsError::OperationNotPermitted,
+            ));
+        }
 
         // [a_start, a_end) and [b_start, b_end) overlap iff
         // a_start < b_end && b_start < a_end.
@@ -2045,6 +2188,9 @@ impl VirtualAddressSpace {
             backing: None,
             dont_fork: false,
             wipe_on_fork: false,
+            mlock: Mlock::Unlocked,
+            sealed: false,
+            pkey: 0,
         };
         self.mappings.lock().insert(vaddr, mapping);
 
@@ -2132,6 +2278,9 @@ impl VirtualAddressSpace {
                 backing: None,
                 dont_fork: false,
                 wipe_on_fork: false,
+                mlock: Mlock::Unlocked,
+                sealed: false,
+                pkey: 0,
             },
         );
         Ok(start)
@@ -2356,6 +2505,32 @@ impl VirtualAddressSpace {
     /// inside it into two at `addr`, so a change can apply to one side.
     /// A huge-page mapping is left whole.
     #[cfg(feature = "alloc")]
+    /// A huge-page mapping cannot be split inside a huge page (Linux's
+    /// hugetlb_split: EINVAL), so a range that ends inside one is refused
+    /// rather than made to change the whole mapping (mlock, mseal; PR #41
+    /// review).
+    fn refuse_huge_cut(
+        mappings: &BTreeMap<VirtualAddress, VirtualMapping>,
+        start: u64,
+        end: u64,
+    ) -> Result<(), KernelError> {
+        let cuts = |addr: u64| {
+            mappings
+                .range(..VirtualAddress(addr))
+                .next_back()
+                .is_some_and(|(_, m)| {
+                    m.flags.contains(PageFlags::HUGE) && m.start.0 < addr && addr < m.end().0
+                })
+        };
+        if cuts(start) || cuts(end) {
+            return Err(KernelError::InvalidArgument {
+                name: "range",
+                value: "ends inside a huge page",
+            });
+        }
+        Ok(())
+    }
+
     fn split_at_locked(mappings: &mut BTreeMap<VirtualAddress, VirtualMapping>, addr: u64) {
         let Some((&key, m)) = mappings.range(..VirtualAddress(addr)).next_back() else {
             return;
@@ -2480,6 +2655,9 @@ impl VirtualAddressSpace {
             && left.may_exec == right.may_exec
             && left.dont_fork == right.dont_fork
             && left.wipe_on_fork == right.wipe_on_fork
+            && left.mlock == right.mlock
+            && left.sealed == right.sealed
+            && left.pkey == right.pkey
             && !left.flags.contains(PageFlags::HUGE)
             && left.physical_frames.len() == left.size / 4096
             && right.physical_frames.len() == right.size / 4096;
@@ -2734,6 +2912,352 @@ impl VirtualAddressSpace {
         Ok(())
     }
 
+    /// The mappings that overlap `[start, end)`, from the last back.
+    #[cfg(feature = "alloc")]
+    fn overlapping(
+        mappings: &BTreeMap<VirtualAddress, VirtualMapping>,
+        start: u64,
+        end: u64,
+    ) -> impl Iterator<Item = &VirtualMapping> {
+        mappings
+            .range(..VirtualAddress(end))
+            .rev()
+            .take_while(move |(_, m)| m.end().0 > start)
+            .map(|(_, m)| m)
+    }
+
+    /// The first address of `[start, end)` that no mapping covers.
+    #[cfg(feature = "alloc")]
+    fn first_hole(
+        mappings: &BTreeMap<VirtualAddress, VirtualMapping>,
+        start: u64,
+        end: u64,
+    ) -> Option<u64> {
+        let mut at = start;
+        if let Some((_, m)) = mappings.range(..=VirtualAddress(start)).next_back() {
+            if m.contains(VirtualAddress(start)) {
+                at = m.end().0;
+            }
+        }
+        if at == start {
+            return Some(start);
+        }
+        if at >= end {
+            return None;
+        }
+        for (_, m) in mappings.range(VirtualAddress(at)..VirtualAddress(end)) {
+            if m.start.0 > at {
+                return Some(at);
+            }
+            at = m.end().0;
+        }
+        (at < end).then_some(at)
+    }
+
+    /// Whether a mapping is the process's own (not the kernel half every
+    /// address space shares).
+    #[cfg(feature = "alloc")]
+    fn is_user(m: &VirtualMapping) -> bool {
+        m.start.0 < crate::mm::user_layout::user_space_end() as u64
+    }
+
+    /// Whether mlock applies to a mapping (mlock_fixup's vma_supports_mlock
+    /// leaves out VM_IO and VM_PFNMAP memory: device memory here).
+    #[cfg(feature = "alloc")]
+    fn lockable(m: &VirtualMapping) -> bool {
+        m.mapping_type != MappingType::Device
+    }
+
+    /// mlock, mlock2 and munlock (apply_vma_lock_flags): give every mapping
+    /// of `[start, end)` (page aligned) the state `lock`, split at the
+    /// ends. At the first address nothing maps, stop with UnmappedMemory
+    /// (ENOMEM), the mappings before it already changed, as Linux.
+    #[cfg(feature = "alloc")]
+    pub fn set_mlock(&self, start: u64, end: u64, lock: Mlock) -> Result<(), KernelError> {
+        let mut mappings = self.mappings.lock();
+        Self::refuse_huge_cut(&mappings, start, end)?;
+        let hole = Self::first_hole(&mappings, start, end);
+        let stop = hole.unwrap_or(end);
+        if stop > start {
+            Self::split_at_locked(&mut mappings, start);
+            Self::split_at_locked(&mut mappings, stop);
+            for (_, m) in mappings
+                .range_mut(..VirtualAddress(stop))
+                .rev()
+                .take_while(|(_, m)| m.end().0 > start)
+            {
+                if Self::lockable(m) {
+                    m.mlock = lock;
+                }
+            }
+        }
+        match hole {
+            Some(at) => Err(KernelError::UnmappedMemory { addr: at as usize }),
+            None => Ok(()),
+        }
+    }
+
+    /// mremap's lock of a locked mapping it grew in place: `[start, end)`
+    /// gets `lock`, then the mapping at `start` joins the grown part after
+    /// it, which `extend` mapped unlocked and so could not merge. Linux
+    /// grows the VMA itself; left as two pieces, a later mremap of the
+    /// whole range found no single mapping (EFAULT; PR #41 review).
+    #[cfg(feature = "alloc")]
+    pub fn lock_grown(&self, start: u64, end: u64, lock: Mlock) -> Result<(), KernelError> {
+        let r = self.set_mlock(start, end, lock);
+        self.merge_with_next(VirtualAddress(start));
+        // set_mlock split the mapping at `start` when the grown range began
+        // inside it (mremap of its tail): join the front back too.
+        let front = self
+            .mappings
+            .lock()
+            .range(..VirtualAddress(start))
+            .next_back()
+            .filter(|(_, m)| m.end().0 == start)
+            .map(|(&k, _)| k);
+        if let Some(front) = front {
+            self.merge_with_next(front);
+        }
+        r
+    }
+
+    /// mlockall(MCL_CURRENT) and munlockall: every user mapping.
+    #[cfg(feature = "alloc")]
+    pub fn set_mlock_all(&self, lock: Mlock) {
+        for m in self
+            .mappings
+            .lock()
+            .values_mut()
+            .filter(|m| Self::is_user(m))
+        {
+            if Self::lockable(m) {
+                m.mlock = lock;
+            }
+        }
+    }
+
+    /// mm->locked_vm: the pages of locked mappings.
+    #[cfg(feature = "alloc")]
+    pub fn locked_pages(&self) -> usize {
+        self.mappings
+            .lock()
+            .values()
+            .filter(|m| Self::is_user(m) && m.mlock.is_locked())
+            .map(|m| m.size / 4096)
+            .sum()
+    }
+
+    /// The locked pages of `[start, end)` (count_mm_mlocked_page_nr).
+    #[cfg(feature = "alloc")]
+    pub fn locked_pages_in(&self, start: u64, end: u64) -> usize {
+        let mappings = self.mappings.lock();
+        Self::overlapping(&mappings, start, end)
+            .filter(|m| m.mlock.is_locked())
+            .map(|m| ((m.end().0.min(end) - m.start.0.max(start)) / 4096) as usize)
+            .sum()
+    }
+
+    /// mm->total_vm: the pages of every user mapping.
+    #[cfg(feature = "alloc")]
+    pub fn total_pages(&self) -> usize {
+        self.mappings
+            .lock()
+            .values()
+            .filter(|m| Self::is_user(m))
+            .map(|m| m.size / 4096)
+            .sum()
+    }
+
+    /// Whether any mapping in `[start, end)` is sealed (mseal): munmap,
+    /// MAP_FIXED, mremap and mprotect over it are EPERM.
+    #[cfg(feature = "alloc")]
+    pub fn sealed_in(&self, start: u64, end: u64) -> bool {
+        let mappings = self.mappings.lock();
+        let sealed = Self::overlapping(&mappings, start, end).any(|m| m.sealed);
+        sealed
+    }
+
+    /// msync's view of `[start, end)`: for each piece of a MAP_SHARED file
+    /// mapping that holds a copy of its file (not a memfd's or tmpfs
+    /// file's own pages), was mapped from a descriptor open for writing and
+    /// has ever been writable (`FileBacking::written`), the file, the file
+    /// offset, the piece's first address in the range and
+    /// the frames to write back. The frames are only names: another thread
+    /// may unmap them once the lock is dropped, so each page is read through
+    /// [`Self::copy_mapped_page`], under the lock again.
+    #[cfg(feature = "alloc")]
+    #[allow(clippy::type_complexity)]
+    pub fn shared_file_copies(
+        &self,
+        start: u64,
+        end: u64,
+    ) -> Vec<(
+        alloc::sync::Arc<dyn crate::fs::VfsNode>,
+        usize,
+        u64,
+        Vec<super::FrameNumber>,
+    )> {
+        let mappings = self.mappings.lock();
+        let mut out = Vec::new();
+        for m in Self::overlapping(&mappings, start, end) {
+            let Some(b) = m.backing.as_ref() else {
+                continue;
+            };
+            if m.mapping_type != MappingType::Shared
+                || b.write.is_none()
+                || !b.written
+                || b.node.maps_own_pages()
+            {
+                continue;
+            }
+            let first = ((start.max(m.start.0) - m.start.0) / 4096) as usize;
+            let last = ((end.min(m.end().0) - m.start.0) / 4096) as usize;
+            let frames = m
+                .physical_frames
+                .get(first..last.min(m.physical_frames.len()))
+                .map_or_else(Vec::new, <[super::FrameNumber]>::to_vec);
+            out.push((
+                b.node.clone(),
+                b.offset + first * 4096,
+                m.start.0 + first as u64 * 4096,
+                frames,
+            ));
+        }
+        out
+    }
+
+    /// Whether the page at `addr` is still backed by `frame`: false once
+    /// it was unmapped or replaced (and the frame perhaps freed and reused).
+    #[cfg(feature = "alloc")]
+    pub fn still_maps(&self, addr: u64, frame: super::FrameNumber) -> bool {
+        Self::maps_frame(&self.mappings.lock(), addr, frame)
+    }
+
+    #[cfg(feature = "alloc")]
+    fn maps_frame(
+        mappings: &BTreeMap<VirtualAddress, VirtualMapping>,
+        addr: u64,
+        frame: super::FrameNumber,
+    ) -> bool {
+        Self::overlapping(mappings, addr, addr + 1).any(|m| {
+            m.physical_frames
+                .get(((addr - m.start.0) / 4096) as usize)
+                .is_some_and(|f| *f == frame)
+        })
+    }
+
+    /// Copy the start of the page at `addr` into `out` if `frame` still
+    /// backs it, under the mappings lock, so the frame cannot be freed
+    /// meanwhile; false (nothing copied) if it no longer does. The caller
+    /// holds the address space's lock, which munmap takes as well.
+    #[cfg(feature = "alloc")]
+    pub fn copy_mapped_page(&self, addr: u64, frame: super::FrameNumber, out: &mut [u8]) -> bool {
+        let n = out.len().min(4096);
+        let mappings = self.mappings.lock();
+        let mapped = Self::maps_frame(&mappings, addr, frame);
+        if mapped {
+            let virt = super::phys_to_virt_addr(frame.as_u64() << 12) as *const u8;
+            // SAFETY: `frame` backs a page of a live mapping, and the
+            // mappings lock is held, so nothing unmaps or frees it while the
+            // `n <= 4096` bytes are copied; the physical map makes it readable.
+            unsafe { core::ptr::copy_nonoverlapping(virt, out.as_mut_ptr(), n) };
+        }
+        drop(mappings);
+        mapped
+    }
+
+    /// Whether any mapping in `[start, end)` is locked (msync's
+    /// MS_INVALIDATE is EBUSY over one).
+    #[cfg(feature = "alloc")]
+    pub fn locked_in(&self, start: u64, end: u64) -> bool {
+        let mappings = self.mappings.lock();
+        let locked = Self::overlapping(&mappings, start, end).any(|m| m.mlock.is_locked());
+        locked
+    }
+
+    /// The first address of `[start, end)` no mapping covers (for msync's
+    /// and mincore's ENOMEM).
+    #[cfg(feature = "alloc")]
+    pub fn hole_in(&self, start: u64, end: u64) -> Option<u64> {
+        Self::first_hole(&self.mappings.lock(), start, end)
+    }
+
+    /// mincore: one byte per page of `[start, end)`, 1 where the page has a
+    /// frame, or `None` if part of the range is unmapped.
+    #[cfg(feature = "alloc")]
+    pub fn residency(&self, start: u64, end: u64) -> Option<Vec<u8>> {
+        let mappings = self.mappings.lock();
+        if Self::first_hole(&mappings, start, end).is_some() {
+            return None;
+        }
+        let mut out = alloc::vec![0u8; ((end - start) / 4096) as usize];
+        for m in Self::overlapping(&mappings, start, end) {
+            let from = start.max(m.start.0);
+            let to = end.min(m.end().0);
+            let mut page = from;
+            while page < to {
+                let idx = ((page - m.start.0) / 4096) as usize;
+                let present = if m.flags.contains(PageFlags::HUGE) {
+                    !m.physical_frames.is_empty()
+                } else {
+                    m.physical_frames.get(idx).is_some()
+                };
+                out[((page - start) / 4096) as usize] = present as u8;
+                page += 4096;
+            }
+        }
+        Some(out)
+    }
+
+    /// Whether `[start, end)` holds a sealed mapping that madvise may not
+    /// discard: private anonymous memory that is not writable
+    /// (can_madvise_modify; file mappings and writable memory may be).
+    #[cfg(feature = "alloc")]
+    pub fn sealed_discard_refused(&self, start: u64, end: u64) -> bool {
+        let mappings = self.mappings.lock();
+        let refused = Self::overlapping(&mappings, start, end).any(|m| {
+            m.sealed
+                && m.backing.is_none()
+                && !matches!(
+                    m.mapping_type,
+                    MappingType::Shared | MappingType::Device | MappingType::SharedRegion
+                )
+                && !m.flags.contains(PageFlags::WRITABLE)
+        });
+        refused
+    }
+
+    /// Split mappings so that `start` and `end` (page aligned) are mapping
+    /// boundaries, for a change to apply to `[start, end)` alone.
+    #[cfg(feature = "alloc")]
+    pub fn split_range(&self, start: u64, end: u64) {
+        let mut mappings = self.mappings.lock();
+        Self::split_at_locked(&mut mappings, start);
+        Self::split_at_locked(&mut mappings, end);
+    }
+
+    /// mseal: seal every mapping of `[start, end)` (page aligned), split at
+    /// the ends. If any part of the range is unmapped, UnmappedMemory
+    /// (ENOMEM) with nothing changed. Sealing is for good.
+    #[cfg(feature = "alloc")]
+    pub fn seal(&self, start: u64, end: u64) -> Result<(), KernelError> {
+        let mut mappings = self.mappings.lock();
+        if let Some(at) = Self::first_hole(&mappings, start, end) {
+            return Err(KernelError::UnmappedMemory { addr: at as usize });
+        }
+        Self::refuse_huge_cut(&mappings, start, end)?;
+        Self::split_at_locked(&mut mappings, start);
+        Self::split_at_locked(&mut mappings, end);
+        for (_, m) in mappings
+            .range_mut(..VirtualAddress(end))
+            .rev()
+            .take_while(|(_, m)| m.end().0 > start)
+        {
+            m.sealed = true;
+        }
+        Ok(())
+    }
+
     /// Whether mprotect may make the mapping starting at `start` writable
     /// (its VM_MAYWRITE), for a mapping made to continue another.
     #[cfg(feature = "alloc")]
@@ -2779,11 +3303,13 @@ impl VirtualAddressSpace {
         hook: Option<MappingHook>,
     ) {
         if let Some(m) = self.mappings.lock().get_mut(&start) {
+            let written = m.flags.contains(super::PageFlags::WRITABLE);
             m.backing = Some(FileBacking {
                 node,
                 offset,
                 write,
                 hook,
+                written,
             });
         }
     }
@@ -3429,20 +3955,15 @@ impl VirtualAddressSpace {
         // their own, as Linux merges or adds a brk VMA. (It used to extend
         // whatever was keyed at the heap start: once mprotect had split the
         // heap, that was its first piece, stretched over the others.)
-        let rw = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER | PageFlags::NO_EXECUTE;
+        // The new pages get the default lock state (MCL_FUTURE, applied
+        // by sys_brk), no seal and key 0: only an end in that state grows.
+        let def = self.mm_state().def_mlock;
         let mut mappings = self.mappings.lock();
         let last = mappings
             .range_mut(..start_addr)
             .next_back()
             .map(|(_, m)| m)
-            .filter(|m| {
-                m.end() == start_addr
-                    && m.mapping_type == MappingType::Heap
-                    && m.flags == rw
-                    && m.physical_frames.len() == m.size / 4096
-                    && !m.dont_fork
-                    && !m.wipe_on_fork
-            });
+            .filter(|m| heap_grows_in_place(m, start_addr, def));
         if let Some(mapping) = last {
             mapping.size += delta_pages * 4096;
             mapping.physical_frames.extend_from_slice(&new_frames);
@@ -3450,7 +3971,11 @@ impl VirtualAddressSpace {
             let mut mapping =
                 VirtualMapping::new(start_addr, delta_pages * 4096, MappingType::Heap);
             mapping.physical_frames = new_frames;
-            mapping.flags = rw;
+            mapping.flags =
+                PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER | PageFlags::NO_EXECUTE;
+            // MCL_FUTURE: made locked, rather than locked afterwards by a
+            // set_mlock that splits the heap at every growth (PR #41).
+            mapping.mlock = def;
             mappings.insert(start_addr, mapping);
         }
 
@@ -3565,6 +4090,11 @@ impl VirtualAddressSpace {
         for (_, m) in mappings.range_mut(..VirtualAddress(end)) {
             if m.start.0 >= start.0 && m.end().0 <= end {
                 m.flags = new_flags;
+                if new_flags.contains(PageFlags::WRITABLE) {
+                    if let Some(b) = m.backing.as_mut() {
+                        b.written = true;
+                    }
+                }
             }
         }
 
@@ -4264,6 +4794,81 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_sealed_mapping_is_never_replaced() {
+        let vas = VirtualAddressSpace::new();
+        let mut m = record(0xA0_0000, 2, MappingType::Data);
+        m.sealed = true;
+        vas.mappings.lock().insert(m.start, m);
+        assert_eq!(
+            vas.map_region_fixed(VirtualAddress(0xA0_1000), 0x2000, MappingType::Data, None),
+            Err(KernelError::FsError(
+                crate::error::FsError::OperationNotPermitted
+            ))
+        );
+        assert!(vas.find_mapping(VirtualAddress(0xA0_1000)).unwrap().sealed);
+    }
+
+    #[test]
+    fn a_locked_mapping_grown_by_mremap_is_one_mapping() {
+        let vas = VirtualAddressSpace::new();
+        let mut m = record(0x90_0000, 2, MappingType::Data);
+        m.mlock = Mlock::Locked;
+        vas.mappings.lock().insert(m.start, m);
+        // The part mremap's extend maps after it, still unlocked.
+        let grown = record(0x90_2000, 2, MappingType::Data);
+        vas.mappings.lock().insert(grown.start, grown);
+        vas.merge_with_next(VirtualAddress(0x90_0000));
+        assert_eq!(
+            vas.find_mapping(VirtualAddress(0x90_0000)).unwrap().size,
+            0x2000
+        );
+        vas.lock_grown(0x90_0000, 0x90_4000, Mlock::Locked).unwrap();
+        let one = vas.find_mapping(VirtualAddress(0x90_3000)).unwrap();
+        assert_eq!(
+            (one.start.0, one.size, one.mlock),
+            (0x90_0000, 0x4000, Mlock::Locked)
+        );
+    }
+
+    #[test]
+    fn growing_a_locked_mappings_tail_leaves_one_mapping() {
+        let vas = VirtualAddressSpace::new();
+        let mut m = record(0x98_0000, 2, MappingType::Data);
+        m.mlock = Mlock::Locked;
+        vas.mappings.lock().insert(m.start, m);
+        let grown = record(0x98_2000, 1, MappingType::Data);
+        vas.mappings.lock().insert(grown.start, grown);
+        // mremap(0x98_1000, 0x1000, 0x2000): the second page grew.
+        vas.lock_grown(0x98_1000, 0x98_3000, Mlock::Locked).unwrap();
+        let one = vas.find_mapping(VirtualAddress(0x98_0000)).unwrap();
+        assert_eq!((one.start.0, one.size), (0x98_0000, 0x3000));
+    }
+
+    #[test]
+    fn a_huge_page_is_not_cut_by_mlock_or_mseal() {
+        let vas = VirtualAddressSpace::new();
+        let mut m = record(0x40_0000, 512, MappingType::Data);
+        m.flags = m.flags | PageFlags::HUGE;
+        vas.mappings.lock().insert(m.start, m);
+        assert!(matches!(
+            vas.set_mlock(0x40_0000, 0x40_1000, Mlock::Locked),
+            Err(KernelError::InvalidArgument { .. })
+        ));
+        assert!(matches!(
+            vas.seal(0x40_0000, 0x40_1000),
+            Err(KernelError::InvalidArgument { .. })
+        ));
+        assert_eq!(
+            vas.find_mapping(VirtualAddress(0x40_0000)).unwrap().mlock,
+            Mlock::Unlocked
+        );
+        assert!(
+            vas.set_mlock(0x40_0000, 0x60_0000, Mlock::Locked).is_ok(),
+            "the whole page"
+        );
+    }
+
     /// WIPEONFORK is for private anonymous memory; the setting splits the
     /// mapping at the range's ends.
     #[test]
@@ -4662,6 +5267,37 @@ mod tests {
     }
 
     #[test]
+    fn brk_grows_in_place_only_a_heap_end_in_the_new_pages_state() {
+        // do_brk_flags expands the last VMA only if its flags are the new
+        // pages': an mlocked, sealed or keyed end must not hand its state
+        // to them (locking past RLIMIT_MEMLOCK unchecked; PR #41 review).
+        let rw = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER | PageFlags::NO_EXECUTE;
+        let at = VirtualAddress(0x2000_0000_2000);
+        let mut m =
+            VirtualMapping::new(VirtualAddress(0x2000_0000_0000), 0x2000, MappingType::Heap);
+        m.flags = rw;
+        m.physical_frames = alloc::vec![FrameNumber::new(1), FrameNumber::new(2)];
+        assert!(heap_grows_in_place(&m, at, Mlock::Unlocked));
+        assert!(!heap_grows_in_place(
+            &m,
+            VirtualAddress(0x2000_0000_3000),
+            Mlock::Unlocked
+        ));
+        m.mlock = Mlock::Locked;
+        assert!(!heap_grows_in_place(&m, at, Mlock::Unlocked), "mlocked end");
+        assert!(
+            heap_grows_in_place(&m, at, Mlock::Locked),
+            "MCL_FUTURE locks both"
+        );
+        m.mlock = Mlock::Unlocked;
+        m.sealed = true;
+        assert!(!heap_grows_in_place(&m, at, Mlock::Unlocked), "sealed end");
+        m.sealed = false;
+        m.pkey = 1;
+        assert!(!heap_grows_in_place(&m, at, Mlock::Unlocked), "keyed end");
+    }
+
+    #[test]
     fn test_vas_brk_shrinks() {
         let vas = VirtualAddressSpace::new();
 
@@ -4840,6 +5476,142 @@ mod tests {
         assert!(ranges(&vas).is_empty());
     }
 
+    fn mlock_states(vas: &VirtualAddressSpace) -> Vec<(u64, usize, Mlock, bool)> {
+        vas.mappings
+            .lock()
+            .values()
+            .map(|m| (m.start.0, m.size / 4096, m.mlock, m.sealed))
+            .collect()
+    }
+
+    /// mlock splits at the range's ends and counts locked pages; a hole
+    /// stops it with ENOMEM after the mappings before it changed.
+    #[test]
+    fn mlock_splits_counts_and_stops_at_a_hole() {
+        let vas = VirtualAddressSpace::new();
+        {
+            let mut m = vas.mappings.lock();
+            m.insert(
+                VirtualAddress(0x10000),
+                record(0x10000, 4, MappingType::Data),
+            );
+            m.insert(
+                VirtualAddress(0x20000),
+                record(0x20000, 2, MappingType::Data),
+            );
+        }
+        vas.set_mlock(0x11000, 0x13000, Mlock::Locked).unwrap();
+        assert_eq!(
+            mlock_states(&vas),
+            alloc::vec![
+                (0x10000, 1, Mlock::Unlocked, false),
+                (0x11000, 2, Mlock::Locked, false),
+                (0x13000, 1, Mlock::Unlocked, false),
+                (0x20000, 2, Mlock::Unlocked, false),
+            ]
+        );
+        assert_eq!(vas.locked_pages(), 2);
+        assert_eq!(vas.locked_pages_in(0x12000, 0x20000), 1);
+        assert_eq!(vas.total_pages(), 6);
+        // [0x13000, 0x22000): 0x14000 is the first unmapped address.
+        assert_eq!(
+            vas.set_mlock(0x13000, 0x22000, Mlock::OnFault),
+            Err(KernelError::UnmappedMemory { addr: 0x14000 })
+        );
+        assert_eq!(vas.locked_pages(), 3, "the page before the hole is locked");
+        assert_eq!(
+            vas.mappings.lock()[&VirtualAddress(0x20000)].mlock,
+            Mlock::Unlocked
+        );
+        // Nothing at the start: nothing changes.
+        assert!(vas.set_mlock(0x30000, 0x31000, Mlock::Locked).is_err());
+        vas.set_mlock_all(Mlock::Unlocked);
+        assert_eq!(vas.locked_pages(), 0);
+    }
+
+    /// msync names the frames to write back, then reads each page only if
+    /// the same frame still backs it: one unmapped (or remapped) by another
+    /// thread in between is never read (commit security review).
+    #[test]
+    fn msync_reads_only_frames_still_mapped() {
+        let vas = VirtualAddressSpace::new();
+        vas.mappings.lock().insert(
+            VirtualAddress(0x10000),
+            record(0x10000, 2, MappingType::Shared),
+        );
+        let f0 = FrameNumber::new(0x1000 + 0x10);
+        let f1 = FrameNumber::new(0x1000 + 0x11);
+        assert!(vas.still_maps(0x10000, f0));
+        assert!(vas.still_maps(0x11000, f1));
+        assert!(!vas.still_maps(0x11000, f0), "another frame backs it");
+        assert!(!vas.still_maps(0x12000, f1), "past the mapping");
+        // As if a sibling thread unmapped the mapping and the frames went
+        // back to the allocator.
+        vas.mappings.lock().clear();
+        assert!(!vas.still_maps(0x10000, f0));
+        let mut buf = [0u8; 16];
+        assert!(!vas.copy_mapped_page(0x10000, f0, &mut buf));
+        assert_eq!(buf, [0u8; 16], "nothing read from the stale frame");
+    }
+
+    /// mseal refuses a range with a hole, changing nothing; otherwise it
+    /// seals exactly the range, and pieces of different state never merge.
+    #[test]
+    fn mseal_is_all_or_nothing() {
+        let vas = VirtualAddressSpace::new();
+        {
+            let mut m = vas.mappings.lock();
+            m.insert(
+                VirtualAddress(0x10000),
+                record(0x10000, 4, MappingType::Data),
+            );
+            m.insert(
+                VirtualAddress(0x20000),
+                record(0x20000, 2, MappingType::Data),
+            );
+        }
+        assert_eq!(
+            vas.seal(0x12000, 0x21000),
+            Err(KernelError::UnmappedMemory { addr: 0x14000 })
+        );
+        assert!(!vas.sealed_in(0x10000, 0x22000));
+        vas.seal(0x11000, 0x12000).unwrap();
+        assert!(vas.sealed_in(0x11000, 0x12000));
+        assert!(vas.sealed_in(0x10000, 0x20000));
+        assert!(!vas.sealed_in(0x12000, 0x14000));
+        vas.merge_with_next(VirtualAddress(0x10000));
+        vas.merge_with_next(VirtualAddress(0x11000));
+        assert_eq!(
+            mlock_states(&vas).len(),
+            4,
+            "sealed and unsealed stay apart"
+        );
+    }
+
+    /// A fork child keeps seals and keys, not locks or MCL_FUTURE; exec
+    /// resets the mm's state.
+    #[test]
+    fn mm_state_on_fork_and_exec() {
+        let s = MmState {
+            def_mlock: Mlock::Locked,
+            membarrier: 0x10,
+            pkeys: 0b111,
+        };
+        assert_eq!(
+            s.forked(),
+            MmState {
+                def_mlock: Mlock::Unlocked,
+                membarrier: 0x10,
+                pkeys: 0b111
+            }
+        );
+        let vas = VirtualAddressSpace::new();
+        vas.update_mm_state(|m| *m = s);
+        vas.reset_mm_state();
+        assert_eq!(vas.mm_state(), MmState::default());
+        assert_eq!(MmState::default().pkeys, 1, "key 0 is always allocated");
+    }
+
     /// Looking at the mappings is no attach or detach: find_mapping and
     /// mappings_in return snapshots whose hook is not counted, while a split
     /// still counts its new piece (PR #40 review).
@@ -4873,6 +5645,7 @@ mod tests {
             offset: 0,
             write: None,
             hook: Some(MappingHook::adopt(owner.clone())),
+            written: false,
         });
         vas.mappings.lock().insert(VirtualAddress(0x10000), m);
         let seen = vas.find_mapping(VirtualAddress(0x10000)).unwrap();
@@ -4952,6 +5725,7 @@ mod tests {
             offset: 0,
             write: None,
             hook: Some(MappingHook::adopt(owner.clone())),
+            written: false,
         });
         let mut maps = BTreeMap::new();
         maps.insert(VirtualAddress(0x10000), m);

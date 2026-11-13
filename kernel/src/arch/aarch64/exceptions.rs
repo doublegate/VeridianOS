@@ -383,11 +383,13 @@ fn irq(user: bool) {
         let Some(iar) = super::gic::acknowledge_raw() else {
             return;
         };
-        // An SGI (SCHED_WAKE_SGI, a dispatcher kick) needs no work here:
-        // taking it ends the target's wait, and it reaches its next
-        // scheduling point.
+        // An SGI (SCHED_WAKE_SGI, a dispatcher kick) needs no work but to
+        // be counted (membarrier waits for the count): taking it ends the
+        // target's wait, and it reaches its next scheduling point.
         if iar & 0x3FF == VIRTUAL_TIMER_INTID {
             super::timer::handle_interrupt(user);
+        } else if iar & 0x3FF == SCHED_WAKE_SGI {
+            crate::arch::percpu::note_ipi();
         }
         super::gic::end_of_interrupt_raw(iar);
     }
