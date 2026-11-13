@@ -10984,11 +10984,15 @@ static void test_mount_api(void)
               errno == EINVAL) ||
             syscall(SYS_mount_setattr, AT_FDCWD, "/tmp/ma-b", 0, &none, sizeof(none)) != 0)
             g |= 2048;
-        /* A detached tree goes with its last descriptor. */
+        /* A detached tree goes with its last file: a duplicate, or any
+         * file opened in it, keeps it, as on Linux. */
         int d1 = syscall(SYS_open_tree, AT_FDCWD, "/tmp/ma-b", 1);
         int d2 = d1 >= 0 ? dup(d1) : -1;
         if (d1 < 0 || d2 < 0 || close(d1) != 0 || fstatat(d2, "f", &st, 0) != 0) g |= 4096;
+        int inner = d2 >= 0 ? openat(d2, ".", O_RDONLY | O_DIRECTORY) : -1;
         close(d2);
+        if (inner < 0 || fstatat(inner, "f", &st, 0) != 0) g |= 4096;
+        if (inner >= 0) close(inner);
         /* Without CAP_SYS_ADMIN: EPERM. */
         pid_t un = fork();
         if (un == 0) {

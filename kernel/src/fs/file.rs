@@ -230,6 +230,12 @@ pub struct File {
     /// What the node asks its open files to keep alive
     /// ([`VfsNode::held_by_open`]), dropped with the file.
     _held: Option<Arc<dyn core::any::Any + Send + Sync>>,
+
+    /// The detached mount tree the file is in, if it was opened by a path
+    /// in one (`fs::mount::DETACHED`): any file in such a tree keeps it,
+    /// as on Linux every file pins its mount, not only the descriptor
+    /// fsmount or open_tree returned.
+    _tree: Option<Arc<crate::fs::mount::Mounts>>,
 }
 
 impl Drop for File {
@@ -303,6 +309,7 @@ impl File {
             opener: None,
             write_access: None,
             _held: held,
+            _tree: None,
         }
     }
 
@@ -310,6 +317,8 @@ impl File {
     pub fn new_with_path(node: Arc<dyn VfsNode>, flags: OpenFlags, path: String) -> Self {
         let nb = flags.nonblock;
         let held = node.held_by_open();
+        let tree = crate::fs::mount::parse_detached(&path)
+            .and_then(|(id, _)| crate::fs::mount::detached_tree(id));
         Self {
             node,
             flags,
@@ -324,6 +333,7 @@ impl File {
             opener: None,
             write_access: None,
             _held: held,
+            _tree: tree,
         }
     }
 
