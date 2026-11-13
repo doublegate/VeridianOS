@@ -4,6 +4,18 @@
 
 - The Linux system call tables are Linux 7.3's (`abi/linux/VERSION`, read by `gen_syscalls.py`
   and `syscall_coverage.py`, which named v7.2 in their code): 7.3 adds fchroot (472).
+- The gate (`scripts/dev/gate.sh`) runs its emulated guests side by side: the AArch64, RISC-V and
+  Sv39 runtime suites, the x86_64 suite and the conformance smoke run at once, and the release
+  kernels build while the debug kernels boot. One guest uses one host CPU, so back to back they took
+  hours; the four-CPU round's guests run side by side too. A full gate went from about five hours
+  to about one. `ONLY="name ..." [REPEAT=n] scripts/run-rootfs-tests.sh` reruns just the named
+  `musl_runtime_test` checks, to confirm a fix confined to them without the whole suite.
+- The boot tests `timer_interrupts_and_clock` and `smp_cpus_online_and_ticking` wait up to a
+  second for the timer ticks they count (they gave 50 and 20 ms): a loaded host can deschedule a
+  guest's CPU while its clock runs on, and a four-CPU x86_64 boot failed that way with the gate's
+  guests side by side. The second waits only until every CPU has ticked. For the same reason
+  `tlb_shootdown_confirmed` counts a shootdown acknowledgement as slow after a second (the serial
+  warning still comes at 100 ms; the wait itself was and is unbounded).
 - uname reports the release `7.3.0-veridian` (the Linux version whose sources are the kernel's
   specification) instead of the crate version, which LTP read as older than its minimum (4.4) and
   answered with a warning in every new-API test; the version field carries the VeridianOS version
@@ -730,6 +742,39 @@
 
 ### Fixed
 
+- Review points left open on merged pull requests (a sweep of PRs #1-#38):
+  - A freed BlockFS FIFO or socket inode is not handed out again until the FIFO and socket
+    tables have forgotten it; between the operation's end and that report a new file could
+    take the number and be found as the old, live FIFO or socket (#20).
+  - ELF: `e_phentsize` must be the program header's size (ENOEXEC otherwise, as Linux), and the
+    header table's offsets are checked without overflow; header, program header and relocation
+    reads are unaligned, as a byte buffer guarantees no alignment (#25).
+  - Package metadata, content and per-file ranges are checked without overflow, as the
+    signature's already were (#25).
+  - A pipe polls writable (POLLOUT) only with room for a whole PIPE_BUF write, as Linux; one free
+    byte made a poll writer spin on EAGAIN (#24).
+  - CLONE_PARENT is refused to the initial PID 1 too, as to any namespace's init (#37).
+  - A write or truncate keeps a file's set-ID bits through CAP_FSETID only with WRITE on the
+    mount namespace, whichever set-group-ID mode the file has (#39).
+  - The user-address translation behind zero-copy sends walks the user half on AArch64
+    (TTBR0_EL1), not the kernel's root (#33).
+  - tmpfs: a mount's `size=` near the largest value no longer wraps to an unlimited mount, and a
+    file grown past the largest file size is EFBIG before a size limit makes it ENOSPC (#28).
+  - An atomic DRM commit claims its page-flip event when it checks it can queue one, so a commit on
+    another CPU cannot take the slot between the check and the flip (#15).
+  - `sysctl -a` gives kernel.version as /proc/sys/kernel/version does (#34). RISC-V falls back to
+    the legacy SBI set_timer on firmware without the TIME extension and counts a refused call
+    instead of ignoring it (#11). The AArch64 boot-integrity hash reads the kernel at its link
+    address, not its physical load address (#18).
+  - The native libc defines the 18 `<wctype.h>` functions it declared (C locale), and
+    `scripts/cross-compile-test.sh` gives the no-libc test its include directory (#18).
+  - Tooling: a conformance guest that dies just before a range is sent is rebooted rather than
+    ending the run, and `--resume` refuses results from another kernel, image or test list
+    (#30); the BusyBox wrapper takes the toolchain from `VERIDIAN_PREFIX`, and interrupted
+    downloads and extractions are cleaned up (#29); `install-deps.sh` installs no default
+    toolchain before the pinned one, and `guest.py` takes `AARCH64_CPU` (#27); the reviewer
+    self-test checks that the workflow has one job timeout (#6); `musl_runtime_test --only
+    itimers N` resets its counters each run.
 - wait4/waitpid looks for a child to report once more before answering a signal with EINTR, as
   Linux's do_wait does: the SIGCHLD of a child's exit, caught without SA_RESTART, could end the
   wait as EINTR although the child was already a zombie (LTP clone301, intermittently; runtime

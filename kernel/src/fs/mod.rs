@@ -199,7 +199,10 @@ fn drop_set_id(
     caller: &crate::process::creds::Caller,
 ) -> Result<(), KernelError> {
     let meta = node.metadata()?;
-    let fsetid = caller.capable(crate::process::linux_caps::CAP_FSETID);
+    // CAP_FSETID over the file counts only with WRITE on the mount
+    // namespace, as in `in_group_or_capable` (PR #39 review): a descriptor
+    // opened before WRITE was dropped keeps no set-ID bit it could not set.
+    let fsetid = caller.fs.write && caller.capable(crate::process::linux_caps::CAP_FSETID);
     if let Some(kept) = meta
         .permissions
         .after_write(fsetid, caller.in_group_or_capable(meta.uid, meta.gid))
@@ -3544,6 +3547,30 @@ pub(crate) mod tests {
         assert_eq!(m.metadata().unwrap().size, 8192);
         truncate_removing_privs_as(&*m, 16384, &user).unwrap();
         assert_eq!(m.metadata().unwrap().permissions.to_mode(), 0o755);
+    }
+
+    /// CAP_FSETID keeps the set-ID bits only with WRITE on the mount
+    /// namespace, for either set-group-ID mode, as `in_group_or_capable`
+    /// already required (PR #39 review): a writer through a descriptor
+    /// opened before dropping WRITE loses them.
+    #[test]
+    fn cap_fsetid_needs_write_authority_to_keep_set_id_bits() {
+        let caller = |write| crate::process::creds::Caller {
+            fs: crate::process::creds::FsAuthority {
+                write,
+                ..crate::process::creds::FsAuthority::ALL
+            },
+            creds: crate::process::creds::Credentials::new(2000, 2000),
+            caps: crate::process::linux_caps::LinuxCaps::FULL,
+            userns: crate::process::userns::initial(),
+        };
+        for (mode, without) in [(0o2740, 0o740), (0o2750, 0o750)] {
+            let m = memfd::MemfdNode::new(Permissions::from_mode(mode), 1000, 1000, true, 0);
+            truncate_removing_privs_as(&*m, 4096, &caller(true)).unwrap();
+            assert_eq!(m.metadata().unwrap().permissions.to_mode(), mode);
+            truncate_removing_privs_as(&*m, 8192, &caller(false)).unwrap();
+            assert_eq!(m.metadata().unwrap().permissions.to_mode(), without);
+        }
     }
 
     /// chown drops set-user-ID always and set-group-ID with group execute.
