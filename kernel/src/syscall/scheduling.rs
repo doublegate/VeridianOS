@@ -56,8 +56,8 @@ const DL_PERIOD_MIN_NS: u64 = 100_000;
 const DL_PERIOD_MAX_NS: u64 = (1 << 22) * 1000;
 
 const PRIO_PROCESS: usize = 0;
-const PRIO_PGRP: usize = 1;
-const PRIO_USER: usize = 2;
+pub(super) const PRIO_PGRP: usize = 1;
+pub(super) const PRIO_USER: usize = 2;
 
 /// A parameter change as a caller asks for it.
 #[derive(Debug, Clone, Copy)]
@@ -205,7 +205,7 @@ pub(crate) fn thread_exit(thread: &Thread) {
 /// thread ID in the caller's PID namespace, as find_task_by_vpid) with its
 /// process ID and owner credentials. `negative` is the error for pid < 0
 /// (EINVAL for most calls, ESRCH for the affinity ones).
-fn target(
+pub(super) fn target(
     pid: usize,
     negative: SyscallError,
 ) -> Result<(u64, Credentials, Arc<Thread>), SyscallError> {
@@ -252,6 +252,11 @@ fn may_act_on(pid: u64) -> bool {
     crate::process::table::get_process(crate::process::ProcessId(pid)).is_none_or(|p| {
         crate::cap::authority::current_may_act_on_process(&p, crate::cap::Rights::MODIFY)
     })
+}
+
+/// [`may_act_on`] for ioprio_set, which shares setpriority's rules.
+pub(super) fn may_act_on_pid(pid: u64) -> bool {
+    may_act_on(pid)
 }
 
 /// `same_owner` over process `pid`'s user namespace and [`may_act_on`], with
@@ -627,7 +632,7 @@ pub fn sys_getcpu(cpu: usize, node: usize, _cache: usize) -> SyscallResult {
 /// (PRIO_PGRP) or of a user (PRIO_USER); `who` 0 is the caller's. A pid
 /// or group is a number in the caller's PID namespace, and PRIO_USER skips
 /// processes that namespace does not number, as Linux.
-fn priority_targets(
+pub(super) fn priority_targets(
     which: usize,
     who: usize,
 ) -> Result<Vec<(u64, Credentials, Arc<Thread>)>, SyscallError> {

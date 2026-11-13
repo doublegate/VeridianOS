@@ -133,6 +133,19 @@
   gains VmSize, VmLck, VmPin and VmRSS; `/proc/self/smaps` is new (Rss, Locked, VmFlags with lo,
   lf, sl). memfd_secret is ENOSYS until the physical map can be split (its own pull request).
   Runtime test memctl.
+- Files and scheduling calls (v0.28 item 5, ADR 0027 decisions 19-22). ioprio_set and
+  ioprio_get, per thread (CLONE_IO shares it, any other clone or fork copies it), with Linux's
+  rules for RT, other users' threads, process groups and users; an unset priority follows the
+  scheduling (nice, SCHED_IDLE, real-time). virtio-blk and NVMe admit requests in priority order
+  (RT, BE, IDLE; a waiter passed over for a second goes next).
+  Inode attribute flags: immutable, append-only, nodump and noatime through chattr's ioctls
+  (FS_IOC_GETFLAGS/SETFLAGS, FS_IOC_FSGETXATTR/FSSETXATTR) and file_getattr/file_setattr, kept by
+  BlockFS (in the on-disk inode, no format change), tmpfs, ramfs and memfd, and read from ext4.
+  Immutable stops every write, through an already-open descriptor too, and a write through a
+  shared mapping is SIGBUS; append-only allows only appending writes. Both refuse unlink, rename,
+  link, chmod, chown, set times and xattr changes; nodump and noatime pass to new files.
+  cachestat reports the pages of a range that are cached and dirty: tmpfs and memfd pages, and
+  BlockFS's block cache and mapping pages. Runtime test files_sched.
 
 - `docs/adr/README.md`, an index of the architecture decision records (number, title, status and
   date), generated from each ADR's own lines by `tools/docs/gen_adr_index.py`; gate.sh and CI fail

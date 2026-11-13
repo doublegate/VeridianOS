@@ -160,6 +160,59 @@ The reference for every behaviour below is the Linux 7.3 source (kernel.org tarb
     XSAVE state; AArch64 POE) follow in their own pull request (the maintainer's choice,
     2026-11-12).
 
+### Files and scheduling (ioprio_set, ioprio_get, file_getattr, file_setattr, cachestat)
+
+19. ioprio_set and ioprio_get have Linux's semantics (`block/ioprio.c`,
+    `kernel/src/syscall/ioprio.rs`). Each thread has an I/O context (`IoContext`), shared by
+    CLONE_IO and copied by any other clone or fork. Its value is 0 (class NONE) until set; such a
+    thread's I/O runs at the priority its scheduling gives (SCHED_IDLE IDLE, real-time and deadline
+    RT, otherwise BE at level (nice + 20) / 5). The RT class needs CAP_SYS_ADMIN or CAP_SYS_NICE;
+    another thread's needs its owner's UID to be the caller's real or effective one, or
+    CAP_SYS_NICE, and MODIFY over its process, as setpriority (ADR 0024).
+20. The priority reaches the devices through an arbiter (`drivers::block_arbiter`, the
+    maintainer's choice over asynchronous queues, which come with v0.29's completion path). The
+    virtio-blk and NVMe drivers run one request at a time behind the device's lock, so callers
+    wait here and each turn goes to the best priority waiting: RT before BE before IDLE, by level
+    within a class, the earliest first between equals. A waiter passed over for a second goes
+    next, whatever its class, and IDLE goes only when no other class waits.
+21. Inode attribute flags (`kernel/src/fs/attr.rs`, `kernel/src/syscall/fileattr.rs`):
+    - **The set:** Linux tmpfs's, the maintainer's choice: immutable, append-only, nodump and
+      noatime, through FS_IOC_GETFLAGS/SETFLAGS, FS_IOC_FSGETXATTR/FSSETXATTR and
+      file_getattr/file_setattr. Other flags, any xflag beyond the common ones, an extent size and
+      a project ID are EOPNOTSUPP, as tmpfs answers; file_setattr's unknown xflags are EINVAL.
+    - **Storage:** BlockFS keeps them in the on-disk inode's `flags` field, at ext4's i_flags
+      offset and unused before (no format change: older images read 0). tmpfs, ramfs and memfd
+      keep them in memory. ext4, read-only here, reports its i_flags and refuses a change (EROFS).
+      Other filesystems have none (ENOTTY from the ioctls, EOPNOTSUPP from file_getattr).
+    - **Setting:** the owner or CAP_FOWNER over the file, with WRITE on the mount namespace (as
+      chmod); immutable and append-only need CAP_LINUX_IMMUTABLE. A new node takes nodump and
+      noatime from its directory.
+    - **Immutable, ext4's semantics on every filesystem** (the maintainer's choice over tmpfs's,
+      which checks only at open):
+      - No write by anyone, through a descriptor opened before the flag was set too: write and
+        its variants, truncate, fallocate, copy_file_range and splice into it.
+      - No open for writing, no entry made or removed in an immutable directory, no unlink,
+        rename or link of the file itself, no chmod, chown or setting of its times, no xattr
+        change.
+      - Shared mappings: setting the flag first write-protects every writable shared mapping of
+        the file in every process and writes their contents back. A later write through one is
+        SIGBUS (BUS_ADRERR), as ext4's page_mkwrite refuses it, and so is a write through one
+        made or made writable later (mmap, mprotect, mremap).
+    - **Append-only:** opens for writing only with O_APPEND and never with O_TRUNC; no truncate,
+      no fallocate except FALLOC_FL_KEEP_SIZE, no clearing O_APPEND with fcntl, no unlink, rename
+      or link, nothing removed from an append-only directory.
+    - **nodump** is only recorded.
+22. cachestat (`mm/filemap.c`) reports the real caches, the maintainer's choice:
+    - **tmpfs and memfd:** every page of the range the file holds (they are always resident, and
+      none is dirty).
+    - **ramfs:** every page within the file's size.
+    - **BlockFS:** a page is cached when its block is in the block cache, dirty as the cache
+      says, or in a mapping's page cache. A hole is not cached.
+    - **Always 0:** nr_writeback (I/O is synchronous) and nr_evicted/nr_recently_evicted (no
+      eviction history is kept).
+    - **Permission:** as Linux's can_do_cachestat (open for writing, the owner, or write
+      permission; EPERM otherwise).
+
 ## Consequences
 
 - LTP's ipc tests (shmget*, shmat*, shmctl*, semget*, semop*, semctl*, msgget*, msgsnd*,

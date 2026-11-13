@@ -39,6 +39,8 @@ pub struct ForkOptions {
     /// CLONE_SYSVSEM: the child shares the System V semaphore undo list
     /// (a fork's child starts with none).
     pub share_sysvsem: bool,
+    /// CLONE_IO: the child shares the I/O context (its I/O priority).
+    pub share_io: bool,
     /// CLONE_PARENT: the child's parent is the caller's, and its exit
     /// signal the caller's own.
     pub clone_parent: bool,
@@ -99,6 +101,7 @@ impl Default for ForkOptions {
             share_files: false,
             share_sighand: false,
             share_sysvsem: false,
+            share_io: false,
             clone_parent: false,
             vfork: false,
             stack: None,
@@ -336,6 +339,10 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
             .tid(super::ThreadId(new_pid.0))
             // Scheduling parameters as Linux's sched_fork (N-221).
             .sched(current_thread.sched.lock().for_child())
+            .io(crate::syscall::ioprio::IoContext::for_child(
+                &current_thread.io,
+                opts.share_io,
+            ))
             // A clone thread has no kernel-chosen stack (it runs on its own);
             // the child's main thread still needs a size for a later exec.
             .user_stack_size(

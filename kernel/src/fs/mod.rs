@@ -10,6 +10,7 @@ use spin::RwLock;
 
 use crate::error::{FsError, KernelError};
 
+pub mod attr;
 pub mod blockdev;
 pub mod blockfs;
 pub mod devfs;
@@ -388,6 +389,21 @@ impl Permissions {
     }
 }
 
+/// What cachestat reports of a range (`struct cachestat`'s first two
+/// fields; the other three are 0 here).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CacheStat {
+    pub cached: u64,
+    pub dirty: u64,
+}
+
+/// The pages of `first..=last` a file of `size` bytes has (cachestat
+/// counts nothing past its end): None when it has none of them.
+pub fn page_span(size: usize, first: u64, last: u64) -> Option<(u64, u64)> {
+    let pages = (size as u64).div_ceil(4096);
+    (first < pages).then(|| (first, last.min(pages - 1)))
+}
+
 /// File metadata
 #[derive(Debug, Clone)]
 pub struct Metadata {
@@ -681,6 +697,30 @@ pub trait VfsNode: Send + Sync {
     /// rejects an unmappable id before the inode changes).
     fn check_owner(&self, _uid: Option<u32>, _gid: Option<u32>) -> Result<(), KernelError> {
         Ok(())
+    }
+
+    /// cachestat's counts for pages `first..=last` of this node (Linux's
+    /// filemap_cachestat): how many are cached and how many of those are
+    /// dirty. Nothing is written back asynchronously and no eviction is
+    /// remembered, so the writeback and evicted counts are always 0 (ADR
+    /// 0027). A node with no pages counts none.
+    fn cache_stat(&self, _first: u64, _last: u64) -> CacheStat {
+        CacheStat::default()
+    }
+
+    /// The inode attribute flags (`attr::FS_*_FL`), for a filesystem that
+    /// keeps them (`fileattr_get`); None for one that keeps none (ENOTTY
+    /// from the ioctls, EOPNOTSUPP from file_getattr).
+    fn attr_flags(&self) -> Option<u32> {
+        None
+    }
+
+    /// Store new attribute flags, already checked by `attr::apply` (and
+    /// update the ctime). Permission checks are the caller's job.
+    fn set_attr_flags(&self, _flags: u32) -> Result<(), KernelError> {
+        Err(KernelError::NotImplemented {
+            feature: "attribute flags",
+        })
     }
 
     /// Set the access and/or modification time (seconds); `None` leaves

@@ -375,6 +375,11 @@ pub mod sysno {
     pub const SYS_futex_wake: usize = 454;
     pub const SYS_futex_wait: usize = 455;
     pub const SYS_futex_requeue: usize = 456;
+    pub const SYS_ioprio_set: usize = 251;
+    pub const SYS_ioprio_get: usize = 252;
+    pub const SYS_cachestat: usize = 451;
+    pub const SYS_file_getattr: usize = 468;
+    pub const SYS_file_setattr: usize = 469;
 }
 
 // Linux's generic table: calls RISC-V leaves to user space are absent.
@@ -709,6 +714,11 @@ pub mod sysno {
     pub const SYS_futex_wake: usize = 454;
     pub const SYS_futex_wait: usize = 455;
     pub const SYS_futex_requeue: usize = 456;
+    pub const SYS_ioprio_set: usize = 30;
+    pub const SYS_ioprio_get: usize = 31;
+    pub const SYS_cachestat: usize = 451;
+    pub const SYS_file_getattr: usize = 468;
+    pub const SYS_file_setattr: usize = 469;
 }
 
 // Linux's generic table with arm64's ABIs (renameat included).
@@ -1044,4 +1054,9 @@ pub mod sysno {
     pub const SYS_futex_wake: usize = 454;
     pub const SYS_futex_wait: usize = 455;
     pub const SYS_futex_requeue: usize = 456;
+    pub const SYS_ioprio_set: usize = 30;
+    pub const SYS_ioprio_get: usize = 31;
+    pub const SYS_cachestat: usize = 451;
+    pub const SYS_file_getattr: usize = 468;
+    pub const SYS_file_setattr: usize = 469;
 }

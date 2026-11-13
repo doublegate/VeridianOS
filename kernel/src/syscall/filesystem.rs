@@ -375,6 +375,8 @@ pub(super) fn open_node(
     }
     if !created {
         require_open_access(&node, &open_flags)?;
+        #[cfg(feature = "alloc")]
+        check_append_open(&node, &open_flags)?;
     }
     if writes && mount_ro {
         return Err(SyscallError::ReadOnlyFilesystem);
@@ -1005,6 +1007,9 @@ pub fn sys_ftruncate(fd: usize, length: usize) -> SyscallResult {
     if file.node.node_type() != crate::fs::NodeType::File || !file.flags.write {
         return Err(SyscallError::InvalidArgument);
     }
+    // An append-only file cannot be truncated (do_sys_ftruncate: EPERM).
+    #[cfg(feature = "alloc")]
+    crate::fs::attr::may_open(&*file.node, false, false, true).map_err(super::map_kernel_error)?;
     crate::fs::check_fsize_truncate(&*file.node, length).map_err(super::map_kernel_error)?;
     crate::fs::truncate_removing_privs(&*file.node, length).map_err(super::map_kernel_error)?;
     crate::fs::inotify::on_file(&file, crate::fs::inotify::IN_MODIFY);
@@ -1036,6 +1041,17 @@ pub fn sys_fallocate(fd: usize, mode: usize, offset: usize, len: usize) -> Sysca
         NodeType::Pipe => return Err(SyscallError::IllegalSeek),
         NodeType::Directory => return Err(SyscallError::IsADirectory),
         _ => return Err(SyscallError::NoDevice),
+    }
+    // vfs_fallocate: an append-only file takes only FALLOC_FL_KEEP_SIZE,
+    // an immutable one nothing (EPERM).
+    #[cfg(feature = "alloc")]
+    {
+        let flags = crate::fs::attr::of(&*file.node);
+        if mode as u32 & !1 != 0 && flags & crate::fs::attr::FS_APPEND_FL != 0
+            || flags & crate::fs::attr::FS_IMMUTABLE_FL != 0
+        {
+            return Err(SyscallError::OperationNotPermitted);
+        }
     }
     request.check_range().map_err(fs_err)?;
     file.node
@@ -1802,6 +1818,14 @@ fn do_utimes(
         Some([a, m]) => (utime_spec(a, now)?, utime_spec(m, now)?),
     };
     let only_now = specs.is_none_or(|[a, m]| a[1] == UTIME_NOW && m[1] == UTIME_NOW);
+    // may_setattr: explicit times not on an append-only or immutable node,
+    // the current time not on an immutable one (EPERM).
+    #[cfg(feature = "alloc")]
+    if only_now {
+        crate::fs::attr::may_write(&*node).map_err(super::map_kernel_error)?;
+    } else {
+        crate::fs::attr::may_change(&*node).map_err(super::map_kernel_error)?;
+    }
     let caller = Caller::current();
     let meta = node.metadata().map_err(super::map_kernel_error)?;
     if !caller.owner_or_capable(meta.uid) {
@@ -2025,6 +2049,15 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
             return Ok(0);
         }
         _ => {}
+    }
+
+    // The attribute-flag ioctls (do_vfs_ioctl's FS_IOC_*), for any file
+    // whose filesystem keeps the flags; ENOTTY from the rest.
+    #[cfg(feature = "alloc")]
+    if let Some(file) = &file {
+        if let Some(result) = super::fileattr::ioctl(file, cmd as u32, arg) {
+            return result;
+        }
     }
 
     // PTY ends answer the window-size calls themselves (and ENOTTY for
@@ -2488,6 +2521,9 @@ pub(crate) fn chmod_node(
     if node.node_type() == crate::fs::NodeType::Symlink {
         return Err(SyscallError::NotSupported);
     }
+    // may_setattr: not an append-only or immutable node (EPERM).
+    #[cfg(feature = "alloc")]
+    crate::fs::attr::may_change(&**node).map_err(super::map_kernel_error)?;
     let meta = node.metadata().map_err(super::map_kernel_error)?;
     let perms = chmod_perms(&Caller::current(), meta.uid, meta.gid, mode)?;
     node.chmod(perms).map_err(super::map_kernel_error)?;
@@ -2531,11 +2567,26 @@ pub(crate) fn require_open_access(
     }
     if flags.write || flags.append || flags.truncate {
         mask |= crate::fs::MAY_WRITE;
+        // Nobody writes an immutable file (inode_permission: EPERM, before
+        // the mode bits are looked at).
+        #[cfg(feature = "alloc")]
+        crate::fs::attr::may_write(&**node).map_err(super::map_kernel_error)?;
     }
     if mask != 0 && !crate::fs::permission(&Caller::current(), &meta, mask) {
         return Err(SyscallError::PermissionDenied);
     }
     Ok(())
+}
+
+/// may_open's append-only rule for an open that may write (or truncate)
+/// `node`: O_APPEND is needed and O_TRUNC is refused (EPERM).
+#[cfg(feature = "alloc")]
+pub(crate) fn check_append_open(
+    node: &alloc::sync::Arc<dyn crate::fs::VfsNode>,
+    flags: &OpenFlags,
+) -> Result<(), SyscallError> {
+    crate::fs::attr::may_open(&**node, flags.write, flags.append, flags.truncate)
+        .map_err(super::map_kernel_error)
 }
 
 /// Rename `old` to `new` (absolute paths) by linking the existing node
@@ -2673,6 +2724,10 @@ pub(crate) fn parent_dir_canonical(
 /// Creating or removing an entry in `dir` needs write and search permission
 /// on it (FS-SEC-02).
 pub(crate) fn check_dir_write(dir: &dyn crate::fs::VfsNode) -> Result<(), SyscallError> {
+    // An immutable directory takes no entry and loses none (EPERM, before
+    // the mode bits: inode_permission).
+    #[cfg(feature = "alloc")]
+    crate::fs::attr::may_write(dir).map_err(super::map_kernel_error)?;
     let meta = dir.metadata().map_err(super::map_kernel_error)?;
     let mask = crate::fs::MAY_WRITE | crate::fs::MAY_EXEC;
     if crate::fs::permission(&Caller::current(), &meta, mask) {
@@ -2690,17 +2745,18 @@ pub(crate) fn check_may_remove(
     name: &str,
 ) -> Result<(), SyscallError> {
     check_dir_write(dir)?;
+    let entry = dir.lookup(name).map_err(map_resolve_err)?;
+    // may_delete: nothing leaves an append-only directory, and an
+    // append-only or immutable entry is not removed (EPERM).
+    #[cfg(feature = "alloc")]
+    crate::fs::attr::may_remove(Some(dir), &*entry).map_err(super::map_kernel_error)?;
     let caller = Caller::current();
     let uid = caller.creds.fsuid;
     let dir_meta = dir.metadata().map_err(super::map_kernel_error)?;
     if !dir_meta.permissions.sticky || dir_meta.uid == uid {
         return Ok(());
     }
-    let entry_meta = dir
-        .lookup(name)
-        .map_err(map_resolve_err)?
-        .metadata()
-        .map_err(super::map_kernel_error)?;
+    let entry_meta = entry.metadata().map_err(super::map_kernel_error)?;
     if caller.owner_or_capable(entry_meta.uid) {
         Ok(())
     } else {
@@ -3205,6 +3261,13 @@ fn set_file_status_flags(
 
     use crate::fs::file::status;
     let old = file.status.load(Ordering::Acquire);
+    // O_APPEND cannot change on an append-only file (EPERM).
+    #[cfg(feature = "alloc")]
+    if (arg ^ old) & status::APPEND != 0
+        && crate::fs::attr::of(&*file.node) & crate::fs::attr::FS_APPEND_FL != 0
+    {
+        return Err(SyscallError::OperationNotPermitted);
+    }
     if arg & status::NOATIME != 0 && old & status::NOATIME == 0 {
         let meta = file.node.metadata().map_err(super::map_kernel_error)?;
         if !owner_ok(meta.uid) {
@@ -3759,6 +3822,9 @@ pub(crate) fn link_at(
     if !same_mount {
         return Err(SyscallError::CrossDevice);
     }
+    // vfs_link: an append-only or immutable file gets no new name (EPERM).
+    #[cfg(feature = "alloc")]
+    crate::fs::attr::may_remove(None, &*target).map_err(super::map_kernel_error)?;
     // A file whose last name is gone (open, through AT_EMPTY_PATH) gets
     // no new one, as Linux's vfs_link, unless it is an O_TMPFILE file made
     // to be named.
@@ -3908,8 +3974,11 @@ pub fn sys_truncate(path_ptr: usize, length: usize) -> SyscallResult {
     }
     // Linux's vfs_truncate: EROFS before the permission check.
     want_write(&vfs, &canonical)?;
-    // As opening it for writing would need (N-191).
+    // As opening it for writing would need (N-191); an append-only file
+    // cannot be truncated (do_truncate's IS_APPEND, EPERM).
     require_open_access(&node, &OpenFlags::write_only())?;
+    #[cfg(feature = "alloc")]
+    crate::fs::attr::may_change(&*node).map_err(super::map_kernel_error)?;
     // Write access for the truncate: a running program is ETXTBSY (Linux's
     // vfs_truncate).
     let _writing =
@@ -4749,6 +4818,9 @@ pub(crate) fn chown_node(
     if uid.is_none() && gid.is_none() {
         return Ok(0);
     }
+    // may_setattr: not an append-only or immutable node (EPERM).
+    #[cfg(feature = "alloc")]
+    crate::fs::attr::may_change(&**node).map_err(super::map_kernel_error)?;
     let meta = node.metadata().map_err(super::map_kernel_error)?;
     if !may_chown(&Caller::current(), meta.uid, meta.gid, uid, gid) {
         return Err(SyscallError::OperationNotPermitted);

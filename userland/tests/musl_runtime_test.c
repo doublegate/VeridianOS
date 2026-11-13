@@ -5642,6 +5642,7 @@ static void test_posix_mq(void);
 static void test_posix_mq_fs(void);
 static void test_futex2(void);
 static void test_memctl(void);
+static void test_files_sched(void);
 static void test_ipc_object_cap(void);
 
 /* Tests `--only NAME` can run alone (for debugging a single test). */
@@ -5657,6 +5658,7 @@ static const struct {
     {"posix_mq_fs", test_posix_mq_fs},
     {"futex2", test_futex2},
     {"memctl", test_memctl},
+    {"files_sched", test_files_sched},
     {"ipc_object_cap", test_ipc_object_cap},
     {"review_fixes", test_review_fixes},
     {"record_locks", test_record_locks},
@@ -9353,6 +9355,178 @@ static long t_vmlck_kb(void)
     return kb;
 }
 
+/* Files and scheduling (ADR 0027): ioprio_set/ioprio_get, inode attribute
+ * flags (FS_IOC_GETFLAGS/SETFLAGS, FSGETXATTR, file_getattr/file_setattr)
+ * with immutable and append-only enforced, and cachestat. */
+#ifndef SYS_ioprio_set
+#if defined(__x86_64__)
+#define SYS_ioprio_set 251
+#define SYS_ioprio_get 252
+#else
+#define SYS_ioprio_set 30
+#define SYS_ioprio_get 31
+#endif
+#endif
+#define T_SYS_cachestat 451
+#define T_SYS_file_getattr 468
+#define T_SYS_file_setattr 469
+#define T_IOPRIO(c, l) (((c) << 13) | (l))
+#define T_FS_IOC_GETFLAGS 0x80086601u
+#define T_FS_IOC_SETFLAGS 0x40086602u
+#define T_FS_IOC_FSGETXATTR 0x801c581fu
+#define T_FS_IMMUTABLE 0x10
+#define T_FS_APPEND 0x20
+#define T_FS_NODUMP 0x40
+#define T_FS_NOATIME 0x80
+
+static int t_getflags(int fd)
+{
+    unsigned int f = 0xffffffffu;
+    return ioctl(fd, T_FS_IOC_GETFLAGS, &f) == 0 ? (int)f : -errno;
+}
+
+static int t_setflags(int fd, unsigned int f)
+{
+    return ioctl(fd, T_FS_IOC_SETFLAGS, &f) == 0 ? 0 : -errno;
+}
+
+static void test_files_sched(void)
+{
+    char why[96];
+    long f = 0;
+    /* ioprio: unset is 0; a set value is read back and inherited. */
+    if (syscall(SYS_ioprio_get, 1, 0) != 0)
+        f |= 1;
+    if (syscall(SYS_ioprio_set, 1, 0, T_IOPRIO(2, 3)) != 0 ||
+        syscall(SYS_ioprio_get, 1, 0) != T_IOPRIO(2, 3))
+        f |= 2;
+    pid_t c = fork();
+    if (c == 0) {
+        int ok = syscall(SYS_ioprio_get, 1, 0) == T_IOPRIO(2, 3);
+        /* Without CAP_SYS_NICE or CAP_SYS_ADMIN: no RT class. */
+        ok = ok && setuid(65534) == 0 && syscall(SYS_ioprio_set, 1, 0, T_IOPRIO(1, 0)) == -1 &&
+             errno == EPERM && syscall(SYS_ioprio_set, 1, 0, T_IOPRIO(3, 0)) == 0;
+        _exit(ok ? 0 : 1);
+    }
+    if (t_exit_status(c) != 0)
+        f |= 4;
+    if (syscall(SYS_ioprio_set, 1, 0, T_IOPRIO(4, 0)) != -1 || errno != EINVAL ||
+        syscall(SYS_ioprio_set, 1, 0, T_IOPRIO(0, 1)) != -1 || errno != EINVAL)
+        f |= 8;
+    if (syscall(SYS_ioprio_get, 2, 0) > T_IOPRIO(2, 3) || syscall(SYS_ioprio_get, 9, 0) != -1 ||
+        errno != EINVAL)
+        f |= 16;
+    syscall(SYS_ioprio_set, 1, 0, 0);
+
+    /* Attribute flags on a tmpfs file. */
+    const char *path = "/tmp/veridian-attr";
+    unlink(path);
+    int fd = open(path, O_CREAT | O_RDWR, 0644);
+    if (fd < 0 || t_getflags(fd) != 0 || t_setflags(fd, T_FS_NODUMP | T_FS_NOATIME) != 0 ||
+        t_getflags(fd) != (T_FS_NODUMP | T_FS_NOATIME))
+        f |= 32;
+    unsigned int fsx[7] = {0};
+    if (ioctl(fd, T_FS_IOC_FSGETXATTR, fsx) != 0 || fsx[0] != 0xc0)
+        f |= 32;
+    if (t_setflags(fd, 0x8 /* FS_SYNC_FL */) != -EOPNOTSUPP)
+        f |= 64;
+    /* Immutable: no write through an open descriptor, no open for
+     * writing, no unlink, rename, chmod or truncate. */
+    if (write(fd, "abcd", 4) != 4 || t_setflags(fd, T_FS_IMMUTABLE) != 0)
+        f |= 128;
+    if (write(fd, "x", 1) != -1 || errno != EPERM || ftruncate(fd, 0) != -1 || errno != EPERM ||
+        open(path, O_WRONLY) != -1 || errno != EPERM || unlink(path) != -1 || errno != EPERM ||
+        rename(path, "/tmp/veridian-attr2") != -1 || errno != EPERM ||
+        chmod(path, 0600) != -1 || errno != EPERM)
+        f |= 256;
+    if (t_setflags(fd, 0) != 0 || write(fd, "e", 1) != 1)
+        f |= 512;
+    /* A shared mapping written before the flag: its bytes reach the file;
+     * written after: SIGBUS. */
+    c = fork();
+    if (c == 0) {
+        int cfd = open(path, O_RDWR);
+        char *m = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, cfd, 0);
+        if (m == MAP_FAILED)
+            _exit(1);
+        m[0] = 'Z';
+        if (t_setflags(cfd, T_FS_IMMUTABLE) != 0)
+            _exit(2);
+        m[1] = 'Y';
+        _exit(3);
+    }
+    int st = 0;
+    waitpid(c, &st, 0);
+    char b2[2] = {0};
+    long rb = pread(fd, b2, 2, 0);
+    int rb_err = rb < 0 ? errno : 0;
+    if (!WIFSIGNALED(st) || WTERMSIG(st) != SIGBUS || rb != 2 || b2[0] != 'Z' || b2[1] != 'b')
+        f |= 1024;
+    t_setflags(fd, 0);
+    /* Append-only: O_APPEND to write, no O_TRUNC, O_APPEND stays, no
+     * unlink. Without CAP_LINUX_IMMUTABLE it cannot be set. */
+    if (t_setflags(fd, T_FS_APPEND) != 0 || open(path, O_WRONLY) != -1 || errno != EPERM ||
+        open(path, O_WRONLY | O_APPEND | O_TRUNC) != -1 || errno != EPERM || unlink(path) != -1 ||
+        errno != EPERM)
+        f |= 2048;
+    int afd = open(path, O_WRONLY | O_APPEND);
+    if (afd < 0 || fcntl(afd, F_SETFL, 0) != -1 || errno != EPERM)
+        f |= 2048;
+    if (afd >= 0)
+        close(afd);
+    t_setflags(fd, 0);
+    c = fork();
+    if (c == 0)
+        _exit(setuid(65534) == 0 && t_setflags(fd, T_FS_IMMUTABLE) == -EPERM ? 0 : 1);
+    if (t_exit_status(c) != 0)
+        f |= 4096;
+    /* file_getattr and file_setattr on the path. */
+    unsigned long long fa[4] = {0};
+    if (syscall(T_SYS_file_getattr, AT_FDCWD, path, fa, 24, 0) != 0 || fa[0] != 0)
+        f |= 8192;
+    if (syscall(T_SYS_file_getattr, AT_FDCWD, path, fa, 23, 0) != -1 || errno != EINVAL ||
+        syscall(T_SYS_file_getattr, AT_FDCWD, path, fa, 4097, 0) != -1 || errno != E2BIG)
+        f |= 8192;
+    unsigned long long big[4] = {0x40 /* FS_XFLAG_NOATIME */, 0, 0, 1};
+    if (syscall(T_SYS_file_setattr, AT_FDCWD, path, big, 32, 0) != -1 || errno != E2BIG ||
+        syscall(T_SYS_file_setattr, AT_FDCWD, path, big, 24, 0) != 0 ||
+        t_getflags(fd) != T_FS_NOATIME)
+        f |= 8192;
+    close(fd);
+    unlink(path);
+    /* cachestat: a 3-page tmpfs file is all cached, none dirty. */
+    fd = open("/dev/shm/veridian-cachestat", O_CREAT | O_RDWR | O_TRUNC, 0644);
+    int trunc_err = fd >= 0 && ftruncate(fd, 3 * 4096) == 0 ? 0 : errno;
+    unsigned long long range[2] = {0, 0}, cs[5] = {0};
+    long csr = syscall(T_SYS_cachestat, fd, range, cs, 0);
+    int cs_err = csr == 0 ? 0 : errno;
+    unsigned long long cached = cs[0], dirty = cs[1];
+    if (trunc_err || csr != 0 || cached != 3 || dirty != 0 ||
+        syscall(T_SYS_cachestat, fd, range, cs, 1) != -1 || errno != EINVAL)
+        f |= 16384;
+    close(fd);
+    unlink("/dev/shm/veridian-cachestat");
+    /* On BlockFS a written block is dirty until synced. */
+    const char *bpath = "/veridian-cachestat";
+    int bfd = open(bpath, O_CREAT | O_RDWR | O_TRUNC, 0644);
+    char page[4096];
+    memset(page, 'q', sizeof(page));
+    if (bfd < 0 || write(bfd, page, 4096) != 4096 || write(bfd, page, 4096) != 4096 ||
+        syscall(T_SYS_cachestat, bfd, range, cs, 0) != 0 || cs[0] != 2 || cs[1] != 2 ||
+        fsync(bfd) != 0 || syscall(T_SYS_cachestat, bfd, range, cs, 0) != 0 || cs[1] != 0)
+        f |= 32768;
+    if (bfd >= 0 && (t_setflags(bfd, T_FS_IMMUTABLE) != 0 || write(bfd, "x", 1) != -1 ||
+                     errno != EPERM || t_setflags(bfd, 0) != 0))
+        f |= 65536;
+    if (bfd >= 0)
+        close(bfd);
+    unlink(bpath);
+    snprintf(why, sizeof(why), "f=%#lx sig=%d rb=%ld/%d:%c%c trunc=%d cs=%ld/%d %llu/%llu", f,
+             WIFSIGNALED(st) ? WTERMSIG(st) : -1, rb, rb_err, b2[0] ? b2[0] : '?', b2[1] ? b2[1] : '?',
+             trunc_err, csr, cs_err, cached, dirty);
+    report("files_sched", f == 0, why);
+}
+
 static void test_memctl(void)
 {
     char why[160];
@@ -12460,6 +12634,7 @@ int main(int argc, char **argv)
     test_posix_mq_fs();
     test_futex2();
     test_memctl();
+    test_files_sched();
     test_ipc_object_cap();
     test_clone_share();
     test_clone_vm_fork();

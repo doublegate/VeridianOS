@@ -47,9 +47,20 @@ struct RamNode {
     /// An O_TMPFILE file that linkat may still name
     /// ([`VfsNode::tmpfile_linkable`]).
     linkable: core::sync::atomic::AtomicBool,
+    /// Attribute flags (`fs::attr`): what chattr sets.
+    attr: core::sync::atomic::AtomicU32,
 }
 
 impl RamNode {
+    /// A new node takes nodump and noatime from its directory.
+    fn inherit_attr(&self, child: &RamNode) {
+        use core::sync::atomic::Ordering;
+        child.attr.store(
+            self.attr.load(Ordering::Relaxed) & super::attr::INHERITED,
+            Ordering::Relaxed,
+        );
+    }
+
     /// [`VfsNode::unlink`], and with `kind` [`VfsNode::unlink_kind`]: the
     /// entry's type is checked under the children lock the removal holds.
     fn unlink_checked(&self, name: &str, kind: Option<bool>) -> Result<(), KernelError> {
@@ -116,6 +127,7 @@ impl RamNode {
             parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
             links: core::sync::atomic::AtomicU32::new(1),
             linkable: core::sync::atomic::AtomicBool::new(false),
+            attr: core::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -143,6 +155,7 @@ impl RamNode {
             parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
             links: core::sync::atomic::AtomicU32::new(1),
             linkable: core::sync::atomic::AtomicBool::new(false),
+            attr: core::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -174,6 +187,7 @@ impl RamNode {
             parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
             links: core::sync::atomic::AtomicU32::new(1),
             linkable: core::sync::atomic::AtomicBool::new(false),
+            attr: core::sync::atomic::AtomicU32::new(0),
         }
     }
 }
@@ -253,6 +267,9 @@ impl VfsNode for RamNode {
     }
 
     fn write(&self, offset: usize, data: &[u8]) -> Result<usize, crate::error::KernelError> {
+        // Immutable: no write at all, an open descriptor's included
+        // (ext4_write_checks and ext4_setattr; the maintainer's choice).
+        super::attr::may_write(self)?;
         if self.node_type != NodeType::File {
             return Err(KernelError::FsError(FsError::NotAFile));
         }
@@ -343,6 +360,7 @@ impl VfsNode for RamNode {
             self.fs_id,
             permissions,
         ));
+        self.inherit_attr(&new_file);
         children.insert(String::from(name), new_file.clone());
         self.entry_added();
 
@@ -371,6 +389,7 @@ impl VfsNode for RamNode {
             self.fs_id,
             permissions,
         ));
+        self.inherit_attr(&new_dir);
         children.insert(String::from(name), new_dir.clone());
         self.entry_added();
 
@@ -393,6 +412,9 @@ impl VfsNode for RamNode {
     }
 
     fn truncate(&self, size: usize) -> Result<(), crate::error::KernelError> {
+        // Immutable: no write at all, an open descriptor's included
+        // (ext4_write_checks and ext4_setattr; the maintainer's choice).
+        super::attr::may_write(self)?;
         if self.node_type != NodeType::File {
             return Err(KernelError::FsError(FsError::NotAFile));
         }
@@ -548,6 +570,7 @@ impl VfsNode for RamNode {
             permissions,
             if devices { rdev } else { 0 },
         ));
+        self.inherit_attr(&node);
         children.insert(String::from(name), node.clone());
         self.entry_added();
         Ok(node as Arc<dyn VfsNode>)
@@ -611,6 +634,7 @@ impl VfsNode for RamNode {
         }
         let inode = NEXT_INODE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         let node = RamNode::new_file(inode, self.inode, self.fs_id, permissions);
+        self.inherit_attr(&node);
         node.links.store(0, core::sync::atomic::Ordering::Release);
         node.linkable
             .store(linkable, core::sync::atomic::Ordering::Release);
@@ -633,6 +657,7 @@ impl VfsNode for RamNode {
 
         let inode = NEXT_INODE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         let new_symlink = Arc::new(RamNode::new_symlink(inode, self.inode, self.fs_id, target));
+        self.inherit_attr(&new_symlink);
         children.insert(String::from(name), new_symlink.clone());
         self.entry_added();
 
@@ -662,6 +687,26 @@ impl VfsNode for RamNode {
         let s =
             core::str::from_utf8(&data).map_err(|_| KernelError::FsError(FsError::InvalidPath))?;
         Ok(String::from(s))
+    }
+
+    fn attr_flags(&self) -> Option<u32> {
+        Some(self.attr.load(core::sync::atomic::Ordering::Relaxed))
+    }
+
+    fn cache_stat(&self, first: u64, last: u64) -> super::CacheStat {
+        // Every byte of a ramfs file is in memory.
+        let size = self.data.read().len();
+        super::CacheStat {
+            cached: super::page_span(size, first, last).map_or(0, |(a, b)| b - a + 1),
+            dirty: 0,
+        }
+    }
+
+    fn set_attr_flags(&self, flags: u32) -> Result<(), KernelError> {
+        self.attr
+            .store(flags, core::sync::atomic::Ordering::Relaxed);
+        super::note_change(&mut self.metadata.write(), false);
+        Ok(())
     }
 
     fn chmod(&self, permissions: Permissions) -> Result<(), KernelError> {

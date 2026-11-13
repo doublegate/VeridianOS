@@ -410,6 +410,12 @@
 #define SYS_futex_wake                   454
 #define SYS_futex_wait                   455
 #define SYS_futex_requeue                456
+/* Files and scheduling */
+#define SYS_ioprio_set                   251
+#define SYS_ioprio_get                   252
+#define SYS_cachestat                    451
+#define SYS_file_getattr                 468
+#define SYS_file_setattr                 469
 
 #elif defined(__riscv) && __riscv_xlen == 64
 
@@ -772,6 +778,12 @@
 #define SYS_futex_wake                   454
 #define SYS_futex_wait                   455
 #define SYS_futex_requeue                456
+/* Files and scheduling */
+#define SYS_ioprio_set                   30
+#define SYS_ioprio_get                   31
+#define SYS_cachestat                    451
+#define SYS_file_getattr                 468
+#define SYS_file_setattr                 469
 
 #elif defined(__aarch64__)
 
@@ -1135,6 +1147,12 @@
 #define SYS_futex_wake                   454
 #define SYS_futex_wait                   455
 #define SYS_futex_requeue                456
+/* Files and scheduling */
+#define SYS_ioprio_set                   30
+#define SYS_ioprio_get                   31
+#define SYS_cachestat                    451
+#define SYS_file_getattr                 468
+#define SYS_file_setattr                 469
 
 #else
 #error "<veridian/sysno.h>: no system call numbers for this architecture"

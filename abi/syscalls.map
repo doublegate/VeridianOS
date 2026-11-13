@@ -447,3 +447,10 @@ futex_waitv
 futex_wake
 futex_wait
 futex_requeue
+
+## Files and scheduling
+ioprio_set
+ioprio_get
+cachestat
+file_getattr
+file_setattr

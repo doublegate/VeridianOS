@@ -357,7 +357,11 @@ mod futex2;
 pub(crate) mod memctl;
 // membarrier (v0.28 item 5)
 #[cfg(feature = "alloc")]
+mod fileattr;
+#[cfg(feature = "alloc")]
 mod futex_pi;
+#[cfg(feature = "alloc")]
+pub(crate) mod ioprio;
 #[cfg(feature = "alloc")]
 mod membarrier;
 
@@ -1648,6 +1652,16 @@ fn handle_syscall(
         Syscall::Msync => memctl::sys_msync(arg1, arg2, arg3),
         #[cfg(feature = "alloc")]
         Syscall::Membarrier => membarrier::sys_membarrier(arg1, arg2, arg3),
+        #[cfg(feature = "alloc")]
+        Syscall::IoprioSet => ioprio::sys_ioprio_set(arg1, arg2, arg3),
+        #[cfg(feature = "alloc")]
+        Syscall::IoprioGet => ioprio::sys_ioprio_get(arg1, arg2),
+        #[cfg(feature = "alloc")]
+        Syscall::Cachestat => memctl::sys_cachestat(arg1, arg2, arg3, arg4),
+        #[cfg(feature = "alloc")]
+        Syscall::FileGetattr => fileattr::sys_file_getattr(arg1, arg2, arg3, arg4, arg5),
+        #[cfg(feature = "alloc")]
+        Syscall::FileSetattr => fileattr::sys_file_setattr(arg1, arg2, arg3, arg4, arg5),
         #[cfg(feature = "alloc")]
         Syscall::ProcessMadvise => memctl::sys_process_madvise(arg1, arg2, arg3, arg4, arg5),
         #[cfg(feature = "alloc")]

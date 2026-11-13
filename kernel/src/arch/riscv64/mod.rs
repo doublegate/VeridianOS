@@ -293,9 +293,15 @@ extern "C" fn riscv_user_trap(f: &mut switch::UserFrame) {
         EXC_INSN_PAGE | EXC_LOAD_PAGE | EXC_STORE_PAGE => {
             switch::irq_enable();
             let info = crate::mm::page_fault::from_riscv(scause as u64, stval as u64, f.sepc);
-            if crate::mm::page_fault::handle_page_fault(info).is_err() {
-                let code = crate::mm::page_fault::user_segv_code(stval as u64);
-                user_fault(11, code, stval as u64);
+            match crate::mm::page_fault::handle_page_fault(info) {
+                Ok(()) => {}
+                Err(e) if crate::mm::page_fault::is_bus_error(&e) => {
+                    user_fault(7, crate::process::signals::BUS_ADRERR, stval as u64)
+                }
+                Err(_) => {
+                    let code = crate::mm::page_fault::user_segv_code(stval as u64);
+                    user_fault(11, code, stval as u64);
+                }
             }
         }
         EXC_ILLEGAL => user_fault(4, crate::process::signals::ILL_ILLOPC, f.sepc),

@@ -865,8 +865,12 @@ pub fn create_thread(
             let sched = current_thread()
                 .map(|t| t.sched.lock().for_child())
                 .unwrap_or_default();
+            let io = current_thread().map_or_else(crate::syscall::ioprio::IoContext::new, |t| {
+                crate::syscall::ioprio::IoContext::for_child(&t.io, false)
+            });
             let thread = ThreadBuilder::new(process.pid, String::from("user_thread"), entry_point)
                 .sched(sched)
+                .io(io)
                 .user_stack_size(1024 * 1024) // 1MB user stack
                 .kernel_stack_size(64 * 1024) // 64KB kernel stack
                 .build()?;

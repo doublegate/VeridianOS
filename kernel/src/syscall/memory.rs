@@ -413,7 +413,22 @@ pub fn sys_mmap(
             .lock()
             .set_mlock(at as u64, end as u64, lock);
     }
+    #[cfg(feature = "alloc")]
+    write_protect_immutable(at, length);
     Ok(at)
+}
+
+/// A writable shared mapping of an immutable file made or widened (mmap
+/// through a descriptor opened before the flag was set, mprotect, mremap)
+/// keeps its pages read-only, so a write faults to SIGBUS (`fs::attr`).
+#[cfg(feature = "alloc")]
+fn write_protect_immutable(at: usize, length: usize) {
+    if let Some(proc) = process::current_process() {
+        let end = at.saturating_add(length.div_ceil(PAGE_SIZE) * PAGE_SIZE);
+        proc.memory_space
+            .lock()
+            .write_protect_file(None, at as u64, end as u64);
+    }
 }
 
 /// MAP_LOCKED's flag bit.
@@ -1060,6 +1075,13 @@ fn current_personality() -> u32 {
 }
 
 pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> SyscallResult {
+    let r = mprotect_inner(addr, length, prot)?;
+    #[cfg(feature = "alloc")]
+    write_protect_immutable(addr, length);
+    Ok(r)
+}
+
+fn mprotect_inner(addr: usize, length: usize, prot: usize) -> SyscallResult {
     /// No effect on x86_64 (Linux accepts it).
     const PROT_SEM: usize = 0x8;
     // As Linux's do_mprotect_pkey (N-240): a page-aligned address and
@@ -1430,6 +1452,8 @@ pub fn sys_mremap(
             .lock()
             .lock_grown(at as u64, (at + len) as u64, lock);
     }
+    #[cfg(feature = "alloc")]
+    write_protect_immutable(at, new_len);
     Ok(at)
 }
 

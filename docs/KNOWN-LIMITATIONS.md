@@ -363,6 +363,14 @@ What remains:
   interrupt every other CPU, not only those running the caller's threads; the RSEQ commands are
   EINVAL (no rseq). Protection keys behave as without the hardware on every architecture
   (pkey_alloc ENOSPC), and memfd_secret is ENOSYS: both get their own pull requests.
+- **Files and scheduling (ADR 0027).** I/O priority orders requests waiting for a device; a
+  device still runs one request at a time, so a request already sent is never overtaken
+  (asynchronous queues come with v0.29). Only tmpfs's attribute flags exist (immutable,
+  append-only, nodump, noatime; nodump is only recorded), with no project IDs or extent sizes;
+  ext4's are read but cannot be changed (the driver is read-only). cachestat's writeback and
+  eviction counts are always 0 (I/O is synchronous and no eviction history is kept), and a
+  tmpfs file's pages count as cached as soon as it has them, a truncate that grows it included,
+  where Linux counts only the pages touched.
 - **kcmp.** KCMP_FILES and KCMP_SIGHAND see the tables a CLONE_FILES or CLONE_SIGHAND clone
   shares, and a table's identity can be reused once its last user is gone, as on Linux. A
   CLONE_VM child counts as sharing its parent's

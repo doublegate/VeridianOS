@@ -46,6 +46,11 @@ impl FileCache {
         }
     }
 
+    /// Whether page `index` is cached (no owner taken).
+    pub fn holds(&self, index: u64) -> bool {
+        self.pages.lock().contains_key(&index)
+    }
+
     /// The frame holding page `index` of the file, with one more owner for
     /// the caller. On a miss, `fill` writes the page's contents into a
     /// zeroed page-sized buffer; it runs without the cache's lock held (it
@@ -193,6 +198,12 @@ impl PageCacheTable {
     /// The cache of inode `inode` (created empty on first use).
     pub fn file(&self, inode: u64) -> Arc<FileCache> {
         self.files.lock().entry(inode).or_default().clone()
+    }
+
+    /// The cache of inode `inode` if it has one (cachestat looks without
+    /// making one).
+    pub fn peek(&self, inode: u64) -> Option<Arc<FileCache>> {
+        self.files.lock().get(&inode).cloned()
     }
 
     /// The data of inode `inode` changed or the inode was freed: drop its
