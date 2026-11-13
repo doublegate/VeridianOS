@@ -2,6 +2,12 @@
 
 ### Changed
 
+- The x86_64 conformance expected list (`tests/compat/expected-x86_64.tsv`) comes from a full run
+  with the memory and files groups: LTP passes 845 of 1,552 tests (789 before), Open POSIX 1,786
+  of 1,965 and libc-test 535 of 560, with no regression; 61 tests improved (the mlock, mseal,
+  msync, remap_file_pages, System V semaphore and shared memory, xattr and file-attribute tests
+  among them) and 8 changed between failing results.
+
 - The gate (`scripts/dev/gate.sh`) runs its emulated guests side by side: the AArch64, RISC-V and
   Sv39 runtime suites, the x86_64 suite and the conformance smoke run at once, and the release
   kernels build while the debug kernels boot. One guest uses one host CPU, so back to back they took
