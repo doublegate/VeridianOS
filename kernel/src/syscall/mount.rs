@@ -189,6 +189,7 @@ pub fn sys_mount(
         let (from_node, from) = view.locate(&from, true).map_err(super::map_kernel_error)?;
         let from_is_dir = from_node.node_type() == NodeType::Directory;
         tree.move_mount(&from, from_is_dir, &point, point_is_dir)
+            .inspect(|()| mount::moved_in(&tree, &from, &point))
     } else {
         let ty = fstype.ok_or(SyscallError::InvalidArgument)?;
         let owner = (caller.creds.fsuid, caller.creds.fsgid);
@@ -326,7 +327,7 @@ fn join(root: &str, cwd: &str) -> String {
 /// becoming read-only. Linux counts the writers of the mount, or for a
 /// read-only superblock of every mount of it; here files are found by the
 /// path they were opened at.
-fn writing_under(point: &str, tree: &Arc<mount::Mounts>) -> bool {
+pub(super) fn writing_under(point: &str, tree: &Arc<mount::Mounts>) -> bool {
     scan(point, tree, true)
 }
 

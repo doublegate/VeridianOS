@@ -21,6 +21,8 @@ pub mod fat32;
 pub mod fifo;
 pub mod file;
 pub mod flock;
+#[cfg(feature = "alloc")]
+pub mod fscontext;
 pub mod inotify;
 #[cfg(feature = "alloc")]
 pub mod memfd;
@@ -1095,6 +1097,10 @@ pub const PSEUDO_MOUNT: MountIds = MountIds {
 /// components lexically. `..` at the root stays at the root. The result
 /// always starts with `/` and never ends with one (except `/` itself).
 pub(crate) fn normalize_path(path: &str, cwd: &str) -> String {
+    // A path in a detached tree stays one.
+    if let Some((id, rest)) = mount::parse_detached(path) {
+        return mount::detached_path(id, &normalize_path(rest, "/"));
+    }
     let mut parts: Vec<&str> = Vec::new();
     let joined = if path.starts_with('/') {
         None
@@ -1985,6 +1991,19 @@ impl Vfs {
         cwd: &str,
         follow_last: bool,
     ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
+        // A path in a detached tree, or relative to a directory in one.
+        let joined;
+        let detached = if path.starts_with(mount::DETACHED) {
+            Some(path)
+        } else if !path.starts_with('/') && cwd.starts_with(mount::DETACHED) {
+            joined = alloc::format!("{cwd}/{path}");
+            Some(joined.as_str())
+        } else {
+            None
+        };
+        if let Some(path) = detached {
+            return Self::lookup_detached(ctx, path, follow_last);
+        }
         ctx.mounts.snapshot().resolve_in(
             path,
             cwd,
@@ -1994,6 +2013,58 @@ impl Vfs {
             ctx.creds.clone(),
             ctx.resolve,
         )
+    }
+
+    /// [`Vfs::lookup`] of a [`mount::DETACHED`] path: in the detached tree,
+    /// its root the root, the result a path in it again; or, once the tree
+    /// is attached, at its place in the tree it was attached to (a path in
+    /// the caller's namespace if it is that one). ENOENT once the tree is
+    /// gone.
+    fn lookup_detached(
+        ctx: &PathContext,
+        path: &str,
+        follow_last: bool,
+    ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
+        let gone = || KernelError::FsError(crate::error::FsError::NotFound);
+        let (id, rest) = mount::parse_detached(path).ok_or_else(gone)?;
+        let rest = if rest.is_empty() { "/" } else { rest };
+        let (tree, point) = mount::detached_place(id).ok_or_else(gone)?;
+        let walk = |p: &str| {
+            tree.snapshot()
+                .resolve_in(p, "/", "/", follow_last, 0, ctx.creds.clone(), ctx.resolve)
+        };
+        match point {
+            None => {
+                let (node, canon) = walk(rest)?;
+                Ok((node, mount::detached_path(id, &canon)))
+            }
+            Some(point) => {
+                let full = if point == "/" {
+                    String::from(rest)
+                } else {
+                    alloc::format!("{point}{rest}")
+                };
+                let (node, canon) = walk(&full)?;
+                if Arc::ptr_eq(&tree, &ctx.mounts) {
+                    return Ok((node, canon));
+                }
+                // Another namespace's tree: still named by the id.
+                if !path_is_under(&canon, &point) {
+                    return Err(gone());
+                }
+                let rel = if point == "/" {
+                    canon.clone()
+                } else {
+                    String::from(&canon[point.len()..])
+                };
+                let rel = if rel.is_empty() {
+                    String::from("/")
+                } else {
+                    rel
+                };
+                Ok((node, mount::detached_path(id, &rel)))
+            }
+        }
     }
 
     /// Resolve a path to a VFS node, following symlinks (including the

@@ -279,6 +279,12 @@ impl File {
         self.status.load(Ordering::Acquire) & status::APPEND != 0
     }
 
+    /// Keep `held` alive while this file is open (a detached mount tree,
+    /// for the descriptor fsmount and open_tree return).
+    pub fn hold(&mut self, held: Arc<dyn core::any::Any + Send + Sync>) {
+        self._held = Some(held);
+    }
+
     /// Create a new file structure
     pub fn new(node: Arc<dyn VfsNode>, flags: OpenFlags) -> Self {
         let nb = flags.nonblock;

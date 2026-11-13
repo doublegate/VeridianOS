@@ -225,6 +225,17 @@ FsUnmount               private 1095
 mount
 umount2
 pivot_root
+open_tree
+move_mount
+fsopen
+fsconfig
+fsmount
+fspick
+mount_setattr
+open_tree_attr
+statmount
+listmount
+listns
 sync
 fsync
 fdatasync

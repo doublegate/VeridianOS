@@ -14,7 +14,12 @@
 //! belong to the superblock, as Linux's anonymous devices, so a file
 //! reports the same device in every namespace.
 
-use alloc::{collections::BTreeSet, string::String, sync::Arc, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, BTreeSet},
+    string::String,
+    sync::{Arc, Weak},
+    vec::Vec,
+};
 use core::{
     fmt::Write,
     sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
@@ -44,6 +49,99 @@ pub mod flags {
     pub const SETTABLE: u32 = NOSUID | NODEV | NOEXEC | ATIME | READONLY | NOSYMFOLLOW;
     /// MS_UNBINDABLE's propagation type: the mount cannot be bound.
     pub const UNBINDABLE: u32 = 0x1_0000;
+}
+
+/// Marks a path in a detached tree (fsmount, open_tree(OPEN_TREE_CLONE)):
+/// `"\0dt:<id>/rel"`, the tree's registry id then the path in the tree.
+/// Such a tree is no mount namespace's, so no path names it; a file in it
+/// keeps this in place of a path, and lookups from it resolve in the tree
+/// (`Vfs::lookup`). It starts with a NUL, which no user path holds.
+pub const DETACHED: &str = "\0dt:";
+
+/// Where a detached tree's files are now.
+#[derive(Clone)]
+enum Place {
+    /// Still detached: the tree itself (Linux's anonymous namespace).
+    Detached(Weak<Mounts>),
+    /// Attached by move_mount at `point` in `tree`.
+    Attached { tree: Weak<Mounts>, point: String },
+}
+
+/// The detached trees, by id. Entries whose tree is gone are pruned when
+/// one is added.
+static TREES: Mutex<BTreeMap<u64, Place>> = Mutex::new(BTreeMap::new());
+
+/// The last detached tree id handed out.
+static LAST_TREE: AtomicU64 = AtomicU64::new(0);
+
+/// Register a detached tree; its id names it in [`DETACHED`] paths. The
+/// caller keeps the tree alive (the descriptor fsmount or open_tree
+/// returns holds it), so the tree goes with its last descriptor, as Linux
+/// unmounts an anonymous namespace's tree on the last close.
+pub fn register_detached(tree: &Arc<Mounts>) -> u64 {
+    let id = LAST_TREE.fetch_add(1, Ordering::Relaxed) + 1;
+    let mut trees = TREES.lock();
+    trees.retain(|_, place| match place {
+        Place::Detached(t) | Place::Attached { tree: t, .. } => t.strong_count() > 0,
+    });
+    trees.insert(id, Place::Detached(Arc::downgrade(tree)));
+    id
+}
+
+/// The path `rel` (absolute in the tree) in detached tree `id`.
+pub fn detached_path(id: u64, rel: &str) -> String {
+    alloc::format!("{DETACHED}{id}{rel}")
+}
+
+/// A [`DETACHED`] path's tree id and the path in the tree ("" for its
+/// root without the slash).
+pub fn parse_detached(path: &str) -> Option<(u64, &str)> {
+    let rest = path.strip_prefix(DETACHED)?;
+    let end = rest.find('/').unwrap_or(rest.len());
+    let id = rest[..end].parse().ok()?;
+    Some((id, &rest[end..]))
+}
+
+/// Where detached tree `id`'s files are: the tree they are in and the
+/// mount point the detached tree's root is at there ("/" while it is
+/// still detached, `None` then for the tree's own). None once it is gone.
+pub fn detached_place(id: u64) -> Option<(Arc<Mounts>, Option<String>)> {
+    match TREES.lock().get(&id)?.clone() {
+        Place::Detached(tree) => Some((tree.upgrade()?, None)),
+        Place::Attached { tree, point } => Some((tree.upgrade()?, Some(point))),
+    }
+}
+
+/// The detached tree `id`, if it is still detached.
+pub fn detached_tree(id: u64) -> Option<Arc<Mounts>> {
+    match detached_place(id)? {
+        (tree, None) => Some(tree),
+        _ => None,
+    }
+}
+
+/// The mount at `from` in `tree` moved to `to`, with what is under it:
+/// the attached trees there moved with it.
+pub fn moved_in(tree: &Arc<Mounts>, from: &str, to: &str) {
+    for place in TREES.lock().values_mut() {
+        if let Place::Attached { tree: t, point } = place {
+            if core::ptr::eq(t.as_ptr(), Arc::as_ptr(tree)) && path_is_under(point, from) {
+                *point = rebase(point, from, to);
+            }
+        }
+    }
+}
+
+/// Detached tree `id` was attached at `point` in `tree`: its files are
+/// there now.
+pub fn mark_attached(id: u64, tree: &Arc<Mounts>, point: &str) {
+    TREES.lock().insert(
+        id,
+        Place::Attached {
+            tree: Arc::downgrade(tree),
+            point: String::from(point),
+        },
+    );
 }
 
 /// Why a change to a tree was refused, as Linux's errno.
@@ -243,6 +341,16 @@ impl Mount {
         self.ids
     }
 
+    /// What `/proc/<pid>/mounts` names as its source.
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    /// Its root's path inside the filesystem ("/" for the whole of it).
+    pub fn root_path(&self) -> &str {
+        &self.root_path
+    }
+
     /// Its [`flags`].
     pub fn flags(&self) -> u32 {
         self.flags.load(Ordering::Acquire)
@@ -332,6 +440,50 @@ pub fn new_filesystem(
     owner: (u32, u32),
 ) -> Result<Arc<dyn Filesystem>, NewFsError> {
     use super::{devfs::DevFs, procfs::ProcFs, ramfs::RamFs, tmpfs::TmpFs, Permissions};
+    let FsOptions {
+        size,
+        mode,
+        uid,
+        gid,
+    } = parse_options(ty, data, owner)?;
+    let fs: Arc<dyn Filesystem> = match ty {
+        "tmpfs" => Arc::new(match size {
+            Some(bytes) => TmpFs::new(bytes),
+            None => TmpFs::half_of_ram(),
+        }),
+        "ramfs" => Arc::new(RamFs::new()),
+        "proc" => Arc::new(ProcFs::new()),
+        // The mounter's IPC namespace's queues (mqueue_get_tree).
+        #[cfg(feature = "alloc")]
+        "mqueue" => Arc::new(crate::syscall::mqueue::MqueueFs::new()),
+        _ => Arc::new(DevFs::new()),
+    };
+    if matches!(ty, "tmpfs" | "ramfs") {
+        let root = fs.root();
+        if let Some(mode) = mode {
+            let _ = root.chmod(Permissions::from_mode(mode));
+        }
+        let _ = root.chown(Some(uid), Some(gid));
+    }
+    Ok(fs)
+}
+
+/// What a filesystem's options asked for ([`parse_options`]).
+struct FsOptions {
+    size: Option<usize>,
+    mode: Option<u32>,
+    uid: u32,
+    gid: u32,
+}
+
+/// Whether filesystem type `ty` takes `option` ("key" or "key=value"),
+/// as Linux's per-parameter parse_param does for fsconfig.
+pub fn check_option(ty: &str, option: &str, owner: (u32, u32)) -> Result<(), NewFsError> {
+    parse_options(ty, option, owner).map(|_| ())
+}
+
+/// The options of [`new_filesystem`], parsed for type `ty`.
+fn parse_options(ty: &str, data: &str, owner: (u32, u32)) -> Result<FsOptions, NewFsError> {
     let options = || data.split(',').filter(|o| !o.is_empty());
     let number =
         |v: &str, radix: u32| u64::from_str_radix(v, radix).map_err(|_| NewFsError::BadOption);
@@ -379,26 +531,12 @@ pub fn new_filesystem(
         }
         _ => return Err(NewFsError::UnknownType),
     }
-    let fs: Arc<dyn Filesystem> = match ty {
-        "tmpfs" => Arc::new(match size {
-            Some(bytes) => TmpFs::new(bytes),
-            None => TmpFs::half_of_ram(),
-        }),
-        "ramfs" => Arc::new(RamFs::new()),
-        "proc" => Arc::new(ProcFs::new()),
-        // The mounter's IPC namespace's queues (mqueue_get_tree).
-        #[cfg(feature = "alloc")]
-        "mqueue" => Arc::new(crate::syscall::mqueue::MqueueFs::new()),
-        _ => Arc::new(DevFs::new()),
-    };
-    if matches!(ty, "tmpfs" | "ramfs") {
-        let root = fs.root();
-        if let Some(mode) = mode {
-            let _ = root.chmod(Permissions::from_mode(mode));
-        }
-        let _ = root.chown(Some(uid), Some(gid));
-    }
-    Ok(fs)
+    Ok(FsOptions {
+        size,
+        mode,
+        uid,
+        gid,
+    })
 }
 
 /// tmpfs's `size=`: bytes, with a k, m, g or t suffix (binary units), or
@@ -508,6 +646,13 @@ impl Mounts {
         self.snapshot()
             .visible_into(&normalize_path(root, "/"), "/", None, &mut out);
         out
+    }
+
+    /// The mounts a process whose root is canonical `root` can see, as
+    /// `/proc/<pid>/mountinfo` lists them: `(mount point relative to
+    /// root, mount, parent's id)`, root first (statmount, listmount).
+    pub fn listing(&self, root: &str) -> Vec<(String, Arc<Mount>, u32)> {
+        self.visible(root)
     }
 
     /// `/proc/<pid>/mounts` for a process whose root is `root` (Linux's
@@ -661,6 +806,162 @@ impl Mounts {
             t.move_parked(|path| path_is_under(path, from).then(|| rebase(path, from, to)));
             Ok(())
         })
+    }
+
+    /// A detached tree (Linux's anonymous mount namespace, as fsmount
+    /// makes) whose only mount is a new superblock's, with this tree's ids:
+    /// the mount flags `mnt`, the superblock read-only if `sb_readonly`.
+    pub fn detached_new(
+        &self,
+        fs: Arc<dyn Filesystem>,
+        source: String,
+        mnt: u32,
+        sb_readonly: bool,
+    ) -> Mounts {
+        let mount = Mount::with_flags(fs, source, &self.pool, mnt, sb_readonly);
+        let table = MountTable {
+            root: Some(mount),
+            ..MountTable::default()
+        };
+        Self::with_table(table, self.pool.clone())
+    }
+
+    /// A detached copy of what serves canonical `source`, whose node is
+    /// `node` (open_tree with OPEN_TREE_CLONE, Linux's __do_loopback): a
+    /// mount rooted there and, with `recursive`, every mount under it
+    /// except the unbindable ones and what is under them. EINVAL for an
+    /// unbindable mount. (Linux also refuses a non-recursive copy of a
+    /// mount with locked mounts under it; no mount is locked here.)
+    pub fn detached_clone(
+        &self,
+        source: &str,
+        node: Arc<dyn VfsNode>,
+        recursive: bool,
+    ) -> Result<Mounts, MountError> {
+        let t = self.snapshot();
+        let at = String::from(t.mount_of(source));
+        let base = t.mount_at(&at).cloned().ok_or(MountError::Invalid)?;
+        if base.flags() & flags::UNBINDABLE != 0 {
+            return Err(MountError::Invalid);
+        }
+        let root_path = join_root(&base.root_path, relative(source, &at));
+        let mut table = MountTable {
+            root: Some(base.bound(node, root_path)),
+            ..MountTable::default()
+        };
+        if recursive {
+            let mut skipped: Vec<String> = Vec::new();
+            for (path, top) in &t.mounts {
+                if path == source || !path_is_under(path, source) {
+                    continue;
+                }
+                if skipped.iter().any(|s| path_is_under(path, s)) {
+                    continue;
+                }
+                if top.flags() & flags::UNBINDABLE != 0 {
+                    skipped.push(path.clone());
+                    continue;
+                }
+                let to = rebase(path, source, "/");
+                for m in t.stack(path) {
+                    table.push(&to, m.copy());
+                }
+            }
+        }
+        Ok(Self::with_table(table, self.pool.clone()))
+    }
+
+    /// Whether this tree has a root mount: a detached tree loses it when
+    /// it is attached ([`Mounts::attach_tree`]).
+    pub fn has_root(&self) -> bool {
+        self.snapshot().root.is_some()
+    }
+
+    /// The mount at mount point `point` ("/" for the root), if any.
+    pub fn mount_at(&self, point: &str) -> Option<Arc<Mount>> {
+        self.snapshot().mount_at(point).cloned()
+    }
+
+    /// The mount point serving canonical `path`.
+    pub fn mount_point_of(&self, path: &str) -> String {
+        String::from(self.snapshot().mount_of(&normalize_path(path, "/")))
+    }
+
+    /// Attach the detached tree `tree` at `to` (move_mount of a detached
+    /// tree's root, Linux's attach_recursive_mnt): its root mount goes on
+    /// `to`, the rest under it, and `tree` is left empty. EINVAL when the
+    /// tree has no root (already attached) or the kinds differ, EBUSY when
+    /// the same mount is already on top there, ELOOP into itself.
+    pub fn attach_tree(&self, tree: &Mounts, to: &str, to_is_dir: bool) -> Result<(), MountError> {
+        if core::ptr::eq(self, tree) {
+            return Err(MountError::Loop);
+        }
+        // One attach at a time: two trees attached into each other at
+        // once would take the two locks in opposite orders.
+        static ATTACH: Mutex<()> = Mutex::new(());
+        let _serial = ATTACH.lock();
+        tree.update(|d| {
+            let root = d.root.clone().ok_or(MountError::Invalid)?;
+            if to_is_dir != (root.root.node_type() == NodeType::Directory) {
+                return Err(MountError::Invalid);
+            }
+            self.update(|t| {
+                t.attach(to, to_is_dir, root)?;
+                for path in d.mounts.keys() {
+                    let at = rebase(path, "/", to);
+                    for m in d.stack(path) {
+                        t.push(&at, m);
+                    }
+                }
+                Ok(())
+            })?;
+            *d = MountTable::default();
+            Ok(())
+        })
+    }
+
+    /// mount_setattr (Linux's do_mount_setattr) on the mount at `point`
+    /// and, with `recursive`, every mount under it: each one's flags become
+    /// `(old & !clr) | set` (the [`flags::SETTABLE`] ones) and its
+    /// propagation type `ty`, if given. All or nothing: EINVAL for a shared
+    /// type ([`Mounts::change_type`]) or when `point` is no mount point,
+    /// EBUSY when a mount would become read-only while `writers(point)`
+    /// says files under its place are open for writing.
+    pub fn setattr(
+        &self,
+        point: &str,
+        set: u32,
+        clr: u32,
+        ty: Option<Propagation>,
+        recursive: bool,
+        writers: impl Fn(&str) -> bool,
+    ) -> Result<(), MountError> {
+        let table = self.snapshot();
+        let top = table.mount_at(point).cloned().ok_or(MountError::Invalid)?;
+        if ty == Some(Propagation::Shared) {
+            return Err(MountError::Invalid);
+        }
+        let mut targets = alloc::vec![(String::from(point), top)];
+        if recursive {
+            for path in table.under(point) {
+                for m in table.stack(&path) {
+                    targets.push((path.clone(), m));
+                }
+            }
+        }
+        let new = |m: &Mount| (m.flags() & !clr) | (set & flags::SETTABLE);
+        for (path, m) in &targets {
+            if new(m) & flags::READONLY != 0 && !m.has(flags::READONLY) && writers(path) {
+                return Err(MountError::Busy);
+            }
+        }
+        for (_, m) in &targets {
+            m.set_flags(new(m));
+            if let Some(ty) = ty {
+                m.set_unbindable(ty == Propagation::Unbindable);
+            }
+        }
+        Ok(())
     }
 
     /// pivot_root (Linux's path_pivot_root) for a caller whose root is
@@ -1488,6 +1789,138 @@ mod tests {
         );
         assert_eq!(
             t.move_mount("/c", true, "/file", false),
+            Err(MountError::Invalid)
+        );
+    }
+
+    /// A detached tree (fsmount, open_tree) is reached only through its
+    /// marker path, until it is attached; then the marker leads to where
+    /// it went, also after a move. It goes with its last reference.
+    #[test]
+    fn a_detached_tree_is_reached_by_its_marker_until_attached() {
+        let vfs = work_tree();
+        let t = vfs.mounts();
+        let ctx = vfs.kernel_context();
+        let tree = Arc::new(t.detached_new(tmpfs(), "det".into(), flags::RELATIME, false));
+        let id = register_detached(&tree);
+        let root = detached_path(id, "/");
+        vfs.lookup(&ctx, &root, "/", true)
+            .unwrap()
+            .0
+            .create("f", crate::fs::Permissions::default())
+            .unwrap();
+        let canon = |path: &str, cwd: &str| vfs.lookup(&ctx, path, cwd, true).map(|(_, c)| c);
+        assert_eq!(
+            canon(&detached_path(id, "/f"), "/"),
+            Ok(detached_path(id, "/f"))
+        );
+        assert_eq!(canon("f", &root), Ok(detached_path(id, "/f")));
+        assert_eq!(
+            canon(&detached_path(id, "/../f"), "/"),
+            Ok(detached_path(id, "/f"))
+        );
+        assert_eq!(
+            normalize_path(&detached_path(id, "/x/../f"), "/a"),
+            detached_path(id, "/f")
+        );
+        assert!(!lines(&vfs).iter().any(|l| l.contains(" det ")));
+
+        t.attach_tree(&tree, "/b", true).unwrap();
+        mark_attached(id, t, "/b");
+        assert!(!tree.has_root() && detached_tree(id).is_none());
+        assert!(lines(&vfs)
+            .iter()
+            .any(|l| l.contains(" /b ") && l.ends_with("tmpfs det rw")));
+        assert_eq!(
+            canon(&detached_path(id, "/f"), "/"),
+            Ok(String::from("/b/f"))
+        );
+        assert_eq!(t.attach_tree(&tree, "/c", true), Err(MountError::Invalid));
+        t.move_mount("/b", true, "/c", true).unwrap();
+        moved_in(t, "/b", "/c");
+        assert_eq!(
+            canon(&detached_path(id, "/f"), "/"),
+            Ok(String::from("/c/f"))
+        );
+        // Into itself; a directory onto a file.
+        assert_eq!(t.attach_tree(t, "/a", true), Err(MountError::Loop));
+        let other = Arc::new(t.detached_new(tmpfs(), "o".into(), 0, false));
+        assert_eq!(
+            t.attach_tree(&other, "/file", false),
+            Err(MountError::Invalid)
+        );
+        let gone = register_detached(&other);
+        drop(other);
+        assert!(canon(&detached_path(gone, "/"), "/").is_err());
+    }
+
+    /// open_tree(OPEN_TREE_CLONE): the mount rooted at the source, and
+    /// with AT_RECURSIVE the mounts under it but no unbindable one.
+    #[test]
+    fn a_detached_copy_takes_submounts_but_no_unbindable_one() {
+        let vfs = work_tree();
+        let t = vfs.mounts();
+        let a = vfs.resolve_path("/a").unwrap();
+        let copy = t.detached_clone("/a", a.clone(), true).unwrap();
+        assert!(copy.has_root() && copy.mount_at("/sub/m").is_some());
+        assert_eq!(copy.mount_point_of("/sub/m/x"), "/sub/m");
+        let flat = t.detached_clone("/a", a.clone(), false).unwrap();
+        assert!(flat.mount_at("/sub/m").is_none());
+        t.change_type("/a/sub/m", Propagation::Unbindable, false)
+            .unwrap();
+        let copy = t.detached_clone("/a", a, true).unwrap();
+        assert!(copy.mount_at("/sub/m").is_none());
+        let m = vfs.resolve_path("/a/sub/m").unwrap();
+        assert_eq!(
+            t.detached_clone("/a/sub/m", m, false).err(),
+            Some(MountError::Invalid)
+        );
+    }
+
+    /// mount_setattr changes a mount and with `recursive` those under it,
+    /// all or nothing.
+    #[test]
+    fn setattr_changes_every_mount_or_none() {
+        let vfs = work_tree();
+        let t = vfs.mounts();
+        t.attach_new("/b", true, tmpfs(), "x".into(), flags::RELATIME, false)
+            .unwrap();
+        vfs.resolve_path("/b")
+            .unwrap()
+            .mkdir("in", crate::fs::Permissions::default())
+            .unwrap();
+        t.attach_new("/b/in", true, tmpfs(), "y".into(), flags::RELATIME, false)
+            .unwrap();
+        let ro = |p: &str| t.mount_at(p).unwrap().has(flags::READONLY);
+        t.setattr("/b", flags::NOEXEC, 0, None, false, |_| false)
+            .unwrap();
+        assert!(t.mount_at("/b").unwrap().has(flags::NOEXEC));
+        assert!(!t.mount_at("/b/in").unwrap().has(flags::NOEXEC));
+        assert_eq!(
+            t.setattr("/b", flags::READONLY, 0, None, true, |p| p == "/b/in"),
+            Err(MountError::Busy)
+        );
+        assert!(!ro("/b") && !ro("/b/in"));
+        t.setattr(
+            "/b",
+            flags::READONLY,
+            0,
+            Some(Propagation::Unbindable),
+            true,
+            |_| false,
+        )
+        .unwrap();
+        assert!(ro("/b") && ro("/b/in"));
+        assert!(t.mount_at("/b/in").unwrap().flags() & flags::UNBINDABLE != 0);
+        t.setattr("/b", 0, flags::READONLY, None, true, |_| true)
+            .unwrap();
+        assert!(!ro("/b") && !ro("/b/in"));
+        assert_eq!(
+            t.setattr("/b", 0, 0, Some(Propagation::Shared), false, |_| false),
+            Err(MountError::Invalid)
+        );
+        assert_eq!(
+            t.setattr("/a", flags::NOEXEC, 0, None, false, |_| false),
             Err(MountError::Invalid)
         );
     }

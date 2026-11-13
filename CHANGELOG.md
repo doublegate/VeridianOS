@@ -77,6 +77,17 @@
 
 ### Added
 
+- The new mount API (Linux 7.3 `fs/fsopen.c`, `fs/namespace.c`): fsopen, fsconfig, fsmount and
+  fspick make and reconfigure a filesystem through a context descriptor, whose parameters are
+  checked one at a time as Linux checks them and whose refusals read back from it (`e tmpfs:
+  Unknown parameter 'x'`); fsmount and open_tree with OPEN_TREE_CLONE (and AT_RECURSIVE) return
+  a descriptor for a detached tree, usable through `*at` calls, which move_mount attaches and
+  whose last close drops it; move_mount also moves mounts; mount_setattr and open_tree_attr
+  change mount flags and propagation types, all or nothing; statmount, listmount and listns
+  describe mounts and list mounts and namespaces. Runtime test mount_api. Not yet: the
+  FSMOUNT_NAMESPACE and OPEN_TREE_NAMESPACE flags, ID-mapped mounts, nullfs, MOVE_MOUNT_BENEATH
+  and MOVE_MOUNT_SET_GROUP (KNOWN-LIMITATIONS).
+
 - System V IPC (v0.28 item 5, ADR 0027, proposed): shmget, shmat, shmdt, shmctl, semget, semop,
   semtimedop, semctl, msgget, msgsnd, msgrcv and msgctl, with Linux's semantics, each IPC
   namespace with its own objects (`kernel/src/syscall/sysvipc/`): identifiers with a sequence

@@ -231,6 +231,9 @@ pub enum FsError {
     /// Text file busy (ETXTBSY): writing a program that is running, or
     /// executing one open for writing (`fs::write_access`)
     TextBusy,
+    /// A message longer than the buffer (EMSGSIZE): reading a filesystem
+    /// context's message log with too small a buffer
+    MessageTooLong,
 }
 
 /// Result type alias for kernel operations

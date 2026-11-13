@@ -400,6 +400,8 @@ mod namespaces;
 // mount(2) and umount2 (ADR 0022 H3b)
 #[cfg(feature = "alloc")]
 mod mount;
+#[cfg(feature = "alloc")]
+mod mount_api;
 // System V shared memory, semaphores and message queues (v0.28 item 5)
 #[cfg(feature = "alloc")]
 pub(crate) mod sysvipc;
@@ -640,6 +642,7 @@ pub fn map_kernel_error(err: crate::error::KernelError) -> SyscallError {
             FsError::Busy => SyscallError::Busy,
             FsError::NoData => SyscallError::NoData,
             FsError::TextBusy => SyscallError::TextBusy,
+            FsError::MessageTooLong => SyscallError::MessageTooLong,
             FsError::Canceled => SyscallError::Canceled,
             FsError::OutOfRange => SyscallError::RangeError,
             FsError::NoProcess => SyscallError::ProcessNotFound,
@@ -1573,6 +1576,29 @@ fn handle_syscall(
         Syscall::Umount2 => mount::sys_umount2(arg1, arg2),
         #[cfg(feature = "alloc")]
         Syscall::PivotRoot => mount::sys_pivot_root(arg1, arg2),
+        // The new mount API (fs/fsopen.c, fs/namespace.c).
+        #[cfg(feature = "alloc")]
+        Syscall::Fsopen => mount_api::sys_fsopen(arg1, arg2),
+        #[cfg(feature = "alloc")]
+        Syscall::Fsconfig => mount_api::sys_fsconfig(arg1, arg2, arg3, arg4, arg5),
+        #[cfg(feature = "alloc")]
+        Syscall::Fsmount => mount_api::sys_fsmount(arg1, arg2, arg3),
+        #[cfg(feature = "alloc")]
+        Syscall::Fspick => mount_api::sys_fspick(arg1, arg2, arg3),
+        #[cfg(feature = "alloc")]
+        Syscall::MoveMount => mount_api::sys_move_mount(arg1, arg2, arg3, arg4, arg5),
+        #[cfg(feature = "alloc")]
+        Syscall::OpenTree => mount_api::sys_open_tree(arg1, arg2, arg3),
+        #[cfg(feature = "alloc")]
+        Syscall::OpenTreeAttr => mount_api::sys_open_tree_attr(arg1, arg2, arg3, arg4, arg5),
+        #[cfg(feature = "alloc")]
+        Syscall::MountSetattr => mount_api::sys_mount_setattr(arg1, arg2, arg3, arg4, arg5),
+        #[cfg(feature = "alloc")]
+        Syscall::Statmount => mount_api::sys_statmount(arg1, arg2, arg3, arg4),
+        #[cfg(feature = "alloc")]
+        Syscall::Listmount => mount_api::sys_listmount(arg1, arg2, arg3, arg4),
+        #[cfg(feature = "alloc")]
+        Syscall::Listns => namespaces::sys_listns(arg1, arg2, arg3, arg4),
         // System V IPC (v0.28 item 5)
         #[cfg(feature = "alloc")]
         Syscall::Shmget => sysvipc::calls::sys_shmget(arg1, arg2, arg3),

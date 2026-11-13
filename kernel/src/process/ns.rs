@@ -123,7 +123,7 @@ impl NsKind {
     }
 
     /// The initial namespace's id (Linux's `init_ns_id`).
-    const fn init_id(self) -> u64 {
+    pub const fn init_id(self) -> u64 {
         match self {
             NsKind::Ipc => 1,
             NsKind::Uts => 2,

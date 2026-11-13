@@ -1872,13 +1872,18 @@ fn fd_directory_path(file: &crate::fs::file::File) -> Result<alloc::string::Stri
     let (now, canonical) = vfs
         .resolve_canonical(&path, "/", true)
         .map_err(|_| SyscallError::ResourceNotFound)?;
-    let same = canonical == global
+    // A detached tree's directory, once the tree is attached, resolves to
+    // where the tree went (`fs::mount::DETACHED`).
+    let moved = global.starts_with(crate::fs::mount::DETACHED) && canonical != global;
+    let same = (canonical == global || moved)
         && now.node_type() == crate::fs::NodeType::Directory
         && match (now.metadata(), file.node.metadata()) {
             (Ok(a), Ok(b)) => a.inode == b.inode,
             _ => false,
         };
-    if same {
+    if same && moved {
+        Ok(crate::fs::root_relative(&canonical, &root))
+    } else if same {
         Ok(path)
     } else {
         Err(SyscallError::ResourceNotFound)
