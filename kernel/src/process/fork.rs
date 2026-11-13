@@ -195,6 +195,9 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
     } else {
         current_process.clone()
     };
+    // For the check once the child is in the table (below).
+    #[cfg(feature = "alloc")]
+    let attr_generation = crate::fs::attr::generation();
     let new_process = ProcessBuilder::new(format!("{}-fork", current_process.name))
         .parent(parent.pid)
         .priority(*current_process.priority.lock())
@@ -234,14 +237,6 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
                 new_space.share_from(&current_space)?;
             } else {
                 new_space.clone_from(&current_space)?;
-            }
-            // A file becoming immutable meanwhile: the child's writable
-            // shared file pages start write-protected, so its writes wait
-            // for the flag (`fs::attr::changing`; commit security review).
-            #[cfg(feature = "alloc")]
-            if crate::fs::attr::changing() {
-                let end = crate::mm::user_layout::user_space_end() as u64;
-                new_space.write_protect_file(None, 0, end);
             }
         }
 
@@ -597,6 +592,19 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
 
     // Add process to table. A fresh pid cannot already be there.
     table::add_process(new_process)?;
+    // A file became, or is becoming, immutable since this fork began: the
+    // change's passes over the table may have come before the child was in
+    // it, so the child write-protects its shared mappings of immutable
+    // files (and, while a change is under way, of any file) itself. It has
+    // not run yet, so nothing was written through them (commit security
+    // review).
+    #[cfg(feature = "alloc")]
+    if crate::fs::attr::generation() != attr_generation || crate::fs::attr::changing() {
+        if let Some(child) = table::get_process(new_pid) {
+            let end = crate::mm::user_layout::user_space_end() as u64;
+            child.memory_space.lock().write_protect_file(None, 0, end);
+        }
+    }
     // Its namespace's init, or that of one above it, began exiting
     // meanwhile: its kill of the namespace may have missed this child,
     // which goes again (ENOMEM), as Linux's alloc_pid checks PIDNS_ADDING

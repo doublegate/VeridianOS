@@ -133,9 +133,19 @@ pub fn changing() -> bool {
     CHANGING.load(core::sync::atomic::Ordering::SeqCst) != 0
 }
 
+/// Bumped as each change begins: a fork that copied its parent's mappings
+/// before a change could have been missed by the change's passes over the
+/// process table, and checks this once its child is in it.
+static GENERATION: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+pub fn generation() -> u64 {
+    GENERATION.load(core::sync::atomic::Ordering::SeqCst)
+}
+
 /// Mark a change under way for as long as the guard lives.
 pub fn begin_change() -> ChangeGuard {
     CHANGING.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    GENERATION.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
     ChangeGuard
 }
 
