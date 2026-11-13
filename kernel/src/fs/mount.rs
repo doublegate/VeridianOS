@@ -1835,6 +1835,22 @@ mod tests {
             canon(&detached_path(id, "/f"), "/"),
             Ok(String::from("/b/f"))
         );
+        // A chrooted caller reaches it only inside its root; `..` stops at
+        // the root, and a tree attached outside it is not found.
+        let mut jailed = vfs.kernel_context();
+        jailed.root = String::from("/b");
+        let (_, c) = vfs
+            .lookup(&jailed, &detached_path(id, "/f"), "/", true)
+            .unwrap();
+        assert_eq!(c, "/b/f");
+        let (_, c) = vfs
+            .lookup(&jailed, &detached_path(id, "/../.."), "/", true)
+            .unwrap();
+        assert_eq!(c, "/b");
+        jailed.root = String::from("/a");
+        assert!(vfs
+            .lookup(&jailed, &detached_path(id, "/f"), "/", true)
+            .is_err());
         assert_eq!(t.attach_tree(&tree, "/c", true), Err(MountError::Invalid));
         t.move_mount("/b", true, "/c", true).unwrap();
         moved_in(t, "/b", "/c");

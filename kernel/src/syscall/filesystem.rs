@@ -1882,6 +1882,10 @@ fn fd_directory_path(file: &crate::fs::file::File) -> Result<alloc::string::Stri
             _ => false,
         };
     if same && moved {
+        // Never a path outside the caller's root.
+        if !crate::fs::path_is_under(&canonical, &root) {
+            return Err(SyscallError::ResourceNotFound);
+        }
         Ok(crate::fs::root_relative(&canonical, &root))
     } else if same {
         Ok(path)

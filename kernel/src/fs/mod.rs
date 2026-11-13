@@ -2044,10 +2044,33 @@ impl Vfs {
                 } else {
                     alloc::format!("{point}{rest}")
                 };
-                let (node, canon) = walk(&full)?;
+                // In the caller's namespace the tree is an ordinary part
+                // of it now: walked as a path in it, from the caller's root,
+                // so `..` and absolute symlinks stay inside a chroot, and a
+                // place outside the root is not found (security review).
                 if Arc::ptr_eq(&tree, &ctx.mounts) {
-                    return Ok((node, canon));
+                    if !path_is_under(&point, &ctx.root) {
+                        return Err(gone());
+                    }
+                    // The rest is walked, not joined lexically: `..` in it
+                    // stops at the root as any walk does.
+                    let at = root_relative(&point, &ctx.root);
+                    let inside = if at == "/" {
+                        String::from(rest)
+                    } else {
+                        alloc::format!("{at}{rest}")
+                    };
+                    return ctx.mounts.snapshot().resolve_in(
+                        &inside,
+                        "/",
+                        &ctx.root,
+                        follow_last,
+                        0,
+                        ctx.creds.clone(),
+                        ctx.resolve,
+                    );
                 }
+                let (node, canon) = walk(&full)?;
                 // Another namespace's tree: still named by the id.
                 if !path_is_under(&canon, &point) {
                     return Err(gone());
