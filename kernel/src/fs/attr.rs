@@ -133,9 +133,9 @@ pub fn changing() -> bool {
     CHANGING.load(core::sync::atomic::Ordering::SeqCst) != 0
 }
 
-/// Bumped as each change begins and ends: a fork that copied its parent's mappings
-/// before a change could have been missed by the change's passes over the
-/// process table, and checks this once its child is in it.
+/// Bumped as each change begins and ends: a fork that copied its parent's
+/// mappings before a change could have been missed by the change's passes over
+/// the process table, and checks this once its child is in it.
 static GENERATION: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 pub fn generation() -> u64 {
