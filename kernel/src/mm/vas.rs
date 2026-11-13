@@ -590,6 +590,13 @@ pub struct FileBacking {
     /// close): a System V shared memory attachment. Each piece holds one
     /// hook, so a split, a fork's copy and every unmap keep the count.
     pub hook: Option<MappingHook>,
+    /// Whether this piece has ever been writable (mapped with PROT_WRITE or
+    /// made so by mprotect). Shared file mappings are copies of the file
+    /// here (no page cache yet, N-125), and only a piece that could be
+    /// written holds changes: msync writes back no other, so a read-only
+    /// mapping's stale copy never overwrites what write(2) put in the file
+    /// since (PR #41 review).
+    pub written: bool,
 }
 
 /// What a mapping's owner is told as pieces of the mapping come and go.
@@ -703,6 +710,7 @@ impl VirtualMapping {
                 offset: b.offset,
                 write: b.write.clone(),
                 hook: b.hook.as_ref().map(MappingHook::snapshot),
+                written: b.written,
             }),
             dont_fork: self.dont_fork,
             wipe_on_fork: self.wipe_on_fork,
@@ -1170,7 +1178,15 @@ impl VirtualAddressSpace {
             .lock()
             .values()
             .filter(|m| m.start.0 < KERNEL_SPACE_START)
-            .map(|m| m.physical_frames.len())
+            // A huge mapping keeps one frame per 2 MiB page: count its 4 KiB
+            // pages, as smaps' Rss does (PR #41 review).
+            .map(|m| {
+                if m.flags.contains(PageFlags::HUGE) && !m.physical_frames.is_empty() {
+                    m.size / 4096
+                } else {
+                    m.physical_frames.len()
+                }
+            })
             .sum()
     }
 
@@ -3063,8 +3079,9 @@ impl VirtualAddressSpace {
 
     /// msync's view of `[start, end)`: for each piece of a MAP_SHARED file
     /// mapping that holds a copy of its file (not a memfd's or tmpfs
-    /// file's own pages) and was mapped from a descriptor open for writing,
-    /// the file, the file offset, the piece's first address in the range and
+    /// file's own pages), was mapped from a descriptor open for writing and
+    /// has ever been writable (`FileBacking::written`), the file, the file
+    /// offset, the piece's first address in the range and
     /// the frames to write back. The frames are only names: another thread
     /// may unmap them once the lock is dropped, so each page is read through
     /// [`Self::copy_mapped_page`], under the lock again.
@@ -3086,7 +3103,10 @@ impl VirtualAddressSpace {
             let Some(b) = m.backing.as_ref() else {
                 continue;
             };
-            if m.mapping_type != MappingType::Shared || b.write.is_none() || b.node.maps_own_pages()
+            if m.mapping_type != MappingType::Shared
+                || b.write.is_none()
+                || !b.written
+                || b.node.maps_own_pages()
             {
                 continue;
             }
@@ -3283,11 +3303,13 @@ impl VirtualAddressSpace {
         hook: Option<MappingHook>,
     ) {
         if let Some(m) = self.mappings.lock().get_mut(&start) {
+            let written = m.flags.contains(super::PageFlags::WRITABLE);
             m.backing = Some(FileBacking {
                 node,
                 offset,
                 write,
                 hook,
+                written,
             });
         }
     }
@@ -4068,6 +4090,11 @@ impl VirtualAddressSpace {
         for (_, m) in mappings.range_mut(..VirtualAddress(end)) {
             if m.start.0 >= start.0 && m.end().0 <= end {
                 m.flags = new_flags;
+                if new_flags.contains(PageFlags::WRITABLE) {
+                    if let Some(b) = m.backing.as_mut() {
+                        b.written = true;
+                    }
+                }
             }
         }
 
@@ -5618,6 +5645,7 @@ mod tests {
             offset: 0,
             write: None,
             hook: Some(MappingHook::adopt(owner.clone())),
+            written: false,
         });
         vas.mappings.lock().insert(VirtualAddress(0x10000), m);
         let seen = vas.find_mapping(VirtualAddress(0x10000)).unwrap();
@@ -5697,6 +5725,7 @@ mod tests {
             offset: 0,
             write: None,
             hook: Some(MappingHook::adopt(owner.clone())),
+            written: false,
         });
         let mut maps = BTreeMap::new();
         maps.insert(VirtualAddress(0x10000), m);
