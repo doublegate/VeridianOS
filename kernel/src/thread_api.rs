@@ -267,6 +267,8 @@ impl ThreadManager {
             let kernel_stack_addr = current_thread_count
                 .checked_mul(kernel_stack_size)
                 .and_then(|used| kernel_stack_base.checked_sub(used))
+                // Not down into the user stacks' region (PR #43 review).
+                .filter(|&addr| addr.checked_sub(kernel_stack_size) >= Some(stack_base))
                 .ok_or(KernelError::ResourceExhausted {
                     resource: "thread stack slots",
                 })?;

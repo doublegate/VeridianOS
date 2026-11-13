@@ -868,10 +868,16 @@ fn init_ignores_with(process: &Process, thread: Option<&Thread>, sig: usize, for
     if !process.is_child_reaper() || process.get_signal_handler(sig).unwrap_or(SIG_DFL) != SIG_DFL {
         return false;
     }
-    let first = process.get_thread(crate::process::ThreadId(process.pid.0));
-    let blocked = thread
-        .or(first.as_deref())
-        .is_some_and(|t| t.sigmask.load(Ordering::Acquire) & sig_bit(sig) != 0);
+    // As [`dropped`]: the mask and, during rt_sigtimedwait, the one it
+    // replaced; the leader's, or after a non-leader's execve the remaining
+    // thread's (PR #43 review).
+    let first = process
+        .get_thread(crate::process::ThreadId(process.pid.0))
+        .or_else(|| process.threads.lock().values().next().cloned());
+    let blocked = thread.or(first.as_deref()).is_some_and(|t| {
+        (t.sigmask.load(Ordering::Acquire) | t.real_blocked.load(Ordering::Acquire)) & sig_bit(sig)
+            != 0
+    });
     if blocked && sig != SIGKILL {
         return false;
     }
@@ -1232,7 +1238,11 @@ pub fn interrupting(process: &Process, thread: &Thread) -> u64 {
     while bits != 0 {
         let sig = bits.trailing_zeros() as usize + 1;
         bits &= bits - 1;
-        if !ignored(process, sig) {
+        // Ignored, or a namespace init's default action, which delivery
+        // discards (deliver_on_return): neither ends a wait (PR #43 review).
+        let init_default = init_skips(process, sig)
+            && process.get_signal_handler(sig).unwrap_or(SIG_DFL) == SIG_DFL;
+        if !ignored(process, sig) && !init_default {
             out |= sig_bit(sig);
         }
     }

@@ -1392,6 +1392,31 @@ mod tests {
         pidns::release(other.pid.0);
     }
 
+    /// A namespace init's blocked SIGTERM (default action) is queued, also
+    /// while rt_sigtimedwait waits for it (real_blocked); unblocked, it is
+    /// deliverable but ends no wait, since delivery discards it (PR #43
+    /// review).
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn an_inits_default_signal_is_queued_but_interrupts_nothing() {
+        use crate::process::signals::{send_timer, sig_bit, SigInfo, TimerSend};
+        const SIGTERM: usize = 15;
+        let pid1 = make_process(1, "init");
+        let threads = with_threads(&pid1, &[1]);
+        threads[0]
+            .real_blocked
+            .store(sig_bit(SIGTERM), Ordering::Release);
+        let sent = send_timer(&pid1, None, SigInfo::timer(SIGTERM, 1, 0, 1));
+        assert_eq!(sent, TimerSend::Queued, "blocked before the wait");
+        threads[0].real_blocked.store(0, Ordering::Release);
+        let deliverable = crate::process::signals::deliverable(&pid1, &threads[0]);
+        assert_ne!(deliverable & sig_bit(SIGTERM), 0);
+        assert_eq!(
+            crate::process::signals::interrupting(&pid1, &threads[0]) & sig_bit(SIGTERM),
+            0
+        );
+    }
+
     /// A child reaper's own SIGCONT timer, with the default action,
     /// continues it after a stop from an ancestor: continuing happens when
     /// the signal is sent, before the check that ignores its delivery
