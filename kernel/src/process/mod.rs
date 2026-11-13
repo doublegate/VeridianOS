@@ -63,9 +63,6 @@ pub use crate::arch::context::{ArchThreadContext, ThreadContext};
 /// their parent via waitpid().
 pub const MAX_PROCESSES: usize = 1024;
 
-/// Maximum threads per process
-pub const MAX_THREADS_PER_PROCESS: usize = 256;
-
 /// Process and thread IDs share one space, as on Linux: a process's first
 /// thread has the process's ID as its thread ID (`ThreadBuilder::tid`), and
 /// every other thread an ID no process has, so gettid, tkill and tgkill name
@@ -140,10 +137,13 @@ pub(crate) fn published(id: u64) {
 static PENDING_IDS: spin::Mutex<alloc::collections::BTreeSet<u64>> =
     spin::Mutex::new(alloc::collections::BTreeSet::new());
 
-/// The IDs clone3's set_tid has claimed (`IdClaims`). Lock order: this,
-/// then PENDING_IDS, then what [`id_in_use`] takes (the process table, the
-/// reap list, the pidfd table, a process's threads); never the other way
-/// (`IdClaim::new`, `IdClaim::drop` and `alloc_id` keep it).
+/// The IDs clone3's set_tid has claimed (`IdClaims`). Lock order: this
+/// first, then what [`id_in_use`] takes (the process table, the reap list,
+/// the pidfd table, a process's threads), then PENDING_IDS, a leaf taken
+/// last and held over no other lock (`published` and a dropped process
+/// take it under those); never the other way. `IdClaim::new`,
+/// `IdClaim::drop` and `alloc_id` keep it: none holds PENDING_IDS while
+/// it calls `id_in_use`.
 #[cfg(feature = "alloc")]
 static CLAIMED_IDS: spin::Mutex<IdClaims> = spin::Mutex::new(IdClaims {
     held: alloc::vec::Vec::new(),
@@ -717,7 +717,8 @@ pub fn user_task_reaped(process: Option<alloc::sync::Arc<Process>>, tid: u64) {
     // lives on is gone for good, as on Linux: its entry (and the kernel
     // stack its builder allocated) is freed now. C libraries join through
     // the CLONE_CHILD_CLEARTID futex, not the kernel, so nothing else ever
-    // removed it, and a process stopped creating threads after 255.
+    // removed it. Until then it is not live, so RLIMIT_NPROC and
+    // threads-max do not count it (`rlimit::tasks_of`).
     if let Some(p) = &process {
         let exited = p.get_thread(ThreadId(tid)).is_some_and(|t| {
             matches!(

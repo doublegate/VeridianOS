@@ -39,7 +39,7 @@ pub enum FormMethod {
     Post,
 }
 
-/// A <form> element's state
+/// A `<form>` element's state
 #[derive(Debug, Clone, Default)]
 pub struct FormElement {
     /// Form node ID in the DOM

@@ -885,10 +885,31 @@ fn init_skips(process: &Process, sig: usize) -> bool {
     sig != SIGKILL && sig != SIGSTOP && process.is_child_reaper()
 }
 
-/// Whether sending `sig` to `process` would only be ignored (SIG_IGN, or
-/// SIG_DFL with a default action of ignore). Such a signal is dropped when
-/// generated (N-98). SIGCONT's continuing happens when it is sent, so with
-/// the default action nothing is left to deliver.
+/// Whether a signal generated now is dropped (Linux's sig_ignored): its
+/// action ignores it ([`ignored`]) and the receiving thread does not block
+/// it. A blocked signal is queued whatever its action, as the action may
+/// change before it is unblocked; delivery discards it if it still ignores
+/// it. The receiver of a process-directed signal is the thread the PID
+/// names (its first), as on Linux.
+#[cfg(feature = "alloc")]
+fn dropped(process: &Process, thread: Option<&Thread>, sig: usize) -> bool {
+    if !ignored(process, sig) {
+        return false;
+    }
+    let mask = match thread {
+        Some(t) => t.sigmask.load(Ordering::Acquire),
+        None => process
+            .get_thread(super::ThreadId(process.pid.0))
+            .map_or(0, |t| t.sigmask.load(Ordering::Acquire)),
+    };
+    mask & sig_bit(sig) == 0
+}
+
+/// Whether `sig`'s action on `process` ignores it (SIG_IGN, or SIG_DFL
+/// with a default action of ignore). Unless blocked, such a signal is
+/// dropped when generated (N-98, [`dropped`]). SIGCONT's continuing
+/// happens when it is sent, so with the default action nothing is left to
+/// deliver.
 pub fn ignored(process: &Process, sig: usize) -> bool {
     match process.get_signal_handler(sig).unwrap_or(SIG_DFL) {
         SIG_IGN => true,
@@ -1024,7 +1045,7 @@ pub fn send_info_to_process(
     }
     if sig == SIGKILL {
         super::exit::set_kill_pending(process, SIGKILL as u32);
-    } else if ignored(process, sig) {
+    } else if dropped(process, None, sig) {
         return Ok(true);
     } else {
         let info = info.for_receiver(process);
@@ -1098,7 +1119,7 @@ pub fn send_to_thread(
         return Ok(());
     }
     job_control_on_send(process, sig);
-    if ignored(process, sig) || init_ignores(process, Some(thread), &info) {
+    if dropped(process, Some(thread), sig) || init_ignores(process, Some(thread), &info) {
         return Ok(());
     }
     let info = info.for_receiver(process);
@@ -1150,7 +1171,7 @@ pub fn send_timer(process: &Process, thread: Option<&Thread>, info: SigInfo) -> 
     }
     if sig == SIGKILL {
         super::exit::set_kill_pending(process, SIGKILL as u32);
-    } else if ignored(process, sig) {
+    } else if dropped(process, thread, sig) {
         return TimerSend::Ignored;
     } else {
         let queued = match thread {

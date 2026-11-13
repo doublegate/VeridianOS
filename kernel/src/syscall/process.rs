@@ -218,6 +218,13 @@ pub fn sys_execveat(
         &crate::process::creds::Caller::current(),
     )
     .map_err(super::map_kernel_error)?;
+    // A file open for writing is ETXTBSY here, before argv and envp are
+    // read and before AT_EXECVE_CHECK returns, as Linux's do_open_execat
+    // denies write access when it opens the file. Held until the exec is
+    // done, beside the denial the new image keeps (dropped explicitly
+    // below: on x86_64 a successful exec never returns through this frame).
+    let deny_write =
+        crate::fs::write_access::WriteDenial::deny(&file.node).map_err(super::map_kernel_error)?;
 
     crate::println!("[SYS_EXEC] path=\"{}\"", file.filename);
 
@@ -272,6 +279,16 @@ pub fn sys_execveat(
 
     match exec_process(file, &argv_refs, &envp_refs, &before_commit) {
         Ok(_) => {
+            // On x86_64 the new image is entered with iretq below, and this
+            // frame is never unwound: whatever it owns must go now, or every
+            // exec leaked the arguments and kept the program write-denied
+            // for good (ETXTBSY on the next open for writing).
+            drop(argv_refs);
+            drop(envp_refs);
+            drop(argv);
+            drop(envp);
+            drop(path);
+            drop(deny_write);
             // exec succeeded. The current process's address space has been
             // replaced with the new program image. We cannot return via
             // SYSRET because the kernel stack holds pre-exec register values
@@ -288,6 +305,9 @@ pub fn sys_execveat(
                 let entry = ctx.get_instruction_pointer() as u64;
                 let stack = ctx.get_stack_pointer() as u64;
                 drop(ctx);
+                // The thread table keeps the thread; this reference would
+                // never be dropped (see above).
+                drop(current_thread);
 
                 // Switch CR3 to the new page tables created by exec_process.
                 // exec_process calls memory_space.init() which creates a new

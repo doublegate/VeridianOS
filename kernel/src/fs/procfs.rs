@@ -287,6 +287,9 @@ enum Sysctl {
     MaxPidNamespaces,
     /// `user/max_net_namespaces` (ADR 0022 H6), likewise.
     MaxNetNamespaces,
+    /// `kernel/threads-max`: how many tasks may exist at once
+    /// (`rlimit::max_threads`).
+    ThreadsMax,
     /// `kernel/{shm,sem,msg}*`: the reader's IPC namespace's System V
     /// limits (`syscall::sysvipc::SYSCTLS`).
     Ipc(&'static str),
@@ -309,6 +312,7 @@ impl Sysctl {
             "sys/user/max_user_namespaces" => Some(Self::MaxUserNamespaces),
             "sys/user/max_pid_namespaces" => Some(Self::MaxPidNamespaces),
             "sys/user/max_net_namespaces" => Some(Self::MaxNetNamespaces),
+            "sys/kernel/threads-max" => Some(Self::ThreadsMax),
             _ => {
                 #[cfg(feature = "alloc")]
                 if let Some(n) = name.strip_prefix("sys/fs/mqueue/") {
@@ -356,6 +360,7 @@ impl Sysctl {
             Self::MaxNetNamespaces => crate::process::ns::NET_NAMESPACES
                 .max
                 .load(Ordering::Acquire) as usize,
+            Self::ThreadsMax => crate::process::rlimit::max_threads() as usize,
             Self::Ipc(_) | Self::Mqueue(_) => 0,
         }
     }
@@ -382,7 +387,9 @@ impl Sysctl {
     /// whole system's rather than a namespace's.
     fn writer_may(self, writer: &crate::process::creds::Caller) -> bool {
         match self {
-            Self::Inotify(_) | Self::UnprivilegedUsernsClone => writer.creds.euid == 0,
+            Self::Inotify(_) | Self::UnprivilegedUsernsClone | Self::ThreadsMax => {
+                writer.creds.euid == 0
+            }
             Self::MaxUserNamespaces | Self::MaxPidNamespaces | Self::MaxNetNamespaces => {
                 writer.capable(crate::process::linux_caps::CAP_SYS_RESOURCE)
             }
@@ -427,6 +434,10 @@ impl Sysctl {
                 return Err(KernelError::FsError(FsError::PermissionDenied))
             }
             Self::UnprivilegedUsernsClone => (&userns::UNPRIVILEGED_CLONE, 1),
+            Self::ThreadsMax => (
+                &crate::process::rlimit::THREADS_MAX,
+                crate::process::rlimit::MAX_THREADS,
+            ),
             Self::MaxUserNamespaces => (&userns::USER_NAMESPACES.max, i32::MAX as u32),
             Self::MaxPidNamespaces => (&crate::process::pidns::PID_NAMESPACES.max, i32::MAX as u32),
             Self::MaxNetNamespaces => (&crate::process::ns::NET_NAMESPACES.max, i32::MAX as u32),
@@ -435,6 +446,10 @@ impl Sysctl {
             .ok()
             .and_then(|t| t.trim().parse::<u32>().ok())
             .filter(|v| *v <= max)
+            // sysctl_max_threads: MIN_THREADS..=MAX_THREADS.
+            .filter(|v| {
+                !matches!(self, Self::ThreadsMax) || *v >= crate::process::rlimit::MIN_THREADS
+            })
             .ok_or(KernelError::InvalidArgument {
                 name: "value",
                 value: "out of the sysctl's range",
@@ -1214,6 +1229,7 @@ impl VfsNode for ProcNode {
                         ("shmmax", NodeType::File),
                         ("shmmni", NodeType::File),
                         ("tainted", NodeType::File),
+                        ("threads-max", NodeType::File),
                         ("unprivileged_userns_clone", NodeType::File),
                         ("version", NodeType::File),
                     ],
@@ -1378,6 +1394,9 @@ impl VfsNode for ProcNode {
                             self.system_file(String::from("sys/kernel/unprivileged_userns_clone")),
                         )
                             as Arc<dyn VfsNode>),
+                        "threads-max" => Ok(Arc::new(
+                            self.system_file(String::from("sys/kernel/threads-max")),
+                        ) as Arc<dyn VfsNode>),
                         "msgmax" | "msgmnb" | "msgmni" | "sem" | "shm_rmid_forced" | "shmall"
                         | "shmmax" | "shmmni" => {
                             Ok(Arc::new(self.system_file(format!("sys/kernel/{}", name)))
@@ -2152,6 +2171,23 @@ mod tests {
         );
     }
 
+    /// kernel/threads-max takes MIN_THREADS..=MAX_THREADS (Linux's
+    /// sysctl_max_threads) and leaves the limit as it was otherwise.
+    #[test]
+    fn threads_max_checks_its_range() {
+        use core::sync::atomic::Ordering;
+        let t = Sysctl::from_name("sys/kernel/threads-max").unwrap();
+        let before = t.get();
+        assert!(before >= crate::process::rlimit::MIN_THREADS as usize);
+        for bad in [&b"19"[..], b"1073741824", b"-1", b""] {
+            assert!(t.write(bad).is_err(), "{:?}", bad);
+        }
+        assert_eq!(t.get(), before);
+        assert!(t.write(b"20").is_ok());
+        assert_eq!(t.get(), 20);
+        crate::process::rlimit::THREADS_MAX.store(0, Ordering::Release);
+    }
+
     #[test]
     fn sys_directories_list_their_entries() {
         let names = |n: &ProcNode| -> Vec<String> {
@@ -2205,6 +2241,7 @@ mod tests {
                     "shmmax",
                     "shmmni",
                     "tainted",
+                    "threads-max",
                     "unprivileged_userns_clone",
                     "version",
                 ][..],

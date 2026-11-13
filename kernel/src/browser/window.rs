@@ -271,7 +271,7 @@ impl BrowserWindow {
         !self.forward_history.is_empty()
     }
 
-    /// Get the page title (from <title> element)
+    /// Get the page title (from the `<title>` element)
     pub fn get_title(&self) -> String {
         if let Some(ref doc) = self.document {
             let titles = doc.get_elements_by_tag_name("title");
