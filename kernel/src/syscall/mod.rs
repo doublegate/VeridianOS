@@ -2296,18 +2296,15 @@ fn sys_memfd_create(name_ptr: usize, flags: usize) -> SyscallResult {
         flags & (MFD_ALLOW_SEALING | MFD_NOEXEC_SEAL) != 0,
         if noexec { crate::fs::seals::EXEC } else { 0 },
     );
-    let node: alloc::sync::Arc<dyn crate::fs::VfsNode> = node;
-    // Open for writing like any read-write file, so executing it while this
-    // descriptor is open is ETXTBSY (Linux's alloc_file takes write access
-    // for an FMODE_WRITE file).
-    let write_access =
-        crate::fs::write_access::WriteAccess::get(&node).map_err(map_kernel_error)?;
-    let mut file = crate::fs::file::File::new_with_path(
+    // The descriptor takes no write access: Linux's alloc_file (unlike an
+    // open, do_dentry_open) does not count it as a writer, so a memfd may be
+    // executed (fexecve) while it is still open read-write, as programs
+    // that build an executable in memory rely on (PR #43 review).
+    let file = crate::fs::file::File::new_with_path(
         node,
         crate::fs::OpenFlags::read_write(),
         alloc::format!("/memfd:{} (deleted)", name),
     );
-    file.write_access = Some(alloc::sync::Arc::new(write_access));
     let fd = proc
         .file_table
         .lock()

@@ -7308,14 +7308,12 @@ static void test_execveat(void)
     }
     /* Following the symlink is fine. */
     if (execveat_status(AT_FDCWD, link_path, t_argv, 0) != 0) f |= 16384;
-    /* A memfd is open for writing from its creation, so executing it
-     * while that descriptor is open is ETXTBSY, as any file open for
-     * writing (Linux's alloc_file takes write access). */
+    /* A memfd may be executed while its creation descriptor is still open
+     * read-write: Linux's alloc_file takes no write access, unlike an open
+     * (fexecve of a memfd built in memory). */
     int mfd = memfd_create("exec", 0);
-    errno = 0;
     if (mfd < 0 || write(mfd, "#!/bin/sh\nexit 0\n", 17) != 17 ||
-        musl_execveat(mfd, "", NULL, NULL, AT_EMPTY_PATH | AT_EXECVE_CHECK) != -1 ||
-        errno != ETXTBSY)
+        musl_execveat(mfd, "", NULL, NULL, AT_EMPTY_PATH | AT_EXECVE_CHECK) != 0)
         f |= 32768;
     if (mfd >= 0) close(mfd);
 

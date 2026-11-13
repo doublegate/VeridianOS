@@ -294,6 +294,12 @@ impl ThreadManager {
             // Set CPU affinity
             thread.set_affinity(params.attributes.cpu_affinity as usize);
 
+            // RLIMIT_NPROC and kernel.threads-max, as clone checks them:
+            // with no per-process limit, every path that makes a thread for a
+            // caller must (commit security review). Held until the thread is
+            // in its process.
+            let _nproc = crate::process::rlimit::check_nproc(&process)
+                .map_err(|_| crate::error::KernelError::WouldBlock)?;
             // Add thread to process
             process.add_thread(thread)?;
 

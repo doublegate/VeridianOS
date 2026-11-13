@@ -772,7 +772,7 @@ pub fn wait_interrupted() -> bool {
         return false;
     };
     match process.kill_pending.load(Ordering::Acquire) {
-        0 => signals::deliverable(&process, &thread) != 0,
+        0 => signals::interrupting(&process, &thread) != 0,
         // An exec in progress interrupts every thread but the exec'ing one.
         exit::EXEC_PENDING => process.exec_tid.load(Ordering::Acquire) != thread.tid.0,
         _ => true,
@@ -902,6 +902,12 @@ pub fn create_thread(
                 *thread.caps.lock() = sets;
             }
 
+            // RLIMIT_NPROC and kernel.threads-max, as clone checks them:
+            // with no per-process limit, every path that makes a thread for a
+            // caller must (commit security review). Held until the thread is
+            // in its process.
+            let _nproc = crate::process::rlimit::check_nproc(&process)
+                .map_err(|_| crate::error::KernelError::WouldBlock)?;
             // Add thread to process
             let thread = process.add_thread(thread)?;
             // Copied again under the thread map, which a set*id call on

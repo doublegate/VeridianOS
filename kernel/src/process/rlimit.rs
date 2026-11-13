@@ -157,8 +157,14 @@ fn initial_nproc() -> u64 {
     static NPROC: AtomicU64 = AtomicU64::new(0);
     match NPROC.load(Ordering::Relaxed) {
         0 => {
-            let n = initial_nproc_for(crate::mm::get_memory_stats().total_frames);
-            NPROC.store(n, Ordering::Relaxed);
+            let frames = crate::mm::get_memory_stats().total_frames;
+            let n = initial_nproc_for(frames);
+            // Kept only once memory is known: a process made before the
+            // frame allocator counts its memory must not fix the floor
+            // value for good (PR #43 review).
+            if frames != 0 {
+                NPROC.store(n, Ordering::Relaxed);
+            }
             n
         }
         n => n,
@@ -201,39 +207,33 @@ pub fn tasks_of(process: &super::Process) -> usize {
 #[cfg(feature = "alloc")]
 pub fn check_nproc(process: &super::Process) -> Result<NprocGuard, SyscallError> {
     use super::linux_caps::{CAP_SYS_ADMIN, CAP_SYS_RESOURCE};
-    // kernel.threads-max: the whole system's task count, for everyone
-    // (copy_process's nr_threads check, which, as there, is not serialised
-    // with the creation).
-    let mut all = 0usize;
-    super::table::PROCESS_TABLE.for_each(|p| all += tasks_of(p));
-    if all >= max_threads() as usize {
-        return Err(SyscallError::WouldBlock);
-    }
     let creds = process.credentials();
     let caller = super::creds::Caller::current();
     // Going past the limit also needs MODIFY on the System object (ADR
     // 0024, step 7), so root whose launcher took it away is limited too.
     let exempt =
         creds.ruid == 0 || caller.capable(CAP_SYS_RESOURCE) || caller.capable(CAP_SYS_ADMIN);
-    if exempt && crate::cap::authority::current_may_change_system() {
-        return Ok(NprocGuard { _held: None });
-    }
     let limit = process.limits().cur(RLIMIT_NPROC);
-    if limit == RLIM_INFINITY {
-        return Ok(NprocGuard { _held: None });
-    }
-    let guard = NPROC.lock();
-    let mut tasks = 0usize;
+    let limited =
+        !(exempt && crate::cap::authority::current_may_change_system()) && limit != RLIM_INFINITY;
+    // A limited creation is serialised with the others; the count of the
+    // whole system (kernel.threads-max, for everyone) and of the user come
+    // from one pass over the table, under that lock when there is one
+    // (PR #43 review). Like copy_process's nr_threads check, threads-max is
+    // not serialised for an unlimited creation.
+    let guard = limited.then(|| NPROC.lock());
+    let (mut all, mut mine) = (0usize, 0usize);
     super::table::PROCESS_TABLE.for_each(|p| {
-        if p.credentials().ruid == creds.ruid {
-            tasks += tasks_of(p);
+        let n = tasks_of(p);
+        all += n;
+        if limited && p.credentials().ruid == creds.ruid {
+            mine += n;
         }
     });
-    if nproc_allows(tasks, limit) {
-        Ok(NprocGuard { _held: Some(guard) })
-    } else {
-        Err(SyscallError::WouldBlock)
+    if all >= max_threads() as usize || limited && !nproc_allows(mine, limit) {
+        return Err(SyscallError::WouldBlock);
     }
+    Ok(NprocGuard { _held: guard })
 }
 
 /// Serialises RLIMIT_NPROC-limited task creation (see [`check_nproc`]).

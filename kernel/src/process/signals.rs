@@ -1211,6 +1211,26 @@ pub fn action_changed(process: &Process, sig: usize, was_ignored: bool) {
     }
 }
 
+/// The deliverable signals ([`deliverable`]) that interrupt a wait: those
+/// whose action does not ignore them now. One queued while blocked and
+/// ignored (Linux's sig_ignored queues it, as the action may change before
+/// the unblock) is discarded when delivered; on Linux the woken call
+/// restarts (ERESTARTSYS) when nothing was delivered, so it must not end a
+/// wait with EINTR here either (PR #43 review). It stays pending and goes
+/// at the next return to user mode.
+pub fn interrupting(process: &Process, thread: &Thread) -> u64 {
+    let mut bits = deliverable(process, thread);
+    let mut out = 0;
+    while bits != 0 {
+        let sig = bits.trailing_zeros() as usize + 1;
+        bits &= bits - 1;
+        if !ignored(process, sig) {
+            out |= sig_bit(sig);
+        }
+    }
+    out
+}
+
 /// Signals `thread` of `process` could take now (pending, not blocked).
 pub fn deliverable(process: &Process, thread: &Thread) -> u64 {
     let pending =

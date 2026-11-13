@@ -1438,6 +1438,15 @@ mod tests {
             TimerSend::Ignored,
             "the other thread does not block it"
         );
+        // Unblocked while still ignored, it is deliverable (and goes when
+        // delivered) but does not end a wait with EINTR (PR #43 review).
+        threads[0].sigmask.store(0, Ordering::Release);
+        let deliverable = crate::process::signals::deliverable(&proc, &threads[0]);
+        assert_ne!(deliverable & sig_bit(SIGCHLD), 0);
+        assert_eq!(
+            crate::process::signals::interrupting(&proc, &threads[0]) & sig_bit(SIGCHLD),
+            0
+        );
     }
 
     /// In a user namespace, the setuid fixup's root is the namespace's: its
