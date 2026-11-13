@@ -32,6 +32,11 @@ fn user_half_root() -> u64 {
 ///
 /// Returns None if the address is not mapped
 pub fn translate_address(addr: usize) -> Option<PageTableEntry> {
+    // Only user addresses: the walk below starts at the user half's root
+    // (PR #42 review).
+    if !is_user_addr_valid(addr) {
+        return None;
+    }
     // Get current process's page table
     let _current_process = crate::process::current_process()?;
 
@@ -45,9 +50,13 @@ pub fn translate_address(addr: usize) -> Option<PageTableEntry> {
     // The mapper reaches every table through the physical-memory map
     // (INC-MEM-03) and walks as deep as the paging mode (three levels under
     // RISC-V Sv39, ADR 0018).
-    // SAFETY: get_kernel_page_table() returns the physical address of the
-    // active page table root, mapped by the physical-memory map for the
-    // kernel's lifetime; the mapper only reads here.
+    // SAFETY: `root` is the physical address of the current address
+    // space's user-half root (CR3 or satp, or TTBR0_EL1 on AArch64), read
+    // while that address space is the active one on this CPU, so its tables
+    // stay allocated for this walk: a process's tables are freed only after
+    // no CPU runs it. The tables are reached through the physical-memory map,
+    // which covers all RAM for the kernel's lifetime, and the mapper only
+    // reads (PR #42 review: the comment named the kernel root).
     let mapper = unsafe { crate::mm::vas::create_mapper_from_root_pub(root) };
     // The 4 KiB frame holding `addr`, also inside a 2 MiB or 1 GiB page.
     let (frame, flags) = mapper

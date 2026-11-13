@@ -281,7 +281,12 @@ impl ElfLoader {
                 if ph.p_vaddr < min_addr {
                     min_addr = ph.p_vaddr;
                 }
-                let end_addr = ph.p_vaddr + ph.p_memsz;
+                // Checked: both come from the file (PR #42 review); execve
+                // reaches this before elf::image::plan checks the segments.
+                let end_addr = ph
+                    .p_vaddr
+                    .checked_add(ph.p_memsz)
+                    .ok_or(ElfError::InvalidProgramHeader)?;
                 if end_addr > max_addr {
                     max_addr = end_addr;
                 }
@@ -292,7 +297,8 @@ impl ElfLoader {
             return Err(ElfError::InvalidProgramHeader);
         }
 
-        let load_size = (max_addr - min_addr) as usize;
+        let load_size = usize::try_from(max_addr.saturating_sub(min_addr))
+            .map_err(|_| ElfError::InvalidProgramHeader)?;
         Ok((min_addr, load_size))
     }
 
@@ -616,18 +622,25 @@ impl ElfLoader {
         let mem_size = ph.p_memsz as usize;
         let vaddr = ph.p_vaddr;
 
-        // Validate offsets (checked: they come from the file).
-        if file_offset
-            .checked_add(file_size)
-            .is_none_or(|e| e > data.len())
+        // Validate offsets (checked: they come from the file). A segment
+        // with more file bytes than memory is refused, as Linux refuses it
+        // (p_filesz > p_memsz: EINVAL).
+        if file_size > mem_size
+            || file_offset
+                .checked_add(file_size)
+                .is_none_or(|e| e > data.len())
         {
             return Err(ElfError::InvalidProgramHeader);
         }
 
-        // Calculate target address
-        let target_addr = base_addr
+        // Calculate target address; the whole segment must fit.
+        let target = base_addr
             .checked_add(vaddr)
-            .ok_or(ElfError::InvalidProgramHeader)? as *mut u8;
+            .ok_or(ElfError::InvalidProgramHeader)?;
+        target
+            .checked_add(mem_size as u64)
+            .ok_or(ElfError::InvalidProgramHeader)?;
+        let target_addr = target as *mut u8;
 
         // Copy file data
         if file_size > 0 {
@@ -747,11 +760,16 @@ impl ElfLoader {
         vaddr: u64,
     ) -> Option<u64> {
         for ph in program_headers {
-            if ph.p_type == ProgramType::Load as u32
-                && vaddr >= ph.p_vaddr
-                && vaddr < ph.p_vaddr + ph.p_filesz
-            {
-                return Some(ph.p_offset + (vaddr - ph.p_vaddr));
+            // Checked: every field comes from the file (PR #42 review). A
+            // segment whose end overflows contains nothing.
+            if ph.p_type != ProgramType::Load as u32 {
+                continue;
+            }
+            let Some(end) = ph.p_vaddr.checked_add(ph.p_filesz) else {
+                continue;
+            };
+            if vaddr >= ph.p_vaddr && vaddr < end {
+                return ph.p_offset.checked_add(vaddr - ph.p_vaddr);
             }
         }
         None
@@ -1153,6 +1171,50 @@ mod tests {
                 Err(ElfError::InvalidProgramHeader)
             );
         }
+    }
+
+    /// Segment sizes from the file are checked before any arithmetic: an
+    /// end past u64::MAX, more file bytes than memory, and a lookup in an
+    /// overflowing segment are refused, not wrapped (PR #42 review).
+    #[test]
+    fn overflowing_segments_are_refused() {
+        let loader = ElfLoader::new();
+        let load = |p_vaddr, p_filesz, p_memsz| Elf64ProgramHeader {
+            p_type: ProgramType::Load as u32,
+            p_flags: 0,
+            p_offset: 0,
+            p_vaddr,
+            p_paddr: 0,
+            p_filesz,
+            p_memsz,
+            p_align: 0x1000,
+        };
+        assert_eq!(
+            loader.calculate_memory_layout(&[load(u64::MAX - 0xfff, 0, 0x2000)]),
+            Err(ElfError::InvalidProgramHeader)
+        );
+        assert_eq!(
+            loader.calculate_memory_layout(&[load(0x40_0000, 0, 0x1000)]),
+            Ok((0x40_0000, 0x1000))
+        );
+        let data = [0u8; 16];
+        assert_eq!(
+            loader.load_segment(&data, &load(0, 16, 8), 0x1000),
+            Err(ElfError::InvalidProgramHeader),
+            "p_filesz > p_memsz"
+        );
+        assert_eq!(
+            loader.load_segment(&data, &load(u64::MAX - 8, 0, 0x100), 0),
+            Err(ElfError::InvalidProgramHeader),
+            "the segment's end overflows"
+        );
+        let wraps = load(u64::MAX - 4, 0x10, 0x10);
+        let ok = load(0x1000, 0x100, 0x100);
+        assert_eq!(
+            loader.vaddr_to_file_offset(&[wraps, ok], 0x1010),
+            Some(0x10)
+        );
+        assert_eq!(loader.vaddr_to_file_offset(&[wraps], u64::MAX - 2), None);
     }
 
     #[test]

@@ -164,12 +164,14 @@ with open(out, "w") as f:
     for round_ in (1, 2):
         regs = ask("info registers -a")
         f.write(f"=== sample {round_}\n{regs}\n")
-        for pc in re.findall(r"(?:RIP|PC|pc)\s*=\s*([0-9a-fA-F]+)", regs):
+        # x86_64 and AArch64 print "RIP=..." / "PC=...", RISC-V " pc  ..."
+        # and "x2/sp ..." with no "=" (PR #42 review).
+        for pc in re.findall(r"\b(?:RIP|PC|pc)(?:=|\s+)([0-9a-fA-F]{8,16})\b", regs):
             f.write(f"{pc}: {' | '.join(where([pc]))}\n")
         # A rough backtrace per CPU: the kernel text addresses among the
         # first 64 words of its stack, most recent first.
         for n, block in enumerate(re.split(r"\nCPU#\d+", "\n" + regs)[1:]):
-            m = re.search(r"\b(?:RSP|SP|sp|x2)\s*=\s*([0-9a-fA-F]{16})", block)
+            m = re.search(r"(?:\bRSP=|\bSP=|\bx2/sp\s+)([0-9a-fA-F]{16})\b", block)
             if not m:
                 continue
             words = ask(f"cpu {n}", f"x /64gx 0x{m.group(1)}")
@@ -195,9 +197,15 @@ PY
     echo "stalled: CPU state in $log_dir/stall-cpus$suffix.txt"
 }
 
-wait_for() { # pattern seconds
+count_in_log() { # pattern: matching lines in the log so far (0 before it exists)
+    local n
+    n=$(grep -acE "$1" "$log" 2>/dev/null)
+    echo "${n:-0}"
+}
+
+wait_for() { # pattern seconds [matches already seen, default 0]
     local waited=0
-    until grep -aqE "$1" "$log" 2>/dev/null; do
+    until (($(count_in_log "$1") > ${3:-0})); do
         ((waited >= $2)) && return 1
         kill -0 "$pid" 2>/dev/null || return 1
         sleep 1
@@ -218,8 +226,11 @@ sleep 2
 if [[ -n ${ONLY:-} ]]; then
     status=PASS
     for t in $ONLY; do
+        # The same name may come twice: wait for a result line past the
+        # ones already in the log (PR #42 review).
+        seen=$(count_in_log "MUSL-ONLY $t: ")
         printf '/bin/musl_runtime_test --only %s %s\r' "$t" "${REPEAT:-1}" >&3
-        wait_for "MUSL-ONLY $t: " "$musl_wait" || true
+        wait_for "MUSL-ONLY $t: " "$musl_wait" "$seen" || dump_cpus
         sleep 1
         r="$(grep -aoE "MUSL-ONLY $t: [0-9]+/[0-9]+" "$log" | tail -1)"
         if [[ $r =~ ([0-9]+)/([0-9]+)$ ]] && [[ ${BASH_REMATCH[1]} == "${BASH_REMATCH[2]}" ]]; then

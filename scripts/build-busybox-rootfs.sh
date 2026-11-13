@@ -94,7 +94,7 @@ phase_download() {
             part="$(mktemp "${tarball}.XXXXXX")"
             # Removed if the run is interrupted too, not only on failure
             # (PR #29 review).
-            trap 'rm -f "$part"' EXIT
+            trap 'rm -f -- "${part:-}"' EXIT
             curl -fsSL -o "$part" "$BUSYBOX_URL" || { rm -f "$part"; echo "  ERROR: download failed"; exit 1; }
             echo "${BUSYBOX_SHA256}  ${part}" | sha256sum -c --quiet - || { rm -f "$part"; echo "  ERROR: BusyBox checksum mismatch in the download"; exit 1; }
             chmod a+r "$part"  # mktemp creates it 0600
@@ -116,7 +116,7 @@ phase_download() {
         done
         rm -rf "$staging"
         mkdir -p "$staging"
-        trap 'rm -rf "$staging"' EXIT
+        trap 'rm -rf -- "${staging:-}"' EXIT
         tar xjf "$tarball" -C "$staging" || { rm -rf "$staging"; echo "  ERROR: extraction failed"; exit 1; }
         mv "${staging}/busybox-${BUSYBOX_VERSION}" "$BB_SRC"
         rm -rf "$staging"
