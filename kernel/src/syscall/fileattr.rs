@@ -51,19 +51,23 @@ fn set(node: &Arc<dyn VfsNode>, change: Change, from_ioctl: bool) -> Result<(), 
     let immutable_ok = caller.capable(crate::process::linux_caps::CAP_LINUX_IMMUTABLE);
     let new = attr::apply(old, change, immutable_ok).map_err(super::map_kernel_error)?;
     if new & attr::FS_IMMUTABLE_FL != 0 && old & attr::FS_IMMUTABLE_FL == 0 {
+        let _changing = attr::begin_change();
         freeze_mappings(node)?;
+        node.set_attr_flags(new).map_err(super::map_kernel_error)?;
+        // A second pass, with the flag set: a process made, or a mapping
+        // made, while the first ran (commit security review). Their pages
+        // have been write-protected since (mmap, fork while `changing`), so
+        // nothing reached them unseen; this only settles them.
+        write_protect_everywhere(node);
+        return Ok(());
     }
     node.set_attr_flags(new).map_err(super::map_kernel_error)
 }
 
-/// A file about to become immutable: every writable shared mapping of it,
-/// in every process, loses its pages' write bit first, then what was
-/// written through them goes to the file, while it still takes writes.
-/// From then on a write through them faults, and once the flag is set the
-/// fault is SIGBUS (ext4's page_mkwrite; the maintainer's choice). A fault
-/// in between is retried until the flag is set (`attr::changing`).
-fn freeze_mappings(node: &Arc<dyn VfsNode>) -> Result<(), SyscallError> {
-    let _changing = attr::begin_change();
+/// Write-protect `node`'s writable shared mappings in every process.
+fn write_protect_everywhere(
+    node: &Arc<dyn VfsNode>,
+) -> alloc::vec::Vec<Arc<crate::process::Process>> {
     let end = crate::mm::user_layout::user_space_end() as u64;
     let mut pids = alloc::vec::Vec::new();
     crate::process::table::PROCESS_TABLE.for_each(|p| pids.push(p.pid));
@@ -74,6 +78,18 @@ fn freeze_mappings(node: &Arc<dyn VfsNode>) -> Result<(), SyscallError> {
     for p in &procs {
         p.memory_space.lock().write_protect_file(Some(node), 0, end);
     }
+    procs
+}
+
+/// A file about to become immutable: every writable shared mapping of it,
+/// in every process, loses its pages' write bit first, then what was
+/// written through them goes to the file, while it still takes writes.
+/// From then on a write through them faults, and once the flag is set the
+/// fault is SIGBUS (ext4's page_mkwrite; the maintainer's choice). A fault
+/// in between is retried until the flag is set (`attr::changing`).
+fn freeze_mappings(node: &Arc<dyn VfsNode>) -> Result<(), SyscallError> {
+    let end = crate::mm::user_layout::user_space_end() as u64;
+    let procs = write_protect_everywhere(node);
     for p in &procs {
         let copies: alloc::vec::Vec<_> = p
             .memory_space

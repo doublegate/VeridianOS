@@ -9469,8 +9469,12 @@ static void test_files_sched(void)
         open(path, O_WRONLY | O_APPEND | O_TRUNC) != -1 || errno != EPERM || unlink(path) != -1 ||
         errno != EPERM)
         f |= 2048;
-    int afd = open(path, O_WRONLY | O_APPEND);
+    int afd = open(path, O_RDWR | O_APPEND);
     if (afd < 0 || fcntl(afd, F_SETFL, 0) != -1 || errno != EPERM)
+        f |= 2048;
+    /* Nor mapped MAP_SHARED through a descriptor open for writing. */
+    if (afd >= 0 &&
+        (mmap(NULL, 4096, PROT_READ, MAP_SHARED, afd, 0) != MAP_FAILED || errno != EACCES))
         f |= 2048;
     if (afd >= 0)
         close(afd);

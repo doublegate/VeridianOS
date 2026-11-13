@@ -643,6 +643,16 @@ fn mmap_inner(
         if !file.flags.read || (shared && prot & PROT_WRITE != 0 && !file.flags.write) {
             return Err(SyscallError::PermissionDenied);
         }
+        // do_mmap: an append-only file is never mapped MAP_SHARED through a
+        // descriptor open for writing (EACCES): the mapping could rewrite
+        // it anywhere (commit security review).
+        #[cfg(feature = "alloc")]
+        if shared
+            && file.flags.write
+            && crate::fs::attr::of(&*file.node) & crate::fs::attr::FS_APPEND_FL != 0
+        {
+            return Err(SyscallError::PermissionDenied);
+        }
         if noexec && prot & PROT_EXEC != 0 {
             return Err(SyscallError::OperationNotPermitted);
         }

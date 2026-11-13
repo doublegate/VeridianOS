@@ -4062,7 +4062,13 @@ impl VirtualAddressSpace {
                     alloc::sync::Arc::as_ptr(&b.node) as *const u8,
                     alloc::sync::Arc::as_ptr(n) as *const u8,
                 ),
-                None => crate::fs::attr::of(&*b.node) & crate::fs::attr::FS_IMMUTABLE_FL != 0,
+                // An immutable file's, and while a file is becoming one,
+                // any file's: a mapping made meanwhile is one the freeze
+                // may not have seen (commit security review).
+                None => {
+                    crate::fs::attr::changing()
+                        || crate::fs::attr::of(&*b.node) & crate::fs::attr::FS_IMMUTABLE_FL != 0
+                }
             };
             if !ours
                 || m.mapping_type != MappingType::Shared

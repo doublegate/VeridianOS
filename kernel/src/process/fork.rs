@@ -235,6 +235,14 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
             } else {
                 new_space.clone_from(&current_space)?;
             }
+            // A file becoming immutable meanwhile: the child's writable
+            // shared file pages start write-protected, so its writes wait
+            // for the flag (`fs::attr::changing`; commit security review).
+            #[cfg(feature = "alloc")]
+            if crate::fs::attr::changing() {
+                let end = crate::mm::user_layout::user_space_end() as u64;
+                new_space.write_protect_file(None, 0, end);
+            }
         }
 
         // Clone capabilities

@@ -199,8 +199,9 @@ The reference for every behaviour below is the Linux 7.3 source (kernel.org tarb
         SIGBUS (BUS_ADRERR), as ext4's page_mkwrite refuses it, and so is a write through one
         made or made writable later (mmap, mprotect, mremap).
     - **Append-only:** opens for writing only with O_APPEND and never with O_TRUNC; no truncate,
-      no fallocate except FALLOC_FL_KEEP_SIZE, no clearing O_APPEND with fcntl, no unlink, rename
-      or link, nothing removed from an append-only directory.
+      no fallocate except FALLOC_FL_KEEP_SIZE, no clearing O_APPEND with fcntl, no MAP_SHARED mapping
+      through a descriptor open for writing (EACCES, as do_mmap), no unlink, rename or link,
+      nothing removed from an append-only directory.
     - **nodump** is only recorded.
 22. cachestat (`mm/filemap.c`) reports the real caches, the maintainer's choice:
     - **tmpfs and memfd:** every page of the range the file holds (they are always resident, and
