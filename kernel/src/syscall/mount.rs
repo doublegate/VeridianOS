@@ -290,7 +290,22 @@ fn move_fs_refs(tree: &Arc<mount::Mounts>, root: &str, new: &str, old: &str) {
             }
             seen.push(Arc::as_ptr(&fs));
             let had_root = fs.root.lock().clone();
-            let cwd = crate::fs::normalize_path(&fs.cwd.lock(), "/");
+            let had_cwd = fs.cwd.lock().clone();
+            // failfs is in no mount: a failfs root or working directory
+            // stays; under a failfs root the working directory is a whole
+            // path already (PR #44 review).
+            if had_root == crate::fs::FAILFS_ROOT {
+                if had_cwd != crate::fs::FAILFS_ROOT {
+                    let cwd = crate::fs::normalize_path(&had_cwd, "/");
+                    *fs.cwd.lock() = mount::pivot_ref(&cwd, root, new, old);
+                }
+                continue;
+            }
+            if had_cwd == crate::fs::FAILFS_ROOT {
+                *fs.root.lock() = mount::pivot_ref(&had_root, root, new, old);
+                continue;
+            }
+            let cwd = crate::fs::normalize_path(&had_cwd, "/");
             let cwd = join(&had_root, &cwd);
             let new_root = mount::pivot_ref(&had_root, root, new, old);
             let cwd = mount::pivot_ref(&cwd, root, new, old);
@@ -356,8 +371,18 @@ fn scan(point: &str, tree: &Arc<mount::Mounts>, writers: bool) -> bool {
             }
             let fs = thread.fs();
             let root = fs.root.lock().clone();
-            let cwd = join(&root, &crate::fs::normalize_path(&fs.cwd.lock(), "/"));
-            if under(&root) || under(&cwd) {
+            let cwd = fs.cwd.lock().clone();
+            // failfs is under no mount point; under a failfs root the
+            // working directory is a whole path (PR #44 review).
+            let failfs = crate::fs::FAILFS_ROOT;
+            let cwd = if cwd == failfs {
+                None
+            } else if root == failfs {
+                Some(crate::fs::normalize_path(&cwd, "/"))
+            } else {
+                Some(join(&root, &crate::fs::normalize_path(&cwd, "/")))
+            };
+            if (root != failfs && under(&root)) || cwd.is_some_and(|c| under(&c)) {
                 busy = true;
                 return;
             }

@@ -1090,6 +1090,7 @@ fn handle_syscall(
         Syscall::Capset => linux_caps::sys_capset(arg1, arg2),
         Syscall::Fchdir => sys_fchdir(arg1),
         Syscall::Chroot => sys_chroot(arg1),
+        Syscall::Fchroot => filesystem::sys_fchroot(arg1, arg2),
         Syscall::Utimensat => sys_utimensat(arg1, arg2, arg3, arg4),
         Syscall::Utimes => sys_utimes(arg1, arg2),
         Syscall::Futimesat => sys_futimesat(arg1, arg2, arg3),

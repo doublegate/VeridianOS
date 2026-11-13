@@ -473,8 +473,10 @@ What remains:
 - **rseq is ENOSYS**, as on Linux built without CONFIG_RSEQ. glibc treats a failed rseq
   registration as no rseq (sched_getcpu then uses getcpu) and musl does not use it; programs that
   require restartable sequences do not run.
-- **chroot (N-250):** a working directory outside the new root is moved to the root, where Linux
-  would leave it outside.
+- **chroot and fchroot (N-250):** a working directory outside the new root is moved to the root,
+  where Linux would leave it outside; only a failfs root (fchroot `FD_FAILFS_ROOT`, Linux 7.3)
+  keeps it, unreachable, as Linux does. `/proc/<pid>/root` and `/proc/<pid>/cwd` do not exist, so
+  the failfs selftest's checks through them do not apply.
 - **uname says `VeridianOS`, not `Linux`, by default (ADR 0021).** Programs that test the
   system name at run time (CMake's `CMAKE_HOST_SYSTEM_NAME`, Python's `platform.system()` and
   `sysconfig.get_platform()`, Node's `os.type()`, OpenJDK's `os.name`) take their unknown-system
