@@ -232,8 +232,9 @@ pub fn sys_unshare(flags: usize) -> SyscallResult {
         None
     };
     // The creator gets authority over its new user namespace and what is
-    // made in it (ADR 0024, decision 7); a failed unshare leaves a harmless
-    // capability naming a namespace nobody is in.
+    // made in it (ADR 0024, decision 7). Nothing after this can fail for
+    // the user namespace: enter_user_ns refuses only a multi-threaded
+    // caller, which unshare_checks already has (PR #39 review).
     if let Some(ns) = &user_ns {
         crate::cap::authority::grant_user_ns(&current.capability_space.lock(), ns)
             .map_err(|_| SyscallError::OutOfMemory)?;

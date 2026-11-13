@@ -704,6 +704,8 @@
   - A pipe polls writable (POLLOUT) only with room for a whole PIPE_BUF write, as Linux; one free
     byte made a poll writer spin on EAGAIN (#24).
   - CLONE_PARENT is refused to the initial PID 1 too, as to any namespace's init (#37).
+  - A write or truncate keeps a file's set-ID bits through CAP_FSETID only with WRITE on the
+    mount namespace, whichever set-group-ID mode the file has (#39).
   - The user-address translation behind zero-copy sends walks the user half on AArch64
     (TTBR0_EL1), not the kernel's root (#33).
   - tmpfs: a mount's `size=` near the largest value no longer wraps to an unlimited mount, and a
