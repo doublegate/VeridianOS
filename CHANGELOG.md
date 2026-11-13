@@ -89,6 +89,47 @@
 
 ### Added
 
+- System V IPC (v0.28 item 5, ADR 0027, proposed): shmget, shmat, shmdt, shmctl, semget, semop,
+  semtimedop, semctl, msgget, msgsnd, msgrcv and msgctl, with Linux's semantics, each IPC
+  namespace with its own objects (`kernel/src/syscall/sysvipc/`): identifiers with a sequence
+  number, ipcperms and ipcget's order of checks, IPC_STAT/IPC_SET/IPC_RMID/IPC_INFO and each
+  kind's own commands, SEM_UNDO applied when the last process sharing the undo list exits
+  (CLONE_SYSVSEM shares it, made at the clone if need be; unshare and setns apply it as Linux
+  does), semtimedop's timeout,
+  message selection by type with MSG_EXCEPT and MSG_NOERROR, `/proc/sysvipc/{shm,sem,msg}`, and
+  the per-namespace limits in `/proc/sys/kernel` (`shmmax`, `shmall`, `shmmni`,
+  `shm_rmid_forced`, `sem`, `msgmax`, `msgmnb`, `msgmni`). A segment is a memfd's pages mapped
+  MAP_SHARED; each piece of an attachment holds a hook on it (`mm::vas::MappingHook`, Linux's
+  vm_ops open and close), so splits, fork, munmap, exit and exec keep `shm_nattch` (and a look at
+  the mappings does not count). Every access
+  also needs the caller's rights over the IPC namespace, by intent (ADR 0027): READ to look
+  (IPC_STAT, the *_STAT_ANY and *_INFO commands, `/proc/sysvipc`, the mqueue filesystem),
+  WRITE to change contents (send, receive, alter, attach writable), CREATE to make an object
+  (EACCES without), MODIFY to control one (IPC_SET, IPC_RMID, SHM_LOCK, mq_unlink, the limits;
+  EPERM without); ADR 0024's table has the rows. `CONFIG_SYSVIPC` is set; kcmp's KCMP_SYSVSEM compares undo lists. The differences from
+  Linux are in KNOWN-LIMITATIONS. Runtime tests sysv_shm, sysv_sem and sysv_msg.
+- POSIX message queues (v0.28 item 5, ADR 0027): mq_open, mq_unlink, mq_timedsend,
+  mq_timedreceive, mq_notify and mq_getsetattr, with Linux's semantics, per IPC namespace
+  (`kernel/src/syscall/mqueue.rs`): a queue is a file whose descriptor reads Linux's status line
+  and polls for a message or room; messages come out by priority, then in order; absolute
+  CLOCK_REALTIME timeouts (ETIMEDOUT); O_NONBLOCK (EAGAIN) through mq_getsetattr; mq_notify by
+  signal (si_code SI_MESGQ) or SIGEV_NONE, one registration per queue (EBUSY), sent only to the
+  process that registered and dropped when it closes a descriptor of the queue (its exit's closes count as its own even when
+  another process runs the cleanup; a CLONE_FILES table still shared keeps it, as on Linux); the rights a
+  queue's operations need are on the queue's own IPC namespace, which an open descriptor keeps
+  alive (the queue works after every process has left it, as on Linux); queues_max checked and
+  counted in one step; queue bytes charged to RLIMIT_MSGQUEUE per real user (EMFILE);
+  `/proc/sys/fs/mqueue` per namespace. New errno EMSGSIZE. The `mqueue` filesystem mounts
+  (usually on /dev/mqueue): its root lists the namespace's queues, reading one shows its status,
+  unlink and open(O_CREAT) there are mq_unlink and mq_open. SIGEV_THREAD waits for netlink
+  sockets (KNOWN-LIMITATIONS). `CONFIG_POSIX_MQUEUE` is set. Runtime tests posix_mq and posix_mq_fs.
+- futex2 (v0.28 item 5, ADR 0027): futex_waitv (up to 128 futexes, the index of the one woken),
+  futex_wake, futex_wait (absolute CLOCK_REALTIME or CLOCK_MONOTONIC timeouts) and
+  futex_requeue, on the futex table futex(2) uses; 32-bit futexes only (others EINVAL), as on
+  Linux; FUTEX2_NUMA's node word, with one node. The private calls 1225 and 1226 are renamed
+  NativeFutexWait and NativeFutexWake (`SYS_NATIVE_FUTEX_WAIT`, `SYS_NATIVE_FUTEX_WAKE`;
+  numbers unchanged), as Linux's names take theirs. Runtime test futex2.
+
 - `docs/adr/README.md`, an index of the architecture decision records (number, title, status and
   date), generated from each ADR's own lines by `tools/docs/gen_adr_index.py`; gate.sh and CI fail
   when it is stale, when a Status is not one of proposed/accepted/rejected/deprecated/superseded,
@@ -161,7 +202,8 @@
   that only takes MODIFY (no mounting) leaves files as they were. The package calls no longer hold
   the capability space locked through the install, which file access now reads.
 - Changing the system as a whole needs an object capability too (ADR 0024, step 7): MODIFY on the
-  `System` object for writing a sysctl (EACCES without), for the package calls (EACCES; they used
+  `System` object for writing a sysctl (EACCES without; a new IPC namespace's own limits take
+  MODIFY on that namespace instead, the initial one's both), for the package calls (EACCES; they used
   to accept a capability of any type with WRITE), and for going past RLIMIT_NPROC as root or with
   CAP_SYS_RESOURCE or CAP_SYS_ADMIN (EAGAIN, as for anyone else at the limit). The native account
   calls on another user's account need WRITE on the mount namespace besides CAP_DAC_OVERRIDE,
@@ -725,6 +767,10 @@
     toolchain before the pinned one, and `guest.py` takes `AARCH64_CPU` (#27); the reviewer
     self-test checks that the workflow has one job timeout (#6); `musl_runtime_test --only
     itimers N` resets its counters each run.
+- wait4/waitpid looks for a child to report once more before answering a signal with EINTR, as
+  Linux's do_wait does: the SIGCHLD of a child's exit, caught without SA_RESTART, could end the
+  wait as EINTR although the child was already a zombie (LTP clone301, intermittently; runtime
+  test wait_beats_its_sigchld).
 - PTRACE_PEEKTEXT/PEEKDATA on AArch64 and RISC-V read the tracee's frame at its physical
   address, as if physical memory were identity-mapped, which it is not once the kernel runs at
   its high address: the first peek there panicked the kernel with a translation fault. PEEK now

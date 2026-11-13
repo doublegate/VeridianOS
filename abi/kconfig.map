@@ -29,7 +29,7 @@ CONFIG_RISCV y arch=riscv64
 
 ## Process model and namespaces (ADR 0022)
 CONFIG_MULTIUSER y needs=setresuid,setresgid,setgroups
-CONFIG_FUTEX y needs=futex
+CONFIG_FUTEX y needs=futex,futex_waitv,futex_wake,futex_wait,futex_requeue
 CONFIG_POSIX_TIMERS y needs=timer_create,timer_settime,timer_delete
 CONFIG_NAMESPACES y needs=unshare,setns
 CONFIG_UTS_NS y needs=unshare,setns,sethostname  # H1
@@ -64,8 +64,8 @@ CONFIG_FANOTIFY n  # no fanotify_init(2)
 CONFIG_AIO n  # no io_setup(2)
 CONFIG_IO_URING n  # no io_uring_setup(2)
 CONFIG_USERFAULTFD n  # no userfaultfd(2)
-CONFIG_SYSVIPC n  # no shmget, semget or msgget
-CONFIG_POSIX_MQUEUE n  # no mq_open(2)
+CONFIG_SYSVIPC y needs=shmget,shmat,shmdt,shmctl,semget,semop,semtimedop,semctl,msgget,msgsnd,msgrcv,msgctl  # v0.28 item 5; per IPC namespace
+CONFIG_POSIX_MQUEUE y needs=mq_open,mq_unlink,mq_timedsend,mq_timedreceive,mq_notify,mq_getsetattr  # v0.28 item 5; per IPC namespace, no SIGEV_THREAD (no netlink sockets)
 CONFIG_BLK_DEV_LOOP n  # no loop devices
 CONFIG_BLK_DEV_RAM n
 CONFIG_ZRAM n

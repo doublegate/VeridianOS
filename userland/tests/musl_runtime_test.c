@@ -42,6 +42,11 @@
 #include <sys/personality.h>
 #include <sys/resource.h>
 #include <sys/sysinfo.h>
+#include <sys/ipc.h>
+#include <sys/msg.h>
+#include <mqueue.h>
+#include <sys/sem.h>
+#include <sys/shm.h>
 #include <sys/statfs.h>
 #include <sys/sysmacros.h>
 #include <sys/time.h>
@@ -2222,6 +2227,44 @@ static void test_waitid(void)
     snprintf(why, sizeof(why), "r=%d pid=%d code=%d status=%d; none=%d errno=%d", r,
              info.si_pid, info.si_code, info.si_status, none, errno);
     report("musl_waitid_echild", ok && none == -1 && errno == ECHILD, why);
+}
+
+/* The SIGCHLD a child's exit sends lands while its parent is in waitpid:
+ * with a handler and no SA_RESTART the wait still returns the child, as
+ * on Linux, which reaps before it looks at signals (LTP clone301). */
+static volatile sig_atomic_t chld_seen;
+static void count_chld(int sig)
+{
+    (void)sig;
+    chld_seen++;
+}
+
+static void test_wait_beats_its_sigchld(void)
+{
+    struct sigaction sa, old;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = count_chld;
+    sigaction(SIGCHLD, &sa, &old);
+    chld_seen = 0;
+    int eintr = 0, wrong = 0;
+    for (int i = 0; i < 50; i++) {
+        pid_t pid = fork();
+        if (pid == 0)
+            _exit(3);
+        int status = 0;
+        pid_t r = waitpid(pid, &status, __WALL);
+        if (r == -1 && errno == EINTR) {
+            eintr++;
+            waitpid(pid, &status, 0);
+        } else if (r != pid || !WIFEXITED(status) || WEXITSTATUS(status) != 3) {
+            wrong++;
+        }
+    }
+    sigaction(SIGCHLD, &old, NULL);
+    static char why[96];
+    snprintf(why, sizeof(why), "eintr=%d wrong=%d sigchld=%d of 50", eintr, wrong,
+             (int)chld_seen);
+    report("wait_beats_its_sigchld", eintr == 0 && wrong == 0, why);
 }
 
 /* Memory protections as musl requests them (N-132). */
@@ -5592,6 +5635,13 @@ static void test_ustat_sysfs(void);
 static void test_pid_levels(void);
 static void test_inotify_mount_ns(void);
 static void test_sysctl_writer(void);
+static void test_sysv_shm(void);
+static void test_sysv_sem(void);
+static void test_sysv_msg(void);
+static void test_posix_mq(void);
+static void test_posix_mq_fs(void);
+static void test_futex2(void);
+static void test_ipc_object_cap(void);
 
 /* Tests `--only NAME` can run alone (for debugging a single test). */
 static const struct {
@@ -5599,6 +5649,13 @@ static const struct {
     void (*fn)(void);
 } only_tests[] = {
     {"system_object_cap", test_system_object_cap},
+    {"sysv_shm", test_sysv_shm},
+    {"sysv_sem", test_sysv_sem},
+    {"sysv_msg", test_sysv_msg},
+    {"posix_mq", test_posix_mq},
+    {"posix_mq_fs", test_posix_mq_fs},
+    {"futex2", test_futex2},
+    {"ipc_object_cap", test_ipc_object_cap},
     {"review_fixes", test_review_fixes},
     {"record_locks", test_record_locks},
     {"fcntl_flags", test_fcntl_flags},
@@ -5714,6 +5771,10 @@ static void test_itimers(void)
         usleep(10000);
     struct itimerval zero = {{0, 0}, {0, 0}};
     int disarmed = setitimer(ITIMER_REAL, &zero, &got) == 0 && got.it_interval.tv_usec == 20000;
+    /* Disarming does not take back a SIGALRM already generated (as on
+     * Linux): one that fired just before is delivered at the next return
+     * to user mode, so let it arrive before counting. */
+    usleep(1000);
     int count = alrm_count;
     usleep(60000);
     int stopped = alrm_count == count && getitimer(ITIMER_REAL, &got) == 0 &&
@@ -8469,7 +8530,12 @@ static long t_clone3(struct t_clone_args *a, size_t size)
 static int t_exit_status(pid_t pid)
 {
     int st;
-    if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st))
+    pid_t r;
+    /* A handler without SA_RESTART (posix_mq's notification) makes the
+     * wait EINTR, as on Linux: wait again. */
+    while ((r = waitpid(pid, &st, 0)) == -1 && errno == EINTR)
+        ;
+    if (r != pid || !WIFEXITED(st))
         return -1;
     return WEXITSTATUS(st);
 }
@@ -8812,6 +8878,526 @@ static void test_clone_share(void)
 
     snprintf(why, sizeof(why), "f=%#x kcmp=%ld/%ld mid=%#x", f, t_share_out[0], t_share_out[1], st);
     report("clone_share", f == 0, why);
+}
+
+/* System V shared memory (v0.28 item 5): a segment attached in a parent is
+ * the same memory in its fork child, shm_nattch counts every attachment
+ * (the child's copy included), IPC_RMID while attached keeps it until the
+ * last detach and frees its key at once, shmdt of an address with no
+ * attachment is EINVAL, SHM_RDONLY maps read-only, a key finds its segment
+ * and IPC_CREAT|IPC_EXCL on it is EEXIST, and /proc/sysvipc/shm and
+ * /proc/sys/kernel/shmmni show it. */
+static void test_sysv_shm(void)
+{
+    char why[128];
+    int f = 0;
+    key_t key = 0x5e6d0001;
+    int id = shmget(key, 8192, IPC_CREAT | IPC_EXCL | 0600);
+    if (id < 0) {
+        snprintf(why, sizeof(why), "shmget errno %d", errno);
+        report("sysv_shm", 0, why);
+        return;
+    }
+    if (shmget(key, 4096, 0600) != id)
+        f |= 1;
+    if (shmget(key, 4096, IPC_CREAT | IPC_EXCL | 0600) != -1 || errno != EEXIST)
+        f |= 2;
+    if (shmget(key, 16384, 0600) != -1 || errno != EINVAL)
+        f |= 4;
+    char *p = shmat(id, NULL, 0);
+    if (p == (void *)-1) {
+        snprintf(why, sizeof(why), "shmat errno %d", errno);
+        shmctl(id, IPC_RMID, NULL);
+        report("sysv_shm", 0, why);
+        return;
+    }
+    strcpy(p, "parent");
+    struct shmid_ds ds;
+    pid_t c = fork();
+    if (c == 0) {
+        /* The child's copy of the attachment counts too; it sees the
+         * parent's bytes and its write is the parent's memory. */
+        struct shmid_ds cds;
+        int ok = strcmp(p, "parent") == 0;
+        ok = ok && shmctl(id, IPC_STAT, &cds) == 0 && cds.shm_nattch == 2;
+        strcpy(p + 4096, "child");
+        _exit(ok ? 0 : 1);
+    }
+    if (t_exit_status(c) != 0)
+        f |= 8;
+    if (strcmp(p + 4096, "child") != 0)
+        f |= 16;
+    if (shmctl(id, IPC_STAT, &ds) != 0 || ds.shm_nattch != 1 || ds.shm_segsz != 8192 ||
+        ds.shm_cpid != getpid())
+        f |= 32;
+    /* A read-only attachment: written through, a fault. */
+    char *ro = shmat(id, NULL, SHM_RDONLY);
+    if (ro == (void *)-1 || strcmp(ro, "parent") != 0)
+        f |= 64;
+    pid_t w = fork();
+    if (w == 0) {
+        ro[0] = 'x';
+        _exit(0);
+    }
+    int st = 0;
+    waitpid(w, &st, 0);
+    if (!WIFSIGNALED(st) || WTERMSIG(st) != SIGSEGV)
+        f |= 128;
+    shmdt(ro);
+    if (shmdt(p + 4096) != -1 || errno != EINVAL)
+        f |= 256;
+    /* /proc/sysvipc/shm lists the key; shmmni has Linux's default. */
+    char buf[4096] = {0}, dec[16];
+    int fd = open("/proc/sysvipc/shm", O_RDONLY);
+    if (fd < 0 || read(fd, buf, sizeof(buf) - 1) <= 0)
+        f |= 512;
+    if (fd >= 0)
+        close(fd);
+    snprintf(dec, sizeof(dec), "%d", key);
+    if (!strstr(buf, dec))
+        f |= 512;
+    fd = open("/proc/sys/kernel/shmmni", O_RDONLY);
+    char mni[16] = {0};
+    if (fd < 0 || read(fd, mni, sizeof(mni) - 1) <= 0 || strcmp(mni, "4096\n") != 0)
+        f |= 1024;
+    if (fd >= 0)
+        close(fd);
+    /* mremap with old size 0 makes a second mapping of the attachment:
+     * it counts (copy_vma runs vm_ops->open) and shmdt takes it away. */
+    char *dup = mremap(p, 0, 8192, MREMAP_MAYMOVE);
+    if (dup == MAP_FAILED || strcmp(dup, "parent") != 0 || shmctl(id, IPC_STAT, &ds) != 0 ||
+        ds.shm_nattch != 2)
+        f |= 65536;
+    if (dup != MAP_FAILED &&
+        (shmdt(dup) != 0 || shmctl(id, IPC_STAT, &ds) != 0 || ds.shm_nattch != 1))
+        f |= 65536;
+    /* Removed while attached: the key is free at once, the segment stays
+     * until the detach, then the id is gone. */
+    if (shmctl(id, IPC_RMID, NULL) != 0)
+        f |= 2048;
+    if (shmget(key, 4096, 0600) != -1 || errno != ENOENT)
+        f |= 4096;
+    if (shmctl(id, IPC_STAT, &ds) != 0 || !(ds.shm_perm.mode & SHM_DEST))
+        f |= 8192;
+    if (shmdt(p) != 0)
+        f |= 16384;
+    if (shmctl(id, IPC_STAT, &ds) != -1 || errno != EINVAL)
+        f |= 32768;
+    snprintf(why, sizeof(why), "f=%#x", f);
+    report("sysv_shm", f == 0, why);
+}
+
+/* System V semaphores: a semop waits until another process makes it
+ * possible, IPC_NOWAIT and an expired semtimedop are EAGAIN, a value past
+ * SEMVMX is ERANGE, SETALL/GETALL and GETPID report, GETNCNT counts a
+ * waiter, and SEM_UNDO's adjustment is applied when the process exits. */
+static void test_sysv_sem(void)
+{
+    char why[128];
+    int f = 0;
+    int id = semget(IPC_PRIVATE, 2, 0600);
+    if (id < 0) {
+        snprintf(why, sizeof(why), "semget errno %d", errno);
+        report("sysv_sem", 0, why);
+        return;
+    }
+    struct sembuf down = {0, -1, 0}, down_nw = {0, -1, IPC_NOWAIT};
+    if (semop(id, &down_nw, 1) != -1 || errno != EAGAIN)
+        f |= 1;
+    struct timespec ts = {0, 50 * 1000 * 1000};
+    if (semtimedop(id, &down, 1, &ts) != -1 || errno != EAGAIN)
+        f |= 2;
+    /* A child raises the semaphore once the parent waits on it. */
+    pid_t c = fork();
+    if (c == 0) {
+        for (int n = 0; n < 1000 && semctl(id, 0, GETNCNT) != 1; n++)
+            usleep(1000);
+        int counted = semctl(id, 0, GETNCNT) == 1;
+        struct sembuf up = {0, 1, 0};
+        _exit(semop(id, &up, 1) == 0 && counted ? 0 : 1);
+    }
+    if (semop(id, &down, 1) != 0)
+        f |= 4;
+    if (t_exit_status(c) != 0)
+        f |= 8;
+    /* The woken waiter's operation records the waiter (Linux sets
+     * sempid from q->pid when it completes a queued operation). */
+    if (semctl(id, 0, GETPID) != getpid())
+        f |= 16;
+    unsigned short vals[2] = {3, 32767}, back[2] = {0, 0};
+    if (semctl(id, 0, SETALL, vals) != 0 || semctl(id, 0, GETALL, back) != 0 || back[0] != 3 ||
+        back[1] != 32767)
+        f |= 32;
+    struct sembuf over = {1, 1, 0};
+    if (semop(id, &over, 1) != -1 || errno != ERANGE)
+        f |= 64;
+    /* SEM_UNDO: a child takes 2 and exits; the 2 come back. */
+    c = fork();
+    if (c == 0) {
+        struct sembuf take = {0, -2, SEM_UNDO};
+        _exit(semop(id, &take, 1) == 0 && semctl(id, 0, GETVAL) == 1 ? 0 : 1);
+    }
+    if (t_exit_status(c) != 0)
+        f |= 128;
+    if (semctl(id, 0, GETVAL) != 3)
+        f |= 256;
+    if (semctl(id, 0, IPC_RMID) != 0 || semctl(id, 0, GETVAL) != -1 || errno != EINVAL)
+        f |= 512;
+    snprintf(why, sizeof(why), "f=%#x", f);
+    report("sysv_sem", f == 0, why);
+}
+
+/* System V message queues: messages are received by type (exact, lowest
+ * at most), a longer message than the buffer is E2BIG without MSG_NOERROR
+ * and stays queued, an empty queue is ENOMSG with IPC_NOWAIT, a receiver
+ * waits until another process sends, a type below 1 is EINVAL, and
+ * IPC_STAT counts. */
+struct t_msg {
+    long mtype;
+    char text[32];
+};
+
+static void test_sysv_msg(void)
+{
+    char why[128];
+    int f = 0;
+    int id = msgget(IPC_PRIVATE, 0600);
+    if (id < 0) {
+        snprintf(why, sizeof(why), "msgget errno %d", errno);
+        report("sysv_msg", 0, why);
+        return;
+    }
+    struct t_msg m;
+    for (long t = 3; t >= 1; t--) {
+        m.mtype = t;
+        snprintf(m.text, sizeof(m.text), "type %ld", t);
+        if (msgsnd(id, &m, strlen(m.text) + 1, 0) != 0)
+            f |= 1;
+    }
+    struct msqid_ds ds;
+    if (msgctl(id, IPC_STAT, &ds) != 0 || ds.msg_qnum != 3 || ds.msg_lspid != getpid())
+        f |= 2;
+    if (msgrcv(id, &m, sizeof(m.text), 2, 0) < 0 || m.mtype != 2)
+        f |= 4;
+    if (msgrcv(id, &m, sizeof(m.text), -3, 0) < 0 || m.mtype != 1)
+        f |= 8;
+    if (msgrcv(id, &m, 2, 0, IPC_NOWAIT) != -1 || errno != E2BIG)
+        f |= 16;
+    if (msgrcv(id, &m, 2, 0, MSG_NOERROR) != 2 || m.mtype != 3)
+        f |= 32;
+    if (msgrcv(id, &m, sizeof(m.text), 0, IPC_NOWAIT) != -1 || errno != ENOMSG)
+        f |= 64;
+    pid_t c = fork();
+    if (c == 0) {
+        usleep(20000);
+        struct t_msg cm = {7, "late"};
+        _exit(msgsnd(id, &cm, 5, 0) == 0 ? 0 : 1);
+    }
+    if (msgrcv(id, &m, sizeof(m.text), 7, 0) != 5 || strcmp(m.text, "late") != 0)
+        f |= 128;
+    if (t_exit_status(c) != 0)
+        f |= 256;
+    m.mtype = 0;
+    if (msgsnd(id, &m, 1, 0) != -1 || errno != EINVAL)
+        f |= 512;
+    if (msgctl(id, IPC_RMID, NULL) != 0 || msgsnd(id, &m, 1, 0) != -1 || errno != EINVAL)
+        f |= 1024;
+    snprintf(why, sizeof(why), "f=%#x", f);
+    report("sysv_msg", f == 0, why);
+}
+
+/* POSIX message queues (v0.28 item 5): messages come out highest
+ * priority first and in order within one, a buffer shorter than the
+ * message size is EMSGSIZE, an empty or full queue with O_NONBLOCK is
+ * EAGAIN, an absolute timeout that has passed is ETIMEDOUT, O_EXCL on a
+ * queue that exists is EEXIST, mq_getsetattr reports and changes
+ * O_NONBLOCK, reading the descriptor gives the status line, poll sees a
+ * message, mq_notify signals a message arriving in an empty queue
+ * (si_code SI_MESGQ, its value) and is EBUSY for a second process, and
+ * after mq_unlink the name is gone. */
+static volatile sig_atomic_t t_mq_sig_code, t_mq_sig_value;
+
+static void t_mq_handler(int sig, siginfo_t *si, void *ctx)
+{
+    (void)sig;
+    (void)ctx;
+    t_mq_sig_code = si->si_code;
+    t_mq_sig_value = si->si_value.sival_int;
+}
+
+static void test_posix_mq(void)
+{
+    char why[128];
+    int f = 0;
+    const char *name = "/veridian-mq-test";
+    mq_unlink(name);
+    struct mq_attr attr = {.mq_maxmsg = 3, .mq_msgsize = 32};
+    mqd_t q = mq_open(name, O_CREAT | O_EXCL | O_RDWR | O_NONBLOCK, 0600, &attr);
+    if (q == (mqd_t)-1) {
+        snprintf(why, sizeof(why), "mq_open errno %d", errno);
+        report("posix_mq", 0, why);
+        return;
+    }
+    if (mq_open(name, O_CREAT | O_EXCL | O_RDWR, 0600, &attr) != (mqd_t)-1 || errno != EEXIST)
+        f |= 1;
+    char buf[64];
+    unsigned prio = 0;
+    if (mq_receive(q, buf, sizeof(buf), &prio) != -1 || errno != EAGAIN)
+        f |= 2;
+    if (mq_send(q, "low", 4, 1) || mq_send(q, "high", 5, 5) || mq_send(q, "mid", 4, 3))
+        f |= 4;
+    if (mq_send(q, "full", 5, 0) != -1 || errno != EAGAIN)
+        f |= 8;
+    struct mq_attr got;
+    if (mq_getattr(q, &got) || got.mq_curmsgs != 3 || got.mq_maxmsg != 3 || got.mq_msgsize != 32 ||
+        !(got.mq_flags & O_NONBLOCK))
+        f |= 16;
+    struct pollfd pfd = {.fd = q, .events = POLLIN | POLLOUT};
+    if (poll(&pfd, 1, 0) != 1 || !(pfd.revents & POLLIN) || (pfd.revents & POLLOUT))
+        f |= 32;
+    char status[128] = {0};
+    if (read(q, status, sizeof(status) - 1) <= 0 || strncmp(status, "QSIZE:13", 8) != 0)
+        f |= 64;
+    if (mq_receive(q, buf, 16, &prio) != -1 || errno != EMSGSIZE)
+        f |= 128;
+    const char *want[3] = {"high", "mid", "low"};
+    unsigned prios[3] = {5, 3, 1};
+    for (int i = 0; i < 3; i++)
+        if (mq_receive(q, buf, sizeof(buf), &prio) < 0 || strcmp(buf, want[i]) || prio != prios[i])
+            f |= 256;
+    /* Blocking, with a timeout already passed. */
+    struct mq_attr blocking = {.mq_flags = 0};
+    if (mq_setattr(q, &blocking, NULL))
+        f |= 512;
+    struct timespec past;
+    clock_gettime(CLOCK_REALTIME, &past);
+    past.tv_sec -= 1;
+    if (mq_timedreceive(q, buf, sizeof(buf), &prio, &past) != -1 || errno != ETIMEDOUT)
+        f |= 1024;
+    /* Notification by signal, once, for a message into the empty queue. */
+    struct sigaction sa = {0}, old;
+    sa.sa_sigaction = t_mq_handler;
+    sa.sa_flags = SA_SIGINFO;
+    sigaction(SIGUSR1, &sa, &old);
+    struct sigevent sev = {0};
+    sev.sigev_notify = SIGEV_SIGNAL;
+    sev.sigev_signo = SIGUSR1;
+    sev.sigev_value.sival_int = 42;
+    if (mq_notify(q, &sev))
+        f |= 2048;
+    pid_t c = fork();
+    if (c == 0) {
+        struct sigevent s2 = {0};
+        s2.sigev_notify = SIGEV_NONE;
+        int busy = mq_notify(q, &s2) == -1 && errno == EBUSY;
+        _exit(busy && mq_send(q, "ping", 5, 0) == 0 ? 0 : 1);
+    }
+    if (t_exit_status(c) != 0)
+        f |= 4096;
+    for (int n = 0; n < 1000 && !t_mq_sig_code; n++)
+        usleep(1000);
+    if (t_mq_sig_code != SI_MESGQ || t_mq_sig_value != 42)
+        f |= 8192;
+    sigaction(SIGUSR1, &old, NULL);
+    mq_close(q);
+    /* The owner closing a descriptor of the queue drops its registration
+     * (mqueue_flush_file): another process may register after it. */
+    struct sigevent none = {0};
+    none.sigev_notify = SIGEV_NONE;
+    mqd_t q2 = mq_open(name, O_RDWR);
+    if (q2 == (mqd_t)-1 || mq_notify(q2, &none)) {
+        f |= 65536;
+    } else {
+        mq_close(q2);
+        pid_t c2 = fork();
+        if (c2 == 0) {
+            mqd_t q3 = mq_open(name, O_RDWR);
+            _exit(q3 != (mqd_t)-1 && mq_notify(q3, &none) == 0 ? 0 : 1);
+        }
+        if (t_exit_status(c2) != 0)
+            f |= 65536;
+    }
+    if (mq_unlink(name) || mq_open(name, O_RDWR) != (mqd_t)-1 || errno != ENOENT)
+        f |= 16384;
+    int fd = open("/proc/sys/fs/mqueue/msg_max", O_RDONLY);
+    char lim[16] = {0};
+    if (fd < 0 || read(fd, lim, sizeof(lim) - 1) <= 0 || strcmp(lim, "10\n"))
+        f |= 32768;
+    if (fd >= 0)
+        close(fd);
+    snprintf(why, sizeof(why), "f=%#x", f);
+    report("posix_mq", f == 0, why);
+}
+
+/* futex2 (v0.28 item 5): futex_waitv waits on several words at once and
+ * returns the index of the one woken, futex_waitv and futex_wait are
+ * EAGAIN for a word that differs and ETIMEDOUT at an absolute timeout
+ * already passed, futex_wake counts who it woke and refuses a 0 mask, a
+ * mask wider than 32 bits or a non-32-bit size, futex_requeue is EAGAIN when the first word moved, and
+ * a FUTEX2_NUMA futex gets node 0 in its second word. */
+#ifndef SYS_futex_waitv
+#define SYS_futex_waitv 449
+#endif
+#ifndef SYS_futex_wake
+#define SYS_futex_wake 454
+#endif
+#ifndef SYS_futex_wait
+#define SYS_futex_wait 455
+#endif
+#ifndef SYS_futex_requeue
+#define SYS_futex_requeue 456
+#endif
+struct t_waitv {
+    uint64_t val;
+    uint64_t uaddr;
+    uint32_t flags;
+    uint32_t reserved;
+};
+#define T_F2_U32 0x02u
+#define T_F2_NUMA 0x04u
+/* FUTEX_BITSET_MATCH_ANY: a 32-bit futex's mask must fit in 32 bits. */
+#define T_F2_ANY 0xfffffffful
+
+static void test_futex2(void)
+{
+    char why[128];
+    int f = 0;
+    uint32_t *w = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (w == MAP_FAILED) {
+        report("futex2", 0, "mmap");
+        return;
+    }
+    w[0] = 0;
+    w[1] = 0;
+    struct t_waitv v[2] = {
+        {.val = 0, .uaddr = (uintptr_t)&w[0], .flags = T_F2_U32},
+        {.val = 0, .uaddr = (uintptr_t)&w[1], .flags = T_F2_U32},
+    };
+    /* A differing word: EAGAIN. */
+    v[1].val = 1;
+    if (syscall(SYS_futex_waitv, v, 2, 0, NULL, 0) != -1 || errno != EAGAIN)
+        f |= 1;
+    v[1].val = 0;
+    /* An absolute timeout already passed. */
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    if (syscall(SYS_futex_waitv, v, 2, 0, &now, CLOCK_MONOTONIC) != -1 || errno != ETIMEDOUT)
+        f |= 2;
+    if (syscall(SYS_futex_waitv, v, 2, 0, &now, CLOCK_BOOTTIME) != -1 || errno != EINVAL)
+        f |= 4;
+    /* A child wakes the second word: the index is 1. */
+    pid_t c = fork();
+    if (c == 0) {
+        long woke = 0;
+        for (int n = 0; n < 2000 && woke == 0; n++) {
+            usleep(1000);
+            woke = syscall(SYS_futex_wake, &w[1], T_F2_ANY, 1, T_F2_U32);
+        }
+        _exit(woke == 1 ? 0 : 1);
+    }
+    /* A deadline, so a lost wake fails the check instead of hanging. */
+    struct timespec limit;
+    clock_gettime(CLOCK_MONOTONIC, &limit);
+    limit.tv_sec += 10;
+    long r = syscall(SYS_futex_waitv, v, 2, 0, &limit, CLOCK_MONOTONIC);
+    if (r != 1)
+        f |= 8;
+    if (t_exit_status(c) != 0)
+        f |= 16;
+    if (syscall(SYS_futex_wake, &w[0], 0ul, 1, T_F2_U32) != -1 || errno != EINVAL)
+        f |= 32;
+    if (syscall(SYS_futex_wake, &w[0], T_F2_ANY, 1, 0x00u) != -1 || errno != EINVAL)
+        f |= 64;
+    if (syscall(SYS_futex_wait, &w[0], 1ul, T_F2_ANY, T_F2_U32, NULL, 0) != -1 || errno != EAGAIN)
+        f |= 128;
+    /* A mask wider than the futex: EINVAL (futex_validate_input). */
+    if (syscall(SYS_futex_wake, &w[0], ~0ul, 1, T_F2_U32) != -1 || errno != EINVAL)
+        f |= 2048;
+    /* futex_requeue: the first word is not its val. */
+    struct t_waitv rq[2] = {
+        {.val = 5, .uaddr = (uintptr_t)&w[0], .flags = T_F2_U32},
+        {.val = 0, .uaddr = (uintptr_t)&w[1], .flags = T_F2_U32},
+    };
+    if (syscall(SYS_futex_requeue, rq, 0, 1, 1) != -1 || errno != EAGAIN)
+        f |= 256;
+    rq[0].val = 0;
+    if (syscall(SYS_futex_requeue, rq, 0, 1, 1) != 0)
+        f |= 512;
+    /* NUMA: the node word starts at FUTEX_NO_NODE and becomes node 0. */
+    w[2] = 0;
+    w[3] = 0xffffffffu;
+    if (syscall(SYS_futex_wait, &w[2], 1ul, T_F2_ANY, T_F2_U32 | T_F2_NUMA, NULL, 0) != -1 ||
+        errno != EAGAIN || w[3] != 0)
+        f |= 1024;
+    munmap(w, 4096);
+    snprintf(why, sizeof(why), "f=%#x", f);
+    report("futex2", f == 0, why);
+}
+
+/* The mqueue filesystem (ADR 0027): mounted, its root is sticky and open
+ * to all and lists the namespace's queues; reading one gives its status
+ * line; unlink there is mq_unlink; open(O_CREAT) there makes a queue that
+ * mq_open then finds. */
+static void test_posix_mq_fs(void)
+{
+    char why[128];
+    int f = 0;
+    const char *dir = "/tmp/veridian-mqfs";
+    mkdir(dir, 0755);
+    if (mount("none", dir, "mqueue", 0, NULL) != 0) {
+        snprintf(why, sizeof(why), "mount errno %d", errno);
+        rmdir(dir);
+        report("posix_mq_fs", 0, why);
+        return;
+    }
+    struct stat st;
+    if (stat(dir, &st) != 0 || (st.st_mode & 07777) != 01777)
+        f |= 1;
+    mqd_t q = mq_open("/vfs-q", O_CREAT | O_RDWR, 0600, NULL);
+    if (q == (mqd_t)-1)
+        f |= 2;
+    else
+        mq_send(q, "abc", 4, 0);
+    DIR *d = opendir(dir);
+    int seen = 0;
+    struct dirent *e;
+    while (d && (e = readdir(d)))
+        if (strcmp(e->d_name, "vfs-q") == 0)
+            seen = 1;
+    if (d)
+        closedir(d);
+    if (!seen)
+        f |= 4;
+    char path[64], buf[128] = {0};
+    snprintf(path, sizeof(path), "%s/vfs-q", dir);
+    int fd = open(path, O_RDONLY);
+    if (fd < 0 || read(fd, buf, sizeof(buf) - 1) <= 0 || strncmp(buf, "QSIZE:4 ", 8) != 0)
+        f |= 8;
+    if (fd >= 0)
+        close(fd);
+    if (unlink(path) != 0 || mq_open("/vfs-q", O_RDWR) != (mqd_t)-1 || errno != ENOENT)
+        f |= 16;
+    if (q != (mqd_t)-1)
+        mq_close(q);
+    snprintf(path, sizeof(path), "%s/made-by-open", dir);
+    fd = open(path, O_CREAT | O_EXCL | O_RDWR, 0600);
+    if (fd < 0)
+        f |= 32;
+    else
+        close(fd);
+    mqd_t m = mq_open("/made-by-open", O_RDWR);
+    struct mq_attr a;
+    if (m == (mqd_t)-1 || mq_getattr(m, &a) || a.mq_maxmsg != 10 || a.mq_msgsize != 8192)
+        f |= 64;
+    if (m != (mqd_t)-1)
+        mq_close(m);
+    mq_unlink("/made-by-open");
+    if (mkdir("/tmp/veridian-mqfs/sub", 0755) != -1 || errno != EPERM)
+        f |= 128;
+    umount2(dir, 0);
+    rmdir(dir);
+    snprintf(why, sizeof(why), "f=%#x", f);
+    report("posix_mq_fs", f == 0, why);
 }
 
 /* A fork by a CLONE_VM child copies the memory it shares with its parent
@@ -10169,6 +10755,60 @@ static unsigned long long t_ns_id(const char *name)
 #define T_SYS_CAPABILITY_DROP VERIDIAN_SYS_CAPABILITY_DROP
 #define T_CAP_NAMESPACE VERIDIAN_CAP_NAMESPACE
 
+/* System V IPC and the IPC namespace's rights (ADR 0027, rule 2+): without
+ * CREATE no new object can be made but an existing one is used; without
+ * MODIFY an object cannot be removed (EPERM) though messages still pass;
+ * without WRITE nothing is sent or received (EACCES) though IPC_STAT
+ * still reads. The rights go from the IPC namespace and from the user
+ * namespace above it, which stands for it. */
+static void test_ipc_object_cap(void)
+{
+    char why[160];
+    int q = msgget(IPC_PRIVATE, 0600);
+    if (q < 0) {
+        report("ipc_object_cap", 0, "msgget");
+        return;
+    }
+    pid_t child = fork();
+    if (child == 0) {
+        int g = 0;
+        unsigned long long ipc = t_ns_id("ipc"), user = t_ns_id("user");
+        struct t_msg m = {1, "x"};
+        struct msqid_ds ds;
+        long d1 = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, ipc, VERIDIAN_RIGHT_CREATE);
+        long d2 = syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, user, VERIDIAN_RIGHT_CREATE);
+        if (d1 != 1 || d2 != 1)
+            g |= 1;
+        if (!(msgget(IPC_PRIVATE, 0600) == -1 && errno == EACCES))
+            g |= 2;
+        if (!(shmget(IPC_PRIVATE, 4096, 0600) == -1 && errno == EACCES))
+            g |= 4;
+        if (msgsnd(q, &m, 2, 0) != 0 || msgrcv(q, &m, sizeof(m.text), 0, 0) != 2)
+            g |= 8;
+        syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, ipc, VERIDIAN_RIGHT_MODIFY);
+        syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, user, VERIDIAN_RIGHT_MODIFY);
+        if (!(msgctl(q, IPC_RMID, NULL) == -1 && errno == EPERM))
+            g |= 16;
+        if (msgsnd(q, &m, 2, 0) != 0 || msgrcv(q, &m, sizeof(m.text), 0, 0) != 2)
+            g |= 32;
+        syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, ipc, VERIDIAN_RIGHT_WRITE);
+        syscall(T_SYS_CAPABILITY_DROP, T_CAP_NAMESPACE, user, VERIDIAN_RIGHT_WRITE);
+        if (!(msgsnd(q, &m, 2, IPC_NOWAIT) == -1 && errno == EACCES))
+            g |= 64;
+        if (msgctl(q, IPC_STAT, &ds) != 0)
+            g |= 128;
+        if (g != 0) {
+            printf("ipc-object-cap g=%#x drops=%ld,%ld\n", g, d1, d2);
+            fflush(stdout);
+        }
+        _exit(g == 0 ? 0 : 1);
+    }
+    int code = t_exit_status(child);
+    msgctl(q, IPC_RMID, NULL);
+    snprintf(why, sizeof(why), "code=%d", code);
+    report("ipc_object_cap", code == 0, why);
+}
+
 /* mount's object capability (ADR 0024, decision 8): mount, umount2 and
  * pivot_root need MODIFY on the mount namespace or on a user namespace
  * above it, besides CAP_SYS_ADMIN. In a new mount namespace, which no
@@ -10631,7 +11271,9 @@ static void test_clock_object_cap(void)
 /* ADR 0024, step 7: changing the system as a whole needs MODIFY on the
  * System object. Root keeps writing a sysctl and going past RLIMIT_NPROC
  * until it drops that right; after the drop a sysctl write is EACCES, a
- * fork past the limit EAGAIN, and the package calls EACCES. */
+ * fork past the limit EAGAIN, and the package calls EACCES, as is writing
+ * the initial IPC namespace's limits, while a new IPC namespace's own
+ * limits can still be written. */
 static void test_system_object_cap(void)
 {
     char why[160];
@@ -10669,6 +11311,20 @@ static void test_system_object_cap(void)
         }
         if (!(syscall(1114, "veridian-nonexistent", 0) == -1 && errno == EACCES))
             g |= 256;
+        /* The initial IPC namespace's limits are the whole system's: they
+         * need the System object too (EACCES); a new IPC namespace's are
+         * its own, MODIFY on it alone (ADR 0027, decision 2). */
+        char mnb[32] = {0};
+        int ipc = open("/proc/sys/kernel/msgmnb", O_RDWR);
+        if (ipc < 0 || read(ipc, mnb, sizeof(mnb) - 1) <= 0 ||
+            !(pwrite(ipc, mnb, strlen(mnb), 0) == -1 && errno == EACCES))
+            g |= 512;
+        if (unshare(CLONE_NEWIPC) != 0)
+            g |= 1024;
+        else if (ipc >= 0 && pwrite(ipc, mnb, strlen(mnb), 0) != (ssize_t)strlen(mnb))
+            g |= 2048;
+        if (ipc >= 0)
+            close(ipc);
         if (fd >= 0)
             close(fd);
         if (g != 0) {
@@ -11536,6 +12192,7 @@ int main(int argc, char **argv)
     test_prctl();
     test_raise_abort();
     test_waitid();
+    test_wait_beats_its_sigchld();
     test_mprotect();
     test_wx_default();
     test_wx_opt_in();
@@ -11627,6 +12284,13 @@ int main(int argc, char **argv)
     test_pidfd();
     test_clone3();
     test_kcmp_process_vm();
+    test_sysv_shm();
+    test_sysv_sem();
+    test_sysv_msg();
+    test_posix_mq();
+    test_posix_mq_fs();
+    test_futex2();
+    test_ipc_object_cap();
     test_clone_share();
     test_clone_vm_fork();
     test_clone_bad_tid();

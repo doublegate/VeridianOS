@@ -465,8 +465,19 @@ pub fn read_user_vec(addr: usize, len: usize, max: usize) -> Result<Vec<u8>, Sys
     if len > max {
         return Err(SyscallError::InvalidArgument);
     }
-    let mut buf = alloc::vec![0u8; len];
+    let mut buf = zeroed_buf(len)?;
     read_user_bytes(addr, &mut buf)?;
+    Ok(buf)
+}
+
+/// A zeroed buffer of `len` bytes, or ENOMEM if the heap cannot hold it: a
+/// length that came from user space must not panic the kernel, as a
+/// failed `vec!` would (Linux's kvmalloc fails with ENOMEM).
+pub fn zeroed_buf(len: usize) -> Result<Vec<u8>, SyscallError> {
+    let mut buf = Vec::new();
+    buf.try_reserve_exact(len)
+        .map_err(|_| SyscallError::OutOfMemory)?;
+    buf.resize(len, 0);
     Ok(buf)
 }
 
@@ -1098,5 +1109,19 @@ mod accessor_tests {
         assert!(refused(Some(F::PRESENT | F::WRITABLE | F::NO_EXECUTE)));
         assert!(!refused(None));
         assert!(!refused(Some(F::USER)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_buffer_too_big_for_the_heap_is_enomem() {
+        assert_eq!(zeroed_buf(5), Ok(alloc::vec![0u8; 5]));
+        assert_eq!(
+            zeroed_buf(usize::MAX / 2).map(|v| v.len()),
+            Err(SyscallError::OutOfMemory)
+        );
     }
 }

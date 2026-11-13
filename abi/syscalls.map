@@ -314,8 +314,8 @@ setpriority
 
 ## Futexes
 futex
-FutexWait               private 1225
-FutexWake               private 1226
+NativeFutexWait         private 1225
+NativeFutexWake         private 1226
 
 ## Shared memory
 ShmOpen                 private 1234
@@ -403,3 +403,31 @@ inotify_init
 inotify_init1
 inotify_add_watch
 inotify_rm_watch
+
+## System V IPC
+shmget
+shmat
+shmdt
+shmctl
+semget
+semop
+semtimedop
+semctl
+msgget
+msgsnd
+msgrcv
+msgctl
+
+## POSIX message queues
+mq_open
+mq_unlink
+mq_timedsend
+mq_timedreceive
+mq_notify
+mq_getsetattr
+
+## futex2
+futex_waitv
+futex_wake
+futex_wait
+futex_requeue

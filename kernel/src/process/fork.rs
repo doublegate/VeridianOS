@@ -36,6 +36,9 @@ pub struct ForkOptions {
     pub share_files: bool,
     /// CLONE_SIGHAND: the child shares the signal actions.
     pub share_sighand: bool,
+    /// CLONE_SYSVSEM: the child shares the System V semaphore undo list
+    /// (a fork's child starts with none).
+    pub share_sysvsem: bool,
     /// CLONE_PARENT: the child's parent is the caller's, and its exit
     /// signal the caller's own.
     pub clone_parent: bool,
@@ -95,6 +98,7 @@ impl Default for ForkOptions {
             share_fs: false,
             share_files: false,
             share_sighand: false,
+            share_sysvsem: false,
             clone_parent: false,
             vfork: false,
             stack: None,
@@ -300,6 +304,14 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
         // pending signals are not. CLONE_SIGHAND shares the actions.
         new_process
             .set_sighand(current_process.sighand_for_child(opts.share_sighand, opts.clear_sighand));
+        // CLONE_SYSVSEM shares the semaphore undo list (copy_semundo),
+        // made now if the parent has none yet, so both use one list from
+        // their first SEM_UNDO on (PR #40 review).
+        #[cfg(feature = "alloc")]
+        if opts.share_sysvsem {
+            *new_process.sem_undo.lock() =
+                Some(crate::syscall::sysvipc::sem::undo_of(&current_process));
+        }
         new_process.signal_mask.store(
             current_process
                 .signal_mask

@@ -835,6 +835,13 @@ pub trait VfsNode: Send + Sync {
         None
     }
 
+    /// What an open file of this node keeps alive until its last close,
+    /// beyond the node itself: a message queue's IPC namespace, which
+    /// Linux's open queue keeps through its mount. Default `None`.
+    fn held_by_open(&self) -> Option<Arc<dyn core::any::Any + Send + Sync>> {
+        None
+    }
+
     /// `(major, minor)` for device nodes, `None` for everything else.
     ///
     /// Use this, never the path a file was opened with, to decide whether a

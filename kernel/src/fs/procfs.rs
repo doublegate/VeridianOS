@@ -287,6 +287,12 @@ enum Sysctl {
     MaxPidNamespaces,
     /// `user/max_net_namespaces` (ADR 0022 H6), likewise.
     MaxNetNamespaces,
+    /// `kernel/{shm,sem,msg}*`: the reader's IPC namespace's System V
+    /// limits (`syscall::sysvipc::SYSCTLS`).
+    Ipc(&'static str),
+    /// `fs/mqueue/*`: the reader's IPC namespace's message-queue limits
+    /// (`syscall::mqueue::SYSCTLS`).
+    Mqueue(&'static str),
 }
 
 impl Sysctl {
@@ -303,7 +309,34 @@ impl Sysctl {
             "sys/user/max_user_namespaces" => Some(Self::MaxUserNamespaces),
             "sys/user/max_pid_namespaces" => Some(Self::MaxPidNamespaces),
             "sys/user/max_net_namespaces" => Some(Self::MaxNetNamespaces),
-            _ => None,
+            _ => {
+                #[cfg(feature = "alloc")]
+                if let Some(n) = name.strip_prefix("sys/fs/mqueue/") {
+                    return crate::syscall::mqueue::SYSCTLS
+                        .iter()
+                        .find(|s| **s == n)
+                        .map(|s| Self::Mqueue(s));
+                }
+                #[cfg(feature = "alloc")]
+                if let Some(n) = name.strip_prefix("sys/kernel/") {
+                    return crate::syscall::sysvipc::SYSCTLS
+                        .iter()
+                        .find(|s| **s == n)
+                        .map(|s| Self::Ipc(s));
+                }
+                None
+            }
+        }
+    }
+
+    /// The file's text.
+    fn text(self) -> String {
+        match self {
+            #[cfg(feature = "alloc")]
+            Self::Ipc(name) => crate::syscall::sysvipc::sysctl_text(name),
+            #[cfg(feature = "alloc")]
+            Self::Mqueue(name) => crate::syscall::mqueue::sysctl_text(name),
+            _ => format!("{}\n", self.get()),
         }
     }
 
@@ -323,7 +356,20 @@ impl Sysctl {
             Self::MaxNetNamespaces => crate::process::ns::NET_NAMESPACES
                 .max
                 .load(Ordering::Acquire) as usize,
+            Self::Ipc(_) | Self::Mqueue(_) => 0,
         }
+    }
+
+    /// Whether it is the whole system's, so that writing it also needs
+    /// MODIFY on the System object (ADR 0024, step 7). The IPC and mqueue
+    /// sysctls are their IPC namespace's, and `writer_may` checks MODIFY on
+    /// that namespace (ADR 0027 rule 2+); those of the initial IPC
+    /// namespace (`ipc_initial`) are shared by every process not unshared
+    /// from it, so they are the system's and need the System object too,
+    /// while the root of a new user namespace may tune a new IPC namespace
+    /// of its own without it (ADR 0027 decision 2).
+    fn system_wide(self, ipc_initial: bool) -> bool {
+        !matches!(self, Self::Ipc(_) | Self::Mqueue(_)) || ipc_initial
     }
 
     /// Whether `writer` may write it now: Linux checks the writer at every
@@ -340,6 +386,11 @@ impl Sysctl {
             Self::MaxUserNamespaces | Self::MaxPidNamespaces | Self::MaxNetNamespaces => {
                 writer.capable(crate::process::linux_caps::CAP_SYS_RESOURCE)
             }
+            // mq_sysctl's set_permissions is ipc_sysctl's.
+            #[cfg(feature = "alloc")]
+            Self::Ipc(_) | Self::Mqueue(_) => crate::syscall::sysvipc::sysctl_writer_may(writer),
+            #[cfg(not(feature = "alloc"))]
+            Self::Ipc(_) | Self::Mqueue(_) => false,
         }
     }
 
@@ -353,6 +404,28 @@ impl Sysctl {
         use crate::process::userns;
         let (store, max) = match self {
             Self::Inotify(limit) => return limit.write(text),
+            #[cfg(feature = "alloc")]
+            Self::Ipc(name) => {
+                return crate::syscall::sysvipc::sysctl_write(name, text).map_err(|_| {
+                    KernelError::InvalidArgument {
+                        name: "value",
+                        value: "out of the sysctl's range",
+                    }
+                })
+            }
+            #[cfg(feature = "alloc")]
+            Self::Mqueue(name) => {
+                return crate::syscall::mqueue::sysctl_write(name, text).map_err(|_| {
+                    KernelError::InvalidArgument {
+                        name: "value",
+                        value: "out of the sysctl's range",
+                    }
+                })
+            }
+            #[cfg(not(feature = "alloc"))]
+            Self::Ipc(_) | Self::Mqueue(_) => {
+                return Err(KernelError::FsError(FsError::PermissionDenied))
+            }
             Self::UnprivilegedUsernsClone => (&userns::UNPRIVILEGED_CLONE, 1),
             Self::MaxUserNamespaces => (&userns::USER_NAMESPACES.max, i32::MAX as u32),
             Self::MaxPidNamespaces => (&crate::process::pidns::PID_NAMESPACES.max, i32::MAX as u32),
@@ -751,7 +824,12 @@ impl VfsNode for ProcNode {
                         crate::process::ns::current_net() == crate::process::ns::INITIAL_NET,
                     ),
                     name if Sysctl::from_name(name).is_some() => {
-                        format!("{}\n", Sysctl::from_name(name).map_or(0, |l| l.get()))
+                        Sysctl::from_name(name).map_or_else(String::new, Sysctl::text)
+                    }
+                    // The reader's IPC namespace's System V objects.
+                    #[cfg(feature = "alloc")]
+                    name if name.starts_with("sysvipc/") => {
+                        crate::syscall::sysvipc::proc_text(&name["sysvipc/".len()..])
                     }
                     "self/maps" => crate::process::current_process()
                         .map(|p| generate_maps(p.pid.0))
@@ -879,9 +957,15 @@ impl VfsNode for ProcNode {
             .sysctl()
             .ok_or(KernelError::FsError(FsError::PermissionDenied))?;
         // The writer, checked at every write (EACCES, as sysctl_perm), and
-        // MODIFY on the System object (ADR 0024, step 7).
+        // for a system-wide one MODIFY on the System object (ADR 0024,
+        // step 7), the initial IPC namespace's limits included.
+        #[cfg(feature = "alloc")]
+        let ipc_initial = crate::syscall::sysvipc::current_ns().is_initial_ipc();
+        #[cfg(not(feature = "alloc"))]
+        let ipc_initial = true;
         if !limit.writer_may(&crate::process::creds::Caller::current())
-            || !crate::cap::authority::current_may_change_system()
+            || (limit.system_wide(ipc_initial)
+                && !crate::cap::authority::current_may_change_system())
         {
             return Err(KernelError::FsError(FsError::PermissionDenied));
         }
@@ -1011,6 +1095,12 @@ impl VfsNode for ProcNode {
                     inode: 0,
                 });
 
+                entries.push(DirEntry {
+                    name: String::from("sysvipc"),
+                    node_type: NodeType::Directory,
+                    inode: 0,
+                });
+
                 // A directory for each process this mount's PID namespace
                 // numbers, by that number.
                 if let Some(process_list) = crate::process::get_process_list() {
@@ -1080,12 +1170,27 @@ impl VfsNode for ProcNode {
             ProcNodeType::SubDir(dir) if dir.starts_with("sys") || dir == "net" => {
                 let listed: &[(&str, NodeType)] = match dir.as_str() {
                     "net" => &[("dev", NodeType::File)],
+                    "sysvipc" => &[
+                        ("msg", NodeType::File),
+                        ("sem", NodeType::File),
+                        ("shm", NodeType::File),
+                    ],
                     "sys" => &[
                         ("fs", NodeType::Directory),
                         ("kernel", NodeType::Directory),
                         ("user", NodeType::Directory),
                     ],
-                    "sys/fs" => &[("inotify", NodeType::Directory)],
+                    "sys/fs" => &[
+                        ("inotify", NodeType::Directory),
+                        ("mqueue", NodeType::Directory),
+                    ],
+                    "sys/fs/mqueue" => &[
+                        ("msg_default", NodeType::File),
+                        ("msg_max", NodeType::File),
+                        ("msgsize_default", NodeType::File),
+                        ("msgsize_max", NodeType::File),
+                        ("queues_max", NodeType::File),
+                    ],
                     "sys/fs/inotify" => &[
                         ("max_queued_events", NodeType::File),
                         ("max_user_instances", NodeType::File),
@@ -1096,10 +1201,18 @@ impl VfsNode for ProcNode {
                         ("core_pattern", NodeType::File),
                         ("domainname", NodeType::File),
                         ("hostname", NodeType::File),
+                        ("msgmax", NodeType::File),
+                        ("msgmnb", NodeType::File),
+                        ("msgmni", NodeType::File),
                         ("osrelease", NodeType::File),
                         ("ostype", NodeType::File),
                         ("pid_max", NodeType::File),
                         ("random", NodeType::Directory),
+                        ("sem", NodeType::File),
+                        ("shm_rmid_forced", NodeType::File),
+                        ("shmall", NodeType::File),
+                        ("shmmax", NodeType::File),
+                        ("shmmni", NodeType::File),
                         ("tainted", NodeType::File),
                         ("unprivileged_userns_clone", NodeType::File),
                         ("version", NodeType::File),
@@ -1166,6 +1279,9 @@ impl VfsNode for ProcNode {
                         Arc::new(self.child(ProcNodeType::SubDir(String::from("sys"))))
                             as Arc<dyn VfsNode>,
                     ),
+                    "sysvipc" => Ok(Arc::new(
+                        self.child(ProcNodeType::SubDir(String::from("sysvipc"))),
+                    ) as Arc<dyn VfsNode>),
                     // Nothing for a caller this mount's namespace does not
                     // number.
                     "self" if self.me().is_some() => Ok(Arc::new(
@@ -1208,6 +1324,13 @@ impl VfsNode for ProcNode {
                             _ => Err(KernelError::FsError(FsError::NotFound)),
                         }
                     }
+                    "sysvipc" => match name {
+                        "shm" | "sem" | "msg" => {
+                            Ok(Arc::new(self.system_file(format!("sysvipc/{}", name)))
+                                as Arc<dyn VfsNode>)
+                        }
+                        _ => Err(KernelError::FsError(FsError::NotFound)),
+                    },
                     "sys" => match name {
                         "fs" | "kernel" | "user" => Ok(Arc::new(
                             self.child(ProcNodeType::SubDir(format!("sys/{}", name))),
@@ -1216,8 +1339,15 @@ impl VfsNode for ProcNode {
                         _ => Err(KernelError::FsError(FsError::NotFound)),
                     },
                     "sys/fs" => match name {
-                        "inotify" => Ok(Arc::new(
-                            self.child(ProcNodeType::SubDir(String::from("sys/fs/inotify"))),
+                        "inotify" | "mqueue" => Ok(Arc::new(
+                            self.child(ProcNodeType::SubDir(format!("sys/fs/{}", name))),
+                        ) as Arc<dyn VfsNode>),
+                        _ => Err(KernelError::FsError(FsError::NotFound)),
+                    },
+                    "sys/fs/mqueue" => match name {
+                        "msg_default" | "msg_max" | "msgsize_default" | "msgsize_max"
+                        | "queues_max" => Ok(Arc::new(
+                            self.system_file(format!("sys/fs/mqueue/{}", name)),
                         ) as Arc<dyn VfsNode>),
                         _ => Err(KernelError::FsError(FsError::NotFound)),
                     },
@@ -1248,6 +1378,11 @@ impl VfsNode for ProcNode {
                             self.system_file(String::from("sys/kernel/unprivileged_userns_clone")),
                         )
                             as Arc<dyn VfsNode>),
+                        "msgmax" | "msgmnb" | "msgmni" | "sem" | "shm_rmid_forced" | "shmall"
+                        | "shmmax" | "shmmni" => {
+                            Ok(Arc::new(self.system_file(format!("sys/kernel/{}", name)))
+                                as Arc<dyn VfsNode>)
+                        }
                         _ => Err(KernelError::FsError(FsError::NotFound)),
                     },
                     "sys/user" => match name {
@@ -1783,6 +1918,32 @@ mod tests {
         assert!(!max.writer_may(&override_only));
     }
 
+    /// The IPC and mqueue sysctls are their IPC namespace's, checked
+    /// against MODIFY on that namespace; the initial IPC namespace's are
+    /// shared by the whole system and need the System object too, as the
+    /// other sysctls always do (ADR 0024 step 7, ADR 0027 decision 2).
+    #[test]
+    fn only_system_wide_sysctls_need_the_system_object() {
+        for ipc_initial in [true, false] {
+            assert!(Sysctl::UnprivilegedUsernsClone.system_wide(ipc_initial));
+            assert!(Sysctl::MaxUserNamespaces.system_wide(ipc_initial));
+            assert!(Sysctl::MaxPidNamespaces.system_wide(ipc_initial));
+            assert!(Sysctl::MaxNetNamespaces.system_wide(ipc_initial));
+        }
+        assert!(Sysctl::Ipc("shmmax").system_wide(true));
+        assert!(Sysctl::Mqueue("msg_max").system_wide(true));
+        assert!(!Sysctl::Ipc("shmmax").system_wide(false));
+        assert!(!Sysctl::Mqueue("msg_max").system_wide(false));
+    }
+
+    /// The initial IPC namespace is the one whose limits need the System
+    /// object.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn the_initial_ipc_namespace_is_known() {
+        assert!(crate::process::ns::initial().ipc.is_initial_ipc());
+    }
+
     /// Everyone may walk /proc and read its files, as on Linux: directories
     /// r-xr-xr-x, files r--r--r--. (Directories had no execute bit, so a
     /// non-root process could open nothing below /proc.)
@@ -2002,9 +2163,20 @@ mod tests {
                 .collect()
         };
         assert!(names(&ProcNode::new_root()).iter().any(|n| n == "sys"));
+        assert!(names(&ProcNode::new_root()).iter().any(|n| n == "sysvipc"));
         for (dir, want) in [
             ("sys", &["fs", "kernel", "user"][..]),
-            ("sys/fs", &["inotify"][..]),
+            ("sys/fs", &["inotify", "mqueue"][..]),
+            (
+                "sys/fs/mqueue",
+                &[
+                    "msg_default",
+                    "msg_max",
+                    "msgsize_default",
+                    "msgsize_max",
+                    "queues_max",
+                ][..],
+            ),
             (
                 "sys/fs/inotify",
                 &[
@@ -2020,10 +2192,18 @@ mod tests {
                     "core_pattern",
                     "domainname",
                     "hostname",
+                    "msgmax",
+                    "msgmnb",
+                    "msgmni",
                     "osrelease",
                     "ostype",
                     "pid_max",
                     "random",
+                    "sem",
+                    "shm_rmid_forced",
+                    "shmall",
+                    "shmmax",
+                    "shmmni",
                     "tainted",
                     "unprivileged_userns_clone",
                     "version",
@@ -2039,6 +2219,7 @@ mod tests {
                 ][..],
             ),
             ("net", &["dev"][..]),
+            ("sysvipc", &["msg", "sem", "shm"][..]),
         ] {
             let node = ProcNode::of(ProcNodeType::SubDir(String::from(dir)));
             let mut got = names(&node);

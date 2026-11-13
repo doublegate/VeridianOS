@@ -72,6 +72,9 @@ pub(crate) fn to_linux_errno(err: super::SyscallError) -> isize {
     const LINUX_ETXTBSY: isize = -26;
     const LINUX_EUSERS: isize = -87;
     const LINUX_ENETUNREACH: isize = -101;
+    const LINUX_EIDRM: isize = -43;
+    const LINUX_ENOMSG: isize = -42;
+    const LINUX_EMSGSIZE: isize = -90;
 
     match err {
         SyscallError::InvalidSyscall => LINUX_ENOSYS,
@@ -139,6 +142,9 @@ pub(crate) fn to_linux_errno(err: super::SyscallError) -> isize {
         SyscallError::TextBusy => LINUX_ETXTBSY,
         SyscallError::TooManyUsers => LINUX_EUSERS,
         SyscallError::NetworkUnreachable => LINUX_ENETUNREACH,
+        SyscallError::IdRemoved => LINUX_EIDRM,
+        SyscallError::NoMessage => LINUX_ENOMSG,
+        SyscallError::MessageTooLong => LINUX_EMSGSIZE,
         // Not an errno: the signal return path rewrites it (`restart`).
         SyscallError::RestartBlock => -516,
     }

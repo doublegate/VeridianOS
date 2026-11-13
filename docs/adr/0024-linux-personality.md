@@ -157,10 +157,14 @@ A survey of the tree on 2026-11-05 found the following:
    | unshare and clone with CLONE_NEW* | SYS_ADMIN (none for a user namespace) | the caller's namespace of that kind, CREATE; the caller's user namespace, CREATE, for CLONE_NEWUSER |
    | setns | SYS_ADMIN over the target's owner, SYS_CHROOT | the target namespace, EXECUTE |
    | uid_map, gid_map, setgroups | SYS_ADMIN, SETFCAP | the user namespace, MODIFY |
-   | sysctls: unprivileged_userns_clone, pid_max, other writes | SYS_ADMIN | `System`, MODIFY |
+   | sysctls: unprivileged_userns_clone, pid_max, other writes (the initial IPC namespace's too; a new IPC namespace's, below) | SYS_ADMIN | `System`, MODIFY |
    | the package calls | (native) | `System`, MODIFY (replacing the check that accepts any type) |
    | RLIMIT_NPROC override | SYS_RESOURCE, SYS_ADMIN | `System`, MODIFY |
    | native account calls (`veridian_auth`) on another user | DAC_OVERRIDE | the mount namespace, WRITE (the account store is a file) |
+   | System V IPC and POSIX message queues: reading, waiting for zero, a read-only attachment, opening a queue (item 5) | the mode bits, IPC_OWNER | the IPC namespace, READ |
+   | the same: sending, receiving, altering a semaphore, a writable attachment, mq_notify (item 5) | the mode bits, IPC_OWNER | the IPC namespace, WRITE |
+   | the same: making an object (shmget, semget, msgget, mq_open with O_CREAT; item 5) | (none) | the IPC namespace, CREATE |
+   | the same: IPC_SET, IPC_RMID, SHM_LOCK, mq_unlink, the IPC limits in /proc/sys (item 5) | owner, SYS_ADMIN, IPC_LOCK, SYS_RESOURCE | the IPC namespace, MODIFY (and `System`, MODIFY, for the initial IPC namespace's limits) |
    | set*id, setgroups, capset, the capability prctls, securebits | SETUID, SETGID, SETPCAP | none: these act on the caller's own credentials |
 
    Calls added later, in item 5 and beyond, take their row from this table, or add one to it in
