@@ -334,8 +334,17 @@ impl ElfLoader {
         let offset = dynamic_offset as usize;
 
         for i in 0..num_entries {
-            let entry_offset = offset + (i * entry_size);
-            if entry_offset + entry_size > data.len() {
+            // Checked: the offset and size come from the file (PR #42).
+            let Some(entry_offset) = i
+                .checked_mul(entry_size)
+                .and_then(|d| offset.checked_add(d))
+            else {
+                break;
+            };
+            if entry_offset
+                .checked_add(entry_size)
+                .is_none_or(|e| e > data.len())
+            {
                 break;
             }
 
@@ -494,8 +503,16 @@ impl ElfLoader {
         let num_symbols = symtab_size / sym_entry_size;
 
         for i in 0..num_symbols {
-            let sym_offset = (symtab_offset as usize) + (i * sym_entry_size);
-            if sym_offset + sym_entry_size > data.len() {
+            let Some(sym_offset) = i
+                .checked_mul(sym_entry_size)
+                .and_then(|d| (symtab_offset as usize).checked_add(d))
+            else {
+                break;
+            };
+            if sym_offset
+                .checked_add(sym_entry_size)
+                .is_none_or(|e| e > data.len())
+            {
                 break;
             }
 
@@ -522,7 +539,9 @@ impl ElfLoader {
 
             // Get symbol name from string table
             let name = if (name_idx as usize) < strtab_size {
-                let name_offset = (strtab_offset as usize) + (name_idx as usize);
+                let name_offset = (strtab_offset as usize)
+                    .checked_add(name_idx as usize)
+                    .ok_or(ElfError::InvalidData)?;
                 self.read_string(data, name_offset)?
             } else {
                 String::new()
@@ -567,7 +586,9 @@ impl ElfLoader {
                 let offset = ph.p_offset as usize;
                 let size = ph.p_filesz as usize;
 
-                if offset + size > data.len() {
+                // Checked, and an empty PT_INTERP has no terminator to
+                // drop (it underflowed; PR #42 review).
+                if size == 0 || offset.checked_add(size).is_none_or(|e| e > data.len()) {
                     return Err(ElfError::InvalidProgramHeader);
                 }
 
@@ -595,13 +616,18 @@ impl ElfLoader {
         let mem_size = ph.p_memsz as usize;
         let vaddr = ph.p_vaddr;
 
-        // Validate offsets
-        if file_offset + file_size > data.len() {
+        // Validate offsets (checked: they come from the file).
+        if file_offset
+            .checked_add(file_size)
+            .is_none_or(|e| e > data.len())
+        {
             return Err(ElfError::InvalidProgramHeader);
         }
 
         // Calculate target address
-        let target_addr = (base_addr + vaddr) as *mut u8;
+        let target_addr = base_addr
+            .checked_add(vaddr)
+            .ok_or(ElfError::InvalidProgramHeader)? as *mut u8;
 
         // Copy file data
         if file_size > 0 {
@@ -1101,6 +1127,32 @@ mod tests {
         let mut shifted = vec![0u8; good.len() + 1];
         shifted[1..].copy_from_slice(&good);
         assert!(loader.parse(&shifted[1..]).is_ok());
+    }
+
+    #[test]
+    fn an_empty_or_overflowing_interpreter_is_refused() {
+        let loader = ElfLoader::new();
+        let data = make_minimal_elf(2, 62, 0x40_0000, 0x40_0000, 0x1000);
+        // SAFETY: the buffer holds a whole ELF header; read_unaligned has
+        // no alignment requirement and every bit pattern is a valid header.
+        let header: Elf64Header =
+            unsafe { core::ptr::read_unaligned(data.as_ptr() as *const Elf64Header) };
+        let interp = |p_offset, p_filesz| Elf64ProgramHeader {
+            p_type: ProgramType::Interp as u32,
+            p_flags: 0,
+            p_offset,
+            p_vaddr: 0,
+            p_paddr: 0,
+            p_filesz,
+            p_memsz: p_filesz,
+            p_align: 1,
+        };
+        for ph in [interp(0, 0), interp(u64::MAX, 2)] {
+            assert_eq!(
+                loader.find_interpreter(&data, &header, &[ph]),
+                Err(ElfError::InvalidProgramHeader)
+            );
+        }
     }
 
     #[test]

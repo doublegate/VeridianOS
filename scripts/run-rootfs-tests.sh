@@ -97,7 +97,11 @@ done
 
 rm -f "$fifo"
 mkfifo "$fifo"
-"${qemu[@]}" -smp "${SMP:-1}" -serial stdio -display none -m 2048M <"$fifo" >"$log" 2>&1 &
+# A monitor socket, for the CPU dump of a stalled run (dump_cpus).
+mon="$log_dir/qemu-monitor$suffix.sock"
+rm -f "$mon"
+"${qemu[@]}" -smp "${SMP:-1}" -serial stdio -display none -m 2048M \
+    -monitor "unix:$mon,server,nowait" <"$fifo" >"$log" 2>&1 &
 pid=$!
 exec 3>"$fifo" # keep the write end open for the whole session
 
@@ -105,7 +109,52 @@ finish() {
     exec 3>&-
     kill "$pid" 2>/dev/null
     wait "$pid" 2>/dev/null
-    rm -f "$fifo"
+    rm -f "$fifo" "$mon"
+}
+
+# A run that stopped making progress: every CPU's registers, twice a
+# second apart (a spinning CPU moves little, a halted one not at all),
+# with each RIP/PC resolved against the kernel ELF, into
+# stall-cpus<suffix>.txt beside the log (CI uploads the directory). For a
+# hang seen only in CI (KNOWN-LIMITATIONS, the four-CPU pid_ns hang).
+dump_cpus() {
+    [[ -S $mon ]] || return 0
+    local elf="$img"
+    [[ $arch == x86_64 ]] && elf="$root/target/x86_64-veridian/debug/veridian-kernel"
+    python3 - "$mon" "$elf" "$log_dir/stall-cpus$suffix.txt" <<'PY' || true
+import re, socket, subprocess, sys, time
+mon, elf, out = sys.argv[1:4]
+def ask(cmd):
+    s = socket.socket(socket.AF_UNIX)
+    s.settimeout(5)
+    s.connect(mon)
+    s.sendall((cmd + "\n").encode())
+    time.sleep(1)
+    data = b""
+    try:
+        while True:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+    except socket.timeout:
+        pass
+    s.close()
+    return data.decode(errors="replace")
+with open(out, "w") as f:
+    for round_ in (1, 2):
+        regs = ask("info registers -a")
+        f.write(f"=== sample {round_}\n{regs}\n")
+        for pc in re.findall(r"(?:RIP|PC|pc)\s*=\s*([0-9a-fA-F]+)", regs):
+            try:
+                where = subprocess.run(["addr2line", "-fipe", elf, "0x" + pc],
+                                       capture_output=True, text=True, timeout=10).stdout.strip()
+            except (OSError, subprocess.SubprocessError):
+                where = "?"
+            f.write(f"{pc}: {where}\n")
+        time.sleep(1)
+PY
+    echo "stalled: CPU state in $log_dir/stall-cpus$suffix.txt"
 }
 
 wait_for() { # pattern seconds
@@ -164,7 +213,7 @@ sleep 1
 # absence a failure). The prompt is the kernel shell (vsh), which has no
 # conditionals, so a missing binary just never prints a result.
 printf '/bin/musl_runtime_test\r' >&3
-wait_for 'MUSL-RUNTIME: [0-9]+/[0-9]+|vsh: command not found' "$musl_wait"
+wait_for 'MUSL-RUNTIME: [0-9]+/[0-9]+|vsh: command not found' "$musl_wait" || dump_cpus
 sleep 1
 # A program started with arguments gets its own name as argv[0] and the
 # arguments after it (the kernel shell used to pass the arguments alone).

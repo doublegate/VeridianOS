@@ -29,7 +29,7 @@ pub const PIPE_BUF: usize = 4096;
 /// smaller), as Linux's pipe_poll, which wants a free slot. With less, a
 /// write of up to PIPE_BUF bytes is EAGAIN, so reporting POLLOUT for one
 /// free byte made a poll writer spin (PR #24 review).
-fn room_for_atomic_write(len: usize, capacity: usize) -> bool {
+pub(crate) fn room_for_atomic_write(len: usize, capacity: usize) -> bool {
     capacity.saturating_sub(len) >= PIPE_BUF.min(capacity)
 }
 
