@@ -5755,6 +5755,10 @@ static void test_itimers(void)
 {
     char why[200];
     struct sigaction sa, old_alrm, old_prof;
+    /* Fresh counts each run: with --only itimers N the repeats used to see
+     * the first run's signals and fail. */
+    alrm_count = 0;
+    prof_count = 0;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = count_alrm;
     sigaction(SIGALRM, &sa, &old_alrm);
@@ -9597,6 +9601,14 @@ static void test_memctl(void)
         memcpy(fm, "abc", 3);
         if (msync(fm, page, MS_SYNC) != 0 || pread(fd, back, 3, 0) != 3 || memcmp(back, "abc", 3))
             f |= 16384;
+        /* A read-only shared mapping holds no changes: its msync must not
+         * write its (stale) copy over what pwrite put in the file since. */
+        char *ro = mmap(NULL, page, PROT_READ, MAP_SHARED, fd, 0);
+        if (ro == MAP_FAILED || pwrite(fd, "xyz", 3, 0) != 3 || msync(ro, page, MS_SYNC) != 0 ||
+            pread(fd, back, 3, 0) != 3 || memcmp(back, "xyz", 3))
+            f |= 16384;
+        if (ro != MAP_FAILED)
+            munmap(ro, page);
         munmap(fm, page);
     }
     if (fd >= 0)

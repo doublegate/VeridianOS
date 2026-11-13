@@ -279,12 +279,22 @@ pub fn sys_remap_file_pages(
         .ok_or(inval)?
         .clone();
     let backing = first.backing.clone().ok_or(inval)?;
-    // One file, shared, with no gap: contiguous pieces of one mapping.
+    // One file, shared, with no gap: contiguous pieces of what Linux would
+    // hold as one VMA, so alike in protection, write access, lock state,
+    // seal and key too (Linux needs the range in one VMA: EINVAL). Pieces
+    // that differ would all take the first one's (PR #41 review).
     let mut covered = start;
     for m in &found {
         let same = m.mapping_type == T::Shared
+            && m.flags == first.flags
+            && m.may_write == first.may_write
+            && m.may_exec == first.may_exec
+            && m.mlock == first.mlock
+            && m.sealed == first.sealed
+            && m.pkey == first.pkey
             && m.backing.as_ref().is_some_and(|b| {
                 b.hook.is_none()
+                    && b.write.is_some() == backing.write.is_some()
                     && core::ptr::eq(
                         alloc::sync::Arc::as_ptr(&b.node) as *const u8,
                         alloc::sync::Arc::as_ptr(&backing.node) as *const u8,
@@ -325,6 +335,10 @@ pub fn sys_remap_file_pages(
             give_back(&frames);
             return Err(SyscallError::WouldBlock);
         }
+        let Some(lock) = remap_lock(&proc, &vas, &first, size) else {
+            give_back(&frames);
+            return Err(SyscallError::WouldBlock);
+        };
         // map_shared_frames replaces the range itself, refusing before it
         // unmaps anything: on failure the old mapping is still there.
         let at = vas
@@ -337,22 +351,19 @@ pub fn sys_remap_file_pages(
             .map_err(|_| SyscallError::OutOfMemory)?;
         vas.set_may_exec(at, first.may_exec);
         vas.set_backing(at, node, offset, backing.write.clone());
-        if first.mlock.is_locked() {
-            let _ = vas.set_mlock(start, end, first.mlock);
-        }
+        finish_remap(&vas, &first, start, end, lock);
     } else {
         // The file's bytes there, then zeros to the end of the range (a
         // copy stops at the end of the file).
-        let FileData::Copy(mut buf) = FileData::copy(&*node, offset, size)? else {
+        // (The new frames start zeroed, so the copy is not padded.)
+        let FileData::Copy(buf) = FileData::copy(&*node, offset, size)? else {
             return Err(inval);
         };
-        buf.try_reserve_exact(size.saturating_sub(buf.len()))
-            .map_err(|_| SyscallError::OutOfMemory)?;
-        buf.resize(size, 0);
         let vas = proc.memory_space.lock();
         if !same_mappings(&vas.mappings_in(start, end), &found) {
             return Err(SyscallError::WouldBlock);
         }
+        let lock = remap_lock(&proc, &vas, &first, size).ok_or(SyscallError::WouldBlock)?;
         // A new mapping of the file at `offset` over the range, with frames
         // of its own (Linux's emulation is a MAP_FIXED mmap). Filling the
         // old frames failed after fork, which shares them with the child
@@ -365,11 +376,44 @@ pub fn sys_remap_file_pages(
         vas.fill_owned_pages(start, &buf)
             .map_err(super::map_kernel_error)?;
         vas.set_backing(VirtualAddress(start), node, offset, backing.write.clone());
-        if first.mlock.is_locked() {
-            let _ = vas.set_mlock(start, end, first.mlock);
-        }
+        finish_remap(&vas, &first, start, end, lock);
     }
     Ok(0)
+}
+
+/// The lock state remap_file_pages' new mapping takes: the old one's, or
+/// mlockall(MCL_FUTURE)'s, as do_mmap would give it; None when that would
+/// lock past RLIMIT_MEMLOCK (EAGAIN). Checked under the lock the mapping
+/// is made under.
+fn remap_lock(
+    proc: &process::Process,
+    vas: &crate::mm::VirtualAddressSpace,
+    first: &crate::mm::vas::VirtualMapping,
+    size: usize,
+) -> Option<crate::mm::vas::Mlock> {
+    if first.mlock.is_locked() {
+        return Some(first.mlock);
+    }
+    let def = vas.mm_state().def_mlock;
+    (!def.is_locked() || super::memctl::future_lock_allowed(proc, vas, size as u64)).then_some(def)
+}
+
+/// After remap_file_pages' new mapping is made: its lock state, and for
+/// code, the instruction caches (AArch64 and RISC-V fetch stale lines
+/// otherwise; PR #41 review), as mmap and mprotect do.
+fn finish_remap(
+    vas: &crate::mm::VirtualAddressSpace,
+    first: &crate::mm::vas::VirtualMapping,
+    start: u64,
+    end: u64,
+    lock: crate::mm::vas::Mlock,
+) {
+    if lock.is_locked() {
+        let _ = vas.set_mlock(start, end, lock);
+    }
+    if !first.flags.contains(crate::mm::PageFlags::NO_EXECUTE) {
+        vas.sync_code_pages(start, end - start);
+    }
 }
 
 /// Map memory into the process address space (syscall 20).
@@ -396,26 +440,52 @@ pub fn sys_mmap(
     flags: usize,
     fd_or_packed: usize,
 ) -> SyscallResult {
+    // MAP_LOCKED, or mlockall(MCL_FUTURE): `mmap_inner` locks the new
+    // mapping under the lock it checks the limit and makes the mapping
+    // under (`lock_new_mapping`), so concurrent mmaps cannot each pass the
+    // limit, and nothing can replace the range in between (PR #41 review).
     let at = mmap_inner(addr, length, prot, flags, fd_or_packed)?;
-    // MAP_LOCKED, or mlockall(MCL_FUTURE): the new mapping is locked (its
-    // limit was checked before it was made, `mmap_lock_checks`).
-    #[cfg(feature = "alloc")]
-    if let Some(lock) = mmap_lock_state(flags) {
-        let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
-        let unit = if flags & MAP_HUGETLB != 0 {
-            2 * 1024 * 1024
-        } else {
-            PAGE_SIZE
-        };
-        let end = at.saturating_add(length.div_ceil(unit) * unit);
-        let _ = proc
-            .memory_space
-            .lock()
-            .set_mlock(at as u64, end as u64, lock);
-    }
     #[cfg(feature = "alloc")]
     write_protect_immutable(at, length);
     Ok(at)
+}
+
+/// Lock a mapping just made at `at` by an mmap of `length` with `flags`,
+/// as MAP_LOCKED or MCL_FUTURE ask, under the guard `vas` it was made
+/// under (whose RLIMIT_MEMLOCK check it follows). Only the mapping
+/// actually made: 2 MiB pages only for an anonymous one the kernel placed
+/// (`map_unit`), else whole pages.
+#[cfg(feature = "alloc")]
+fn lock_new_mapping(
+    vas: &crate::mm::vas::VirtualAddressSpace,
+    at: usize,
+    length: usize,
+    flags: usize,
+) {
+    if let Some(lock) = lock_state_of(flags, vas.mm_state().def_mlock) {
+        let end = (at as u64).saturating_add(mapped_len(flags, length));
+        // A fresh mapping of whole units: nothing to refuse.
+        let _ = vas.set_mlock(at as u64, end, lock);
+    }
+}
+
+/// The size unit an mmap with `flags` maps in: 2 MiB for an anonymous
+/// MAP_HUGETLB mapping the kernel places (mmap_inner's rule), else a
+/// page. Lock limits count in it: a 1-byte MAP_HUGETLB | MAP_LOCKED
+/// mapping locks 2 MiB (PR #41 review).
+fn map_unit(flags: usize) -> usize {
+    let fixed = flags & (MAP_FIXED | MAP_FIXED_NOREPLACE) != 0;
+    if flags & MAP_ANONYMOUS != 0 && !fixed && flags & MAP_HUGETLB != 0 {
+        2 * 1024 * 1024
+    } else {
+        PAGE_SIZE
+    }
+}
+
+/// The bytes an mmap of `length` with `flags` maps.
+fn mapped_len(flags: usize, length: usize) -> u64 {
+    let unit = map_unit(flags);
+    length.div_ceil(unit).saturating_mul(unit) as u64
 }
 
 /// A writable shared mapping of an immutable file made or widened (mmap
@@ -434,19 +504,8 @@ fn write_protect_immutable(at: usize, length: usize) {
 /// MAP_LOCKED's flag bit.
 const MAP_LOCKED: usize = 0x2000;
 
-/// How a new mapping is locked: MAP_LOCKED (VM_LOCKED), else the default
-/// mlockall(MCL_FUTURE) set (mm->def_vma_flags).
-#[cfg(feature = "alloc")]
-fn mmap_lock_state(flags: usize) -> Option<crate::mm::vas::Mlock> {
-    let def = process::current_process()?
-        .memory_space
-        .lock()
-        .mm_state()
-        .def_mlock;
-    lock_state_of(flags, def)
-}
-
-/// [`mmap_lock_state`] given the mm's default.
+/// How a new mapping is locked: MAP_LOCKED (VM_LOCKED), else the mm's
+/// default `def` (mlockall(MCL_FUTURE), mm->def_vma_flags).
 #[cfg(feature = "alloc")]
 fn lock_state_of(flags: usize, def: crate::mm::vas::Mlock) -> Option<crate::mm::vas::Mlock> {
     use crate::mm::vas::Mlock;
@@ -473,7 +532,7 @@ fn mmap_lock_checks(
     }
     let vas = proc.memory_space.lock();
     if lock_state_of(flags, vas.mm_state().def_mlock).is_some()
-        && !super::memctl::future_lock_allowed(proc, &vas, length as u64)
+        && !super::memctl::future_lock_allowed(proc, &vas, mapped_len(flags, length))
     {
         return Err(SyscallError::WouldBlock);
     }
@@ -734,6 +793,7 @@ fn mmap_inner(
                     vas.sync_code_pages(start.0, bytes);
                 }
                 vas.set_backing(start, file.node.clone(), offset, file.write_access.clone());
+                lock_new_mapping(&vas, start.as_usize(), length, flags);
                 return Ok(start.as_usize());
             }
         }
@@ -831,7 +891,7 @@ fn mmap_inner(
         let refused = if is_fixed && memory_space.sealed_in(addr as u64, end) {
             Some(SyscallError::OperationNotPermitted)
         } else if lock_state_of(flags, memory_space.mm_state().def_mlock).is_some()
-            && !super::memctl::future_lock_allowed(&proc, &memory_space, length as u64)
+            && !super::memctl::future_lock_allowed(&proc, &memory_space, mapped_len(flags, length))
         {
             Some(SyscallError::WouldBlock)
         } else {
@@ -946,6 +1006,8 @@ fn mmap_inner(
             memory_space.set_may_exec(start, !noexec);
         }
     }
+    #[cfg(feature = "alloc")]
+    lock_new_mapping(&memory_space, mapped_addr, length, flags);
 
     Ok(mapped_addr)
 }
@@ -1094,24 +1156,27 @@ pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> SyscallResult {
 fn mprotect_inner(addr: usize, length: usize, prot: usize) -> SyscallResult {
     /// No effect on x86_64 (Linux accepts it).
     const PROT_SEM: usize = 0x8;
-    // As Linux's do_mprotect_pkey (N-240): a page-aligned address and
-    // known protection bits (EINVAL); a zero length succeeds; a range that
-    // wraps, leaves user space or is not all mapped is ENOMEM.
-    if addr & (PAGE_SIZE - 1) != 0
-        || prot & !(PROT_READ | PROT_WRITE | PROT_EXEC | PROT_SEM | PROT_ARCH) != 0
-    {
+    // As Linux's do_mprotect_pkey (N-240), in its order: a page-aligned
+    // address (EINVAL); a zero length succeeds, whatever `prot` is; a range
+    // that wraps is ENOMEM; then known protection bits (EINVAL,
+    // arch_validate_prot); a range that leaves user space or is not all
+    // mapped is ENOMEM.
+    if addr & (PAGE_SIZE - 1) != 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    // PROT_BTI only where the CPU has BTI (arm64 `arch_validate_prot`).
-    #[cfg(target_arch = "aarch64")]
-    let prot = bti_prot(prot, crate::arch::bti_supported(), true)?;
-    let prot = prot & !PROT_SEM;
     if length == 0 {
         return Ok(0);
     }
     let len = length
         .checked_next_multiple_of(PAGE_SIZE)
         .ok_or(SyscallError::OutOfMemory)?;
+    if prot & !(PROT_READ | PROT_WRITE | PROT_EXEC | PROT_SEM | PROT_ARCH) != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    // PROT_BTI only where the CPU has BTI (arm64 `arch_validate_prot`).
+    #[cfg(target_arch = "aarch64")]
+    let prot = bti_prot(prot, crate::arch::bti_supported(), true)?;
+    let prot = prot & !PROT_SEM;
     if !crate::mm::user_layout::is_user_range(addr, len) {
         return Err(SyscallError::OutOfMemory);
     }
@@ -1156,10 +1221,12 @@ fn mprotect_inner(addr: usize, length: usize, prot: usize) -> SyscallResult {
     // hole, as Linux checks each VMA in turn.
     #[cfg(feature = "alloc")]
     {
+        // do_mprotect_pkey walks the VMAs from `addr` and refuses a sealed
+        // one (EPERM) before it reaches a hole (ENOMEM): only what lies
+        // before the first hole counts (PR #41 review).
         let end = addr as u64 + len as u64;
-        if memory_space.hole_in(addr as u64, end).is_none()
-            && memory_space.sealed_in(addr as u64, end)
-        {
+        let upto = memory_space.hole_in(addr as u64, end).unwrap_or(end);
+        if memory_space.sealed_in(addr as u64, upto) {
             return Err(SyscallError::OperationNotPermitted);
         }
     }
@@ -1200,6 +1267,11 @@ mod madv {
     pub const DONTNEED_LOCKED: usize = 24;
 }
 
+/// madvise_behavior_valid: the advice madvise knows.
+pub(super) fn madvise_valid(advice: usize) -> bool {
+    matches!(advice, madv::NORMAL..=madv::DONTNEED | madv::FREE..=madv::DONTNEED_LOCKED)
+}
+
 /// madvise(addr, len, advice) (N-243), as Linux:
 ///
 /// - EINVAL: an unaligned address, a length that overflows, an unknown advice
@@ -1223,9 +1295,7 @@ mod madv {
 pub fn sys_madvise(addr: usize, len: usize, advice: usize) -> SyscallResult {
     use crate::mm::vas::MappingType as T;
     let inval = SyscallError::InvalidArgument;
-    let known =
-        matches!(advice, madv::NORMAL..=madv::DONTNEED | madv::FREE..=madv::DONTNEED_LOCKED);
-    if addr & (PAGE_SIZE - 1) != 0 || !known {
+    if addr & (PAGE_SIZE - 1) != 0 || !madvise_valid(advice) {
         return Err(inval);
     }
     let len = len.checked_next_multiple_of(PAGE_SIZE).ok_or(inval)?;
@@ -1392,7 +1462,8 @@ pub fn sys_madvise(addr: usize, len: usize, advice: usize) -> SyscallResult {
 
 /// Whether two snapshots of the mappings in a range are the same mappings
 /// (another thread changed none of them in between): place, kind,
-/// protection, write permission and file, by identity.
+/// protection, write permission, seal, lock state, key and file, by
+/// identity.
 fn same_mappings(
     a: &[crate::mm::vas::VirtualMapping],
     b: &[crate::mm::vas::VirtualMapping],
@@ -1410,6 +1481,8 @@ fn same_mappings(
                 && x.flags == y.flags
                 && x.may_write == y.may_write
                 && x.sealed == y.sealed
+                && x.mlock == y.mlock
+                && x.pkey == y.pkey
                 && file(x) == file(y)
         })
 }
@@ -1442,32 +1515,13 @@ pub fn sys_mremap(
     flags: usize,
     new_addr: usize,
 ) -> SyscallResult {
-    // A locked mapping stays locked as it grows or moves (Linux grows the
-    // VMA itself; here the new part is a piece of its own).
-    #[cfg(feature = "alloc")]
-    let lock = process::current_process().and_then(|p| {
-        p.memory_space
-            .lock()
-            .find_mapping(VirtualAddress(old_addr as u64))
-            .map(|m| m.mlock)
-            .filter(|l| l.is_locked())
-    });
     let at = mremap_inner(old_addr, old_len, new_len, flags, new_addr)?;
-    #[cfg(feature = "alloc")]
-    if let Some(lock) = lock {
-        let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
-        let len = new_len.div_ceil(PAGE_SIZE) * PAGE_SIZE;
-        let _ = proc
-            .memory_space
-            .lock()
-            .lock_grown(at as u64, (at + len) as u64, lock);
-    }
     #[cfg(feature = "alloc")]
     write_protect_immutable(at, new_len);
     Ok(at)
 }
 
-/// The body of mremap(2), before a grown or moved locked mapping is locked.
+/// The body of mremap(2).
 fn mremap_inner(
     old_addr: usize,
     old_len: usize,
@@ -1589,9 +1643,44 @@ fn mremap_inner(
             dont_unmap,
             grow_offset,
         };
-        return remap_locked(&proc, &vas, &request, &m, growth);
+        let done = remap_locked(&proc, &vas, &request, &m, growth);
+        #[cfg(feature = "alloc")]
+        if let Ok(at) = done {
+            relock(&vas, &request, &m, at);
+        }
+        return done;
     }
     Err(SyscallError::OutOfMemory)
+}
+
+/// A locked mapping stays locked as it grows or moves (Linux grows the VMA
+/// itself; here the new part is a piece of its own): the new range at `at`
+/// takes `m`'s lock state, under the lock the change was made under and
+/// from the mapping checked under it, so another thread's mlock, munlock or
+/// replacement in between cannot be undone or skipped (PR #41 review). A
+/// shrink in place keeps its pieces as they are (relocking would only split
+/// them). MREMAP_DONTUNMAP leaves the old range unlocked, as Linux's
+/// dontunmap_complete clears VM_LOCKED on the source.
+#[cfg(feature = "alloc")]
+fn relock(
+    vas: &crate::mm::VirtualAddressSpace,
+    r: &Remap,
+    m: &crate::mm::vas::VirtualMapping,
+    at: usize,
+) {
+    if !m.mlock.is_locked() {
+        return;
+    }
+    if at != r.old || r.new_len > r.old_len {
+        let _ = vas.lock_grown(at as u64, (at + r.new_len) as u64, m.mlock);
+    }
+    if r.dont_unmap {
+        let _ = vas.set_mlock(
+            r.old as u64,
+            (r.old + r.old_len) as u64,
+            crate::mm::vas::Mlock::Unlocked,
+        );
+    }
 }
 
 /// An mremap request, validated.
@@ -1634,6 +1723,12 @@ fn remap_locked(
     {
         release(growth);
         return Err(SyscallError::OperationNotPermitted);
+    }
+    // Growing a locked mapping, within RLIMIT_MEMLOCK, checked again under
+    // this lock: another thread may have locked more since (PR #41 review).
+    if m.mlock.is_locked() && grow > 0 && !super::memctl::future_lock_allowed(proc, vas, grow) {
+        release(growth);
+        return Err(SyscallError::WouldBlock);
     }
 
     // A second mapping of a shared mapping's pages (old length 0).
@@ -1920,19 +2015,9 @@ pub fn sys_brk(addr: usize) -> SyscallResult {
         Some(VirtualAddress(addr as u64))
     };
 
-    #[cfg(feature = "alloc")]
-    let before = memory_space.brk(None).0;
+    // MCL_FUTURE's lock state comes with the new pages
+    // (`brk_extend_heap`), its limit checked above.
     let result = memory_space.brk(new_break);
-    #[cfg(feature = "alloc")]
-    {
-        let def = memory_space.mm_state().def_mlock;
-        let page = PAGE_SIZE as u64;
-        let (from, to) = (before.div_ceil(page) * page, result.0.div_ceil(page) * page);
-        if def.is_locked() && to > from {
-            let _ = memory_space.set_mlock(from, to, def);
-        }
-    }
-
     Ok(result.as_usize())
 }
 

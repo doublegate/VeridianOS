@@ -113,9 +113,11 @@ impl ShmemPages {
         self.frames.len() * PAGE
     }
 
-    /// The memory a file of `size` bytes holds.
+    /// The memory a file of `size` bytes holds; saturating, as a mount's
+    /// `size=` near usize::MAX would otherwise wrap to a limit of 0 or
+    /// panic (PR #28 review).
     pub(crate) fn bytes_for(size: usize) -> usize {
-        size.div_ceil(PAGE) * PAGE
+        size.div_ceil(PAGE).saturating_mul(PAGE)
     }
 
     /// Whether any page is also mapped (has an owner besides the file).
@@ -384,6 +386,17 @@ mod tests {
         // Give back the owner the successful share added.
         let f = p.frames[0];
         assert!(!crate::mm::frame_refs::release(f));
+    }
+
+    #[test]
+    fn bytes_for_saturates() {
+        assert_eq!(ShmemPages::bytes_for(1), PAGE);
+        assert_eq!(ShmemPages::bytes_for(usize::MAX), usize::MAX);
+        // The last whole page still fits.
+        assert_eq!(
+            ShmemPages::bytes_for(usize::MAX - PAGE),
+            usize::MAX - (PAGE - 1)
+        );
     }
 
     #[test]

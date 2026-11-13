@@ -27,7 +27,9 @@
 #        120), MUSL_WAIT (seconds for the musl suite, 600; it runs for
 #        several minutes, and a result ends the wait at once), SMP (CPU
 #        count, default 1), RISCV_CPU (QEMU -cpu for RISC-V, default QEMU's;
-#        `rv64,sv48=off` leaves Sv39 as the only paging mode, ADR 0018)
+#        `rv64,sv48=off` leaves Sv39 as the only paging mode, ADR 0018),
+#        ONLY ("name ..." of musl_runtime_test checks: run just those, each
+#        REPEAT times, default 1, and skip the rest of the suite)
 set -u
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -95,7 +97,11 @@ done
 
 rm -f "$fifo"
 mkfifo "$fifo"
-"${qemu[@]}" -smp "${SMP:-1}" -serial stdio -display none -m 2048M <"$fifo" >"$log" 2>&1 &
+# A monitor socket, for the CPU dump of a stalled run (dump_cpus).
+mon="$log_dir/qemu-monitor$suffix.sock"
+rm -f "$mon"
+"${qemu[@]}" -smp "${SMP:-1}" -serial stdio -display none -m 2048M \
+    -monitor "unix:$mon,server,nowait" <"$fifo" >"$log" 2>&1 &
 pid=$!
 exec 3>"$fifo" # keep the write end open for the whole session
 
@@ -103,12 +109,103 @@ finish() {
     exec 3>&-
     kill "$pid" 2>/dev/null
     wait "$pid" 2>/dev/null
-    rm -f "$fifo"
+    rm -f "$fifo" "$mon"
 }
 
-wait_for() { # pattern seconds
+# A run that stopped making progress: every CPU's registers, twice a
+# second apart (a spinning CPU moves little, a halted one not at all),
+# with each RIP/PC resolved against the kernel ELF, into
+# stall-cpus<suffix>.txt beside the log (CI uploads the directory). For a
+# hang seen only in CI (KNOWN-LIMITATIONS, the four-CPU pid_ns hang).
+dump_cpus() {
+    [[ -S $mon ]] || return 0
+    local elf="$img"
+    [[ $arch == x86_64 ]] && elf="$root/target/x86_64-veridian/debug/veridian-kernel"
+    python3 - "$mon" "$elf" "$log_dir/stall-cpus$suffix.txt" <<'PY' || true
+import re, socket, subprocess, sys, time
+mon, elf, out = sys.argv[1:4]
+ansi = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+def ask(*cmds):
+    s = socket.socket(socket.AF_UNIX)
+    s.settimeout(5)
+    s.connect(mon)
+    for cmd in cmds:
+        s.sendall((cmd + "\n").encode())
+        time.sleep(0.3)
+    time.sleep(1)
+    data = b""
+    try:
+        while True:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+    except socket.timeout:
+        pass
+    s.close()
+    # The monitor echoes each typed character with cursor moves: keep
+    # only its answers.
+    text = ansi.sub("", data.decode(errors="replace"))
+    return "\n".join(l for l in text.splitlines()
+                     if not l.startswith(("(qemu)", "QEMU ")))
+def where(addrs):
+    if not addrs:
+        return []
+    try:
+        res = subprocess.run(["addr2line", "-Cfipe", elf] + ["0x" + a for a in addrs],
+                             capture_output=True, text=True, timeout=20).stdout
+        return res.strip().splitlines()
+    except (OSError, subprocess.SubprocessError):
+        return ["?"]
+# A kernel text address: the upper half (x86_64 0xffffffff8..., AArch64
+# and RISC-V kernels linked high as well).
+text_addr = re.compile(r"0x(ffffffff[0-9a-f]{8})\b")
+with open(out, "w") as f:
+    for round_ in (1, 2):
+        regs = ask("info registers -a")
+        f.write(f"=== sample {round_}\n{regs}\n")
+        # x86_64 and AArch64 print "RIP=..." / "PC=...", RISC-V " pc  ..."
+        # and "x2/sp ..." with no "=" (PR #42 review).
+        for pc in re.findall(r"\b(?:RIP|PC|pc)(?:=|\s+)([0-9a-fA-F]{8,16})\b", regs):
+            f.write(f"{pc}: {' | '.join(where([pc]))}\n")
+        # A rough backtrace per CPU: the kernel text addresses among the
+        # first 64 words of its stack, most recent first.
+        for n, block in enumerate(re.split(r"\nCPU#\d+", "\n" + regs)[1:]):
+            m = re.search(r"(?:\bRSP=|\bSP=|\bx2/sp\s+)([0-9a-fA-F]{16})\b", block)
+            if not m:
+                continue
+            words = ask(f"cpu {n}", f"x /64gx 0x{m.group(1)}")
+            seen = []
+            for line in words.splitlines():
+                # "addr: 0x... 0x...": only the values, not the address column.
+                for a in text_addr.findall(line.split(":", 1)[-1]):
+                    if a not in seen:
+                        seen.append(a)
+            f.write(f"--- CPU#{n} stack (sp {m.group(1)}): kernel code addresses\n")
+            shown = 0
+            for a in seen:
+                w = where([a])
+                # A data pointer into the kernel image resolves to nothing.
+                if not w or w[0].startswith("??"):
+                    continue
+                f.write(f"  {a}: {' | '.join(w)}\n")
+                shown += 1
+                if shown == 24:
+                    break
+        time.sleep(1)
+PY
+    echo "stalled: CPU state in $log_dir/stall-cpus$suffix.txt"
+}
+
+count_in_log() { # pattern: matching lines in the log so far (0 before it exists)
+    local n
+    n=$(grep -acE "$1" "$log" 2>/dev/null)
+    echo "${n:-0}"
+}
+
+wait_for() { # pattern seconds [matches already seen, default 0]
     local waited=0
-    until grep -aqE "$1" "$log" 2>/dev/null; do
+    until (($(count_in_log "$1") > ${3:-0})); do
         ((waited >= $2)) && return 1
         kill -0 "$pid" 2>/dev/null || return 1
         sleep 1
@@ -123,6 +220,35 @@ if ! wait_for 'root@veridian' "$prompt_wait"; then
     exit 1
 fi
 sleep 2
+# ONLY="name ...": run just those musl_runtime_test checks (REPEAT times
+# each, default 1) and stop; for a change confined to them, instead of the
+# whole suite.
+if [[ -n ${ONLY:-} ]]; then
+    status=PASS
+    for t in $ONLY; do
+        # The same name may come twice: wait for a result line past the
+        # ones already in the log (PR #42 review).
+        seen=$(count_in_log "MUSL-ONLY $t: ")
+        printf '/bin/musl_runtime_test --only %s %s\r' "$t" "${REPEAT:-1}" >&3
+        wait_for "MUSL-ONLY $t: " "$musl_wait" "$seen" || dump_cpus
+        sleep 1
+        r="$(grep -aoE "MUSL-ONLY $t: [0-9]+/[0-9]+" "$log" | tail -1)"
+        if [[ $r =~ ([0-9]+)/([0-9]+)$ ]] && [[ ${BASH_REMATCH[1]} == "${BASH_REMATCH[2]}" ]]; then
+            echo "PASS $r"
+        else
+            echo "FAIL ${r:-MUSL-ONLY $t: no result}"
+            status=FAIL
+        fi
+    done
+    finish
+    grep -aqE 'KERNEL PANIC|panicked at' "$log" && status=FAIL
+    if [[ $status != PASS ]]; then
+        grep -aE '^FAIL|KERNEL PANIC|panicked at' "$log" | head -30
+        echo "log: $log"
+        exit 1
+    fi
+    exit 0
+fi
 # Only x86_64's kernel runs the BusyBox self-test at boot.
 if [[ $arch != x86_64 ]]; then
     printf '/bin/ash /usr/src/busybox_test.sh\r' >&3
@@ -136,7 +262,7 @@ sleep 1
 # absence a failure). The prompt is the kernel shell (vsh), which has no
 # conditionals, so a missing binary just never prints a result.
 printf '/bin/musl_runtime_test\r' >&3
-wait_for 'MUSL-RUNTIME: [0-9]+/[0-9]+|vsh: command not found' "$musl_wait"
+wait_for 'MUSL-RUNTIME: [0-9]+/[0-9]+|vsh: command not found' "$musl_wait" || dump_cpus
 sleep 1
 # A program started with arguments gets its own name as argv[0] and the
 # arguments after it (the kernel shell used to pass the arguments alone).

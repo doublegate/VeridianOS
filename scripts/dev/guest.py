@@ -13,7 +13,8 @@ A command has finished when a root prompt, in any working directory, appears in
 the output after the shell has echoed the whole command. A command that itself
 prints a root prompt ends its wait early.
 
-Environment: SMP (CPU count, default 1), RISCV_CPU (QEMU -cpu for RISC-V),
+Environment: SMP (CPU count, default 1), AARCH64_CPU (QEMU -cpu for AArch64,
+default cortex-a72), RISCV_CPU (QEMU -cpu for RISC-V),
 PROMPT_TIMEOUT (seconds to wait for each prompt, default 600), IMAGE (another
 root filesystem image, such as target/rootfs-compat-ARCH.img from
 scripts/build-compat-rootfs.sh, to run single conformance tests).
@@ -38,7 +39,8 @@ def qemu_command(arch: str) -> list[str]:
             "-M",
             "virt",
             "-cpu",
-            "cortex-a72",
+            # AARCH64_CPU, as RISCV_CPU for RISC-V (PR #27 review).
+            os.environ.get("AARCH64_CPU", "cortex-a72"),
             "-kernel",
             str(ROOT / "target/aarch64-unknown-none-softfloat/debug/veridian-kernel"),
         ]

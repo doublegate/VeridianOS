@@ -1862,6 +1862,25 @@ fn handle_mode_obj_get_properties(arg: *mut u8) -> Result<i32, KernelError> {
     Ok(0)
 }
 
+/// A page flip claimed by [`PageFlipManager::reserve_flip`]: given back on
+/// drop unless it was committed.
+///
+/// [`PageFlipManager::reserve_flip`]: gpu_accel::PageFlipManager::reserve_flip
+struct FlipClaim {
+    crtc: u32,
+    before: gpu_accel::FlipState,
+    committed: bool,
+}
+
+impl Drop for FlipClaim {
+    fn drop(&mut self) {
+        if !self.committed {
+            let (crtc, before) = (self.crtc, self.before);
+            let _ = gpu_accel::with_page_flip(|pf| pf.cancel_reserved_flip(crtc, before));
+        }
+    }
+}
+
 /// DRM_IOCTL_MODE_ATOMIC -- atomic modesetting commit
 ///
 /// Accepts a batch of property changes and applies them atomically.
@@ -1895,11 +1914,19 @@ fn handle_mode_atomic(arg: *mut u8, pid: u64) -> Result<i32, KernelError> {
     // this after the KMS apply would leave the new state in place while the
     // client waits forever for an event that never comes (review of the
     // v0.26.0 stack, PR #8).
-    if wants_event
-        && !is_test
-        && !gpu_accel::with_page_flip(|pf| pf.can_queue_flip(EVENT_CRTC, pid)).unwrap_or(false)
-    {
-        return Err(KernelError::WouldBlock);
+    // The check claims the flip too (the CRTC is marked pending), so a
+    // commit on another CPU cannot pass it before this one queues its event
+    // (PR #15 review); the claim is given back on any early return.
+    let mut flip_claim = None;
+    if wants_event && !is_test {
+        let before = gpu_accel::with_page_flip(|pf| pf.reserve_flip(EVENT_CRTC, pid))
+            .flatten()
+            .ok_or(KernelError::WouldBlock)?;
+        flip_claim = Some(FlipClaim {
+            crtc: EVENT_CRTC,
+            before,
+            committed: false,
+        });
     }
 
     // Parse the commit to find FB_ID / ACTIVE property updates. Layout:
@@ -1966,27 +1993,23 @@ fn handle_mode_atomic(arg: *mut u8, pid: u64) -> Result<i32, KernelError> {
     // Since we have no real hardware vsync, immediately simulate a vblank
     // after requesting the flip so that a drm_event_vblank is queued for
     // the caller to read from the DRM fd.
-    if wants_event && !is_test {
+    if let Some(claim) = flip_claim.as_mut() {
         let queued = gpu_accel::with_page_flip(|pf| {
-            let ok = pf.request_flip(PageFlipRequest {
+            pf.commit_reserved_flip(PageFlipRequest {
                 crtc_id: EVENT_CRTC,
                 fb_id: 0, // FB tracked above
                 user_data: atomic.user_data,
                 owner_pid: pid,
             });
-            if ok {
-                let ts_ns = crate::timer::get_uptime_ms() * 1_000_000;
-                pf.handle_vblank(EVENT_CRTC, ts_ns);
-            }
-            ok
+            let ts_ns = crate::timer::get_uptime_ms() * 1_000_000;
+            pf.handle_vblank(EVENT_CRTC, ts_ns);
         })
-        .unwrap_or(false);
-        // The check above makes this unreachable under the current
-        // single-threaded DRM path, but never report success for an event
-        // that was not queued.
+        .is_some();
+        // Never report success for an event that was not queued.
         if !queued {
             return Err(KernelError::WouldBlock);
         }
+        claim.committed = true;
     }
 
     Ok(0)

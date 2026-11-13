@@ -105,8 +105,35 @@ pub fn sys_membarrier(cmd: usize, flags: usize, _cpu_id: usize) -> SyscallResult
         Action::Barrier => {
             drop(vas);
             crate::sched::dispatch::barrier_cpus();
+            // SYNC_CORE asks this core to be serialised too before the
+            // caller runs on: x86's sysret is not serialising and RISC-V's
+            // sret does not synchronise instruction fetch (PR #41 review).
+            if cmd as u32 == CMD_PRIVATE_EXPEDITED_SYNC_CORE {
+                serialize_this_core();
+            }
             Ok(0)
         }
+    }
+}
+
+/// A core-serialising instruction on this CPU (Linux's sync_core): CPUID on
+/// x86_64, ISB on AArch64 (whose eret is already context-synchronising),
+/// FENCE.I on RISC-V.
+fn serialize_this_core() {
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    // SAFETY: CPUID has no effect but its outputs (and serialising).
+    unsafe {
+        let _ = core::arch::x86_64::__cpuid(0);
+    }
+    #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+    // SAFETY: ISB only flushes the pipeline.
+    unsafe {
+        core::arch::asm!("isb", options(nostack, preserves_flags));
+    }
+    #[cfg(all(target_arch = "riscv64", target_os = "none"))]
+    // SAFETY: FENCE.I only orders instruction fetch after earlier stores.
+    unsafe {
+        core::arch::asm!("fence.i", options(nostack, preserves_flags));
     }
 }
 

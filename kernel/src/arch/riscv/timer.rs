@@ -26,6 +26,17 @@ static SSTC: AtomicBool = AtomicBool::new(false);
 static PERIOD: AtomicU64 = AtomicU64::new(0);
 /// Tick period in milliseconds.
 static PERIOD_MS: AtomicU64 = AtomicU64::new(0);
+/// SBI set_timer calls the firmware refused (none should): counted rather
+/// than printed, as the timer path may have interrupted the console's
+/// holder (PR #11 review); read it from a debugger (`p SET_TIMER_FAILURES`).
+static SET_TIMER_FAILURES: AtomicU64 = AtomicU64::new(0);
+
+/// Program the next timer interrupt through the SBI, counting a refusal.
+pub(crate) fn sbi_set_timer(deadline: u64) {
+    if sbi::set_timer(deadline).error != 0 {
+        SET_TIMER_FAILURES.fetch_add(1, Ordering::Relaxed);
+    }
+}
 
 /// stimecmp CSR number (Sstc).
 const CSR_STIMECMP: usize = 0x14D;
@@ -99,7 +110,7 @@ fn arm(deadline: u64) {
                 options(nomem, nostack));
         }
     } else {
-        let _ = sbi::set_timer(deadline);
+        sbi_set_timer(deadline);
     }
 }
 

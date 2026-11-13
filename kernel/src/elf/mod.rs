@@ -184,11 +184,11 @@ impl ElfLoader {
             return Err(ElfError::InvalidMagic);
         }
 
-        // SAFETY: We verified data.len() >= size_of::<Elf64Header>() above.
-        // Elf64Header is #[repr(C)] with Copy, so reading it via pointer cast
-        // is valid as long as the data is large enough (which we checked).
-        // Alignment is not an issue because we dereference and copy immediately.
-        let header = unsafe { *(data.as_ptr() as *const Elf64Header) };
+        // SAFETY: data.len() >= size_of::<Elf64Header>() was checked above,
+        // and Elf64Header is #[repr(C)] plain data, valid for any bytes. A
+        // byte buffer has no alignment guarantee, so the read is unaligned
+        // (a plain dereference of a misaligned pointer is undefined).
+        let header = unsafe { core::ptr::read_unaligned(data.as_ptr() as *const Elf64Header) };
 
         Ok(header)
     }
@@ -236,21 +236,31 @@ impl ElfLoader {
     ) -> Result<Vec<Elf64ProgramHeader>, ElfError> {
         let mut headers = Vec::new();
 
-        let ph_offset = header.phoff as usize;
+        let ph_offset =
+            usize::try_from(header.phoff).map_err(|_| ElfError::InvalidProgramHeader)?;
         let ph_size = header.phentsize as usize;
         let ph_count = header.phnum as usize;
+        // Linux's elf_read_phdrs: e_phentsize must be the size of the
+        // structure read (ENOEXEC), or a small one reads past the table
+        // (PR #25 review).
+        if ph_count != 0 && ph_size != mem::size_of::<Elf64ProgramHeader>() {
+            return Err(ElfError::InvalidProgramHeader);
+        }
 
         for i in 0..ph_count {
-            let offset = ph_offset + (i * ph_size);
-            if offset + ph_size > data.len() {
-                return Err(ElfError::InvalidProgramHeader);
-            }
+            let offset = i
+                .checked_mul(ph_size)
+                .and_then(|o| o.checked_add(ph_offset))
+                .filter(|o| o.checked_add(ph_size).is_some_and(|e| e <= data.len()))
+                .ok_or(ElfError::InvalidProgramHeader)?;
 
-            // SAFETY: We verified offset + ph_size <= data.len() above.
-            // Elf64ProgramHeader is #[repr(C)] with Copy, so the pointer cast
-            // and dereference is valid for the checked bounds. The value is
-            // immediately copied out.
-            let ph = unsafe { *(data[offset..].as_ptr() as *const Elf64ProgramHeader) };
+            // SAFETY: offset + size_of::<Elf64ProgramHeader>() <= data.len()
+            // was checked above (ph_size is that size), and the header is
+            // #[repr(C)] plain data; the read is unaligned, as a byte buffer
+            // carries no alignment guarantee.
+            let ph = unsafe {
+                core::ptr::read_unaligned(data[offset..].as_ptr() as *const Elf64ProgramHeader)
+            };
 
             headers.push(ph);
         }
@@ -271,7 +281,12 @@ impl ElfLoader {
                 if ph.p_vaddr < min_addr {
                     min_addr = ph.p_vaddr;
                 }
-                let end_addr = ph.p_vaddr + ph.p_memsz;
+                // Checked: both come from the file (PR #42 review); execve
+                // reaches this before elf::image::plan checks the segments.
+                let end_addr = ph
+                    .p_vaddr
+                    .checked_add(ph.p_memsz)
+                    .ok_or(ElfError::InvalidProgramHeader)?;
                 if end_addr > max_addr {
                     max_addr = end_addr;
                 }
@@ -282,7 +297,8 @@ impl ElfLoader {
             return Err(ElfError::InvalidProgramHeader);
         }
 
-        let load_size = (max_addr - min_addr) as usize;
+        let load_size = usize::try_from(max_addr.saturating_sub(min_addr))
+            .map_err(|_| ElfError::InvalidProgramHeader)?;
         Ok((min_addr, load_size))
     }
 
@@ -324,8 +340,17 @@ impl ElfLoader {
         let offset = dynamic_offset as usize;
 
         for i in 0..num_entries {
-            let entry_offset = offset + (i * entry_size);
-            if entry_offset + entry_size > data.len() {
+            // Checked: the offset and size come from the file (PR #42).
+            let Some(entry_offset) = i
+                .checked_mul(entry_size)
+                .and_then(|d| offset.checked_add(d))
+            else {
+                break;
+            };
+            if entry_offset
+                .checked_add(entry_size)
+                .is_none_or(|e| e > data.len())
+            {
                 break;
             }
 
@@ -484,8 +509,16 @@ impl ElfLoader {
         let num_symbols = symtab_size / sym_entry_size;
 
         for i in 0..num_symbols {
-            let sym_offset = (symtab_offset as usize) + (i * sym_entry_size);
-            if sym_offset + sym_entry_size > data.len() {
+            let Some(sym_offset) = i
+                .checked_mul(sym_entry_size)
+                .and_then(|d| (symtab_offset as usize).checked_add(d))
+            else {
+                break;
+            };
+            if sym_offset
+                .checked_add(sym_entry_size)
+                .is_none_or(|e| e > data.len())
+            {
                 break;
             }
 
@@ -512,7 +545,9 @@ impl ElfLoader {
 
             // Get symbol name from string table
             let name = if (name_idx as usize) < strtab_size {
-                let name_offset = (strtab_offset as usize) + (name_idx as usize);
+                let name_offset = (strtab_offset as usize)
+                    .checked_add(name_idx as usize)
+                    .ok_or(ElfError::InvalidData)?;
                 self.read_string(data, name_offset)?
             } else {
                 String::new()
@@ -557,7 +592,9 @@ impl ElfLoader {
                 let offset = ph.p_offset as usize;
                 let size = ph.p_filesz as usize;
 
-                if offset + size > data.len() {
+                // Checked, and an empty PT_INTERP has no terminator to
+                // drop (it underflowed; PR #42 review).
+                if size == 0 || offset.checked_add(size).is_none_or(|e| e > data.len()) {
                     return Err(ElfError::InvalidProgramHeader);
                 }
 
@@ -585,13 +622,25 @@ impl ElfLoader {
         let mem_size = ph.p_memsz as usize;
         let vaddr = ph.p_vaddr;
 
-        // Validate offsets
-        if file_offset + file_size > data.len() {
+        // Validate offsets (checked: they come from the file). A segment
+        // with more file bytes than memory is refused, as Linux refuses it
+        // (p_filesz > p_memsz: EINVAL).
+        if file_size > mem_size
+            || file_offset
+                .checked_add(file_size)
+                .is_none_or(|e| e > data.len())
+        {
             return Err(ElfError::InvalidProgramHeader);
         }
 
-        // Calculate target address
-        let target_addr = (base_addr + vaddr) as *mut u8;
+        // Calculate target address; the whole segment must fit.
+        let target = base_addr
+            .checked_add(vaddr)
+            .ok_or(ElfError::InvalidProgramHeader)?;
+        target
+            .checked_add(mem_size as u64)
+            .ok_or(ElfError::InvalidProgramHeader)?;
+        let target_addr = target as *mut u8;
 
         // Copy file data
         if file_size > 0 {
@@ -711,11 +760,16 @@ impl ElfLoader {
         vaddr: u64,
     ) -> Option<u64> {
         for ph in program_headers {
-            if ph.p_type == ProgramType::Load as u32
-                && vaddr >= ph.p_vaddr
-                && vaddr < ph.p_vaddr + ph.p_filesz
-            {
-                return Some(ph.p_offset + (vaddr - ph.p_vaddr));
+            // Checked: every field comes from the file (PR #42 review). A
+            // segment whose end overflows contains nothing.
+            if ph.p_type != ProgramType::Load as u32 {
+                continue;
+            }
+            let Some(end) = ph.p_vaddr.checked_add(ph.p_filesz) else {
+                continue;
+            };
+            if vaddr >= ph.p_vaddr && vaddr < end {
+                return ph.p_offset.checked_add(vaddr - ph.p_vaddr);
             }
         }
         None
@@ -731,13 +785,18 @@ impl ElfLoader {
     ) -> Result<(), ElfError> {
         let entry_size = mem::size_of::<Elf64Rela>();
         for i in 0..count {
-            let pos = offset + i * entry_size;
-            if pos + entry_size > data.len() {
+            let Some(pos) = i
+                .checked_mul(entry_size)
+                .and_then(|o| o.checked_add(offset))
+                .filter(|p| p.checked_add(entry_size).is_some_and(|e| e <= data.len()))
+            else {
                 break;
-            }
-            // SAFETY: pos + entry_size <= data.len() was checked above.
-            // Elf64Rela is #[repr(C)] with Copy. The value is copied immediately.
-            let rela = unsafe { *(data[pos..].as_ptr() as *const Elf64Rela) };
+            };
+            // SAFETY: pos + entry_size <= data.len() was checked above, and
+            // Elf64Rela is #[repr(C)] plain data; read unaligned, as the
+            // buffer carries no alignment guarantee.
+            let rela =
+                unsafe { core::ptr::read_unaligned(data[pos..].as_ptr() as *const Elf64Rela) };
             out.push(ElfRelocation {
                 offset: rela.r_offset,
                 symbol: (rela.r_info >> 32) as u32,
@@ -1060,6 +1119,103 @@ mod tests {
     }
 
     // --- Header validation tests ---
+
+    /// e_phentsize must be the program header's size: a small one used to
+    /// read each 56-byte header past the bounds it was checked against, and
+    /// a table whose offsets overflow is refused (PR #25 review).
+    #[test]
+    fn program_header_size_and_offsets_are_checked() {
+        let loader = ElfLoader::new();
+        let good = make_minimal_elf(2, 62, 0x40_0000, 0x40_0000, 0x1000);
+        assert!(loader.parse(&good).is_ok());
+        let mut small = good.clone();
+        small[54] = 1;
+        small[55] = 0;
+        assert_eq!(
+            loader.parse(&small).err(),
+            Some(ElfError::InvalidProgramHeader)
+        );
+        let mut far = good.clone();
+        far[32..40].copy_from_slice(&u64::MAX.to_le_bytes()); // e_phoff
+        assert_eq!(
+            loader.parse(&far).err(),
+            Some(ElfError::InvalidProgramHeader)
+        );
+        // Misaligned buffer: the reads are unaligned, so this parses too.
+        let mut shifted = vec![0u8; good.len() + 1];
+        shifted[1..].copy_from_slice(&good);
+        assert!(loader.parse(&shifted[1..]).is_ok());
+    }
+
+    #[test]
+    fn an_empty_or_overflowing_interpreter_is_refused() {
+        let loader = ElfLoader::new();
+        let data = make_minimal_elf(2, 62, 0x40_0000, 0x40_0000, 0x1000);
+        // SAFETY: the buffer holds a whole ELF header; read_unaligned has
+        // no alignment requirement and every bit pattern is a valid header.
+        let header: Elf64Header =
+            unsafe { core::ptr::read_unaligned(data.as_ptr() as *const Elf64Header) };
+        let interp = |p_offset, p_filesz| Elf64ProgramHeader {
+            p_type: ProgramType::Interp as u32,
+            p_flags: 0,
+            p_offset,
+            p_vaddr: 0,
+            p_paddr: 0,
+            p_filesz,
+            p_memsz: p_filesz,
+            p_align: 1,
+        };
+        for ph in [interp(0, 0), interp(u64::MAX, 2)] {
+            assert_eq!(
+                loader.find_interpreter(&data, &header, &[ph]),
+                Err(ElfError::InvalidProgramHeader)
+            );
+        }
+    }
+
+    /// Segment sizes from the file are checked before any arithmetic: an
+    /// end past u64::MAX, more file bytes than memory, and a lookup in an
+    /// overflowing segment are refused, not wrapped (PR #42 review).
+    #[test]
+    fn overflowing_segments_are_refused() {
+        let loader = ElfLoader::new();
+        let load = |p_vaddr, p_filesz, p_memsz| Elf64ProgramHeader {
+            p_type: ProgramType::Load as u32,
+            p_flags: 0,
+            p_offset: 0,
+            p_vaddr,
+            p_paddr: 0,
+            p_filesz,
+            p_memsz,
+            p_align: 0x1000,
+        };
+        assert_eq!(
+            loader.calculate_memory_layout(&[load(u64::MAX - 0xfff, 0, 0x2000)]),
+            Err(ElfError::InvalidProgramHeader)
+        );
+        assert_eq!(
+            loader.calculate_memory_layout(&[load(0x40_0000, 0, 0x1000)]),
+            Ok((0x40_0000, 0x1000))
+        );
+        let data = [0u8; 16];
+        assert_eq!(
+            loader.load_segment(&data, &load(0, 16, 8), 0x1000),
+            Err(ElfError::InvalidProgramHeader),
+            "p_filesz > p_memsz"
+        );
+        assert_eq!(
+            loader.load_segment(&data, &load(u64::MAX - 8, 0, 0x100), 0),
+            Err(ElfError::InvalidProgramHeader),
+            "the segment's end overflows"
+        );
+        let wraps = load(u64::MAX - 4, 0x10, 0x10);
+        let ok = load(0x1000, 0x100, 0x100);
+        assert_eq!(
+            loader.vaddr_to_file_offset(&[wraps, ok], 0x1010),
+            Some(0x10)
+        );
+        assert_eq!(loader.vaddr_to_file_offset(&[wraps], u64::MAX - 2), None);
+    }
 
     #[test]
     fn test_parse_invalid_magic() {

@@ -247,6 +247,11 @@ impl TmpNode {
     /// Resize the file to `size`, charging or releasing its pages
     /// (truncate, and a growing fallocate), with its pages locked.
     fn resize_charged(&self, pages: &mut ShmemPages, size: usize) -> Result<(), KernelError> {
+        // Too large for any file is EFBIG, before the space check makes it
+        // ENOSPC on a size-limited mount (PR #28 review).
+        if size > super::MAX_RAM_FILE_SIZE {
+            return Err(KernelError::FsError(FsError::FileTooLarge));
+        }
         // Charged in whole pages, as in `write`.
         let held = pages.allocated_bytes();
         let need = ShmemPages::bytes_for(size);
@@ -1008,6 +1013,22 @@ mod tests {
         assert_eq!(
             a.fallocate(falloc(ZERO_RANGE, 0, 1)),
             Err(KernelError::FsError(FsError::NotSupported))
+        );
+    }
+
+    /// Past the largest file, a size-limited mount says EFBIG, not ENOSPC
+    /// (PR #28 review).
+    #[test]
+    fn too_large_is_efbig_before_enospc() {
+        let fs = TmpFs::new(4 * P);
+        let a = fs.root().create("a", Permissions::default()).unwrap();
+        assert_eq!(
+            a.truncate(super::super::MAX_RAM_FILE_SIZE + 1),
+            Err(KernelError::FsError(FsError::FileTooLarge))
+        );
+        assert_eq!(
+            a.truncate(5 * P),
+            Err(KernelError::FsError(FsError::NoSpace))
         );
     }
 
