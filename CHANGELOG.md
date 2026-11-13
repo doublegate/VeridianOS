@@ -7,7 +7,8 @@
   of 1,965 and libc-test 535 of 560, with no regression; 61 tests improved (the mlock, mseal,
   msync, remap_file_pages, System V semaphore and shared memory, xattr and file-attribute tests
   among them) and 8 changed between failing results.
-
+- The Linux system call tables are Linux 7.3's (`abi/linux/VERSION`, read by `gen_syscalls.py`
+  and `syscall_coverage.py`, which named v7.2 in their code): 7.3 adds fchroot (472).
 - The gate (`scripts/dev/gate.sh`) runs its emulated guests side by side: the AArch64, RISC-V and
   Sv39 runtime suites, the x86_64 suite and the conformance smoke run at once, and the release
   kernels build while the debug kernels boot. One guest uses one host CPU, so back to back they took
@@ -95,6 +96,12 @@
 
 ### Added
 
+- fchroot (Linux 7.3): chroot to a directory by descriptor, and with `FD_FAILFS_ROOT` to failfs,
+  from whose root no absolute path resolves (EOPNOTSUPP) while lookups from real directories go on;
+  unprivileged with no_new_privs, unshared filesystem state and no earlier chroot, as on Linux;
+  a privileged caller leaving a chroot for failfs needs MODIFY on the mount namespace, as chroot
+  does (ADR 0024). fchdir takes `FD_FAILFS_ROOT` too, and getcwd reports a working directory the root cannot reach
+  as `(unreachable)`. Runtime test failfs, ported from Linux's failfs selftest.
 - System V IPC (v0.28 item 5, ADR 0027, proposed): shmget, shmat, shmdt, shmctl, semget, semop,
   semtimedop, semctl, msgget, msgsnd, msgrcv and msgctl, with Linux's semantics, each IPC
   namespace with its own objects (`kernel/src/syscall/sysvipc/`): identifiers with a sequence

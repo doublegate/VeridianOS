@@ -97,7 +97,7 @@ The design goal is a microkernel that provides only memory management, schedulin
 | --- | --- |
 | Build | 0 errors, 0 warnings across all 3 architectures |
 | Boot tests | x86_64 43/43, AArch64 64/64, RISC-V 57/57 (Stage 6 BOOTOK); with `-smp 4` 47/47, 68/68, 61/61 |
-| Host-target unit tests | 5,127 passing |
+| Host-target unit tests | 5,128 passing |
 | CI pipeline | GitHub Actions + Codecov: builds, boots on 1 and 4 CPUs, and the x86_64 runtime suite; host-test line coverage 56.2% |
 | Unsafe code | 3 justified `static mut` (early serial, boot info, per-CPU data); unsafe blocks carry SAFETY comments |
 

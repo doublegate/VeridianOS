@@ -215,6 +215,23 @@ The reference for every behaviour below is the Linux 7.3 source (kernel.org tarb
     - **Permission:** as Linux's can_do_cachestat (open for writing, the owner, or write
       permission; EPERM otherwise).
 
+### fchroot and failfs (Linux 7.3)
+
+23. fchroot (472, new in Linux 7.3; the vendored tables move to v7.3 with it, `abi/linux/VERSION`)
+    with Linux's semantics (`fs/open.c`, `fs/failfs.c`): `fchroot(fd, 0)` is chroot to the
+    directory `fd` names, with chroot's checks (search permission, CAP_SYS_CHROOT, and MODIFY on
+    the mount namespace by ADR 0024's chroot row). `FD_FAILFS_ROOT` (-10004), for fchroot and
+    fchdir, is failfs: from its root no absolute path or absolute symlink resolves, and from it
+    as working directory no relative one (EOPNOTSUPP), while lookups anchored at real
+    directories go on and `..` stops at the top of the tree. An unprivileged caller may enter it
+    with no_new_privs, unshared filesystem state and no earlier chroot (EPERM, EINVAL, EPERM),
+    as on Linux; entering it from the top of the tree takes authority away, so it needs no
+    object capability, but a privileged caller entering it from a chroot leaves the jail (its
+    relative lookups walk the whole tree) and needs MODIFY on the mount namespace, as chroot
+    does (EPERM; Linux asks only for CAP_SYS_CHROOT there). Kept in the
+    path-string model as a sentinel root no user path can hold (`fs::FAILFS_ROOT`). Not yet:
+    `/proc/self/root` and `/proc/self/cwd`, which do not exist.
+
 ## Consequences
 
 - LTP's ipc tests (shmget*, shmat*, shmctl*, semget*, semop*, semctl*, msgget*, msgsnd*,
