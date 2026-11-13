@@ -31,6 +31,7 @@ pub mod sysno {
     pub const SYS_chdir: usize = 80;
     pub const SYS_fchdir: usize = 81;
     pub const SYS_chroot: usize = 161;
+    pub const SYS_fchroot: usize = 472;
     pub const SYS_kill: usize = 62;
     pub const SYS_umask: usize = 95;
     pub const SYS_uname: usize = 63;
@@ -402,6 +403,7 @@ pub mod sysno {
     pub const SYS_chdir: usize = 49;
     pub const SYS_fchdir: usize = 50;
     pub const SYS_chroot: usize = 51;
+    pub const SYS_fchroot: usize = 472;
     pub const SYS_kill: usize = 129;
     pub const SYS_umask: usize = 166;
     pub const SYS_uname: usize = 160;
@@ -736,6 +738,7 @@ pub mod sysno {
     pub const SYS_chdir: usize = 49;
     pub const SYS_fchdir: usize = 50;
     pub const SYS_chroot: usize = 51;
+    pub const SYS_fchroot: usize = 472;
     pub const SYS_kill: usize = 129;
     pub const SYS_umask: usize = 166;
     pub const SYS_uname: usize = 160;

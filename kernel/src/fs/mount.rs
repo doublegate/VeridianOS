@@ -878,7 +878,9 @@ impl Mounts {
                 return Ok(());
             }
             let mount = t.mount_at(point).cloned().ok_or(MountError::Invalid)?;
-            let holds_root = t.mount_of(&normalize_path(root, "/")) == point;
+            // A failfs root is in no mount of the namespace.
+            let holds_root =
+                root != super::FAILFS_ROOT && t.mount_of(&normalize_path(root, "/")) == point;
             let parked_under = |p: &String| p != point && path_is_under(p, point);
             let children = !t.under(point).is_empty() || t.parked.keys().any(parked_under);
             if how.expire {
@@ -1626,6 +1628,16 @@ mod tests {
             .render_mounts("/")
             .starts_with("ramfs / ramfs ro,relatime"));
         assert_eq!(t.umount("/", detach, "/", false), Err(MountError::Invalid));
+        // A failfs root holds no mount (PR #44 review): the namespace
+        // root is then no caller's root, so umount2 of it is EINVAL, not
+        // a read-only remount.
+        let vfs = work_tree();
+        let t = vfs.mounts();
+        assert_eq!(
+            t.umount("/", plain, super::super::FAILFS_ROOT, false),
+            Err(MountError::Invalid)
+        );
+        assert!(t.render_mounts("/").starts_with("ramfs / ramfs rw,"));
     }
 
     #[test]

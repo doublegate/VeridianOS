@@ -1596,7 +1596,22 @@ pub fn sys_getcwd(buf: usize, size: usize) -> SyscallResult {
         let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
         #[cfg(feature = "alloc")]
         {
-            thread.fs().cwd.lock().clone()
+            // A working directory the root cannot reach -- any, under a
+            // failfs root, or failfs itself -- is "(unreachable)" and its
+            // path, as Linux's getcwd reports (Linux 7.3 failfs).
+            let fs = thread.fs();
+            let cwd = fs.cwd.lock().clone();
+            let root = fs.root.lock().clone();
+            if cwd == crate::fs::FAILFS_ROOT && root == crate::fs::FAILFS_ROOT {
+                // The working directory is the root.
+                alloc::string::String::from("/")
+            } else if cwd == crate::fs::FAILFS_ROOT {
+                alloc::format!("(unreachable){}", crate::fs::FAILFS_NAME)
+            } else if root == crate::fs::FAILFS_ROOT {
+                alloc::format!("(unreachable){}", cwd)
+            } else {
+                cwd
+            }
         }
         #[cfg(not(feature = "alloc"))]
         {
@@ -1845,9 +1860,20 @@ fn fd_directory_path(file: &crate::fs::file::File) -> Result<alloc::string::Stri
     let vfs = vfs()?;
     let root = vfs.get_root();
     let path = crate::fs::root_relative(global, &root);
-    let (now, canonical) = vfs
-        .resolve_canonical(&path, "/", true)
-        .map_err(|_| SyscallError::ResourceNotFound)?;
+    // Under a failfs root no absolute lookup succeeds, but a descriptor
+    // still names its directory (Linux 7.3): check it in the whole tree of
+    // the caller's mount namespace (`WHOLE_TREE`), not the initial one's
+    // (PR #44 review).
+    let found = if root == crate::fs::FAILFS_ROOT {
+        vfs.resolve_canonical(
+            &alloc::format!("{}{}", crate::fs::WHOLE_TREE, global),
+            "/",
+            true,
+        )
+    } else {
+        vfs.resolve_canonical(&path, "/", true)
+    };
+    let (now, canonical) = found.map_err(|_| SyscallError::ResourceNotFound)?;
     let same = canonical == global
         && now.node_type() == crate::fs::NodeType::Directory
         && match (now.metadata(), file.node.metadata()) {
@@ -1864,6 +1890,13 @@ fn fd_directory_path(file: &crate::fs::file::File) -> Result<alloc::string::Stri
 /// fchdir: change to the directory an open fd refers to (N-250).
 pub fn sys_fchdir(fd: usize) -> SyscallResult {
     let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
+    // fchdir(FD_FAILFS_ROOT): into failfs, which anyone may (Linux 7.3's
+    // failfs_current_chdir); every relative lookup then fails.
+    #[cfg(feature = "alloc")]
+    if fd as u32 as i32 == FD_FAILFS_ROOT {
+        *thread.fs().cwd.lock() = alloc::string::String::from(crate::fs::FAILFS_ROOT);
+        return Ok(0);
+    }
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
     let file = proc
         .file_table
@@ -1874,7 +1907,7 @@ pub fn sys_fchdir(fd: usize) -> SyscallResult {
     // `path` is relative to the root; enter_directory wants the whole-tree
     // path it maps back.
     let root = vfs()?.get_root();
-    let path = if root == "/" {
+    let path = if root == "/" || root == crate::fs::FAILFS_ROOT {
         path
     } else if path == "/" {
         root
@@ -1910,35 +1943,135 @@ pub fn sys_chroot(path_ptr: usize) -> SyscallResult {
         return Err(SyscallError::OperationNotPermitted);
     }
     let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
-    let fs = thread.fs();
-    let cwd = fs.cwd.lock().clone();
+    let cwd = thread.fs().cwd.lock().clone();
     let (node, new_root) = vfs()?
         .resolve_canonical(&path, &cwd, true)
         .map_err(map_resolve_err)?;
     if node.node_type() != crate::fs::NodeType::Directory {
         return Err(SyscallError::NotADirectory);
     }
+    set_root(&thread, new_root);
+    Ok(0)
+}
+
+/// FD_FAILFS_ROOT (Linux 7.3 `include/uapi/linux/fcntl.h`): the descriptor
+/// fchroot and fchdir take for failfs.
+pub const FD_FAILFS_ROOT: i32 = -10004;
+
+/// Make `new_root` (a canonical path in the whole tree, or
+/// [`crate::fs::FAILFS_ROOT`]) the thread's root, with its working
+/// directory seen from there: a directory outside the new root becomes the
+/// new root's "/", except under a failfs root, which reaches no directory
+/// and keeps the whole-tree path (unreachable, as getcwd reports). A
+/// failfs working directory stays failfs.
+fn set_root(thread: &process::Thread, new_root: alloc::string::String) {
+    use crate::fs::FAILFS_ROOT;
+    let fs = thread.fs();
+    let cwd = fs.cwd.lock().clone();
     let old_root = fs.root.lock().clone();
-    // The working directory in the whole tree, then seen from the new root.
-    let cwd_global = if old_root == "/" {
+    let new_cwd = if cwd == FAILFS_ROOT {
         cwd
-    } else if cwd == "/" {
-        old_root
     } else {
-        alloc::format!("{}{}", old_root, cwd)
-    };
-    let new_cwd = if new_root == "/" {
-        cwd_global
-    } else if cwd_global == new_root {
-        alloc::string::String::from("/")
-    } else {
-        match cwd_global.strip_prefix(new_root.as_str()) {
-            Some(rest) if rest.starts_with('/') => alloc::string::String::from(rest),
-            _ => alloc::string::String::from("/"),
+        // The working directory in the whole tree, then seen from the new
+        // root.
+        let cwd_global = if old_root == "/" || old_root == FAILFS_ROOT {
+            cwd
+        } else if cwd == "/" {
+            old_root
+        } else {
+            alloc::format!("{}{}", old_root, cwd)
+        };
+        if new_root == "/" || new_root == FAILFS_ROOT {
+            cwd_global
+        } else if cwd_global == new_root {
+            alloc::string::String::from("/")
+        } else {
+            match cwd_global.strip_prefix(new_root.as_str()) {
+                Some(rest) if rest.starts_with('/') => alloc::string::String::from(rest),
+                _ => alloc::string::String::from("/"),
+            }
         }
     };
     *fs.root.lock() = new_root;
     *fs.cwd.lock() = new_cwd;
+}
+
+/// fchroot(fd, flags) (Linux 7.3, fs/open.c): chroot to the directory
+/// `fd` names, or with FD_FAILFS_ROOT to failfs, where no absolute lookup
+/// succeeds. `flags` must be 0 (EINVAL). failfs is open to an unprivileged
+/// caller with no_new_privs (else EPERM), its filesystem state not shared
+/// with another thread (EINVAL: a sibling could exec a set-ID program past
+/// the check) and not chrooted already (EPERM: failfs would lift the old
+/// root's ".." barrier). A real directory takes what chroot takes: search
+/// permission on it (EACCES), CAP_SYS_CHROOT (EPERM) and, as ADR 0024's
+/// chroot row, MODIFY on the mount namespace. Entering failfs from the
+/// top of the tree only takes authority away and needs neither; from a
+/// chroot it lifts the jail's ".." barrier, so a privileged caller needs
+/// MODIFY there as for chroot (EPERM without it).
+pub fn sys_fchroot(fd: usize, flags: usize) -> SyscallResult {
+    if flags as u32 != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
+    let caller = Caller::current();
+    let privileged = caller.ns_capable(&caller.userns, crate::process::linux_caps::CAP_SYS_CHROOT);
+    let fd = fd as u32 as i32;
+    if fd == FD_FAILFS_ROOT {
+        if !privileged {
+            let fs = thread.fs();
+            if !thread
+                .no_new_privs
+                .load(core::sync::atomic::Ordering::Acquire)
+            {
+                return Err(SyscallError::OperationNotPermitted);
+            }
+            if fs.users.load(core::sync::atomic::Ordering::Acquire) != 1 {
+                return Err(SyscallError::InvalidArgument);
+            }
+            if *fs.root.lock() != "/" {
+                return Err(SyscallError::OperationNotPermitted);
+            }
+        }
+        // From a chroot, failfs's relative lookups walk the whole tree: as
+        // leaving the jail by chroot, that needs MODIFY on the mount
+        // namespace too (ADR 0024), not CAP_SYS_CHROOT alone.
+        let jailed = !matches!(
+            thread.fs().root.lock().as_str(),
+            "/" | crate::fs::FAILFS_ROOT
+        );
+        if jailed && !crate::cap::authority::current_may_change_mounts() {
+            return Err(SyscallError::OperationNotPermitted);
+        }
+        set_root(&thread, alloc::string::String::from(crate::fs::FAILFS_ROOT));
+        return Ok(0);
+    }
+    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let file = usize::try_from(fd)
+        .ok()
+        .and_then(|fd| proc.file_table.lock().get_path(fd))
+        .ok_or(SyscallError::BadFileDescriptor)?;
+    if file.node.node_type() != crate::fs::NodeType::Directory {
+        return Err(SyscallError::NotADirectory);
+    }
+    let meta = file.node.metadata().map_err(super::map_kernel_error)?;
+    if !crate::fs::permission(&caller, &meta, crate::fs::MAY_EXEC) {
+        return Err(SyscallError::PermissionDenied);
+    }
+    if !privileged || !crate::cap::authority::current_may_change_mounts() {
+        return Err(SyscallError::OperationNotPermitted);
+    }
+    // Where the directory is in the whole tree, checked against the
+    // descriptor as fchdir checks it.
+    let relative = fd_directory_path(&file)?;
+    let root = vfs()?.get_root();
+    let new_root = if root == "/" || root == crate::fs::FAILFS_ROOT {
+        relative
+    } else if relative == "/" {
+        root
+    } else {
+        alloc::format!("{}{}", root, relative)
+    };
+    set_root(&thread, new_root);
     Ok(0)
 }
 
@@ -3710,9 +3843,9 @@ pub(crate) fn link_at(
     let mut old_canonical: Option<alloc::string::String> = None;
     let target = if old.is_empty() {
         if olddirfd as u32 as i32 == AT_FDCWD as u32 as i32 {
-            let (node, canonical) = vfs
-                .resolve_canonical(&vfs.get_cwd(), "/", true)
-                .map_err(map_resolve_err)?;
+            // "." from the working directory, as open_empty_path does, so
+            // a failfs root or working directory is handled (PR #44).
+            let (node, canonical) = vfs.resolve_path_canonical(".").map_err(map_resolve_err)?;
             old_canonical = Some(canonical);
             node
         } else {
@@ -4008,6 +4141,18 @@ pub(crate) fn resolve_at_path(
         // Absolute path — dirfd is irrelevant
         return Ok(String::from(path));
     }
+    // Under a failfs root a relative path still resolves from its start
+    // directory, which is in the whole tree; joined into an absolute path it
+    // is marked so (`fs::WHOLE_TREE`), or it would resolve from failfs and
+    // fail. From a failfs working directory nothing relative resolves.
+    let whole = |joined: String| -> Result<String, SyscallError> {
+        let root = vfs().map(|v| v.get_root()).unwrap_or_default();
+        if root == crate::fs::FAILFS_ROOT {
+            Ok(alloc::format!("{}{}", crate::fs::WHOLE_TREE, joined))
+        } else {
+            Ok(joined)
+        }
+    };
 
     // dirfd is an int: compare its low 32 bits, sign-extended or not.
     if dirfd as u32 as i32 == AT_FDCWD as u32 as i32 {
@@ -4017,10 +4162,13 @@ pub(crate) fn resolve_at_path(
         } else {
             String::from("/")
         };
+        if cwd == crate::fs::FAILFS_ROOT {
+            return Err(SyscallError::NotSupported);
+        }
         if cwd.ends_with('/') {
-            Ok(alloc::format!("{}{}", cwd, path))
+            whole(alloc::format!("{}{}", cwd, path))
         } else {
-            Ok(alloc::format!("{}/{}", cwd, path))
+            whole(alloc::format!("{}/{}", cwd, path))
         }
     } else {
         // Relative to the directory the fd refers to: EBADF if it is not
@@ -4035,9 +4183,9 @@ pub(crate) fn resolve_at_path(
         let dir_path = fd_directory_path(&file)?;
 
         if dir_path.ends_with('/') {
-            Ok(alloc::format!("{}{}", dir_path, path))
+            whole(alloc::format!("{}{}", dir_path, path))
         } else {
-            Ok(alloc::format!("{}/{}", dir_path, path))
+            whole(alloc::format!("{}/{}", dir_path, path))
         }
     }
 }
