@@ -862,6 +862,14 @@ pub fn create_thread(
 
             use thread::ThreadBuilder;
 
+            // RLIMIT_NPROC and kernel.threads-max, as clone checks them:
+            // with no per-process limit, every path that makes a thread for a
+            // caller must (commit security review). Checked before anything
+            // is allocated, so a refusal leaks nothing (PR #43 review), and
+            // held until the thread is in its process.
+            let _nproc = crate::process::rlimit::check_nproc(&process)
+                .map_err(|_| crate::error::KernelError::WouldBlock)?;
+
             // Build thread with real stack allocation via ThreadBuilder
             let sched = current_thread()
                 .map(|t| t.sched.lock().for_child())
@@ -902,12 +910,6 @@ pub fn create_thread(
                 *thread.caps.lock() = sets;
             }
 
-            // RLIMIT_NPROC and kernel.threads-max, as clone checks them:
-            // with no per-process limit, every path that makes a thread for a
-            // caller must (commit security review). Held until the thread is
-            // in its process.
-            let _nproc = crate::process::rlimit::check_nproc(&process)
-                .map_err(|_| crate::error::KernelError::WouldBlock)?;
             // Add thread to process
             let thread = process.add_thread(thread)?;
             // Copied again under the thread map, which a set*id call on

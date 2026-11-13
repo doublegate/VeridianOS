@@ -223,6 +223,16 @@ impl ThreadManager {
         params: ThreadCreateParams,
         process_id: ProcessId,
     ) -> Result<Arc<ThreadHandle>, KernelError> {
+        // RLIMIT_NPROC and kernel.threads-max, as clone checks them, before
+        // anything is allocated or recorded, so a refusal leaks nothing (PR
+        // #43 review); held until the thread is in its process.
+        let process = get_process(process_id);
+        let _nproc = match &process {
+            Some(p) => {
+                Some(crate::process::rlimit::check_nproc(p).map_err(|_| KernelError::WouldBlock)?)
+            }
+            None => None,
+        };
         let thread_id = ThreadId(self.next_thread_id.fetch_add(1, Ordering::SeqCst));
 
         // Create thread handle
@@ -232,19 +242,34 @@ impl ThreadManager {
             params.attributes.clone(),
         ));
 
-        // Add to thread table
-        self.threads.write().insert(thread_id, handle.clone());
-
         // Create actual thread in the process
-        if let Some(process) = get_process(process_id) {
+        if let Some(process) = process {
             // Allocate stack first
             let stack_size = params.attributes.stack_size;
             let mut memory_space = process.memory_space.lock();
 
             // Find a suitable virtual address for the stack
-            let stack_base = 0x70000000; // User stack area
+            let stack_base: usize = 0x70000000; // User stack area
             let current_thread_count = process.thread_count();
-            let stack_addr = stack_base - (current_thread_count * stack_size);
+            // Without a per-process cap the slots below the base can run
+            // out (PR #43 review): refused, not wrapped.
+            let stack_addr = current_thread_count
+                .checked_mul(stack_size)
+                .and_then(|used| stack_base.checked_sub(used))
+                .filter(|&addr| addr >= stack_size)
+                .ok_or(KernelError::ResourceExhausted {
+                    resource: "thread stack slots",
+                })?;
+
+            // Both slots are found before anything is mapped.
+            let kernel_stack_size = 64 * 1024; // 64KB kernel stack
+            let kernel_stack_base: usize = 0x80000000; // Kernel stack area
+            let kernel_stack_addr = current_thread_count
+                .checked_mul(kernel_stack_size)
+                .and_then(|used| kernel_stack_base.checked_sub(used))
+                .ok_or(KernelError::ResourceExhausted {
+                    resource: "thread stack slots",
+                })?;
 
             // Map stack pages
             let page_count = (stack_size + 4095) / 4096;
@@ -259,10 +284,6 @@ impl ThreadManager {
 
             // Create the actual Thread object
             use crate::process::thread::Thread;
-
-            let kernel_stack_size = 64 * 1024; // 64KB kernel stack
-            let kernel_stack_base = 0x80000000; // Kernel stack area
-            let kernel_stack_addr = kernel_stack_base - (current_thread_count * kernel_stack_size);
 
             let thread = Thread::new(
                 thread_id,
@@ -294,15 +315,12 @@ impl ThreadManager {
             // Set CPU affinity
             thread.set_affinity(params.attributes.cpu_affinity as usize);
 
-            // RLIMIT_NPROC and kernel.threads-max, as clone checks them:
-            // with no per-process limit, every path that makes a thread for a
-            // caller must (commit security review). Held until the thread is
-            // in its process.
-            let _nproc = crate::process::rlimit::check_nproc(&process)
-                .map_err(|_| crate::error::KernelError::WouldBlock)?;
             // Add thread to process
             process.add_thread(thread)?;
 
+            // Recorded once the thread exists, so no failure above leaves
+            // a handle behind.
+            self.threads.write().insert(thread_id, handle.clone());
             handle.set_state(ThreadState::Ready);
 
             crate::println!(

@@ -896,11 +896,19 @@ fn dropped(process: &Process, thread: Option<&Thread>, sig: usize) -> bool {
     if !ignored(process, sig) {
         return false;
     }
+    // The mask, and while rt_sigtimedwait waits the mask it had (Linux's
+    // sig_ignored checks blocked and real_blocked).
+    let blocked =
+        |t: &Thread| t.sigmask.load(Ordering::Acquire) | t.real_blocked.load(Ordering::Acquire);
     let mask = match thread {
-        Some(t) => t.sigmask.load(Ordering::Acquire),
+        Some(t) => blocked(t),
+        // A process-directed signal: the leader's mask, or after a
+        // non-leader's execve (whose thread keeps its own id) the remaining
+        // thread's (PR #43 review).
         None => process
             .get_thread(super::ThreadId(process.pid.0))
-            .map_or(0, |t| t.sigmask.load(Ordering::Acquire)),
+            .or_else(|| process.threads.lock().values().next().cloned())
+            .map_or(0, |t| blocked(&t)),
     };
     mask & sig_bit(sig) == 0
 }

@@ -721,6 +721,8 @@ pub fn sys_thread_create(
 
     match create_thread(entry_point, stack_ptr, arg, tls_ptr) {
         Ok(tid) => Ok(tid.0 as usize),
+        // The thread limits are EAGAIN, as clone's (PR #43 review).
+        Err(crate::error::KernelError::WouldBlock) => Err(SyscallError::WouldBlock),
         Err(_) => Err(SyscallError::OutOfMemory),
     }
 }

@@ -1447,6 +1447,24 @@ mod tests {
             crate::process::signals::interrupting(&proc, &threads[0]) & sig_bit(SIGCHLD),
             0
         );
+        // While rt_sigtimedwait waits for it, unblocked, the mask it had is
+        // still blocking (Linux's real_blocked): queued, not dropped.
+        proc.pending_signals.store(0, Ordering::Release);
+        threads[0]
+            .real_blocked
+            .store(sig_bit(SIGCHLD), Ordering::Release);
+        let sent = send_timer(&proc, None, SigInfo::timer(SIGCHLD, 4, 0, 1));
+        assert_eq!(sent, TimerSend::Queued, "blocked before the wait");
+        threads[0].real_blocked.store(0, Ordering::Release);
+        // After a non-leader's execve only that thread is left: its mask
+        // decides for a process-directed signal.
+        let lone = make_process(8, "lone");
+        let lone_threads = with_threads(&lone, &[80]);
+        lone_threads[0]
+            .sigmask
+            .store(sig_bit(SIGCHLD), Ordering::Release);
+        let sent = send_timer(&lone, None, SigInfo::timer(SIGCHLD, 5, 0, 1));
+        assert_eq!(sent, TimerSend::Queued, "the remaining thread blocks it");
     }
 
     /// In a user namespace, the setuid fixup's root is the namespace's: its
