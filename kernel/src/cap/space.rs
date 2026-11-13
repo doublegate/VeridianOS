@@ -26,7 +26,10 @@ use crate::error::KernelError;
 
 /// A single capability entry in the capability space
 pub struct CapabilityEntry {
-    /// The capability token
+    /// The capability token. The rights it encodes are the grant-time
+    /// rights: [`CapabilitySpace::narrow`] changes `rights` below and leaves
+    /// the token as it was, so a lookup by token still finds the entry.
+    /// Read `rights`, never `capability.rights()`, for what it allows.
     pub capability: CapabilityToken,
     /// Object reference
     pub object: ObjectRef,

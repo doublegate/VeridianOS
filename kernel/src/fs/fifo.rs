@@ -319,7 +319,9 @@ impl VfsNode for FifoEnd {
             }
         }
         if self.write {
-            if st.buffer.len() < FIFO_CAPACITY {
+            // As a pipe: writable only with room for a whole PIPE_BUF
+            // write, which `write` makes atomic (PR #42 review).
+            if super::pipe::room_for_atomic_write(st.buffer.len(), FIFO_CAPACITY) {
                 events |= POLLOUT;
             }
             if st.readers == 0 {
@@ -484,6 +486,9 @@ mod tests {
         let w = FifoEnd::open(inode.clone(), false, true, true).unwrap();
         let big = alloc::vec![7u8; FIFO_CAPACITY - 10];
         assert_eq!(w.write(0, &big), Ok(FIFO_CAPACITY - 10));
+        // Ten bytes free: less than PIPE_BUF, so not writable for poll, as
+        // a whole PIPE_BUF write would be EAGAIN (PR #42 review).
+        assert_eq!(w.poll_readiness() & 0x4, 0, "no room for an atomic write");
         assert_eq!(w.write(0, &[1u8; 11]), Err(KernelError::WouldBlock));
         assert_eq!(w.write(0, &[1u8; 10]), Ok(10));
         assert_eq!(w.poll_readiness() & 0x4, 0, "full");

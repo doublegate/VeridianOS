@@ -160,7 +160,8 @@ impl PlatformTimer for RiscVTimer {
 
     fn set_timer(ticks: u64) {
         let current = Self::current_ticks();
-        let _ = crate::arch::riscv::sbi::set_timer(current + ticks);
+        // The time CSR is 64-bit and wraps; so does a deadline past it.
+        crate::arch::riscv::timer::sbi_set_timer(current.wrapping_add(ticks));
     }
 }
 
