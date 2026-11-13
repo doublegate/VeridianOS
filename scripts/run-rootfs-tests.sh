@@ -124,11 +124,14 @@ dump_cpus() {
     python3 - "$mon" "$elf" "$log_dir/stall-cpus$suffix.txt" <<'PY' || true
 import re, socket, subprocess, sys, time
 mon, elf, out = sys.argv[1:4]
-def ask(cmd):
+ansi = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+def ask(*cmds):
     s = socket.socket(socket.AF_UNIX)
     s.settimeout(5)
     s.connect(mon)
-    s.sendall((cmd + "\n").encode())
+    for cmd in cmds:
+        s.sendall((cmd + "\n").encode())
+        time.sleep(0.3)
     time.sleep(1)
     data = b""
     try:
@@ -140,18 +143,53 @@ def ask(cmd):
     except socket.timeout:
         pass
     s.close()
-    return data.decode(errors="replace")
+    # The monitor echoes each typed character with cursor moves: keep
+    # only its answers.
+    text = ansi.sub("", data.decode(errors="replace"))
+    return "\n".join(l for l in text.splitlines()
+                     if not l.startswith(("(qemu)", "QEMU ")))
+def where(addrs):
+    if not addrs:
+        return []
+    try:
+        res = subprocess.run(["addr2line", "-Cfipe", elf] + ["0x" + a for a in addrs],
+                             capture_output=True, text=True, timeout=20).stdout
+        return res.strip().splitlines()
+    except (OSError, subprocess.SubprocessError):
+        return ["?"]
+# A kernel text address: the upper half (x86_64 0xffffffff8..., AArch64
+# and RISC-V kernels linked high as well).
+text_addr = re.compile(r"0x(ffffffff[0-9a-f]{8})\b")
 with open(out, "w") as f:
     for round_ in (1, 2):
         regs = ask("info registers -a")
         f.write(f"=== sample {round_}\n{regs}\n")
         for pc in re.findall(r"(?:RIP|PC|pc)\s*=\s*([0-9a-fA-F]+)", regs):
-            try:
-                where = subprocess.run(["addr2line", "-fipe", elf, "0x" + pc],
-                                       capture_output=True, text=True, timeout=10).stdout.strip()
-            except (OSError, subprocess.SubprocessError):
-                where = "?"
-            f.write(f"{pc}: {where}\n")
+            f.write(f"{pc}: {' | '.join(where([pc]))}\n")
+        # A rough backtrace per CPU: the kernel text addresses among the
+        # first 64 words of its stack, most recent first.
+        for n, block in enumerate(re.split(r"\nCPU#\d+", "\n" + regs)[1:]):
+            m = re.search(r"\b(?:RSP|SP|sp|x2)\s*=\s*([0-9a-fA-F]{16})", block)
+            if not m:
+                continue
+            words = ask(f"cpu {n}", f"x /64gx 0x{m.group(1)}")
+            seen = []
+            for line in words.splitlines():
+                # "addr: 0x... 0x...": only the values, not the address column.
+                for a in text_addr.findall(line.split(":", 1)[-1]):
+                    if a not in seen:
+                        seen.append(a)
+            f.write(f"--- CPU#{n} stack (sp {m.group(1)}): kernel code addresses\n")
+            shown = 0
+            for a in seen:
+                w = where([a])
+                # A data pointer into the kernel image resolves to nothing.
+                if not w or w[0].startswith("??"):
+                    continue
+                f.write(f"  {a}: {' | '.join(w)}\n")
+                shown += 1
+                if shown == 24:
+                    break
         time.sleep(1)
 PY
     echo "stalled: CPU state in $log_dir/stall-cpus$suffix.txt"
