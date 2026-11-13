@@ -61,6 +61,15 @@ pub fn lock_range(start: usize, len: usize) -> Option<(u64, u64)> {
     Some((start, start.checked_add(len)?))
 }
 
+/// The error a lock or seal of a range gives: EINVAL for one that ends
+/// inside a huge page, ENOMEM for a hole.
+fn range_error(e: crate::error::KernelError) -> SyscallError {
+    match e {
+        crate::error::KernelError::InvalidArgument { .. } => SyscallError::InvalidArgument,
+        _ => SyscallError::OutOfMemory,
+    }
+}
+
 /// Whether a range lies in user space: beyond it nothing is mapped (ENOMEM
 /// from the walk on Linux; here the kernel half must not be touched).
 fn in_user_space(end: u64) -> bool {
@@ -91,8 +100,7 @@ fn do_mlock(start: usize, len: usize, lock: Mlock) -> SyscallResult {
     if !in_user_space(end) {
         return Err(SyscallError::OutOfMemory);
     }
-    vas.set_mlock(start, end, lock)
-        .map_err(|_| SyscallError::OutOfMemory)?;
+    vas.set_mlock(start, end, lock).map_err(range_error)?;
     Ok(0)
 }
 
@@ -127,7 +135,7 @@ pub fn sys_munlock(start: usize, len: usize) -> SyscallResult {
     proc.memory_space
         .lock()
         .set_mlock(start, end, Mlock::Unlocked)
-        .map_err(|_| SyscallError::OutOfMemory)?;
+        .map_err(range_error)?;
     Ok(0)
 }
 
@@ -233,7 +241,7 @@ pub fn sys_mseal(start: usize, len: usize, flags: usize) -> SyscallResult {
     proc.memory_space
         .lock()
         .seal(start, end)
-        .map_err(|_| SyscallError::OutOfMemory)?;
+        .map_err(range_error)?;
     Ok(0)
 }
 
@@ -395,14 +403,27 @@ pub fn sys_process_madvise(
         return Err(SyscallError::InvalidArgument);
     }
     let raw = super::userspace::read_user_vec(iov, vlen * 16, UIO_MAXIOV * 16)?;
-    let segs: alloc::vec::Vec<(usize, usize)> = raw
-        .chunks_exact(16)
-        .map(|c| {
-            let base = u64::from_ne_bytes(c[0..8].try_into().unwrap_or([0; 8]));
-            let len = u64::from_ne_bytes(c[8..16].try_into().unwrap_or([0; 8]));
-            (base as usize, len as usize)
-        })
-        .collect();
+    // import_iovec: a negative length is EINVAL, and the total stops at
+    // MAX_RW_COUNT (the segments past it are cut short), so the count
+    // returned is never a negative ssize_t (PR #41 review).
+    const MAX_RW_COUNT: usize = 0x7fff_f000;
+    let mut total = 0usize;
+    let mut segs: alloc::vec::Vec<(usize, usize)> = alloc::vec::Vec::new();
+    for c in raw.chunks_exact(16) {
+        let base = u64::from_ne_bytes(c[0..8].try_into().unwrap_or([0; 8]));
+        let len = i64::from_ne_bytes(c[8..16].try_into().unwrap_or([0; 8]));
+        if len < 0 {
+            return Err(SyscallError::InvalidArgument);
+        }
+        let len = (len as usize).min(MAX_RW_COUNT - total);
+        total += len;
+        segs.push((base as usize, len));
+    }
+    // Unknown advice is EINVAL however many segments there are, as Linux
+    // checks madvise_behavior_valid first (PR #41 review).
+    if !super::memory::madvise_valid(advice) {
+        return Err(SyscallError::InvalidArgument);
+    }
     let target = pidfd_process(pidfd)?;
     let me = process::current_process().ok_or(SyscallError::InvalidState)?;
     let remote = target.pid != me.pid;

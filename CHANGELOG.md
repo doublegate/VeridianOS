@@ -119,7 +119,8 @@
   numbers unchanged), as Linux's names take theirs. Runtime test futex2.
 - Memory calls (v0.28 item 5, ADR 0027 decisions 9-18): mlock, mlock2 (MLOCK_ONFAULT), munlock,
   mlockall (MCL_CURRENT, MCL_FUTURE, MCL_ONFAULT) and munlockall, with RLIMIT_MEMLOCK, MAP_LOCKED
-  and MCL_FUTURE applied to later mmap, brk and mremap growth (EAGAIN past the limit); locking
+  and MCL_FUTURE applied to later mmap and brk, and a locked mapping staying locked as mremap
+  grows it (EAGAIN past the limit); locking
   past the limit takes CAP_IPC_LOCK and the `System` object (ADR 0024's new row). mseal, which
   makes munmap, MAP_FIXED over, mremap, mprotect, discarding madvise, shmdt and shmat's
   SHM_REMAP over the range EPERM.

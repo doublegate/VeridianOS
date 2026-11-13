@@ -2489,6 +2489,32 @@ impl VirtualAddressSpace {
     /// inside it into two at `addr`, so a change can apply to one side.
     /// A huge-page mapping is left whole.
     #[cfg(feature = "alloc")]
+    /// A huge-page mapping cannot be split inside a huge page (Linux's
+    /// hugetlb_split: EINVAL), so a range that ends inside one is refused
+    /// rather than made to change the whole mapping (mlock, mseal; PR #41
+    /// review).
+    fn refuse_huge_cut(
+        mappings: &BTreeMap<VirtualAddress, VirtualMapping>,
+        start: u64,
+        end: u64,
+    ) -> Result<(), KernelError> {
+        let cuts = |addr: u64| {
+            mappings
+                .range(..VirtualAddress(addr))
+                .next_back()
+                .is_some_and(|(_, m)| {
+                    m.flags.contains(PageFlags::HUGE) && m.start.0 < addr && addr < m.end().0
+                })
+        };
+        if cuts(start) || cuts(end) {
+            return Err(KernelError::InvalidArgument {
+                name: "range",
+                value: "ends inside a huge page",
+            });
+        }
+        Ok(())
+    }
+
     fn split_at_locked(mappings: &mut BTreeMap<VirtualAddress, VirtualMapping>, addr: u64) {
         let Some((&key, m)) = mappings.range(..VirtualAddress(addr)).next_back() else {
             return;
@@ -2933,6 +2959,7 @@ impl VirtualAddressSpace {
     #[cfg(feature = "alloc")]
     pub fn set_mlock(&self, start: u64, end: u64, lock: Mlock) -> Result<(), KernelError> {
         let mut mappings = self.mappings.lock();
+        Self::refuse_huge_cut(&mappings, start, end)?;
         let hole = Self::first_hole(&mappings, start, end);
         let stop = hole.unwrap_or(end);
         if stop > start {
@@ -2963,6 +2990,18 @@ impl VirtualAddressSpace {
     pub fn lock_grown(&self, start: u64, end: u64, lock: Mlock) -> Result<(), KernelError> {
         let r = self.set_mlock(start, end, lock);
         self.merge_with_next(VirtualAddress(start));
+        // set_mlock split the mapping at `start` when the grown range began
+        // inside it (mremap of its tail): join the front back too.
+        let front = self
+            .mappings
+            .lock()
+            .range(..VirtualAddress(start))
+            .next_back()
+            .filter(|(_, m)| m.end().0 == start)
+            .map(|(&k, _)| k);
+        if let Some(front) = front {
+            self.merge_with_next(front);
+        }
         r
     }
 
@@ -3186,6 +3225,7 @@ impl VirtualAddressSpace {
         if let Some(at) = Self::first_hole(&mappings, start, end) {
             return Err(KernelError::UnmappedMemory { addr: at as usize });
         }
+        Self::refuse_huge_cut(&mappings, start, end)?;
         Self::split_at_locked(&mut mappings, start);
         Self::split_at_locked(&mut mappings, end);
         for (_, m) in mappings
@@ -3911,6 +3951,9 @@ impl VirtualAddressSpace {
             mapping.physical_frames = new_frames;
             mapping.flags =
                 PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER | PageFlags::NO_EXECUTE;
+            // MCL_FUTURE: made locked, rather than locked afterwards by a
+            // set_mlock that splits the heap at every growth (PR #41).
+            mapping.mlock = def;
             mappings.insert(start_addr, mapping);
         }
 
@@ -4758,6 +4801,44 @@ mod tests {
         assert_eq!(
             (one.start.0, one.size, one.mlock),
             (0x90_0000, 0x4000, Mlock::Locked)
+        );
+    }
+
+    #[test]
+    fn growing_a_locked_mappings_tail_leaves_one_mapping() {
+        let vas = VirtualAddressSpace::new();
+        let mut m = record(0x98_0000, 2, MappingType::Data);
+        m.mlock = Mlock::Locked;
+        vas.mappings.lock().insert(m.start, m);
+        let grown = record(0x98_2000, 1, MappingType::Data);
+        vas.mappings.lock().insert(grown.start, grown);
+        // mremap(0x98_1000, 0x1000, 0x2000): the second page grew.
+        vas.lock_grown(0x98_1000, 0x98_3000, Mlock::Locked).unwrap();
+        let one = vas.find_mapping(VirtualAddress(0x98_0000)).unwrap();
+        assert_eq!((one.start.0, one.size), (0x98_0000, 0x3000));
+    }
+
+    #[test]
+    fn a_huge_page_is_not_cut_by_mlock_or_mseal() {
+        let vas = VirtualAddressSpace::new();
+        let mut m = record(0x40_0000, 512, MappingType::Data);
+        m.flags = m.flags | PageFlags::HUGE;
+        vas.mappings.lock().insert(m.start, m);
+        assert!(matches!(
+            vas.set_mlock(0x40_0000, 0x40_1000, Mlock::Locked),
+            Err(KernelError::InvalidArgument { .. })
+        ));
+        assert!(matches!(
+            vas.seal(0x40_0000, 0x40_1000),
+            Err(KernelError::InvalidArgument { .. })
+        ));
+        assert_eq!(
+            vas.find_mapping(VirtualAddress(0x40_0000)).unwrap().mlock,
+            Mlock::Unlocked
+        );
+        assert!(
+            vas.set_mlock(0x40_0000, 0x60_0000, Mlock::Locked).is_ok(),
+            "the whole page"
         );
     }
 

@@ -1183,7 +1183,7 @@ fn kick_cpu(cpu: usize) {
 pub fn barrier_cpus() {
     use core::sync::atomic::{fence, Ordering};
     fence(Ordering::SeqCst);
-    let online = crate::arch::smp_boot::online_cpus() as usize;
+    let online = (crate::arch::smp_boot::online_cpus() as usize).min(crate::sched::smp::MAX_CPUS);
     // Without the dispatcher's kick (only the boot CPU runs anything), or
     // on one CPU, the fence is the whole barrier. System calls run with
     // interrupts on (N-139), so two CPUs here at once each answer the
