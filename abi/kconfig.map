@@ -41,7 +41,7 @@ CONFIG_PID_NS y  # H5a the namespaces and the main interfaces, H5b the remaining
 CONFIG_NET_NS n  # H6 makes the namespaces, each with its own ports and a loopback that is down; unset until an interface can be configured (netlink, SIOCSIFFLAGS)
 CONFIG_CHECKPOINT_RESTORE n  # kcmp only; no PR_SET_MM, map_files or msg_next_id
 CONFIG_SECCOMP y
-CONFIG_SECCOMP_FILTER n  # until user notification (stage 2)
+CONFIG_SECCOMP_FILTER y
 CONFIG_BSD_PROCESS_ACCT n  # no acct(2)
 CONFIG_RT_GROUP_SCHED n  # no cgroup hierarchy
 CONFIG_PREEMPT_RT n

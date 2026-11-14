@@ -534,6 +534,14 @@ pub struct FileTable {
     /// lowered limit stay open.
     limit: AtomicUsize,
 
+    /// Descriptors allocated but not yet filled ([`FileTable::reserve`],
+    /// Linux's get_unused_fd_flags before fd_install): no file is there, so
+    /// every lookup is EBADF, but `open` does not hand them out and a dup2
+    /// or dup3 onto one is EBUSY. Changed with the `files` write lock held.
+    reserved: spin::Mutex<Vec<FileDescriptor>>,
+    /// How many there are, so the common case skips the lock.
+    reserved_count: AtomicUsize,
+
     /// The owner of the POSIX record locks taken through this table
     /// ([`FileTable::lock_owner`]): unique for the kernel's life, so it
     /// survives the table being moved out of its `Arc` at the last close,
@@ -566,6 +574,8 @@ impl FileTable {
             console_fds: AtomicU8::new(CONSOLE_FDS_ALL),
             free_hint: AtomicUsize::new(3),
             limit: AtomicUsize::new(MAX_FDS),
+            reserved: spin::Mutex::new(Vec::new()),
+            reserved_count: AtomicUsize::new(0),
             owner: new_table_owner(),
         }
     }
@@ -593,6 +603,7 @@ impl FileTable {
     fn is_allocatable(&self, files: &[Option<FileEntry>], fd: FileDescriptor) -> bool {
         files[fd].is_none()
             && (fd >= 3 || self.console_fds.load(Ordering::Acquire) & (1 << fd) == 0)
+            && !self.is_reserved(fd)
     }
 
     /// Slot `fd` became free: the lowest free fd is now at most `fd`.
@@ -672,6 +683,97 @@ impl FileTable {
             file,
             cloexec: false,
         });
+        Ok(())
+    }
+
+    /// Whether `fd` is reserved and not yet filled.
+    fn is_reserved(&self, fd: FileDescriptor) -> bool {
+        self.reserved_count.load(Ordering::Acquire) != 0 && self.reserved.lock().contains(&fd)
+    }
+
+    /// Allocate the lowest free descriptor below the limit without putting
+    /// a file there yet (get_unused_fd_flags): EMFILE if there is none. It
+    /// becomes visible only through [`Self::fill`]; [`Self::unreserve`]
+    /// gives it back. For calls that must fail without a trace after
+    /// allocating, which closing an installed descriptor by number cannot
+    /// do: another thread may have closed it and opened something else.
+    pub fn reserve(&self) -> Result<FileDescriptor, KernelError> {
+        let mut files = self.files.write();
+        let limit = self.limit();
+        let end = files.len().min(limit);
+        let start = self.free_hint.load(Ordering::Acquire).min(end);
+        let fd = match (start..end).find(|&fd| self.is_allocatable(&files, fd)) {
+            Some(fd) => fd,
+            None => {
+                let fd = files.len();
+                if fd >= limit {
+                    return Err(KernelError::FsError(FsError::TooManyOpenFiles));
+                }
+                files.push(None);
+                fd
+            }
+        };
+        self.reserved.lock().push(fd);
+        self.reserved_count.fetch_add(1, Ordering::AcqRel);
+        self.note_filled(fd);
+        Ok(fd)
+    }
+
+    fn take_reservation(&self, fd: FileDescriptor) -> bool {
+        let mut reserved = self.reserved.lock();
+        let Some(pos) = reserved.iter().position(|&r| r == fd) else {
+            return false;
+        };
+        reserved.swap_remove(pos);
+        self.reserved_count.fetch_sub(1, Ordering::AcqRel);
+        true
+    }
+
+    /// Put `file` at reserved descriptor `fd` (fd_install).
+    pub fn fill(&self, fd: FileDescriptor, file: Arc<File>, cloexec: bool) {
+        let mut files = self.files.write();
+        if self.take_reservation(fd) {
+            files[fd] = Some(FileEntry { file, cloexec });
+        }
+    }
+
+    /// Give reserved descriptor `fd` back (put_unused_fd).
+    pub fn unreserve(&self, fd: FileDescriptor) {
+        let _files = self.files.write();
+        if self.take_reservation(fd) {
+            self.note_freed(fd);
+        }
+    }
+
+    /// Install `file` at exactly `fd` with `cloexec`, closing whatever was
+    /// there (Linux's replace_fd, for seccomp's ADDFD_FLAG_SETFD): EBADF at
+    /// or past the descriptor limit.
+    pub fn replace_at(
+        &self,
+        fd: FileDescriptor,
+        file: Arc<File>,
+        cloexec: bool,
+    ) -> Result<(), KernelError> {
+        if fd >= self.limit() {
+            return Err(KernelError::FsError(FsError::BadFileDescriptor));
+        }
+        let old = {
+            let mut files = self.files.write();
+            if self.is_reserved(fd) {
+                return Err(KernelError::FsError(FsError::Busy));
+            }
+            while files.len() <= fd {
+                files.push(None);
+            }
+            let old = files[fd].replace(FileEntry { file, cloexec });
+            self.release_console_fd(fd);
+            self.note_filled(fd);
+            old
+        };
+        if let Some(existing) = old {
+            self.closing(&existing.file);
+            existing.file.dec_ref();
+        }
         Ok(())
     }
 
@@ -873,6 +975,11 @@ impl FileTable {
         file.inc_ref();
 
         let mut files = self.files.write();
+        // Allocated by another call and not yet filled: EBUSY (do_dup2).
+        if self.is_reserved(new_fd) {
+            file.dec_ref();
+            return Err(KernelError::FsError(FsError::Busy));
+        }
 
         // Ensure files vector is large enough
         while files.len() <= new_fd {
@@ -920,6 +1027,11 @@ impl FileTable {
         file.inc_ref();
 
         let mut files = self.files.write();
+        // Allocated by another call and not yet filled: EBUSY (do_dup2).
+        if self.is_reserved(new_fd) {
+            file.dec_ref();
+            return Err(KernelError::FsError(FsError::Busy));
+        }
 
         // Ensure files vector is large enough
         while files.len() <= new_fd {
@@ -1047,8 +1159,18 @@ impl FileTable {
         Self {
             files: RwLock::new(new_files),
             console_fds: AtomicU8::new(self.console_fds.load(Ordering::Acquire)),
-            free_hint: AtomicUsize::new(self.free_hint.load(Ordering::Acquire)),
+            // A descriptor reserved here is free in the copy (dup_fd copies
+            // only installed files), so the lowest free one may be lower.
+            free_hint: AtomicUsize::new(
+                self.reserved
+                    .lock()
+                    .iter()
+                    .copied()
+                    .fold(self.free_hint.load(Ordering::Acquire), usize::min),
+            ),
             limit: AtomicUsize::new(self.limit()),
+            reserved: spin::Mutex::new(Vec::new()),
+            reserved_count: AtomicUsize::new(0),
             // A copy owns no locks: Linux's fork child does not inherit them.
             owner: new_table_owner(),
         }
@@ -1398,6 +1520,35 @@ mod tests {
         table.close(1).unwrap();
         // fd 1 is no longer the console: it is free for the next open.
         assert_eq!(table.open(some_file()).unwrap(), 1);
+    }
+
+    /// A reserved descriptor is invisible until filled: lookups and close
+    /// are EBADF, open skips it, dup2/dup3 onto it are EBUSY, a fork's
+    /// table does not have it; given back, it is the next one open hands out.
+    #[test]
+    fn a_reserved_descriptor_is_invisible_until_filled() {
+        let table = FileTable::new();
+        let r = table.reserve().unwrap();
+        assert_eq!(r, 3);
+        assert!(table.get(r).is_none() && table.close(r).is_err());
+        assert_eq!(table.open(some_file()).unwrap(), 4);
+        assert!(matches!(
+            table.dup2(4, r),
+            Err(KernelError::FsError(FsError::Busy))
+        ));
+        assert!(matches!(
+            table.dup3(4, r, true),
+            Err(KernelError::FsError(FsError::Busy))
+        ));
+        let child = table.clone_for_fork();
+        assert!(child.get(r).is_none());
+        assert_eq!(child.open(some_file()).unwrap(), r);
+        table.unreserve(r);
+        assert_eq!(table.open(some_file()).unwrap(), r);
+        let s = table.reserve().unwrap();
+        table.fill(s, some_file(), true);
+        assert!(table.get_entry(s).is_some_and(|(_, cloexec)| cloexec));
+        table.close(s).unwrap();
     }
 
     #[test]

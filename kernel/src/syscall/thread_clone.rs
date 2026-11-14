@@ -816,10 +816,19 @@ fn thread_clone(
     // thread map (`Process::change_uids`). Copied again under the map, the
     // new thread's sets either went through that fixup or are taken from a
     // creator that already has.
+    // The seccomp state and no_new_privs likewise: TSYNC checks and
+    // changes every thread's under the map (seccomp_sync_threads).
     {
         let _threads = proc.threads.lock();
         let sets = *current_thread.caps.lock();
         *thread.caps.lock() = sets;
+        thread.seccomp.copy_from(&current_thread.seccomp);
+        thread.no_new_privs.store(
+            current_thread
+                .no_new_privs
+                .load(core::sync::atomic::Ordering::Acquire),
+            core::sync::atomic::Ordering::Release,
+        );
     }
 
     // The TID stores come after every step that can fail but the start, as

@@ -2186,6 +2186,16 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
         _ => {}
     }
 
+    // A seccomp listener answers its own commands, every other one EINVAL
+    // (seccomp_notify_ioctl; an anonymous inode has no attribute flags).
+    #[cfg(feature = "alloc")]
+    if let Some(result) = file
+        .as_ref()
+        .and_then(|f| super::seccomp::notify_ioctl(f, cmd, arg))
+    {
+        return result;
+    }
+
     // The attribute-flag ioctls (do_vfs_ioctl's FS_IOC_*), for any file
     // whose filesystem keeps the flags; ENOTTY from the rest.
     #[cfg(feature = "alloc")]

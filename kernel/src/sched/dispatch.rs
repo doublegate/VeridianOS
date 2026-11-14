@@ -1551,12 +1551,31 @@ pub fn clock_ns() -> u64 {
 pub fn wait_event(
     wq: &WaitQueue,
     deadline: Option<u64>,
+    cond: impl FnMut() -> bool,
+) -> Result<(), WaitError> {
+    wait_event_until(wq, deadline, cond, crate::process::wait_interrupted)
+}
+
+/// [`wait_event`] that only a fatal signal ends (Linux's killable waits):
+/// a signal with a handler waits until the call is done.
+pub fn wait_event_killable(
+    wq: &WaitQueue,
+    deadline: Option<u64>,
+    cond: impl FnMut() -> bool,
+) -> Result<(), WaitError> {
+    wait_event_until(wq, deadline, cond, crate::process::wait_killed)
+}
+
+fn wait_event_until(
+    wq: &WaitQueue,
+    deadline: Option<u64>,
     mut cond: impl FnMut() -> bool,
+    interrupted: fn() -> bool,
 ) -> Result<(), WaitError> {
     let check = |cond: &mut dyn FnMut() -> bool| {
         if cond() {
             Some(Ok(()))
-        } else if crate::process::wait_interrupted() {
+        } else if interrupted() {
             Some(Err(WaitError::Interrupted))
         } else if deadline.is_some_and(|d| deadline_now() >= d) {
             Some(Err(WaitError::TimedOut))

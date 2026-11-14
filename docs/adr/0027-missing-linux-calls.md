@@ -314,8 +314,23 @@ The reference for every behaviour below is the Linux 7.3 source (kernel.org tarb
       (at most 4095); LOG logs and allows; TRACE is ENOSYS with no tracer, as on Linux.
       GET_ACTION_AVAIL and GET_NOTIF_SIZES answer; `/proc/<pid>/status` shows NoNewPrivs,
       Seccomp and Seccomp_filters.
-    - **Stage 2 (same group):** SECCOMP_RET_USER_NOTIF with its listener descriptor and
-      ioctls; until then a filter returning it gets ENOSYS and NEW_LISTENER is EINVAL.
+    - **Installing** happens under the process's thread map (Linux's siglock), and TSYNC
+      also holds the credential guard, so no thread made meanwhile and no other thread's
+      install escapes it, and no exec decides privileges halfway. A new thread copies its
+      creator's state again under the map. Exiting threads are skipped, and an exiting
+      thread stops using its chain.
+    - **User notification:** NEW_LISTENER returns a close-on-exec listener descriptor
+      (EBUSY if the chain already has one), reserved before the filter is installed and
+      filled after, as Linux's get_unused_fd_flags and fd_install: no other thread sees it
+      halfway, and a failed install gives the number back without closing anything. SECCOMP_RET_USER_NOTIF hands the call to its
+      supervisor; the calling thread waits interruptibly (EINTR, restarted as ERESTARTSYS),
+      or with WAIT_KILLABLE_RECV killably once the supervisor has the call. Ioctls: RECV
+      (zeroed buffer, the caller's PID namespace), SEND (once; CONTINUE runs the call),
+      ID_VALID, SET_FLAGS and ADDFD (SETFD, SEND), whose install the notifying thread
+      carries out in its own descriptor table, as Linux's receive_fd. Poll gives POLLIN,
+      POLLOUT, and POLLHUP once no thread or filter uses the filter (Linux's `users`).
+      Closing the listener answers what is outstanding with ENOSYS. An ERRNO or answer of
+      EINTR is final and never restarted.
 
 ## Consequences
 

@@ -5639,6 +5639,7 @@ static void test_mount_flags(void);
 static void test_mount_api(void);
 static void test_idmapped_mount(void);
 static void test_seccomp(void);
+static void test_seccomp_notify(void);
 static void test_mount_no_escape(void);
 static void test_pivot_root(void);
 static void test_mount_object_cap(void);
@@ -5718,6 +5719,7 @@ static const struct {
     {"mount_api", test_mount_api},
     {"idmapped_mount", test_idmapped_mount},
     {"seccomp", test_seccomp},
+    {"seccomp_notify", test_seccomp_notify},
     {"pivot_root", test_pivot_root},
     {"mount_object_cap", test_mount_object_cap},
     {"mount_modify_drop", test_mount_modify_drop},
@@ -11338,6 +11340,128 @@ static void test_seccomp(void)
     report("seccomp", f == 0, why);
 }
 
+/* seccomp user notification (SECCOMP_RET_USER_NOTIF, Linux's
+ * seccomp_do_user_notification): a supervisor holding the listener gets
+ * the call, answers it with a value, a descriptor (ADDFD with SEND) or
+ * CONTINUE; POLLHUP and ENOENT once nothing can notify, ENOSYS once the
+ * listener is closed, EBUSY for a second listener on one chain. */
+struct t_seccomp_data {
+    int nr;
+    uint32_t arch;
+    uint64_t ip, args[6];
+};
+struct t_notif {
+    uint64_t id;
+    uint32_t pid, flags;
+    struct t_seccomp_data data;
+};
+struct t_notif_resp {
+    uint64_t id;
+    int64_t val;
+    int32_t error;
+    uint32_t flags;
+};
+struct t_notif_addfd {
+    uint64_t id;
+    uint32_t flags, srcfd, newfd, newfd_flags;
+};
+#define T_NOTIF_RECV 0xc0502100u
+#define T_NOTIF_SEND 0xc0182101u
+#define T_NOTIF_ID_VALID 0x40082102u
+#define T_NOTIF_ADDFD 0x40182103u
+/* Receive one notification for getppid from `pid`, within 5 s. */
+static int t_notif_recv(int l, pid_t pid, struct t_notif *n)
+{
+    struct pollfd pf = {l, POLLIN, 0};
+    if (poll(&pf, 1, 5000) != 1 || !(pf.revents & POLLIN)) return 0;
+    memset(n, 0, sizeof(*n));
+    if (ioctl(l, T_NOTIF_RECV, n) != 0) return 0;
+    return n->pid == (uint32_t)pid && n->data.nr == SYS_getppid && n->data.arch == T_AUDIT_ARCH;
+}
+static void test_seccomp_notify(void)
+{
+    char why[96];
+    int f = 0, p1[2], p2[2];
+    if (pipe(p1) != 0 || pipe(p2) != 0) {
+        report("seccomp_notify", 0, "pipe");
+        return;
+    }
+    pid_t me = getpid();
+    pid_t g = fork();
+    if (g == 0) {
+        char c;
+        prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+        /* WAIT_KILLABLE_RECV needs NEW_LISTENER. */
+        if (!(t_seccomp_install(0x7fc00000u, 1u << 5) == -1 && errno == EINVAL)) _exit(2);
+        int l = (int)t_seccomp_install(0x7fc00000u, 1u << 3 /* NEW_LISTENER */);
+        if (l < 0) _exit(3);
+        if (!(t_seccomp_install(0x7fc00000u, 1u << 3) == -1 && errno == EBUSY)) _exit(4);
+        if (write(p1[1], &l, sizeof(l)) != sizeof(l) || read(p2[0], &c, 1) != 1) _exit(5);
+        close(l);
+        if (syscall(SYS_getppid) != 4242) _exit(6);
+        long fd = syscall(SYS_getppid);
+        if (fd < 0 || write((int)fd, "x", 1) != 1) _exit(7);
+        if (syscall(SYS_getppid) != me) _exit(8);
+        _exit(0);
+    }
+    int l = -1, gl = -1, pfd = sys_pidfd_open(g, 0);
+    if (pfd < 0 || read(p1[0], &gl, sizeof(gl)) != sizeof(gl) || (l = sys_pidfd_getfd(pfd, gl, 0)) < 0) {
+        f |= 1;
+        kill(g, SIGKILL);
+    }
+    if (write(p2[1], "g", 1) != 1) f |= 1;
+    struct t_notif n;
+    if (!(f & 1)) {
+        /* A receive buffer that is not zeroed: EINVAL. */
+        memset(&n, 0xff, sizeof(n));
+        if (!(ioctl(l, T_NOTIF_RECV, &n) == -1 && errno == EINVAL)) f |= 2;
+        /* An answer with a value. */
+        if (!t_notif_recv(l, g, &n)) f |= 4;
+        if (ioctl(l, T_NOTIF_ID_VALID, &n.id) != 0) f |= 4;
+        struct t_notif_resp r = {n.id, 4242, 0, 0};
+        if (ioctl(l, T_NOTIF_SEND, &r) != 0) f |= 4;
+        /* A descriptor, which is also the call's result. */
+        int q[2];
+        char x = 0;
+        if (pipe(q) != 0 || !t_notif_recv(l, g, &n)) f |= 8;
+        struct t_notif_addfd a = {n.id, 1u << 1 /* SEND */, (uint32_t)q[1], 0, 0};
+        if (ioctl(l, T_NOTIF_ADDFD, &a) < 0) f |= 8;
+        if (read(q[0], &x, 1) != 1 || x != 'x') f |= 8;
+        close(q[0]);
+        close(q[1]);
+        /* CONTINUE: the call runs. */
+        if (!t_notif_recv(l, g, &n)) f |= 16;
+        struct t_notif_resp cont = {n.id, 0, 0, 1};
+        if (ioctl(l, T_NOTIF_SEND, &cont) != 0) f |= 16;
+    }
+    if (t_exit_status(g) != 0) f |= 32;
+    if (!(f & 1)) {
+        /* Nothing can notify any more: POLLHUP, and a receive is ENOENT. */
+        struct pollfd pf = {l, POLLIN, 0};
+        if (poll(&pf, 1, 1000) != 1 || !(pf.revents & POLLHUP)) f |= 64;
+        memset(&n, 0, sizeof(n));
+        if (!(ioctl(l, T_NOTIF_RECV, &n) == -1 && errno == ENOENT)) f |= 64;
+    }
+    close(l);
+    close(pfd);
+    /* The listener closed: the call gets ENOSYS. */
+    pid_t c = fork();
+    if (c == 0) {
+        prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+        int fd = (int)t_seccomp_install(0x7fc00000u, 1u << 3);
+        if (fd < 0) _exit(2);
+        close(fd);
+        _exit(syscall(SYS_getppid) == -1 && errno == ENOSYS ? 0 : 1);
+    }
+    if (t_exit_status(c) != 0) f |= 128;
+    close(p1[0]);
+    close(p1[1]);
+    close(p2[0]);
+    close(p2[1]);
+    snprintf(why, sizeof(why), "f=%#x", f);
+    report("seccomp_notify", f == 0, why);
+}
+
 /* An idmapped mount (mount_setattr's MOUNT_ATTR_IDMAP, Linux's
  * fs/mnt_idmapping.c): a detached tmpfs mount made idmapped through a user
  * namespace mapping 0..999 to 100000..100999 shows root's file as owned
@@ -13555,6 +13679,7 @@ int main(int argc, char **argv)
     test_mount_api();
     test_idmapped_mount();
     test_seccomp();
+    test_seccomp_notify();
     test_mount_no_escape();
     test_pivot_root();
     test_mount_object_cap();

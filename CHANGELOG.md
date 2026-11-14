@@ -105,7 +105,11 @@
   `veridian-cbpf` crate; every call, private ones included, is filtered before it is decoded;
   KILL_PROCESS, KILL_THREAD, TRAP (SIGSYS with SYS_SECCOMP), ERRNO, LOG and TRACE (ENOSYS
   without a tracer), TSYNC, GET_ACTION_AVAIL and GET_NOTIF_SIZES; `/proc/<pid>/status` shows
-  NoNewPrivs, Seccomp and Seccomp_filters. User notification follows. Runtime test seccomp.
+  NoNewPrivs, Seccomp and Seccomp_filters. User notification: the listener descriptor
+  (NEW_LISTENER, WAIT_KILLABLE_RECV), RET_USER_NOTIF and the RECV, SEND (with CONTINUE),
+  ID_VALID, SET_FLAGS and ADDFD ioctls, POLLHUP once no thread uses the filter. Filters are
+  installed under the thread map (TSYNC also under the credential guard) and freed without
+  recursion. Runtime tests seccomp and seccomp_notify.
 - The new mount API (Linux 7.3 `fs/fsopen.c`, `fs/namespace.c`): fsopen, fsconfig, fsmount and
   fspick make and reconfigure a filesystem through a context descriptor, whose parameters are
   checked one at a time as Linux checks them and whose refusals read back from it (`e tmpfs:

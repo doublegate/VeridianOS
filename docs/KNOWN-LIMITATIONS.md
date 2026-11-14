@@ -818,9 +818,9 @@ Page protections now follow `prot` (fixed in v0.27, N-132 to N-137). What remain
 - MAC labels every file and user process alike; its capability step only logs, once per access,
   which floods the audit ring.
 - `prctl` implemented only the name and timer-slack options (fixed in v0.27, N-151); seccomp
-  works since v0.28 (ADR 0027 decision 27), still without SECCOMP_RET_USER_NOTIF's listener
-  (a filter returning it gets ENOSYS, and SECCOMP_FILTER_FLAG_NEW_LISTENER is EINVAL) and
-  without a tracer for SECCOMP_RET_TRACE (ENOSYS, as Linux with none attached).
+  works since v0.28 (ADR 0027 decision 27), user notification included; SECCOMP_RET_TRACE
+  is ENOSYS until ptrace can attach a tracer (Track C item 8), as on Linux with none
+  attached.
 - POSIX shared memory objects have no access control (N-88).
 
 ### Accounts and passwords (N-131, N-153)

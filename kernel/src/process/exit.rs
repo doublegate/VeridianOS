@@ -565,6 +565,9 @@ pub fn exit_dispatched(exit_code: i32, group: bool) -> ! {
         crate::syscall::futex_pi_owner_exiting((process.pid.0, thread.tid.0));
         crate::syscall::scheduling::thread_exit(&thread);
         thread.release_fs();
+        // It stops using its seccomp filters (seccomp_filter_release): a
+        // listener sees POLLHUP once no thread can notify it any more.
+        thread.seccomp.release();
         // The thread's CPU time stays with the process.
         process.add_exited_cpu_from(dispatch::take_current_usage);
         let clear_ptr = thread.clear_tid.load(Ordering::Acquire);
