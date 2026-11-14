@@ -1043,7 +1043,8 @@ pub fn sys_fallocate(fd: usize, mode: usize, offset: usize, len: usize) -> Sysca
     #[cfg(feature = "alloc")]
     {
         let flags = crate::fs::attr::of(&*file.node);
-        if mode as u32 & !1 != 0 && flags & crate::fs::attr::FS_APPEND_FL != 0
+        if mode as u32 & !crate::fs::falloc::KEEP_SIZE != 0
+            && flags & crate::fs::attr::FS_APPEND_FL != 0
             || flags & crate::fs::attr::FS_IMMUTABLE_FL != 0
         {
             return Err(SyscallError::OperationNotPermitted);

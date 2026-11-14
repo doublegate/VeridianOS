@@ -1923,7 +1923,8 @@ impl BlockFsInner {
 
         let mode = permissions_to_mode(permissions, false);
         self.inode_table[inode_num as usize] = DiskInode::new(mode, 0, 0);
-        self.inode_table[inode_num as usize].flags = self.inherited_attr(parent);
+        let ty = self.inode_table[inode_num as usize].node_type();
+        self.inode_table[inode_num as usize].flags = self.inherited_attr(parent, ty);
 
         // Add directory entry to parent
         if let Err(e) = self.write_dir_entry(parent, inode_num, name, DiskDirEntry::FT_REG_FILE) {
@@ -1961,7 +1962,8 @@ impl BlockFsInner {
 
         let mode = permissions_to_mode(permissions, true);
         let mut new_inode = DiskInode::new(mode, 0, 0);
-        new_inode.flags = self.inherited_attr(parent);
+        let ty = new_inode.node_type();
+        new_inode.flags = self.inherited_attr(parent, ty);
         // Directories start with link count 2 (parent's entry + self ".")
         new_inode.links_count = 2;
         self.inode_table[inode_num as usize] = new_inode;
@@ -2028,7 +2030,8 @@ impl BlockFsInner {
 
         // Symlink inode: mode 0o120000 | 0o777 (rwx for all)
         let mut inode = DiskInode::new(0o120000 | 0o777, 0, 0);
-        inode.flags = self.inherited_attr(parent);
+        let ty = inode.node_type();
+        inode.flags = self.inherited_attr(parent, ty);
         inode.links_count = 1;
         inode.size = target.len() as u32;
         self.inode_table[inode_num as usize] = inode;
@@ -2077,7 +2080,8 @@ impl BlockFsInner {
             .ok_or(KernelError::ResourceExhausted { resource: "inodes" })?;
         let mode = type_mode(kind) | (permissions.to_mode() & 0o7777) as u16;
         let mut inode = DiskInode::new(mode, 0, 0);
-        inode.flags = self.inherited_attr(parent);
+        let ty = inode.node_type();
+        inode.flags = self.inherited_attr(parent, ty);
         if matches!(kind, NodeType::CharDevice | NodeType::BlockDevice) {
             inode.direct_blocks[0] = rdev;
         }
@@ -2630,7 +2634,12 @@ impl BlockFsInner {
     /// Change the permission bits on an inode, preserving the type bits.
     /// The attribute flags a new node in directory `parent` takes from it
     /// (nodump and noatime, `fs::attr::INHERITED`).
-    fn inherited_attr(&self, parent: u32) -> u32 {
+    fn inherited_attr(&self, parent: u32, ty: NodeType) -> u32 {
+        // Regular files and directories only, as ext4_init_new_inode
+        // (PR #45 review).
+        if !matches!(ty, NodeType::File | NodeType::Directory) {
+            return 0;
+        }
         self.inode_table
             .get(parent as usize)
             .map_or(0, |d| d.flags & super::attr::INHERITED)

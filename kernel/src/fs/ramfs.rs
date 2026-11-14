@@ -54,6 +54,14 @@ struct RamNode {
 impl RamNode {
     /// A new node takes nodump and noatime from its directory.
     fn inherit_attr(&self, child: &RamNode) {
+        // Regular files and directories only (shmem_get_inode, PR #45
+        // review): a symlink or special node keeps none.
+        if !matches!(
+            super::VfsNode::node_type(child),
+            super::NodeType::File | super::NodeType::Directory
+        ) {
+            return;
+        }
         use core::sync::atomic::Ordering;
         child.attr.store(
             self.attr.load(Ordering::Relaxed) & super::attr::INHERITED,

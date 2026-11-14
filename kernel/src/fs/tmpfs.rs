@@ -53,6 +53,14 @@ impl TmpNode {
     /// A new node takes nodump and noatime from its directory
     /// (shmem_get_inode, SHMEM_FL_INHERITED).
     fn inherit_attr(&self, child: &TmpNode) {
+        // Regular files and directories only (shmem_get_inode, PR #45
+        // review): a symlink or special node keeps none.
+        if !matches!(
+            super::VfsNode::node_type(child),
+            super::NodeType::File | super::NodeType::Directory
+        ) {
+            return;
+        }
         child.attr.store(
             self.attr.load(Ordering::Relaxed) & super::attr::INHERITED,
             Ordering::Relaxed,

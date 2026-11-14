@@ -30,11 +30,21 @@ const PAGE: usize = 4096;
 /// A node's flags, or the error a filesystem without them gives: ENOTTY
 /// from an ioctl (ENOIOCTLCMD), EOPNOTSUPP from file_getattr.
 fn flags_of(node: &dyn VfsNode, from_ioctl: bool) -> Result<u32, SyscallError> {
-    node.attr_flags().ok_or(if from_ioctl {
+    let none = if from_ioctl {
         SyscallError::NotATerminal
     } else {
         SyscallError::NotSupported
-    })
+    };
+    // A device, FIFO, socket or symlink has none (vfs_fileattr_get and
+    // vfs_fileattr_set refuse d_is_special; PR #45 review): its open file
+    // may be a wrapper (devfs) that does not keep them.
+    if !matches!(
+        node.node_type(),
+        crate::fs::NodeType::File | crate::fs::NodeType::Directory
+    ) {
+        return Err(none);
+    }
+    node.attr_flags().ok_or(none)
 }
 
 /// vfs_fileattr_set: the owner or CAP_FOWNER over it, with WRITE on the
