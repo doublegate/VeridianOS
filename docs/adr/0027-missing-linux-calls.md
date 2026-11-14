@@ -236,6 +236,24 @@ The reference for every behaviour below is the Linux 7.3 source (kernel.org tarb
     path-string model as a sentinel root no user path can hold (`fs::FAILFS_ROOT`). Not yet:
     `/proc/self/root` and `/proc/self/cwd`, which do not exist.
 
+### The new mount API (Linux 7.3 `fs/fsopen.c`, `fs/namespace.c`)
+
+24. fsopen, fsconfig, fsmount, fspick, move_mount, open_tree, open_tree_attr, mount_setattr,
+    statmount, listmount and listns have Linux's semantics and checks, each needing MODIFY on
+    the mount namespace (or a user namespace above it) as mount does (ADR 0024):
+    - **Detached trees** (fsmount, open_tree with OPEN_TREE_CLONE) are anonymous mount
+      namespaces: each its own mount table, reached through a path marker its descriptor holds,
+      and kept alive, as on Linux, by every open file inside it, not only the descriptor that
+      made it. move_mount attaches one; a tree attached under itself is ELOOP.
+    - **The context descriptor** checks each fsconfig parameter as the filesystem would and
+      keeps the last eight refusals, read back as Linux formats them (`e tmpfs: Unknown
+      parameter 'x'`; ENODATA when none, EMSGSIZE for a short buffer).
+    - **mount_setattr** changes the read-only, nosuid, nodev, noexec, atime and propagation
+      flags, recursively with AT_RECURSIVE. statmount (by mount ID or descriptor) and listmount
+      read the caller's namespace; listns lists the namespaces it can see.
+    - **Not yet** (step 3 of the group, KNOWN-LIMITATIONS): nullfs, FSMOUNT_NAMESPACE and
+      OPEN_TREE_NAMESPACE, and idmapped mounts (MOUNT_ATTR_IDMAP, EINVAL until then).
+
 ## Consequences
 
 - LTP's ipc tests (shmget*, shmat*, shmctl*, semget*, semop*, semctl*, msgget*, msgsnd*,
