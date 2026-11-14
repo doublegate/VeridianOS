@@ -187,9 +187,10 @@ fn truncate_removing_privs_as(
     if node.node_type() != NodeType::File {
         return node.truncate(size);
     }
-    // An immutable file refuses the truncate before anything changes
-    // (may_setattr's ATTR_TOUCH check in notify_change).
-    attr::may_write(node)?;
+    // An immutable or append-only file refuses the truncate before
+    // anything changes (may_setattr's ATTR_TOUCH check in notify_change,
+    // do_sys_ftruncate's IS_APPEND; callers check too).
+    attr::may_change(node)?;
     kill_file_caps(node)?;
     node.truncate(size)?;
     drop_set_id(node, caller)

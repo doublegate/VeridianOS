@@ -9734,6 +9734,8 @@ static void test_files_sched(void)
      * writing, no unlink, rename, chmod or truncate. */
     if (write(fd, "abcd", 4) != 4 || t_setflags(fd, T_FS_IMMUTABLE) != 0)
         f |= 128;
+    if (access(path, W_OK) != -1 || errno != EPERM || access(path, R_OK) != 0)
+        f |= 256;
     if (write(fd, "x", 1) != -1 || errno != EPERM || ftruncate(fd, 0) != -1 || errno != EPERM ||
         open(path, O_WRONLY) != -1 || errno != EPERM || unlink(path) != -1 || errno != EPERM ||
         rename(path, "/tmp/veridian-attr2") != -1 || errno != EPERM ||
