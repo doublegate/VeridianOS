@@ -535,7 +535,7 @@ ltp-syscalls	inotify07	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	inotify08	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	inotify09	TIMEOUT	../../../../include/tst_fuzzy_sync.h:255: TINFO: end_b - start_b  : { avg = 75203ns, avg_dev =  8721ns, dev_ratio = 0.12 }
 ltp-syscalls	inotify10	PASS	
-ltp-syscalls	inotify11	PASS	
+ltp-syscalls	inotify11	FLAKY	PASS locally in 36 to 44 s, TIMEOUT locally at times and on the GitHub runner in both runs of PR #45 (180 s, 2026-11-14): file creation and removal in a loop are slow (follow-up: directory operations, Track P); last here: PASS
 ltp-syscalls	inotify12	FAIL	inotify12.c:82: TFAIL: Could not parse inotify fdinfo
 ltp-syscalls	inotify_init1_01	PASS	
 ltp-syscalls	inotify_init1_02	PASS	
@@ -664,7 +664,7 @@ ltp-syscalls	lgetxattr01	PASS
 ltp-syscalls	lgetxattr02	PASS	
 ltp-syscalls	link02	PASS	
 ltp-syscalls	link04	PASS	
-ltp-syscalls	link05	PASS	
+ltp-syscalls	link05	FLAKY	PASS locally in 35 to 46 s, TIMEOUT locally at times and on the GitHub runner in both runs of PR #45 (TPASS printed, then removing the 1,000 links outlasts 180 s; 2026-11-14): directory operations are slow (follow-up, Track P); last here: PASS
 ltp-syscalls	link08	PASS	
 ltp-syscalls	linkat01	FAIL	linkat01   16  TFAIL  :  linkat01.c:276: linkat failed unexpectedly; expected 2 - No such file or directory: TEST_ERRNO=ENOTDIR(20): Not a directory
 ltp-syscalls	linkat02	BROK	linkat02    1  TBROK  :  tst_device.c:450: Failed to acquire device
