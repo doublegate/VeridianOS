@@ -509,27 +509,35 @@ esac
 # ambient credential helper.
 # ($diff_err was allocated alongside $diff_file / $meta_file above, so the cleanup
 # trap never references it before it exists.)
+# >>> SELFTEST-EXTRACT: diff-limit classifier
+# GitHub refuses an oversized diff TWO ways, with different wording: over
+# 20,000 lines, and over 300 FILES. Both are HTTP 406 and both mean the same
+# thing here -- the PR is too big for the API, not that anything went wrong --
+# so both must reach the local fallback. Matching only the `lines` variant made
+# a wide-but-shallow PR -- hundreds of files, well under the line limit, as a
+# bulk regeneration of test baselines produces -- fail the review outright
+# instead of falling back.
+#
+# On a match, print the limit that actually fired and succeed. Reporting
+# "20,000-line" for a file-count refusal is the same class of misleading triage
+# signal that made this bug look like a runner auth failure in the first place.
+# A function, not inline, so the self-test executes the real matcher and label
+# against both GitHub messages rather than grepping for its text.
+diff_limit_hit() {
+  grep -qiE 'diff exceeded the maximum number of (lines|files)' "$1" || return 1
+  if grep -qi 'maximum number of files' "$1"; then
+    printf '300-file'
+  else
+    printf '20,000-line'
+  fi
+}
+# <<< SELFTEST-EXTRACT
 if ! gh pr diff "$PR" --repo "$REPO" > "$diff_file" 2>"$diff_err"; then
-  # GitHub refuses an oversized diff TWO ways, with different wording: over
-  # 20,000 lines, and over 300 FILES. Both are HTTP 406 and both mean the same
-  # thing here -- the PR is too big for the API, not that anything went wrong --
-  # so both must reach the local fallback. Matching only the `lines` variant made
-  # a wide-but-shallow PR -- hundreds of files, well under the line limit, as a
-  # bulk regeneration of test baselines produces -- fail the review outright
-  # instead of falling back.
-  if grep -qiE 'diff exceeded the maximum number of (lines|files)' "$diff_err"; then
+  if hit="$(diff_limit_hit "$diff_err")"; then
     base_ref="$(jq -r '.baseRefName // empty' "$meta_file")"
     if [ -z "$base_ref" ] || [ "$base_ref" = "null" ]; then
       log "diff exceeds the API limit and the base branch is unknown; cannot fall back"
       exit 1
-    fi
-    # Name the limit that actually fired. Reporting "20,000-line" for a
-    # file-count refusal is the same class of misleading triage signal that
-    # made this bug look like a runner auth failure in the first place.
-    if grep -qi 'maximum number of files' "$diff_err"; then
-      hit="300-file"
-    else
-      hit="20,000-line"
     fi
     log "diff exceeds GitHub's ${hit} API limit; falling back to a local git diff"
     pr_ref="refs/agy/pr-${PR}"
@@ -547,6 +555,19 @@ if ! gh pr diff "$PR" --repo "$REPO" > "$diff_file" 2>"$diff_err"; then
     # runner is a shared workstation, so that window is real. `/proc/<pid>/environ` is
     # restricted to the same UID, so moving the secret from argv to the environment is what
     # actually closes it. Do not "simplify" this back to `git -c`.
+    # Every fetch on this path goes through agy_fetch so they all carry the header: the
+    # follow-up merge-base fetches below once omitted it, which fails on a private repo
+    # (agy review, switch2-hub-patcher PR #1). Token first, then git's ambient credentials.
+    agy_fetch() {
+      if [ -n "${GH_TOKEN:-}" ] \
+         && GIT_CONFIG_COUNT=1 \
+            GIT_CONFIG_KEY_0="http.extraheader" \
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: bearer ${GH_TOKEN}" \
+            git fetch --no-tags --quiet "$@" 2>/dev/null; then
+        return 0
+      fi
+      git fetch --no-tags --quiet "$@" 2>/dev/null
+    }
     if [ -n "${GH_TOKEN:-}" ] \
        && GIT_CONFIG_COUNT=1 \
           GIT_CONFIG_KEY_0="http.extraheader" \
@@ -589,10 +610,22 @@ if ! gh pr diff "$PR" --repo "$REPO" > "$diff_file" 2>"$diff_err"; then
       [ -n "$api_base" ] || log "compare API gave no merge base ($(head -c 300 "$compare_err" | tr '\n' ' '))"
       rm -f "$compare_err"
       if [ -n "$api_base" ] && [ "$api_base" != "null" ]; then
-        if git fetch --no-tags --quiet origin "$api_base" 2>/dev/null \
-           || git fetch --no-tags --quiet --deepen=250 origin "${fetch_refspecs[@]}" 2>/dev/null; then
-          merge_base="$(git merge-base "$base_local" "$pr_ref" 2>/dev/null || echo "$api_base")"
-          log "shallow clone: merge base ${merge_base} resolved via the compare API"
+        if agy_fetch origin "$api_base" \
+           || agy_fetch --deepen=250 origin "${fetch_refspecs[@]}"; then
+          merge_base="$(git merge-base "$base_local" "$pr_ref" 2>/dev/null || true)"
+          # Fall back to the API's merge base only if that commit is actually
+          # here. When the SHA fetch fails and `--deepen=250` succeeds without
+          # reaching it, the object is absent, and using it anyway surfaced later
+          # as the generic "local git diff failed" -- the wrong diagnosis.
+          if [ -z "$merge_base" ]; then
+            if git cat-file -e "${api_base}^{commit}" 2>/dev/null; then
+              merge_base="$api_base"
+            else
+              log "compare API merge base ${api_base} is not in the local clone after both fetches"
+            fi
+          fi
+          [ -z "$merge_base" ] \
+            || log "shallow clone: merge base ${merge_base} resolved via the compare API"
         fi
       fi
     fi
@@ -653,6 +686,30 @@ agy_cap_round() {
   # -1: the trailing newline written below is part of the budget too.
   agy_cut_file "$1" "$(( $2 - ${#notice} - 1 ))" || return 1
   printf '%s\n' "$notice" >> "$1"
+}
+# Drop invalid/partial UTF-8 sequences from file $1 in place (a byte cut can split one). Every byte
+# cap that feeds agy or a PR comment calls this, so the two paths cannot drift apart again (the
+# review-output path once had iconv only; agy review, switch2-hub-patcher PR #1). iconv first
+# (glibc and macOS ship it), then python3 -- also when iconv is present but fails. That case is the
+# common one, not an edge: GNU `iconv -c` writes the cleaned bytes but EXITS 1 whenever it dropped
+# anything ("incomplete character or shift sequence at end of buffer"), i.e. on exactly the byte-cut
+# input this exists for. The old iconv-only branches discarded that output, so on glibc hosts the
+# scrub was a no-op whenever it mattered (measured: glibc 2.44). A sanitizer that
+# exits 0 with ZERO bytes is a malfunction, not a result: replace the file only with non-empty
+# output, otherwise keep the original. A failed mv is fatal under `set -e`; the function returns
+# 0 when no sanitizer succeeded, so a host with neither tool proceeds with the original bytes.
+agy_scrub_utf8() {
+  if command -v iconv >/dev/null 2>&1 \
+      && iconv -c -f UTF-8 -t UTF-8 "$1" > "$1.utf8" 2>/dev/null && [ -s "$1.utf8" ]; then
+    mv "$1.utf8" "$1"; return
+  fi
+  rm -f "$1.utf8"
+  if command -v python3 >/dev/null 2>&1 \
+      && python3 -c 'import sys; sys.stdout.buffer.write(open(sys.argv[1],"rb").read().decode("utf-8","ignore").encode("utf-8"))' \
+           "$1" > "$1.utf8" 2>/dev/null && [ -s "$1.utf8" ]; then
+    mv "$1.utf8" "$1"; return
+  fi
+  rm -f "$1.utf8"
 }
 # <<< SELFTEST-EXTRACT
 
@@ -771,30 +828,15 @@ fi
 # Byte truncation (here or in the MAX_DIFF_BYTES cap above) can slice a multi-byte UTF-8 sequence.
 # agy is a Rust binary and std::env::args() PANICS on a non-UTF-8 argument, which would reintroduce
 # an instant startup failure -- exactly the class of bug this guard exists to prevent. Drop any
-# invalid/partial sequences with iconv (glibc + macOS ship it), and fall back to python3 (present on
-# every CI runner) if iconv is absent, so a no-iconv host can't leave a split sequence in the prompt.
-# Explicit branches, not `&& mv || rm`: that idiom masks an mv failure and would then feed agy the
-# original (possibly split) bytes. A successful sanitize must replace the file; a failed mv is fatal
-# (set -e); a failed/absent sanitizer leaves the original and we proceed (it may already be clean, and
-# any residual invalid byte now surfaces via the captured stderr rather than a silent instant crash).
-# The `[ -s ... ]` guard is deliberate: the prompt is always non-empty here (boilerplate at
-# minimum), so a sanitizer that exits 0 but emits ZERO bytes is a malfunction, and mv-ing that
-# empty file over $prompt_file would wipe the prompt and hand agy nothing. Replace only on a
-# non-empty result; otherwise discard it and proceed with the original (already likely clean).
-if command -v iconv >/dev/null 2>&1; then
-  if iconv -c -f UTF-8 -t UTF-8 "$prompt_file" > "$prompt_file.utf8" 2>/dev/null && [ -s "$prompt_file.utf8" ]; then
-    mv "$prompt_file.utf8" "$prompt_file"
-  else
-    rm -f "$prompt_file.utf8"
-  fi
-elif command -v python3 >/dev/null 2>&1; then
-  if python3 -c 'import sys; sys.stdout.buffer.write(open(sys.argv[1],"rb").read().decode("utf-8","ignore").encode("utf-8"))' \
-       "$prompt_file" > "$prompt_file.utf8" 2>/dev/null && [ -s "$prompt_file.utf8" ]; then
-    mv "$prompt_file.utf8" "$prompt_file"
-  else
-    rm -f "$prompt_file.utf8"
-  fi
-fi
+# invalid/partial sequences with `agy_scrub_utf8` (iconv, then python3), so a host without iconv can't
+# leave a split sequence in the prompt. Explicit branches inside it, not `&& mv || rm`: that idiom
+# masks an mv failure and would then feed agy the original (possibly split) bytes. A successful
+# sanitize must replace the file; a failed mv is fatal (set -e); a failed/absent sanitizer leaves the
+# original and we proceed (it may already be clean, and any residual invalid byte now surfaces via the
+# captured stderr rather than a silent instant crash). Its non-empty guard matters here: the prompt is
+# always non-empty (boilerplate at minimum), so mv-ing an empty sanitizer result over $prompt_file
+# would wipe the prompt and hand agy nothing.
+agy_scrub_utf8 "$prompt_file"
 
 # Escape hatch for verifying the diff-acquisition and prompt-assembly path (including
 # the large-PR API-limit fallback and the inline/file decision) without spending an agy
@@ -1073,12 +1115,7 @@ fi
 # framing and some archive, and say what was cut. A byte cut can split a UTF-8 sequence: scrub it.
 if agy_cap_round "$out_file" "$(( MAX_BODY_BYTES - 4096 ))"; then
   log "review output capped to fit the ${MAX_BODY_BYTES}-byte comment budget"
-  if command -v iconv >/dev/null 2>&1 \
-      && iconv -c -f UTF-8 -t UTF-8 "$out_file" > "$out_file.utf8" 2>/dev/null && [ -s "$out_file.utf8" ]; then
-    mv "$out_file.utf8" "$out_file"
-  else
-    rm -f "$out_file.utf8"
-  fi
+  agy_scrub_utf8 "$out_file"
 fi
 body_file="$(mktemp)"
 {

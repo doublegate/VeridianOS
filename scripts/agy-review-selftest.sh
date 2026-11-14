@@ -61,7 +61,8 @@ log() { :; }
 # otherwise extract EMPTY, and an empty guard sources fine and asserts nothing -- the same
 # absence-reads-as-agreement failure the markers were adopted to prevent.
 for guard in "service-error guard" "oauth guard" "ours-comment filter" "duration parser" \
-             "numeric env validation" "diff-size scaling" "truncation helpers"; do
+             "numeric env validation" "diff-size scaling" "truncation helpers" \
+             "diff-limit classifier"; do
   blk="$(extract_block "$guard")"
   [ -n "$blk" ] || { echo "FAIL: SELFTEST-EXTRACT block '$guard' is missing or empty" >&2; exit 1; }
   printf '%s\n' "$blk" | bash -n - 2>/dev/null \
@@ -329,6 +330,22 @@ check "an oversized review round is capped" "yes" \
   "$([ "$(wc -c < "$TMPD/round")" -le 1000 ] && echo yes || echo no)"
 check "a capped review round says it was truncated" "yes" \
   "$(grep -q 'Review truncated' "$TMPD/round" && echo yes || echo no)"
+# --- UTF-8 scrub: one helper for the prompt AND the review output, executed -------
+# The review-output path once had iconv only while the prompt path also fell back to python3
+# (agy review, switch2-hub-patcher PR #1). Both now call agy_scrub_utf8; exercise each sanitizer.
+printf 'abc\xe2\x82' > "$TMPD/split"          # a euro sign cut after two of its three bytes
+agy_scrub_utf8 "$TMPD/split"
+check "a split UTF-8 sequence is scrubbed" "abc" "$(cat "$TMPD/split")"
+mkdir -p "$TMPD/noiconv"
+for t in python3 mv rm; do ln -sf "$(command -v "$t")" "$TMPD/noiconv/$t"; done
+printf 'abc\xe2\x82' > "$TMPD/split"
+( PATH="$TMPD/noiconv"; agy_scrub_utf8 "$TMPD/split" )
+check "the python3 fallback scrubs when iconv is absent" "abc" "$(cat "$TMPD/split")"
+printf '\xe2\x82' > "$TMPD/allbad"            # no valid byte: every sanitizer yields nothing
+agy_scrub_utf8 "$TMPD/allbad"
+check "a sanitizer's empty result never replaces the file" "2" "$(wc -c < "$TMPD/allbad" | tr -d ' ')"
+check "both byte-cap paths call the shared scrub" "2" \
+  "$(grep -c '^ *agy_scrub_utf8 "\$' "$SCRIPT_DIR/agy-review.sh")"
 # A failed jq step in the archive lookup must be logged, not swallowed.
 check "archive jq failures are logged" "no" \
   "$(grep -n 'SELECT_OURS_JQ" 2>/dev/null' "$SCRIPT_DIR/agy-review.sh" >/dev/null && echo yes || echo no)"
@@ -440,6 +457,18 @@ check "numeric env: canonical value is arithmetic-safe" "9" \
 check "numeric env: the RAW value would have crashed"   "CRASHED" \
   "$(bash -c 'set -e; echo $(( 1048576 * 09 / 1048576 ))' 2>/dev/null || echo CRASHED)"
 
+# --- the 406 diff-limit classifier -------------------------------------------------------
+# GitHub's two "too big for the API" refusals must BOTH reach the local-diff fallback, and the
+# log must name the limit that fired. Matching only the lines variant failed a wide-but-shallow
+# PR outright; the label is what a reader triages from. Anything else is a real failure.
+dl() { printf '%s\n' "$1" > "$TMPD/derr"; diff_limit_hit "$TMPD/derr" || printf 'NO-FALLBACK'; }
+check "406, lines variant: falls back, named 20,000-line" "20,000-line" \
+  "$(dl 'could not find pull request diff: HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)')"
+check "406, files variant: falls back, named 300-file" "300-file" \
+  "$(dl 'could not find pull request diff: HTTP 406: Sorry, the diff exceeded the maximum number of files (300)')"
+check "an unrelated gh error does not fall back" "NO-FALLBACK" \
+  "$(dl 'could not find pull request diff: HTTP 404: Not Found')"
+
 # --- the print-timeout guard -------------------------------------------------------------
 # agy exits 0 on its own --print-timeout and prints a notice, alone or after a partial review.
 # `have_text` passed that, so a truncated review was posted as the whole one (2026-09-28).
@@ -480,8 +509,8 @@ fi
 wf="$SCRIPT_DIR/../.github/workflows/antigravity-review.yml"
 wf_val() { sed -n "s/^[[:space:]]*$1:[[:space:]]*[\"']\{0,1\}\([0-9][0-9]*\).*/\1/p;T;q" "$wf"; }
 sh_default() { sed -n "s/^$1=\"\${$1:-\([0-9][0-9]*\)}\".*/\1/p;T;q" "$SCRIPT_DIR/agy-review.sh"; }
-# wf_val takes the first match: right while the workflow has one job. A
-# second timeout-minutes would make it read the wrong one (PR #6 review).
+# wf_val takes the first match: right while the workflow has one job. A second
+# timeout-minutes would make it read the wrong one (adopted from VeridianOS, PR #6 review).
 if [ "$(grep -c '^[[:space:]]*timeout-minutes:' "$wf")" -gt 1 ]; then
   echo "  FAIL  more than one timeout-minutes in the workflow: wf_val needs the review job's"
   fails=$((fails + 1))
