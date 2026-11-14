@@ -2335,6 +2335,10 @@ fn sys_memfd_create(name_ptr: usize, flags: usize) -> SyscallResult {
         flags & (MFD_ALLOW_SEALING | MFD_NOEXEC_SEAL) != 0,
         if noexec { crate::fs::seals::EXEC } else { 0 },
     );
+    // The descriptor takes no write access: Linux's alloc_file (unlike an
+    // open, do_dentry_open) does not count it as a writer, so a memfd may be
+    // executed (fexecve) while it is still open read-write, as programs
+    // that build an executable in memory rely on (PR #43 review).
     let file = crate::fs::file::File::new_with_path(
         node,
         crate::fs::OpenFlags::read_write(),

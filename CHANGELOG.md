@@ -763,6 +763,30 @@
 
 ### Fixed
 
+- No limit on threads per process, as on Linux: the cap of 256 is gone, and thread creation is
+  limited only by RLIMIT_NPROC per real user and by `kernel.threads-max` for the whole system
+  (new, `/proc/sys/kernel/threads-max`, root-writable within 20..=0x3fffffff; by default as many
+  tasks as keep their kernel stacks within an eighth of memory, Linux's set_max_threads). Both
+  count only live threads: an exited one waiting for the reaper thread counted before, so a
+  create-and-join loop failed with EAGAIN when the reaper fell behind (`musl_many_threads`, 4
+  vCPUs on 2 host CPUs), and RLIMIT_NPROC charged a user for threads that had exited. Every
+  path that makes a thread for a caller checks both limits: the native thread call and the
+  thread API used to rely on the per-process cap alone.
+  RLIMIT_NPROC now starts at half of the boot-time threads-max, as Linux's fork_init sets it
+  (2,048 tasks per user with 2 GiB of memory), instead of the process table's 1,024.
+- A signal whose action ignores it is queued when the receiving thread blocks it, as Linux's
+  sig_ignored decides (the action may change before it is unblocked; delivery still discards
+  it if it is ignored then). It was dropped when sent, so `sigpending` missed it and a handler
+  installed before the unblock never ran. A pending signal whose action ignores it does not end a
+  wait with EINTR (Linux restarts such a call, ERESTARTSYS); it goes at the next return to user
+  mode.
+- execve and execveat deny write access as soon as they have the file, as Linux's
+  do_open_execat does, so ETXTBSY comes before argv and envp are read and AT_EXECVE_CHECK
+  reports it too; the check-only call passed for a file open for writing.
+- A successful exec on x86_64 leaked what execveat's frame owned (the path, argv and envp, and a
+  reference to the calling thread, which kept the thread from being freed): the new image is
+  entered with iretq and that frame is never unwound. They are dropped before user mode.
+- Rustdoc: four unclosed-HTML-tag warnings (`Vec<u8>`, `<tag>`, `<title>`, `<form>` in prose).
 - Review points left open on merged pull requests (a sweep of PRs #1-#38):
   - A freed BlockFS FIFO or socket inode is not handed out again until the FIFO and socket
     tables have forgotten it; between the operation's end and that report a new file could

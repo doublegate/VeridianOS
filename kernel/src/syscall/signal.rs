@@ -465,11 +465,13 @@ pub fn sys_rt_sigtimedwait(
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
     let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
     let old = thread.sigmask.load(Ordering::Acquire);
+    thread.real_blocked.store(old, Ordering::Release);
     signals::set_mask(&proc, &thread, old & !set);
     let deadline = timeout_ns.map(|ns| dispatch::clock_ns().saturating_add(ns));
     static WAITERS: dispatch::WaitQueue = dispatch::WaitQueue::new();
     let waited = dispatch::wait_event(&WAITERS, deadline, || signals::pending_in(set));
     signals::set_mask(&proc, &thread, old);
+    thread.real_blocked.store(0, Ordering::Release);
     drop(thread);
     drop(proc);
 

@@ -2831,7 +2831,7 @@ pub fn recreate_proc_stubs() {
     println!("[VFS] Re-created /proc/sys/kernel/ stubs for Qt/KDE");
 }
 
-/// Read the entire contents of a file into a Vec<u8>
+/// Read the entire contents of a file into a `Vec<u8>`
 ///
 /// This is a convenience function that opens a file, reads its entire
 /// contents into memory, and returns the data as a byte vector.
