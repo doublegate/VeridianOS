@@ -38,7 +38,7 @@ is why this uses a self-hosted runner rather than GitHub's cloud runners.
 GitHub PR event ──▶ self-hosted runner (YOUR machine, systemd --user)
                       │  gh pr diff ─▶ build adversarial-reviewer prompt (+ style guide)
                       │  agy --print  (PTY-wrapped, OAuth/Ultra)  ─▶ review text
-                      └─ gh pr comment ─▶ posted back on the PR (prior bot comment replaced)
+                      └─ gh api ─▶ one comment per PR, edited in place (earlier rounds archived)
 ```
 
 Files in this template:
@@ -48,14 +48,23 @@ Files in this template:
 | `.github/workflows/antigravity-review.yml` | **copy → target repo** | trigger + job definition |
 | `scripts/agy-review.sh` | **copy → target repo** | the reviewer (diff → prompt → `agy` → comment) |
 | `scripts/_agy_print.sh` | **copy → target repo** | PTY fallback helper (only if `unbuffer` is absent) |
+| `scripts/_agy_comment_body.sh` | **copy → target repo** | comment-body and archive format; `agy-review.sh` sources it unconditionally |
+| `scripts/agy-review-selftest.sh` | **copy → target repo** | offline self-test of the reviewer; run it in the target's CI |
+| `.github/actionlint.yaml` | **copy → target repo** (only if absent) | declares the self-hosted `agy` label for actionlint |
+| `README.md` (this file) | **copy → `.github/AGY-REVIEWER.md`** | operations doc: setup, troubleshooting, security model |
 | `agy-review.md.example` | **copy → `.github/agy-review.md`** in target repo | the review style guide (optional) |
+| `scripts/provision-runner.sh`, `scripts/deprovision-runner.sh` | template-local | stand up and tear down a per-repo runner |
 | `systemd/github-agy-runner@.service` | `~/.config/systemd/user/` | runs each runner in your session (template-local) |
 | `gitignore.snippet` | *optional append* | precautionary ignores (see below) — never copied over an existing `.gitignore` |
 | `.gitignore` | template-local | this repo's own hygiene — **do not** copy into target repos |
 
-> **Copy into a target repo:** only the workflow, the `scripts/` dir, and
-> optionally `.github/agy-review.md`. Everything else (`systemd/`, `.gitignore`,
-> `*.example`, this README, `gitignore.snippet`) stays here.
+> **Copy into a target repo** (what `install-into-repo.sh` does): the workflow, the four
+> scripts `agy-review.sh`, `_agy_print.sh`, `_agy_comment_body.sh` and
+> `agy-review-selftest.sh`, this README as `.github/AGY-REVIEWER.md`,
+> `.github/actionlint.yaml` when the target has none, optionally `.github/agy-review.md`,
+> and one appended `.gitignore` line (`/.agy-review-work/`). Everything else
+> (`systemd/`, the provision/deprovision scripts, this repo's `.gitignore`, `*.example`,
+> `gitignore.snippet`) stays here.
 
 ---
 
@@ -260,9 +269,12 @@ runner, so disable fork workflows there or gate them the same way.
 | `AGY_MODEL` | *(agy default)* | e.g. `gemini-3-pro`; run `agy models` to see IDs |
 | `AGY_EFFORT` | `high` | reasoning effort: `low` / `medium` / `high` |
 | `AGY_PRINT_TIMEOUT` | `5m` | max wait for a single `agy --print`, raised for a large diff; set explicitly, it is used as given and not raised. This repository sets `15m`, the per-attempt cap, because a high-effort review of an ordinary diff can take longer than the 5-minute base |
+| `AGY_TIMEOUT_SECONDS_PER_MIB` | `900` | extra seconds per MiB of diff. A diff handed over as a file costs agy 6-8 minutes almost whatever its size, so this is deliberately steep (240 left a 426 KB diff at 397 s, too little) |
+| `AGY_PRINT_TIMEOUT_MAX_SECONDS` | `1800` (workflow: `900`) | ceiling on one attempt after the raise |
+| `AGY_RETRIES` | `3` (workflow: `2`) | attempts; a retry is for a transient backend error, so more of them at the same budget only repeat a timeout |
 | `AGY_DIFF_MODE` | `auto` | how the diff reaches agy: `inline` (in the `--print` prompt), `file` (written to a file agy reads with its tools), or `auto` (inline if it fits the arg-size budget, else file — so **large PRs are never truncated**) |
 | `MAX_DIFF_BYTES` | `5000000` | sanity cap on a pathological diff (5 MB). Not the arg-size limit — a large diff goes to agy as a file, not an argv value |
-| `MAX_PROMPT_BYTES` | `125000` | the inline/file threshold in `auto` mode, and a hard backstop on the **inlined** prompt. agy takes an inlined prompt as a `--print` argv value, and a single `execve` argument cannot exceed `MAX_ARG_STRLEN` (128 KiB); over it `execve` fails with E2BIG before agy starts. Clamped below 128 KiB |
+| `MAX_PROMPT_BYTES` | `120000` | the inline/file threshold in `auto` mode, and a hard backstop on the **inlined** prompt. agy takes an inlined prompt as a `--print` argv value, and a single `execve` argument cannot exceed `MAX_ARG_STRLEN` (128 KiB); over it `execve` fails with E2BIG before agy starts. Clamped below 128 KiB |
 | `STYLE_GUIDE` | `.github/agy-review.md` | repo-relative style guide, loaded if present |
 
 ---
@@ -279,6 +291,16 @@ runner, so disable fork workflows there or gate them the same way.
 - **Auth errors / no output:** the keyring is probably locked (you're logged out,
   or the runner started before the session unlocked). Log in, then
   `systemctl --user restart github-agy-runner`.
+- **"agy hit its print timeout ... on N of N attempt(s)":** the review needed
+  more time than the budget, which is a size problem, not an outage: agy did run
+  (an expired login prints its OAuth flow instead, and a backend error is logged
+  as one). A diff over the inline budget goes to agy as a file, and that costs
+  6-8 minutes at `AGY_EFFORT: high` almost whatever its size. Raise
+  `AGY_TIMEOUT_SECONDS_PER_MIB` or `AGY_PRINT_TIMEOUT_MAX_SECONDS` in the
+  workflow's `env:` and keep the job's `timeout-minutes` above the worst case
+  (the selftest checks it). For a `pull_request` run GitHub takes the workflow
+  from the PR branch, so an `env:` change takes effect on the PR's next push; a
+  script change only after it reaches the default branch.
 - **Job never starts:** no runner is online/idle with the `agy` label, or the
   machine is asleep. Check `systemctl --user status github-agy-runner`.
 - **Review fails on a very large PR (`gh pr diff failed`):** GitHub's API refuses
