@@ -293,6 +293,30 @@ The reference for every behaviour below is the Linux 7.3 source (kernel.org tarb
     - **Not yet** (KNOWN-LIMITATIONS): MOVE_MOUNT_BENEATH, until open files keep the mount they
       were reached through.
 
+### System tier: seccomp
+
+27. seccomp(2) and prctl's PR_SET_SECCOMP/PR_GET_SECCOMP follow Linux 7.3's `kernel/seccomp.c`:
+    - **Strict mode** allows read, write, exit and rt_sigreturn; anything else is SIGKILL.
+    - **Filter mode**: classic BPF programs, checked as bpf_check_classic and
+      seccomp_check_filter, run by the new `veridian-cbpf` crate (no_std, no unsafe), which
+      the user-space Linux runtime will share (Track M) and the Kani harnesses of Track S are
+      to cover. A thread's programs form a chain kept across fork, clone and exec, at most
+      32,768 instructions with four per program (ENOMEM). Installing one needs no_new_privs
+      or CAP_SYS_ADMIN in the caller's user namespace (EACCES); TSYNC gives every thread the
+      chain if each one's is an ancestor of the caller's (else that thread's id, or ESRCH
+      with TSYNC_ESRCH).
+    - **Every call** is checked at the top of dispatch with its raw number, before decoding,
+      so the private VeridianOS calls are filtered as well, with all six arguments and the
+      instruction pointer. The action of highest precedence across the chain wins:
+      KILL_PROCESS and KILL_THREAD end the process or thread by SIGSYS, which no handler sees
+      (unknown actions kill the process); TRAP raises a forced SIGSYS with SYS_SECCOMP, the
+      call, the architecture and the call address, the call skipped; ERRNO returns its errno
+      (at most 4095); LOG logs and allows; TRACE is ENOSYS with no tracer, as on Linux.
+      GET_ACTION_AVAIL and GET_NOTIF_SIZES answer; `/proc/<pid>/status` shows NoNewPrivs,
+      Seccomp and Seccomp_filters.
+    - **Stage 2 (same group):** SECCOMP_RET_USER_NOTIF with its listener descriptor and
+      ioctls; until then a filter returning it gets ENOSYS and NEW_LISTENER is EINVAL.
+
 ## Consequences
 
 - LTP's ipc tests (shmget*, shmat*, shmctl*, semget*, semop*, semctl*, msgget*, msgsnd*,

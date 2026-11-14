@@ -466,3 +466,6 @@ ioprio_get
 cachestat
 file_getattr
 file_setattr
+
+## Security (v0.28 item 5, system tier)
+seccomp

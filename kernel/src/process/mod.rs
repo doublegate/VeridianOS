@@ -40,6 +40,7 @@ pub mod pidns;
 pub mod posix_timer;
 pub mod rlimit;
 pub mod robust_list;
+pub mod seccomp;
 pub mod session;
 pub mod signals;
 pub mod table;
@@ -910,6 +911,7 @@ pub fn create_thread(
                     creator.no_new_privs.load(Ordering::Acquire),
                     Ordering::Release,
                 );
+                thread.seccomp.copy_from(&creator.seccomp);
                 let sets = *creator.caps.lock();
                 *thread.caps.lock() = sets;
             }

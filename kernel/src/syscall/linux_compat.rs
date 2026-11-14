@@ -169,6 +169,8 @@ pub(crate) fn sys_prctl(
     const PR_GET_NAME: usize = 16;
     const PR_SET_TIMERSLACK: usize = 29;
     const PR_GET_TIMERSLACK: usize = 30;
+    const PR_GET_SECCOMP: usize = 21;
+    const PR_SET_SECCOMP: usize = 22;
     const PR_SET_NO_NEW_PRIVS: usize = 38;
     const PR_GET_NO_NEW_PRIVS: usize = 39;
     const PR_SET_MDWE: usize = 65;
@@ -220,6 +222,8 @@ pub(crate) fn sys_prctl(
         PR_GET_TIMERSLACK => Ok(50_000),
         // exec grants no privilege from now on; one way only, and Linux's
         // argument checks.
+        PR_GET_SECCOMP => super::seccomp::prctl_get(),
+        PR_SET_SECCOMP => super::seccomp::prctl_set(arg2, arg3),
         PR_SET_NO_NEW_PRIVS => {
             if arg2 != 1 || arg3 != 0 || arg4 != 0 || arg5 != 0 {
                 return Err(super::SyscallError::InvalidArgument);

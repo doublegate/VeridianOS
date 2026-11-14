@@ -510,6 +510,7 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
         );
         *new_thread.altstack.lock() = *current_thread.altstack.lock();
         *new_thread.comm.lock() = *current_thread.comm.lock();
+        new_thread.seccomp.copy_from(&current_thread.seccomp);
         new_thread.no_new_privs.store(
             opts.no_new_privs
                 || current_thread

@@ -428,6 +428,8 @@
 #define SYS_cachestat                    451
 #define SYS_file_getattr                 468
 #define SYS_file_setattr                 469
+/* Security (v0.28 item 5, system tier) */
+#define SYS_seccomp                      317
 
 #elif defined(__riscv) && __riscv_xlen == 64
 
@@ -808,6 +810,8 @@
 #define SYS_cachestat                    451
 #define SYS_file_getattr                 468
 #define SYS_file_setattr                 469
+/* Security (v0.28 item 5, system tier) */
+#define SYS_seccomp                      277
 
 #elif defined(__aarch64__)
 
@@ -1189,6 +1193,8 @@
 #define SYS_cachestat                    451
 #define SYS_file_getattr                 468
 #define SYS_file_setattr                 469
+/* Security (v0.28 item 5, system tier) */
+#define SYS_seccomp                      277
 
 #else
 #error "<veridian/sysno.h>: no system call numbers for this architecture"

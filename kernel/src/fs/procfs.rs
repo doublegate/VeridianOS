@@ -887,7 +887,7 @@ impl VfsNode for ProcNode {
                             let caps = process
                                 .get_main_thread_id()
                                 .and_then(|tid| process.get_thread(tid))
-                                .map(|t| status_caps(&t.caps.lock()))
+                                .map(|t| status_caps(&t.caps.lock()) + &status_security(&t))
                                 .unwrap_or_default();
 
                             format!(
@@ -1784,6 +1784,18 @@ fn status_caps(c: &crate::process::linux_caps::CapSets) -> String {
         c.effective.bits(),
         c.bounding.bits(),
         c.ambient.bits()
+    )
+}
+
+/// The lines after the capability sets (proc_pid_status): no_new_privs and
+/// the seccomp mode and filter count.
+fn status_security(t: &crate::process::thread::Thread) -> String {
+    let (mode, filters) = crate::process::seccomp::status_lines(&t.seccomp);
+    format!(
+        "NoNewPrivs:\t{}\nSeccomp:\t{}\nSeccomp_filters:\t{}\n",
+        u8::from(t.no_new_privs.load(core::sync::atomic::Ordering::Acquire)),
+        mode,
+        filters
     )
 }
 

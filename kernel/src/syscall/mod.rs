@@ -115,6 +115,51 @@ fn validate_user_string_ptr(ptr: usize) -> Result<(), SyscallError> {
     validate_user_pointer(ptr, 1)
 }
 
+/// The user instruction pointer of the system call (seccomp_data's
+/// instruction_pointer): just past the system call instruction, 0 where
+/// no frame is saved.
+fn syscall_user_ip() -> u64 {
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    {
+        crate::arch::x86_64::syscall::get_syscall_frame().map_or(0, |f| f.rip)
+    }
+    #[cfg(all(target_arch = "riscv64", target_os = "none"))]
+    {
+        // SAFETY: as in `syscall_arg6`: this CPU's block, a live frame or 0.
+        let frame = unsafe { (*crate::arch::percpu::this_arch_cpu()).syscall_frame }
+            as *const crate::arch::riscv64::switch::UserFrame;
+        if frame.is_null() {
+            0
+        } else {
+            // SAFETY: as above.
+            unsafe { (*frame).sepc }
+        }
+    }
+    #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+    {
+        // SAFETY: as in `syscall_arg6`.
+        let frame = unsafe { (*crate::arch::percpu::this_arch_cpu()).syscall_frame }
+            as *const crate::arch::aarch64::switch::UserFrame;
+        if frame.is_null() {
+            0
+        } else {
+            // SAFETY: as above.
+            unsafe { (*frame).elr }
+        }
+    }
+    #[cfg(not(all(
+        any(
+            target_arch = "x86_64",
+            target_arch = "riscv64",
+            target_arch = "aarch64"
+        ),
+        target_os = "none"
+    )))]
+    {
+        0
+    }
+}
+
 /// The sixth syscall argument, which the 5-argument handlers do not receive.
 /// On x86_64 it is r9, saved in the syscall frame. Elsewhere it is not
 /// captured yet, and callers that need it must fail rather than act on a
@@ -419,6 +464,9 @@ use self::graphics_syscalls::*;
 mod wayland_syscalls;
 use self::wayland_syscalls::*;
 mod network_ext_syscalls;
+// seccomp(2) and the check every call passes (v0.28 item 5)
+#[cfg(feature = "alloc")]
+pub(crate) mod seccomp;
 use self::network_ext_syscalls::*;
 
 // Phase 7.5 Wave 8: Shell/Userland extensions (io_uring, ptrace, core dump,
@@ -841,6 +889,23 @@ fn dispatch(
     arg4: usize,
     arg5: usize,
 ) -> isize {
+    // seccomp sees every call first, by its raw number, before decoding:
+    // the private VeridianOS calls are filtered too (ADR 0027).
+    #[cfg(feature = "alloc")]
+    if let seccomp::Outcome::Skip(v) = seccomp::check(
+        syscall_num,
+        [
+            arg1 as u64,
+            arg2 as u64,
+            arg3 as u64,
+            arg4 as u64,
+            arg5 as u64,
+            syscall_arg6().unwrap_or(0) as u64,
+        ],
+        syscall_user_ip(),
+    ) {
+        return v;
+    }
     // Caller PID for audit logging (dropped here: exit and exec do not
     // return, so an Arc held across the dispatch would never be released).
     let caller_pid = crate::process::current_process()
@@ -1686,6 +1751,8 @@ fn handle_syscall(
         Syscall::IoprioGet => ioprio::sys_ioprio_get(arg1, arg2),
         #[cfg(feature = "alloc")]
         Syscall::Cachestat => memctl::sys_cachestat(arg1, arg2, arg3, arg4),
+        #[cfg(feature = "alloc")]
+        Syscall::Seccomp => seccomp::sys_seccomp(arg1, arg2, arg3),
         #[cfg(feature = "alloc")]
         Syscall::FileGetattr => fileattr::sys_file_getattr(arg1, arg2, arg3, arg4, arg5),
         #[cfg(feature = "alloc")]

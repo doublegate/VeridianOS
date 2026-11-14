@@ -392,6 +392,7 @@ pub mod sysno {
     pub const SYS_cachestat: usize = 451;
     pub const SYS_file_getattr: usize = 468;
     pub const SYS_file_setattr: usize = 469;
+    pub const SYS_seccomp: usize = 317;
 }
 
 // Linux's generic table: calls RISC-V leaves to user space are absent.
@@ -743,6 +744,7 @@ pub mod sysno {
     pub const SYS_cachestat: usize = 451;
     pub const SYS_file_getattr: usize = 468;
     pub const SYS_file_setattr: usize = 469;
+    pub const SYS_seccomp: usize = 277;
 }
 
 // Linux's generic table with arm64's ABIs (renameat included).
@@ -1095,4 +1097,5 @@ pub mod sysno {
     pub const SYS_cachestat: usize = 451;
     pub const SYS_file_getattr: usize = 468;
     pub const SYS_file_setattr: usize = 469;
+    pub const SYS_seccomp: usize = 277;
 }

@@ -728,6 +728,8 @@ fn thread_clone(
             .load(core::sync::atomic::Ordering::Acquire),
         core::sync::atomic::Ordering::Release,
     );
+    // A new thread runs under its creator's filters (copy_seccomp).
+    thread.seccomp.copy_from(&current_thread.seccomp);
     let sets = *current_thread.caps.lock();
     *thread.caps.lock() = sets;
     #[cfg(feature = "alloc")]

@@ -100,6 +100,12 @@
 
 ### Added
 
+- seccomp (v0.28 item 5 system tier, ADR 0027 decision 27): seccomp(2) and PR_SET_SECCOMP with
+  strict mode and classic BPF filters checked and run as Linux does, by the new shared
+  `veridian-cbpf` crate; every call, private ones included, is filtered before it is decoded;
+  KILL_PROCESS, KILL_THREAD, TRAP (SIGSYS with SYS_SECCOMP), ERRNO, LOG and TRACE (ENOSYS
+  without a tracer), TSYNC, GET_ACTION_AVAIL and GET_NOTIF_SIZES; `/proc/<pid>/status` shows
+  NoNewPrivs, Seccomp and Seccomp_filters. User notification follows. Runtime test seccomp.
 - The new mount API (Linux 7.3 `fs/fsopen.c`, `fs/namespace.c`): fsopen, fsconfig, fsmount and
   fspick make and reconfigure a filesystem through a context descriptor, whose parameters are
   checked one at a time as Linux checks them and whose refusals read back from it (`e tmpfs:

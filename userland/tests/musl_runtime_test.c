@@ -5638,6 +5638,7 @@ static void test_mount_calls(void);
 static void test_mount_flags(void);
 static void test_mount_api(void);
 static void test_idmapped_mount(void);
+static void test_seccomp(void);
 static void test_mount_no_escape(void);
 static void test_pivot_root(void);
 static void test_mount_object_cap(void);
@@ -5716,6 +5717,7 @@ static const struct {
     {"mount_flags", test_mount_flags},
     {"mount_api", test_mount_api},
     {"idmapped_mount", test_idmapped_mount},
+    {"seccomp", test_seccomp},
     {"pivot_root", test_pivot_root},
     {"mount_object_cap", test_mount_object_cap},
     {"mount_modify_drop", test_mount_modify_drop},
@@ -11201,6 +11203,141 @@ struct t_mount_attr {
 
 static int t_write_text(const char *path, const char *text);
 
+/* seccomp (Linux's kernel/seccomp.c, v0.28 item 5): filters run on every
+ * call and their strictest action wins; ERRNO, TRAP (SIGSYS with
+ * SYS_SECCOMP), KILL_PROCESS, strict mode, no_new_privs or CAP_SYS_ADMIN,
+ * TSYNC, GET_ACTION_AVAIL, and the status lines. */
+static ssize_t t_read_text(const char *path, char *buf, size_t len);
+struct t_sock_filter {
+    uint16_t code;
+    uint8_t jt, jf;
+    uint32_t k;
+};
+struct t_sock_fprog {
+    unsigned short len;
+    struct t_sock_filter *filter;
+};
+#if defined(__x86_64__)
+#define T_AUDIT_ARCH 0xc000003eu
+#elif defined(__aarch64__)
+#define T_AUDIT_ARCH 0xc00000b7u
+#else
+#define T_AUDIT_ARCH 0xc00000f3u
+#endif
+/* Filter: other architectures killed; getppid gets `action`; the rest run. */
+static long t_seccomp_install(uint32_t action, unsigned flags)
+{
+    static struct t_sock_filter prog[7];
+    struct t_sock_filter p[7] = {
+        {0x20, 0, 0, 4},                    /* ld [4] (arch) */
+        {0x15, 1, 0, T_AUDIT_ARCH},         /* jeq arch, +1 */
+        {0x06, 0, 0, 0x80000000u},          /* ret KILL_PROCESS */
+        {0x20, 0, 0, 0},                    /* ld [0] (nr) */
+        {0x15, 0, 1, (uint32_t)SYS_getppid}, /* jeq getppid */
+        {0x06, 0, 0, action},               /* ret action */
+        {0x06, 0, 0, 0x7fff0000u},          /* ret ALLOW */
+    };
+    memcpy(prog, p, sizeof(p));
+    struct t_sock_fprog fp = {7, prog};
+    return syscall(SYS_seccomp, 1 /* SET_MODE_FILTER */, flags, &fp);
+}
+static volatile int t_sigsys_code, t_sigsys_nr;
+static volatile unsigned t_sigsys_arch;
+static void t_sigsys(int sig, siginfo_t *si, void *uc)
+{
+    (void)sig;
+    (void)uc;
+    t_sigsys_code = si->si_code;
+    t_sigsys_nr = si->si_syscall;
+    t_sigsys_arch = si->si_arch;
+}
+static void *t_seccomp_thread(void *arg)
+{
+    (void)arg;
+    usleep(100000);
+    long r = syscall(SYS_getppid);
+    return (void *)(intptr_t)(r == -1 && errno == EPERM ? 0 : 1);
+}
+static void test_seccomp(void)
+{
+    char why[96];
+    int f = 0;
+    if (prctl(PR_GET_SECCOMP) != 0) f |= 1;
+    uint32_t act = 0x7fff0000u;
+    if (syscall(SYS_seccomp, 2 /* GET_ACTION_AVAIL */, 0, &act) != 0) f |= 2;
+    act = 0x12340000u;
+    if (!(syscall(SYS_seccomp, 2, 0, &act) == -1 && errno == EOPNOTSUPP)) f |= 2;
+    /* ERRNO, and the status lines. */
+    pid_t c = fork();
+    if (c == 0) {
+        char st[4096];
+        if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 || t_seccomp_install(0x00050000u | EACCES, 0) != 0)
+            _exit(2);
+        int ok = syscall(SYS_getppid) == -1 && errno == EACCES && getpid() > 0;
+        ok = ok && t_read_text("/proc/self/status", st, sizeof(st)) > 0 &&
+             strstr(st, "Seccomp:\t2\n") && strstr(st, "Seccomp_filters:\t1\n") &&
+             strstr(st, "NoNewPrivs:\t1\n") && prctl(PR_GET_SECCOMP) == 2;
+        _exit(ok ? 0 : 1);
+    }
+    if (t_exit_status(c) != 0) f |= 4;
+    /* TRAP: SIGSYS with SYS_SECCOMP, the call and the architecture. */
+    c = fork();
+    if (c == 0) {
+        struct sigaction sa = {0};
+        sa.sa_sigaction = t_sigsys;
+        sa.sa_flags = SA_SIGINFO;
+        sigaction(SIGSYS, &sa, NULL);
+        prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+        if (t_seccomp_install(0x00030000u | 7, 0) != 0) _exit(2);
+        syscall(SYS_getppid);
+        _exit(t_sigsys_code == 1 && t_sigsys_nr == SYS_getppid && t_sigsys_arch == T_AUDIT_ARCH ? 0 : 1);
+    }
+    if (t_exit_status(c) != 0) f |= 8;
+    /* KILL_PROCESS: dies of SIGSYS, which no handler sees. */
+    c = fork();
+    if (c == 0) {
+        signal(SIGSYS, SIG_IGN);
+        prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+        if (t_seccomp_install(0x80000000u, 0) != 0) _exit(2);
+        syscall(SYS_getppid);
+        _exit(0);
+    }
+    int ws = 0;
+    waitpid(c, &ws, 0);
+    if (!WIFSIGNALED(ws) || WTERMSIG(ws) != SIGSYS) f |= 16;
+    /* Strict mode: write runs, anything else is SIGKILL. */
+    c = fork();
+    if (c == 0) {
+        if (prctl(PR_SET_SECCOMP, 1, 0, 0, 0) != 0) _exit(2);
+        if (syscall(SYS_write, 1, "", 0) != 0) syscall(SYS_exit, 3);
+        syscall(SYS_getppid);
+        syscall(SYS_exit, 4);
+    }
+    waitpid(c, &ws, 0);
+    if (!WIFSIGNALED(ws) || WTERMSIG(ws) != SIGKILL) f |= 32;
+    /* Without no_new_privs and CAP_SYS_ADMIN: EACCES. */
+    c = fork();
+    if (c == 0) {
+        if (setuid(65534) != 0) _exit(2);
+        _exit(t_seccomp_install(0x7fff0000u, 0) == -1 && errno == EACCES ? 0 : 1);
+    }
+    if (t_exit_status(c) != 0) f |= 64;
+    /* TSYNC: another thread of the process gets the filter. */
+    c = fork();
+    if (c == 0) {
+        pthread_t t;
+        void *res = (void *)1;
+        if (pthread_create(&t, NULL, t_seccomp_thread, NULL) != 0) _exit(2);
+        prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+        long r = t_seccomp_install(0x00050000u | EPERM, 1 /* TSYNC */);
+        pthread_join(t, &res);
+        _exit(r == 0 && res == NULL ? 0 : 1);
+    }
+    if (t_exit_status(c) != 0) f |= 128;
+    snprintf(why, sizeof(why), "f=%#x", f);
+    report("seccomp", f == 0, why);
+}
+
 /* An idmapped mount (mount_setattr's MOUNT_ATTR_IDMAP, Linux's
  * fs/mnt_idmapping.c): a detached tmpfs mount made idmapped through a user
  * namespace mapping 0..999 to 100000..100999 shows root's file as owned
@@ -13417,6 +13554,7 @@ int main(int argc, char **argv)
     test_mount_flags();
     test_mount_api();
     test_idmapped_mount();
+    test_seccomp();
     test_mount_no_escape();
     test_pivot_root();
     test_mount_object_cap();

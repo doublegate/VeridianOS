@@ -453,6 +453,9 @@ pub struct Thread {
     /// privilege (no setuid or setgid). It cannot be cleared, and every
     /// thread and process the thread creates inherits it.
     pub no_new_privs: AtomicBool,
+    /// seccomp's mode and filters (`process::seccomp`): per thread, shared
+    /// with the threads and processes it creates, kept across exec.
+    pub seccomp: super::seccomp::ThreadSeccomp,
     /// personality(2)'s value (`process::personality`): per thread, as on
     /// Linux, and inherited by every thread and process the thread creates.
     pub personality: core::sync::atomic::AtomicU32,
@@ -629,6 +632,7 @@ impl Thread {
             sched: Mutex::new(SchedParams::default()),
             io: crate::syscall::ioprio::IoContext::new(),
             no_new_privs: AtomicBool::new(false),
+            seccomp: super::seccomp::ThreadSeccomp::new(),
             personality: core::sync::atomic::AtomicU32::new(0),
             caps: Mutex::new(super::linux_caps::CapSets::ROOT),
             comm: Mutex::new(comm),

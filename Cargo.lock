@@ -379,6 +379,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "veridian-cbpf"
+version = "0.27.0"
+
+[[package]]
 name = "veridian-kernel"
 version = "0.27.0"
 dependencies = [
@@ -395,6 +399,7 @@ dependencies = [
  "riscv",
  "spin",
  "uart_16550",
+ "veridian-cbpf",
  "x86_64 0.15.4",
 ]
 
