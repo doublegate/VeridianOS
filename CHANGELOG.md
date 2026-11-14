@@ -109,7 +109,10 @@
   change mount flags and propagation types, all or nothing; statmount, listmount and listns
   describe mounts and list mounts and namespaces; FSMOUNT_NAMESPACE and OPEN_TREE_NAMESPACE put
   the new mount, or a copy of the tree at a directory, in a new mount namespace of the caller's
-  user namespace and return its descriptor for setns. Runtime test mount_api. Not yet: ID-mapped
+  user namespace and return its descriptor for setns, with Linux 7.3's rules. Locked mounts
+  (MNT_LOCKED, MNT_LOCK_*): a mount namespace copied for a less privileged owner cannot have its
+  mounts unmounted, moved or left out of a copy, nor their restrictive flags cleared, so what
+  they hide stays hidden. Runtime test mount_api. Not yet: ID-mapped
   mounts, MOVE_MOUNT_BENEATH (it waits for open files to keep their mount) and
   MOVE_MOUNT_SET_GROUP (KNOWN-LIMITATIONS).
 - fchroot (Linux 7.3): chroot to a directory by descriptor, and with `FD_FAILFS_ROOT` to failfs,

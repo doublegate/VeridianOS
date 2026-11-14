@@ -659,7 +659,12 @@ impl Namespaces {
             new.mnt = Arc::new(MntNs {
                 ident: NsIdent::fresh(NsKind::Mnt),
                 owner: owner.clone(),
-                mounts: Arc::new(self.mnt.mounts.copy(flags & CLONE_EMPTY_MNTNS != 0)),
+                // Locked when the new owner is not this namespace's
+                // (copy_mnt_ns: user_ns != ns->user_ns).
+                mounts: Arc::new(self.mnt.mounts.copy(
+                    flags & CLONE_EMPTY_MNTNS != 0,
+                    !Arc::ptr_eq(owner, &self.mnt.owner),
+                )),
             });
         }
         if flags & CLONE_NEWTIME != 0 {

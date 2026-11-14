@@ -132,6 +132,12 @@ fn open_new_namespace(tree: Arc<mount::Mounts>, cloexec: bool) -> SyscallResult 
     super::namespaces::open_ns_with(crate::process::ns::NsRef::Mnt(ns), cloexec)
 }
 
+/// The owner of the caller's mount namespace.
+fn current_mnt_owner() -> Result<Arc<crate::process::userns::UserNs>, SyscallError> {
+    let thread = crate::process::current_thread().ok_or(SyscallError::InvalidState)?;
+    Ok(thread.namespaces().mnt.owner.clone())
+}
+
 fn may_mount() -> Result<(), SyscallError> {
     if !Caller::current().capable(CAP_SYS_ADMIN)
         || !crate::cap::authority::current_may_change_mounts()
@@ -149,6 +155,7 @@ fn mount_error(e: MountError) -> SyscallError {
         MountError::Loop => SyscallError::SymlinkLoop,
         MountError::Again => SyscallError::WouldBlock,
         MountError::NoSpace => SyscallError::NoSpace,
+        MountError::Perm => SyscallError::OperationNotPermitted,
     }
 }
 
@@ -460,15 +467,17 @@ pub fn sys_fsmount(fs_fd: usize, flags: usize, attr_flags: usize) -> SyscallResu
     if flags & !(FSMOUNT_CLOEXEC | FSMOUNT_NAMESPACE) != 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    // Linux skips may_mount for FSMOUNT_NAMESPACE, relying on the
-    // context's own user namespace and mount_too_revealing, which are not
-    // kept here: the mount check stays, so a context passed to a less
-    // privileged process does not become its namespace (commit security
-    // review).
+    // FSMOUNT_NAMESPACE: the caller's privilege over its own user
+    // namespace, not may_mount (the new namespace is that user namespace's
+    // and touches no other); the context descriptor, made by someone who
+    // could mount, is the authority over its filesystem. A filesystem that
+    // shows the whole system (proc) must not reveal what a locked mount
+    // hides (mount_too_revealing, below).
     let new_ns = flags & FSMOUNT_NAMESPACE != 0;
-    may_mount()?;
     if new_ns {
         may_make_mount_ns()?;
+    } else {
+        may_mount()?;
     }
     if attr_flags & !attr::FSMOUNT_VALID != 0 {
         return Err(SyscallError::InvalidArgument);
@@ -492,12 +501,36 @@ pub fn sys_fsmount(fs_fd: usize, flags: usize, attr_flags: usize) -> SyscallResu
     let fs = ctx.fs.clone().ok_or(SyscallError::Busy)?;
     let source = ctx.source.clone().unwrap_or_else(|| String::from("none"));
     let sb_readonly = ctx.sb_readonly == Some(true);
-    let tree = Arc::new(vfs()?.mount_tree().detached_new(
-        fs.clone(),
-        source,
-        mnt_flags(attr_flags),
-        sb_readonly,
-    ));
+    let mnt = mnt_flags(attr_flags);
+    // mount_too_revealing: in a namespace not owned by the initial user
+    // namespace, a new proc mount needs one here that shows all of proc,
+    // and keeps its locked flags (EPERM otherwise).
+    let revealing_locks = if crate::fs::mount::linux_fs_type(fs.name()) == "proc" {
+        let ns = crate::process::current_thread()
+            .ok_or(SyscallError::InvalidState)?
+            .namespaces();
+        if Arc::ptr_eq(&ns.mnt.owner, &crate::process::userns::initial()) {
+            0
+        } else {
+            let readonly = if sb_readonly {
+                mnt | mount::flags::READONLY
+            } else {
+                mnt
+            };
+            ns.mnt
+                .mounts
+                .fully_visible("proc", readonly)
+                .ok_or(SyscallError::OperationNotPermitted)?
+        }
+    } else {
+        0
+    };
+    let tree = Arc::new(
+        vfs()?
+            .mount_tree()
+            .detached_new(fs.clone(), source, mnt, sb_readonly),
+    );
+    tree.lock_root(revealing_locks);
     // The context goes on to reconfigure what it mounted (vfs_clean_context):
     // the new namespace's root, or the detached tree's.
     let (target, id) = if new_ns {
@@ -684,17 +717,18 @@ pub fn sys_open_tree(dfd: usize, path: usize, flags: usize) -> SyscallResult {
         }
         let recursive = flags & AT_RECURSIVE != 0;
         let (tree, at, _) = tree_and_path(&canonical)?;
-        // Leaving submounts out shows what they cover. Linux refuses that
-        // to a caller from another user namespace than the namespace's
-        // owner and, through MNT_LOCKED, for mounts copied into a less
-        // privileged namespace; with no locked mounts kept here, only a
-        // caller who may mount in the first place may leave them out
-        // (EINVAL otherwise; commit security review).
-        if !recursive && tree.has_submounts(&at) && may_mount().is_err() {
+        // Linux 7.3 create_new_namespace (with the fix for leaving out
+        // covering mounts): a caller whose user namespace does not own the
+        // namespace the copy is made from may leave out nothing mounted
+        // below (EINVAL), and gets unbindable mounts copied too and the
+        // copy locked; anyone is refused a copy without a locked submount
+        // (clone_tree, has_locked_children).
+        let foreign = !Arc::ptr_eq(&Caller::current().userns, &current_mnt_owner()?);
+        if foreign && !recursive && tree.has_submounts(&at) {
             return Err(SyscallError::InvalidArgument);
         }
         let copy = tree
-            .detached_clone(&at, node.clone(), recursive)
+            .clone_tree(&at, node.clone(), recursive, foreign)
             .map_err(mount_error)?;
         return open_new_namespace(Arc::new(copy), cloexec);
     }

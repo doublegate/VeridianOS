@@ -456,10 +456,11 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
      (LTP move_mount03; draft without those in the session notes). Found 2026-11-06:
      - [ ] With any move of mount, umount2 or pivot_root from `capable` to `ns_capable` (not
        reachable before; ADR 0022 H4 says MNT_LOCKED comes with it): a superblock owner (the
-       mounter's user namespace) whose CAP_SYS_ADMIN a change of its read-only state needs, and
-       Linux's locked mount flags (MNT_LOCK_READONLY, NODEV, NOSUID, NOEXEC, ATIME) set by
-       `Mounts::copy` into a less privileged namespace, so they cannot be cleared there (EPERM)
-       and such a mount cannot be unmounted to uncover what it hides (EINVAL).
+       mounter's user namespace) whose CAP_SYS_ADMIN a change of its read-only state needs. The
+       locks themselves (MNT_LOCKED, MNT_LOCK_*) came with the mount API's namespace flags
+       (ADR 0027 decision 24, 2026-11-14): `Mounts::copy` locks a copy for a less privileged
+       owner, and umount, move, bind, open_tree, pivot_root, mount_setattr and remount honour
+       them already.
      - [ ] `clock_gettime03` is FLAKY on x86_64 (2026-11-06): a retry boots a fresh guest, whose
        uptime under 10 s makes the -10 s offset ERANGE (as on Linux). Have `--retry` wait until
        the guest has been up 10 s, then set it back to PASS.

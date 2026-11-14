@@ -49,6 +49,23 @@ pub mod flags {
     pub const SETTABLE: u32 = NOSUID | NODEV | NOEXEC | ATIME | READONLY | NOSYMFOLLOW;
     /// MS_UNBINDABLE's propagation type: the mount cannot be bound.
     pub const UNBINDABLE: u32 = 0x1_0000;
+    /// Locks (Linux's MNT_LOCK_* and MNT_LOCKED, include/linux/mount.h):
+    /// set on a mount copied into a mount namespace whose owner (a user
+    /// namespace) differs from the one it was copied from, so the less
+    /// privileged owner cannot clear the flag it covers (EPERM) or, with
+    /// LOCKED, unmount, move or leave out the mount to reveal what it
+    /// hides (EINVAL). They never clear once set; copies keep the
+    /// LOCK_* ones, and a recursive copy LOCKED too (clone_mnt, copy_tree).
+    /// The same mechanism attenuates a native namespace handed to a less
+    /// trusted owner (ADR 0027 decision 24).
+    pub const LOCK_ATIME: u32 = 0x100;
+    pub const LOCK_NOEXEC: u32 = 0x200;
+    pub const LOCK_NOSUID: u32 = 0x400;
+    pub const LOCK_NODEV: u32 = 0x800;
+    pub const LOCK_READONLY: u32 = 0x1000;
+    pub const LOCKED: u32 = 0x2000;
+    /// The flag locks a bind or clone keeps.
+    pub const LOCKS: u32 = LOCK_ATIME | LOCK_NOEXEC | LOCK_NOSUID | LOCK_NODEV | LOCK_READONLY;
 }
 
 /// Marks a path in a detached tree (fsmount, open_tree(OPEN_TREE_CLONE)):
@@ -160,6 +177,8 @@ pub enum MountError {
     /// ENOSPC: pivot_root(".", ".") would park roots deeper than
     /// [`MAX_PARKED_DEPTH`].
     NoSpace,
+    /// EPERM: a locked flag would be cleared ([`flags::LOCKS`]).
+    Perm,
 }
 
 /// How deep pivot_root(".", ".") may stack parked roots, each over the
@@ -310,22 +329,73 @@ impl Mount {
         })
     }
 
-    /// A new mount of the same filesystem and root, with its flags
-    /// (Linux's clone_mnt).
+    /// A new mount of the same filesystem and root, with its flags and
+    /// locks, LOCKED included (a mount copied with the tree it is in,
+    /// Linux's copy_tree).
     fn copy(&self) -> Arc<Self> {
-        self.bound(self.root.clone(), self.root_path.clone())
+        let m = self.bound(self.root.clone(), self.root_path.clone());
+        m.add_locks(self.flags() & flags::LOCKED);
+        m
     }
 
     /// A new mount of the same filesystem rooted at `root`, which is at
-    /// `root_path` in it (a bind mount); private.
+    /// `root_path` in it (a bind mount); private, with the flag locks but
+    /// not LOCKED (clone_mnt clears MNT_INTERNAL_FLAGS).
     fn bound(&self, root: Arc<dyn VfsNode>, root_path: String) -> Arc<Self> {
         Self::on(
             self.sb.clone(),
             self.source.clone(),
             root,
             root_path,
-            self.flags() & flags::SETTABLE,
+            self.flags() & (flags::SETTABLE | flags::LOCKS),
         )
+    }
+
+    /// Set lock bits ([`flags::LOCKS`], [`flags::LOCKED`]); they are never
+    /// cleared but by pivot_root moving LOCKED from the old root to the new.
+    fn add_locks(&self, bits: u32) {
+        self.flags
+            .fetch_or(bits & (flags::LOCKS | flags::LOCKED), Ordering::AcqRel);
+    }
+
+    /// Lock this mount as lock_mnt_tree does: the atime type always, each
+    /// set flag of read-only, nodev, nosuid and noexec, and LOCKED unless
+    /// it is the copy's top mount (`top`).
+    fn lock(&self, top: bool) {
+        let f = self.flags();
+        let mut bits = flags::LOCK_ATIME;
+        for (flag, lock) in [
+            (flags::READONLY, flags::LOCK_READONLY),
+            (flags::NODEV, flags::LOCK_NODEV),
+            (flags::NOSUID, flags::LOCK_NOSUID),
+            (flags::NOEXEC, flags::LOCK_NOEXEC),
+        ] {
+            if f & flag != 0 {
+                bits |= lock;
+            }
+        }
+        if !top {
+            bits |= flags::LOCKED;
+        }
+        self.add_locks(bits);
+    }
+
+    /// Whether it is locked to its place (MNT_LOCKED).
+    pub fn is_locked(&self) -> bool {
+        self.has(flags::LOCKED)
+    }
+
+    /// Whether mount flags `mnt` keep every locked flag as it is (Linux's
+    /// can_change_locked_flags): a locked read-only, nodev, nosuid or
+    /// noexec stays set, a locked atime type stays the same.
+    fn keeps_locked_flags(&self, mnt: u32) -> bool {
+        let f = self.flags();
+        let kept = |lock: u32, flag: u32| f & lock == 0 || mnt & flag != 0;
+        kept(flags::LOCK_READONLY, flags::READONLY)
+            && kept(flags::LOCK_NODEV, flags::NODEV)
+            && kept(flags::LOCK_NOSUID, flags::NOSUID)
+            && kept(flags::LOCK_NOEXEC, flags::NOEXEC)
+            && (f & flags::LOCK_ATIME == 0 || f & flags::ATIME == mnt & flags::ATIME)
     }
 
     pub fn fs(&self) -> &Arc<dyn Filesystem> {
@@ -621,7 +691,7 @@ impl Mounts {
     /// A new namespace's tree (Linux's copy_mnt_ns): every mount copied,
     /// root first and then in path order, so a parent's id comes before its
     /// children's; or with `empty` (CLONE_EMPTY_MNTNS) only the root.
-    pub fn copy(&self, empty: bool) -> Mounts {
+    pub fn copy(&self, empty: bool, less_privileged: bool) -> Mounts {
         let old = self.snapshot();
         let table = if empty {
             MountTable {
@@ -631,7 +701,77 @@ impl Mounts {
         } else {
             old.copied()
         };
+        // A copy for an owner other than this namespace's (copy_mnt_ns with
+        // user_ns != ns->user_ns): locked, so the new owner cannot reveal
+        // what its mounts hide or loosen their flags.
+        if less_privileged {
+            table.lock_tree();
+        }
         Self::with_table(table, self.pool.clone())
+    }
+
+    /// Linux's mnt_already_visible for a new mount of type `ty` (as
+    /// `/proc/filesystems` names it) with mount flags `mnt`: a mount of the
+    /// whole filesystem of that type in this namespace that shows all of it
+    /// (no locked submount) and whose locked flags the new one keeps. Some
+    /// with the locks the new mount takes over (read-only, atime), else
+    /// None: the new mount would reveal what a mount here hides.
+    pub fn fully_visible(&self, ty: &str, mnt: u32) -> Option<u32> {
+        let t = self.snapshot();
+        let places = t
+            .root
+            .iter()
+            .map(|m| (String::from("/"), m.clone()))
+            .chain(t.mounts.iter().map(|(p, m)| (p.clone(), m.clone())));
+        for (path, m) in places {
+            if linux_fs_type(m.fs().name()) != ty || m.root_path() != "/" {
+                continue;
+            }
+            let mut f = m.flags();
+            if m.sb_readonly() {
+                f |= flags::LOCK_READONLY;
+            }
+            if f & flags::LOCK_READONLY != 0 && mnt & flags::READONLY == 0 {
+                continue;
+            }
+            if f & flags::LOCK_ATIME != 0 && f & flags::ATIME != mnt & flags::ATIME {
+                continue;
+            }
+            let hidden = t
+                .under(&path)
+                .iter()
+                .any(|p| t.stack(p).iter().any(|c| c.is_locked()));
+            if hidden {
+                continue;
+            }
+            return Some(f & (flags::LOCK_READONLY | flags::LOCK_ATIME));
+        }
+        None
+    }
+
+    /// Add flag locks (`flags::LOCK_READONLY`, `flags::LOCK_ATIME`) to the
+    /// root mount (mount_too_revealing's preserved locks).
+    pub fn lock_root(&self, bits: u32) {
+        if let Some(root) = &self.snapshot().root {
+            root.add_locks(bits & flags::LOCKS);
+        }
+    }
+
+    /// Whether a mount under `source` (not at it) is locked: leaving it
+    /// out of a copy would show what it covers (has_locked_children).
+    pub fn has_locked_submounts(&self, source: &str) -> bool {
+        let t = self.snapshot();
+        t.under(source)
+            .iter()
+            .any(|p| t.stack(p).iter().any(|m| m.is_locked()))
+            || t.parked.iter().any(|(p, trees)| {
+                // A parked old root is mounted on the new root's root, a
+                // child at its place (pivot_root(".", ".")).
+                path_is_under(p, source)
+                    && trees
+                        .iter()
+                        .any(|tr| tr.root.as_ref().is_some_and(|r| r.is_locked()))
+            })
     }
 
     /// The mounts a process whose root is `root` (a canonical path) can
@@ -741,6 +881,14 @@ impl Mounts {
             if base.flags() & flags::UNBINDABLE != 0 {
                 return Err(MountError::Invalid);
             }
+            // Binding without a locked submount would show what it covers.
+            if !recursive
+                && t.under(source)
+                    .iter()
+                    .any(|p| t.stack(p).iter().any(|m| m.is_locked()))
+            {
+                return Err(MountError::Invalid);
+            }
             let root_path = join_root(&base.root_path, relative(source, &at));
             let mount = base.bound(node, root_path);
             let mut copies = Vec::new();
@@ -783,6 +931,10 @@ impl Mounts {
     ) -> Result<(), MountError> {
         self.update(|t| {
             if from == "/" || !t.mounts.contains_key(from) || from_is_dir != to_is_dir {
+                return Err(MountError::Invalid);
+            }
+            // A locked mount stays where it is (do_move_mount).
+            if t.mount_at(from).is_some_and(|m| m.is_locked()) {
                 return Err(MountError::Invalid);
             }
             if path_is_under(to, from) {
@@ -838,10 +990,28 @@ impl Mounts {
         node: Arc<dyn VfsNode>,
         recursive: bool,
     ) -> Result<Mounts, MountError> {
+        self.clone_tree(source, node, recursive, false)
+    }
+
+    /// [`Mounts::detached_clone`], and with `foreign` (a copy for a caller
+    /// not privileged over this namespace, create_new_namespace's
+    /// CL_COPY_UNBINDABLE and lock_mnt_tree) unbindable mounts copied too
+    /// and the copy locked. A copy without the submounts of a locked mount
+    /// under `source` is EINVAL (__do_loopback's has_locked_children).
+    pub fn clone_tree(
+        &self,
+        source: &str,
+        node: Arc<dyn VfsNode>,
+        recursive: bool,
+        foreign: bool,
+    ) -> Result<Mounts, MountError> {
+        if !recursive && self.has_locked_submounts(source) {
+            return Err(MountError::Invalid);
+        }
         let t = self.snapshot();
         let at = String::from(t.mount_of(source));
         let base = t.mount_at(&at).cloned().ok_or(MountError::Invalid)?;
-        if base.flags() & flags::UNBINDABLE != 0 {
+        if base.flags() & flags::UNBINDABLE != 0 && !foreign {
             return Err(MountError::Invalid);
         }
         let root_path = join_root(&base.root_path, relative(source, &at));
@@ -858,7 +1028,7 @@ impl Mounts {
                 if skipped.iter().any(|s| path_is_under(path, s)) {
                     continue;
                 }
-                if top.flags() & flags::UNBINDABLE != 0 {
+                if top.flags() & flags::UNBINDABLE != 0 && !foreign {
                     skipped.push(path.clone());
                     continue;
                 }
@@ -867,6 +1037,9 @@ impl Mounts {
                     table.push(&to, m.copy());
                 }
             }
+        }
+        if foreign {
+            table.lock_tree();
         }
         Ok(Self::with_table(table, self.pool.clone()))
     }
@@ -956,6 +1129,11 @@ impl Mounts {
             }
         }
         let new = |m: &Mount| (m.flags() & !clr) | (set & flags::SETTABLE);
+        // A locked flag stays (can_change_locked_flags): EPERM, all or
+        // nothing.
+        if targets.iter().any(|(_, m)| !m.keeps_locked_flags(new(m))) {
+            return Err(MountError::Perm);
+        }
         for (path, m) in &targets {
             if new(m) & flags::READONLY != 0 && !m.has(flags::READONLY) && writers(path) {
                 return Err(MountError::Busy);
@@ -1009,10 +1187,19 @@ impl Mounts {
                     return Err(MountError::NoSpace);
                 }
             }
+            // The new root may not be a locked mount (EINVAL).
+            if t.mount_at(new).is_some_and(|m| m.is_locked()) {
+                return Err(MountError::Invalid);
+            }
             // Nothing fails from here on.
             let Some(new_top) = t.mounts.remove(new) else {
                 return Err(MountError::Invalid);
             };
+            // The old root's lock goes to the new root, which takes its place.
+            if let Some(old_root) = t.mount_at(&root).cloned().filter(|m| m.is_locked()) {
+                new_top.add_locks(flags::LOCKED);
+                old_root.flags.fetch_and(!flags::LOCKED, Ordering::AcqRel);
+            }
             // A moved mount does not expire (Linux drops it from the list).
             new_top.expiry.store(false, Ordering::Release);
             let covered_new = t.covered.remove(new).unwrap_or_default();
@@ -1098,6 +1285,10 @@ impl Mounts {
     ) -> Result<(), MountError> {
         let table = self.snapshot();
         let mount = table.mount_at(point).ok_or(MountError::Invalid)?;
+        // A locked flag stays (do_reconfigure_mnt, do_remount): EPERM.
+        if !mount.keeps_locked_flags(mnt) {
+            return Err(MountError::Perm);
+        }
         let mount_to_ro = mnt & flags::READONLY != 0 && !mount.has(flags::READONLY);
         let sb_to_ro = sb_readonly == Some(true) && !mount.sb_readonly();
         if (mount_to_ro || sb_to_ro) && writers() {
@@ -1185,6 +1376,11 @@ impl Mounts {
                 return Ok(());
             }
             let mount = t.mount_at(point).cloned().ok_or(MountError::Invalid)?;
+            // A locked mount is not unmounted, so what it hides stays
+            // hidden (can_umount, do_umount: EINVAL).
+            if mount.is_locked() {
+                return Err(MountError::Invalid);
+            }
             // A failfs root is in no mount of the namespace.
             let holds_root =
                 root != super::FAILFS_ROOT && t.mount_of(&normalize_path(root, "/")) == point;
@@ -1223,6 +1419,26 @@ impl Mounts {
 }
 
 impl MountTable {
+    /// Lock every mount (lock_mnt_tree): the flag locks on all, LOCKED on
+    /// all but the root; parked trees too.
+    fn lock_tree(&self) {
+        if let Some(root) = &self.root {
+            root.lock(true);
+        }
+        for m in self.covered.values().flatten() {
+            m.lock(false);
+        }
+        for m in self.mounts.values() {
+            m.lock(false);
+        }
+        for tree in self.parked.values().flatten() {
+            tree.lock_tree();
+            if let Some(root) = &tree.root {
+                root.lock(false);
+            }
+        }
+    }
+
     /// A copy with new mounts of the same filesystems (copy_tree): the
     /// root first, then in path order, so a parent's id comes before its
     /// children's, then the parked trees.
@@ -1527,7 +1743,7 @@ mod tests {
     fn a_copy_has_new_mounts_of_the_same_filesystems() {
         let vfs = tree();
         let old = vfs.mounts().snapshot();
-        let copy = vfs.mounts().copy(false);
+        let copy = vfs.mounts().copy(false, false);
         let new = copy.snapshot();
         assert_eq!(
             new.mounts.keys().collect::<Vec<_>>(),
@@ -1553,7 +1769,7 @@ mod tests {
     #[test]
     fn an_empty_copy_has_only_the_root() {
         let vfs = tree();
-        let copy = vfs.mounts().copy(true);
+        let copy = vfs.mounts().copy(true, false);
         let new = copy.snapshot();
         assert!(new.mounts.is_empty());
         assert!(Arc::ptr_eq(
@@ -1565,7 +1781,7 @@ mod tests {
     #[test]
     fn ids_and_devices_are_freed_with_the_last_reference() {
         let vfs = tree();
-        let copy = vfs.mounts().copy(false);
+        let copy = vfs.mounts().copy(false, false);
         let shm = copy.snapshot().mounts["/dev/shm"].ids;
         copy.update(|t| t.mounts.remove("/dev/shm"));
         // The id is free again; the device is not, the original mount
@@ -1662,6 +1878,90 @@ mod tests {
             .lines()
             .map(String::from)
             .collect()
+    }
+
+    /// MNT_LOCKED (Linux's lock_mnt_tree): a namespace copied for a less
+    /// privileged owner keeps its mounts in place and their flags as they
+    /// are; a mount made there afterwards is its own.
+    #[test]
+    fn a_less_privileged_copy_is_locked() {
+        let vfs = work_tree();
+        let t = vfs.mounts();
+        t.attach_new(
+            "/b",
+            true,
+            tmpfs(),
+            "nosuid".into(),
+            flags::RELATIME | flags::NOSUID,
+            false,
+        )
+        .unwrap();
+        let open = t.copy(false, false);
+        assert!(!open.mount_at("/b").unwrap().is_locked());
+        let copy = t.copy(false, true);
+        assert!(!copy.mount_at("/").unwrap().is_locked());
+        assert!(copy.mount_at("/b").unwrap().is_locked());
+        // Not unmounted, moved, left out of a copy or bind, nor loosened.
+        assert_eq!(
+            copy.umount("/b", Umount::default(), "/", false),
+            Err(MountError::Invalid)
+        );
+        assert_eq!(
+            copy.move_mount("/b", true, "/c", true),
+            Err(MountError::Invalid)
+        );
+        let root_node = vfs.resolve_path("/").unwrap();
+        assert!(matches!(
+            copy.detached_clone("/", root_node.clone(), false),
+            Err(MountError::Invalid)
+        ));
+        assert!(copy.detached_clone("/", root_node.clone(), true).is_ok());
+        assert_eq!(
+            copy.bind("/", root_node.clone(), "/c", true, false),
+            Err(MountError::Invalid)
+        );
+        assert_eq!(
+            copy.setattr("/b", 0, flags::NOSUID, None, false, |_| false),
+            Err(MountError::Perm)
+        );
+        assert_eq!(
+            copy.reconfigure("/b", flags::RELATIME, None, || false),
+            Err(MountError::Perm)
+        );
+        assert_eq!(
+            copy.reconfigure(
+                "/b",
+                flags::RELATIME | flags::NOSUID | flags::NODEV,
+                None,
+                || false
+            ),
+            Ok(())
+        );
+        // A recursive copy keeps the lock, a new mount on top has none.
+        let again = copy.detached_clone("/", root_node, true).unwrap();
+        assert!(again.mount_at("/b").unwrap().is_locked());
+        copy.attach_new("/c", true, tmpfs(), "mine".into(), flags::RELATIME, false)
+            .unwrap();
+        assert_eq!(copy.umount("/c", Umount::default(), "/", false), Ok(()));
+    }
+
+    /// mount_too_revealing's test: a proc mount showing all of proc, whose
+    /// locked flags a new one keeps.
+    #[test]
+    fn a_fully_visible_mount_is_one_nothing_locked_covers() {
+        let vfs = work_tree();
+        let t = vfs.mounts();
+        assert_eq!(t.fully_visible("tmpfs", flags::RELATIME), Some(0));
+        assert_eq!(t.fully_visible("proc", flags::RELATIME), None);
+        let locked = t.copy(false, true);
+        // The tmpfs at /a/sub/m: locked, its atime type kept.
+        assert_eq!(locked.fully_visible("tmpfs", flags::NOATIME), None);
+        assert_eq!(
+            locked.fully_visible("tmpfs", flags::RELATIME),
+            Some(flags::LOCK_ATIME)
+        );
+        // The root's filesystem with a locked mount under it is not.
+        assert_eq!(locked.fully_visible("ramfs", flags::RELATIME), None);
     }
 
     #[test]
@@ -2300,7 +2600,7 @@ mod tests {
             ]
         );
         // A copy of the namespace has it too.
-        assert_eq!(lines(&t.copy(false)).len(), 3);
+        assert_eq!(lines(&t.copy(false, false)).len(), 3);
         // umount2 there takes the old root off: EBUSY with /p under it
         // unless detached.
         let detach = Umount {

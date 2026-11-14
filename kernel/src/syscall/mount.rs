@@ -84,6 +84,7 @@ fn mount_error(e: MountError) -> SyscallError {
         MountError::Loop => SyscallError::SymlinkLoop,
         MountError::Again => SyscallError::WouldBlock,
         MountError::NoSpace => SyscallError::NoSpace,
+        MountError::Perm => SyscallError::OperationNotPermitted,
     }
 }
 

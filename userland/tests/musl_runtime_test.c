@@ -11353,6 +11353,18 @@ static void test_mount_api(void)
         if (nsfd >= 0) close(nsfd);
         if (nsfd2 >= 0) close(nsfd2);
         umount("/tmp/ma-d");
+        /* A namespace copied for a new user namespace is locked
+         * (MNT_LOCKED): its owner may copy "/" only with what is mounted
+         * under it, so nothing hidden shows (EINVAL without AT_RECURSIVE). */
+        pid_t lk = fork();
+        if (lk == 0) {
+            if (unshare(CLONE_NEWUSER | CLONE_NEWNS) != 0) _exit(2);
+            int bad = syscall(SYS_open_tree, AT_FDCWD, "/", 2) == -1 && errno == EINVAL;
+            int all = syscall(SYS_open_tree, AT_FDCWD, "/", 2 | AT_RECURSIVE);
+            _exit(bad && all >= 0 ? 0 : 1);
+        }
+        x = t_exit_status(lk);
+        if (x != 0) g |= 0x200000;
         /* Without CAP_SYS_ADMIN: EPERM. */
         pid_t un = fork();
         if (un == 0) {

@@ -255,10 +255,25 @@ The reference for every behaviour below is the Linux 7.3 source (kernel.org tarb
       mount, or a copy of the mount at a directory (with its submounts under AT_RECURSIVE),
       becomes the root of a new mount namespace owned by the caller's user namespace, returned
       as an nsfs descriptor for setns. They need CAP_SYS_ADMIN in the caller's user namespace
-      and the object capability unshare(CLONE_NEWNS) needs (ADR 0024). Stricter than Linux,
-      which keeps MNT_LOCKED and a context's own user namespace where this kernel does not:
-      fsmount's FSMOUNT_NAMESPACE keeps mount's check too, and leaving submounts out of a copy
-      (which shows what they cover) needs it as well (EINVAL otherwise). Linux puts the tree on an empty nullfs root, which every namespace has there;
+      and the object capability unshare(CLONE_NEWNS) needs (ADR 0024), as on Linux 7.3,
+      including its fix for leaving out covering mounts: a caller whose user namespace does not
+      own the namespace the copy is made from may leave nothing mounted below out (EINVAL), and
+      its copy includes unbindable mounts and is locked. A new proc mount through
+      FSMOUNT_NAMESPACE in a namespace not owned by the initial user namespace needs a proc mount
+      there that shows all of proc (mount_too_revealing, EPERM).
+    - **Locked mounts (MNT_LOCKED and MNT_LOCK_*; the maintainer asked for the long-term design,
+      2026-11-14):** a mount namespace copied for an owner other than the one it is copied from
+      (unshare or clone with a new user namespace, a foreign OPEN_TREE_NAMESPACE copy) is
+      locked, as lock_mnt_tree: every mount's atime type and its set read-only, nodev, nosuid
+      and noexec flags cannot be cleared (EPERM, mount_setattr and remount), and every mount but
+      the copy's root cannot be unmounted, moved or left out of a copy or bind (EINVAL), nor be
+      the new root of pivot_root, which moves the old root's lock to the new one. Copies keep
+      the flag locks; a recursive copy keeps the mount locks too. This is the native form of
+      handing a mount tree to a less trusted owner: masks and restrictive flags travel with it
+      and only the authority that made them can remove them, which the sandbox and capability
+      mode of Track S rely on, and which Linux mode's ns_capable mount calls (queue item 6)
+      need. A first version of the namespace flags without locks (9da3f830) required mount's
+      privilege instead; that is gone. Linux puts the tree on an empty nullfs root, which every namespace has there;
       here the tree is the root, so such a namespace lists one mount fewer. nullfs itself is not
       a filesystem type a caller can open, on Linux either (ENODEV).
     - **Not yet** (KNOWN-LIMITATIONS): idmapped mounts (MOUNT_ATTR_IDMAP, EINVAL until then);
