@@ -451,7 +451,9 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
      files and mappings keep the `Mount` they were reached through and the mount flags are checked
      on it, not on a path looked up again in the caller's namespace; mounts follow a renamed
      directory in every namespace; a remount read-only sees every writer of the superblock
-     (KNOWN-LIMITATIONS "Namespaces are partial"). Found 2026-11-06:
+     (KNOWN-LIMITATIONS "Namespaces are partial"). Then move_mount's MOVE_MOUNT_BENEATH, deferred
+     to it (2026-11-14): a mount moved beneath keeps its open files and takes its submounts along
+     (LTP move_mount03; draft without those in the session notes). Found 2026-11-06:
      - [ ] With any move of mount, umount2 or pivot_root from `capable` to `ns_capable` (not
        reachable before; ADR 0022 H4 says MNT_LOCKED comes with it): a superblock owner (the
        mounter's user namespace) whose CAP_SYS_ADMIN a change of its read-only state needs, and
