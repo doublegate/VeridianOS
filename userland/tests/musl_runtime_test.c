@@ -9776,6 +9776,12 @@ static void test_files_sched(void)
     if (afd >= 0 &&
         (mmap(NULL, 4096, PROT_READ, MAP_SHARED, afd, 0) != MAP_FAILED || errno != EACCES))
         f |= 2048;
+    /* Nor rewritten in place by RWF_NOAPPEND, which musl's pwrite uses
+     * (kiocb_set_rw_flags: EPERM). */
+    struct iovec nov = {"x", 1};
+    if (afd >= 0 && (pwritev2(afd, &nov, 1, 0, RWF_NOAPPEND) != -1 || errno != EPERM ||
+                     pwrite(afd, "x", 1, 0) != -1 || errno != EPERM))
+        f |= 2048;
     if (afd >= 0)
         close(afd);
     t_setflags(fd, 0);

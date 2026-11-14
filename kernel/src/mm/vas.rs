@@ -4128,10 +4128,10 @@ impl VirtualAddressSpace {
                 continue;
             };
             let ours = match node {
-                Some(n) => core::ptr::eq(
-                    alloc::sync::Arc::as_ptr(&b.node) as *const u8,
-                    alloc::sync::Arc::as_ptr(n) as *const u8,
-                ),
+                // By inode: BlockFS gives each lookup its own node, so a
+                // mapping made through another open of the file is a
+                // different Arc (PR #45 review).
+                Some(n) => crate::fs::inode_key(&b.node) == crate::fs::inode_key(n),
                 // An immutable file's, and while a file is becoming one,
                 // any file's: a mapping made meanwhile is one the freeze
                 // may not have seen (commit security review).

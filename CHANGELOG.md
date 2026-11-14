@@ -172,8 +172,11 @@
   (FS_IOC_GETFLAGS/SETFLAGS, FS_IOC_FSGETXATTR/FSSETXATTR) and file_getattr/file_setattr, kept by
   BlockFS (in the on-disk inode, no format change), tmpfs, ramfs and memfd, and read from ext4.
   Immutable stops every write, through an already-open descriptor too, and a write through a
-  shared mapping is SIGBUS; append-only allows only appending writes. Both refuse unlink, rename,
-  link, chmod, chown, set times and xattr changes; nodump and noatime pass to new files.
+  shared mapping is SIGBUS, and a refused write or truncate leaves the set-ID bits and file
+  capabilities; append-only allows only appending writes through an O_APPEND descriptor
+  (RWF_NOAPPEND on one is EPERM). Both refuse unlink, rename, link, chmod, chown, set times and
+  xattr changes; noatime keeps reads from changing the access time (tmpfs, ramfs); nodump and
+  noatime pass to new files.
   cachestat reports the pages of a range that are cached and dirty: tmpfs and memfd pages, and
   BlockFS's block cache and mapping pages. Runtime test files_sched.
 

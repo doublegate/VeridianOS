@@ -260,8 +260,10 @@ impl VfsNode for RamNode {
         let bytes_to_read = core::cmp::min(buffer.len(), data.len() - offset);
         buffer[..bytes_to_read].copy_from_slice(&data[offset..offset + bytes_to_read]);
 
-        // Update accessed time
-        self.metadata.write().accessed = crate::arch::timer::get_timestamp_secs();
+        // Update accessed time, unless the file is noatime.
+        if !super::attr::no_atime(self) {
+            self.metadata.write().accessed = crate::arch::timer::get_timestamp_secs();
+        }
 
         Ok(bytes_to_read)
     }

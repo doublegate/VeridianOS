@@ -226,6 +226,7 @@ pub fn sys_pwritev2(
     }
     let stream = file.node.is_stream();
     let rwf = Rwf::parse(flags, true, stream)?;
+    refuse_noappend(&file, &rwf)?;
     // RWF_APPEND, or RWF_NOAPPEND on an O_APPEND file, moves a file's
     // write away from where writev puts it; the position then follows the
     // data, as Linux's do_writev.
@@ -252,6 +253,19 @@ pub fn sys_pwritev2(
     Ok(written)
 }
 
+/// RWF_NOAPPEND on an O_APPEND descriptor of an append-only file is EPERM
+/// (kiocb_set_rw_flags): the flag would let pwrite, which musl builds on
+/// pwritev2(RWF_NOAPPEND), rewrite the file anywhere (PR #45 review).
+fn refuse_noappend(file: &crate::fs::file::File, rwf: &Rwf) -> Result<(), SyscallError> {
+    if rwf.noappend
+        && file.is_append()
+        && crate::fs::attr::of(&*file.node) & crate::fs::attr::FS_APPEND_FL != 0
+    {
+        return Err(SyscallError::OperationNotPermitted);
+    }
+    Ok(())
+}
+
 /// The vectored write at `pos` of pwritev and pwritev2, checked in the
 /// same order as preadv_at; RWF_APPEND, or an O_APPEND file without
 /// RWF_NOAPPEND, writes at the end instead.
@@ -268,6 +282,7 @@ fn pwritev_at(fd: usize, iov_ptr: usize, iovcnt: usize, pos: i64, flags: u32) ->
         return Ok(0);
     }
     let rwf = Rwf::parse(flags, true, false)?;
+    refuse_noappend(&file, &rwf)?;
     let at = if rwf.append || (file.is_append() && !rwf.noappend) {
         file_size(&file)?
     } else {
