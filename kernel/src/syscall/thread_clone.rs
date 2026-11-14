@@ -730,6 +730,8 @@ fn thread_clone(
     );
     // A new thread runs under its creator's filters (copy_seccomp).
     thread.seccomp.copy_from(&current_thread.seccomp);
+    #[cfg(feature = "alloc")]
+    thread.landlock.copy_from(&current_thread.landlock);
     let sets = *current_thread.caps.lock();
     *thread.caps.lock() = sets;
     #[cfg(feature = "alloc")]
@@ -823,6 +825,8 @@ fn thread_clone(
         let sets = *current_thread.caps.lock();
         *thread.caps.lock() = sets;
         thread.seccomp.copy_from(&current_thread.seccomp);
+        #[cfg(feature = "alloc")]
+        thread.landlock.copy_from(&current_thread.landlock);
         thread.no_new_privs.store(
             current_thread
                 .no_new_privs

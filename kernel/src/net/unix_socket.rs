@@ -164,6 +164,11 @@ pub struct UnixSocket {
     /// This socket's own credentials when it last listened or connected:
     /// what its peer is given.
     pub own_cred: PeerCred,
+    /// The Landlock domain of the process that made it (its file's
+    /// f_cred): a connection from that domain or a lower one needs no
+    /// RESOLVE_UNIX rule (hook_unix_find).
+    #[cfg(feature = "alloc")]
+    pub landlock: Option<Arc<crate::security::landlock::KDomain>>,
 }
 
 /// A process's credentials as SO_PEERCRED reports them (`struct ucred`):
@@ -228,6 +233,8 @@ impl UnixSocket {
             owner_pid,
             peer_cred: None,
             own_cred,
+            #[cfg(feature = "alloc")]
+            landlock: None,
         }
     }
 }
@@ -288,6 +295,17 @@ pub fn forget_file(key: NameKey) {
 }
 
 /// The socket bound to `file`, if any.
+/// The Landlock domain of the process that made the socket bound to
+/// `file`: `None` when no socket is bound to it, `Some(None)` for an
+/// unrestricted maker.
+#[cfg(feature = "alloc")]
+pub fn bound_landlock(
+    file: &Arc<dyn VfsNode>,
+) -> Option<Option<Arc<crate::security::landlock::KDomain>>> {
+    let id = bound_to(file).ok()?;
+    UNIX_SOCKETS.lock().get(&id).map(|s| s.landlock.clone())
+}
+
 fn bound_to(file: &Arc<dyn VfsNode>) -> KernelResult<u64> {
     let key = crate::fs::inode_key(file);
     PATH_REGISTRY
@@ -329,7 +347,12 @@ pub fn socket_create(socket_type: UnixSocketType, owner_pid: u64) -> KernelResul
     drop(sockets);
 
     let id = NEXT_SOCKET_ID.fetch_add(1, Ordering::Relaxed);
-    let socket = UnixSocket::new(id, socket_type, owner_pid, PeerCred::current());
+    #[allow(unused_mut)]
+    let mut socket = UnixSocket::new(id, socket_type, owner_pid, PeerCred::current());
+    #[cfg(feature = "alloc")]
+    {
+        socket.landlock = crate::security::landlock::current();
+    }
 
     UNIX_SOCKETS.lock().insert(id, socket);
     Ok(id)
@@ -690,6 +713,11 @@ pub fn socketpair(socket_type: UnixSocketType, owner_pid: u64) -> KernelResult<(
     let cred = PeerCred::current();
     let mut sock_a = UnixSocket::new(id_a, socket_type, owner_pid, cred);
     let mut sock_b = UnixSocket::new(id_b, socket_type, owner_pid, cred);
+    #[cfg(feature = "alloc")]
+    {
+        sock_a.landlock = crate::security::landlock::current();
+        sock_b.landlock = sock_a.landlock.clone();
+    }
 
     sock_a.state = UnixSocketState::Connected;
     sock_a.peer_id = Some(id_b);
@@ -887,10 +915,10 @@ mod tests {
         }
     }
 
-    /// BlockFS finds a file by inode number and reuses a freed number:
-    /// a new socket file given the number of an unlinked one that a socket
-    /// is still bound to must be bindable, reach only its own socket, and
-    /// survive the old socket's close.
+    /// BlockFS finds a file by inode number, and an unlinked socket file a
+    /// socket is still bound to keeps its number (`blockfs::InodeHolds`):
+    /// a new socket file gets another number, is bindable, reaches only
+    /// its own socket, and survives the old socket's close.
     #[test]
     fn freed_blockfs_socket_file_number_is_not_the_old_binding() {
         use crate::fs::{blockfs::BlockFs, Filesystem, NodeType, Permissions};
@@ -903,10 +931,10 @@ mod tests {
         socket_listen(old, 4).unwrap();
         root.unlink("s").unwrap();
         let new_file = root.mknod("t", NodeType::Socket, perms, 0).unwrap();
-        assert_eq!(
+        assert_ne!(
             crate::fs::inode_key(&new_file),
             crate::fs::inode_key(&old_file),
-            "the test needs the inode number reused"
+            "a held number is not reused"
         );
         let new = socket_create(UnixSocketType::Stream, 1).unwrap();
         assert_eq!(socket_bind(new, new_file.clone(), "/t"), Ok(()));

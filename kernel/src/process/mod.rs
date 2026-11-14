@@ -928,6 +928,8 @@ pub fn create_thread(
                     Ordering::Release,
                 );
                 thread.seccomp.copy_from(&creator.seccomp);
+                #[cfg(feature = "alloc")]
+                thread.landlock.copy_from(&creator.landlock);
                 let sets = *creator.caps.lock();
                 *thread.caps.lock() = sets;
             }
@@ -945,6 +947,8 @@ pub fn create_thread(
                 let sets = *creator.caps.lock();
                 *thread.caps.lock() = sets;
                 thread.seccomp.copy_from(&creator.seccomp);
+                #[cfg(feature = "alloc")]
+                thread.landlock.copy_from(&creator.landlock);
                 thread.no_new_privs.store(
                     creator.no_new_privs.load(Ordering::Acquire),
                     Ordering::Release,

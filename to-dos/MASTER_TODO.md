@@ -448,6 +448,9 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
        - [x] seccomp in full: strict mode, classic BPF filters by the shared `veridian-cbpf`
          crate, every action, TSYNC, user notification with its listener and ioctls, the status
          lines (ADR 0027 decision 27).
+       - [x] Landlock, ABI 11 (ADR 0028): the three calls, every filesystem, network and scope
+         check, through `cap::authority::holds_path` and `holds_net` and the shared
+         `veridian-landlock` crate.
      - [ ] Linux AIO (io_setup, io_destroy, io_submit, io_cancel, io_getevents, io_pgetevents) and
        io_uring (io_uring_setup, io_uring_enter, io_uring_register) move to v0.29: they need an
        asynchronous completion path in the kernel.

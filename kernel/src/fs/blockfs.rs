@@ -548,11 +548,55 @@ fn disk_owner_ids(
 pub struct BlockFsNode {
     inode_num: u32,
     fs: Arc<RwLock<BlockFsInner>>,
+    holds: Arc<InodeHolds>,
+}
+
+/// How many nodes in memory name each inode number. A number held is
+/// not given to a new file even once its last name is gone: an open file,
+/// a working directory or a Landlock rule's anchor names that file, and
+/// anything keyed by its number (a rule, a FIFO or socket binding, a file
+/// handle) must not come to name another, as Linux keeps an inode until
+/// its last reference goes. Locked on its own, as nodes are made with the
+/// filesystem lock held.
+#[derive(Default)]
+pub struct InodeHolds(spin::Mutex<alloc::collections::BTreeMap<u32, u32>>);
+
+impl InodeHolds {
+    fn hold(&self, inode: u32) {
+        *self.0.lock().entry(inode).or_insert(0) += 1;
+    }
+
+    fn release(&self, inode: u32) {
+        let mut held = self.0.lock();
+        if let Some(n) = held.get_mut(&inode) {
+            *n -= 1;
+            if *n == 0 {
+                held.remove(&inode);
+            }
+        }
+    }
+
+    fn is_held(&self, inode: u32) -> bool {
+        self.0.lock().contains_key(&inode)
+    }
+}
+
+impl Drop for BlockFsNode {
+    fn drop(&mut self) {
+        self.holds.release(self.inode_num);
+    }
 }
 
 impl BlockFsNode {
-    pub fn new(inode_num: u32, fs: Arc<RwLock<BlockFsInner>>) -> Self {
-        Self { inode_num, fs }
+    /// A node for `inode_num`, counted in `holds` (the filesystem's) until
+    /// it is dropped.
+    pub fn new(inode_num: u32, fs: Arc<RwLock<BlockFsInner>>, holds: Arc<InodeHolds>) -> Self {
+        holds.hold(inode_num);
+        Self {
+            inode_num,
+            fs,
+            holds,
+        }
     }
 
     /// Run one whole modifying operation under the filesystem write lock,
@@ -667,7 +711,11 @@ impl VfsNode for BlockFsNode {
     fn lookup(&self, name: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
         let fs = self.fs.read();
         let child_inode = fs.lookup_in_dir(self.inode_num, name)?;
-        Ok(Arc::new(BlockFsNode::new(child_inode, self.fs.clone())))
+        Ok(Arc::new(BlockFsNode::new(
+            child_inode,
+            self.fs.clone(),
+            self.holds.clone(),
+        )))
     }
 
     fn create(
@@ -676,12 +724,20 @@ impl VfsNode for BlockFsNode {
         permissions: Permissions,
     ) -> Result<Arc<dyn VfsNode>, KernelError> {
         let new_inode = self.mutate(|fs| fs.create_file(self.inode_num, name, permissions))?;
-        Ok(Arc::new(BlockFsNode::new(new_inode, self.fs.clone())))
+        Ok(Arc::new(BlockFsNode::new(
+            new_inode,
+            self.fs.clone(),
+            self.holds.clone(),
+        )))
     }
 
     fn mkdir(&self, name: &str, permissions: Permissions) -> Result<Arc<dyn VfsNode>, KernelError> {
         let new_inode = self.mutate(|fs| fs.create_directory(self.inode_num, name, permissions))?;
-        Ok(Arc::new(BlockFsNode::new(new_inode, self.fs.clone())))
+        Ok(Arc::new(BlockFsNode::new(
+            new_inode,
+            self.fs.clone(),
+            self.holds.clone(),
+        )))
     }
 
     fn unlink(&self, name: &str) -> Result<(), KernelError> {
@@ -728,7 +784,11 @@ impl VfsNode for BlockFsNode {
 
     fn symlink(&self, name: &str, target: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
         let new_inode = self.mutate(|fs| fs.create_symlink(self.inode_num, name, target))?;
-        Ok(Arc::new(BlockFsNode::new(new_inode, self.fs.clone())))
+        Ok(Arc::new(BlockFsNode::new(
+            new_inode,
+            self.fs.clone(),
+            self.holds.clone(),
+        )))
     }
 
     /// Read the target of a symbolic link in BlockFS.
@@ -826,7 +886,11 @@ impl VfsNode for BlockFsNode {
     ) -> Result<Arc<dyn VfsNode>, KernelError> {
         let new_inode =
             self.mutate(|fs| fs.create_special(self.inode_num, name, kind, permissions, rdev))?;
-        Ok(Arc::new(BlockFsNode::new(new_inode, self.fs.clone())))
+        Ok(Arc::new(BlockFsNode::new(
+            new_inode,
+            self.fs.clone(),
+            self.holds.clone(),
+        )))
     }
 
     fn is_special_inode(&self) -> bool {
@@ -925,6 +989,8 @@ pub struct BlockFsInner {
     /// found by that inode number must not be found by the next file to get
     /// it (`fs::special_inode_freed`).
     freed_special: Vec<u32>,
+    /// The inode numbers nodes in memory hold ([`InodeHolds`]).
+    holds: Arc<InodeHolds>,
     /// Those being reported now, with the lock released: not given to a
     /// new file until the FIFO and socket tables have forgotten them, or a
     /// new FIFO or socket could be found as the old one (PR #20 review).
@@ -977,6 +1043,7 @@ impl BlockFsInner {
             disk_writable: false,
             page_cache: crate::mm::page_cache::PageCacheTable::new(),
             freed_special: Vec::new(),
+            holds: Arc::new(InodeHolds::default()),
             reporting_special: Vec::new(),
         };
 
@@ -1020,7 +1087,11 @@ impl BlockFsInner {
 
     fn allocate_inode(&mut self) -> Option<u32> {
         for (idx, inode) in self.inode_table.iter().enumerate() {
-            if inode.links_count == 0 && idx > 0 && !self.special_unreported(idx as u32) {
+            if inode.links_count == 0
+                && idx > 0
+                && !self.special_unreported(idx as u32)
+                && !self.holds.is_held(idx as u32)
+            {
                 // Don't allocate root. A cache of the inode's previous file
                 // must not serve the new one.
                 self.superblock.free_inodes -= 1;
@@ -1546,6 +1617,7 @@ impl BlockFsInner {
             disk_writable: false,
             page_cache: crate::mm::page_cache::PageCacheTable::new(),
             freed_special: Vec::new(),
+            holds: Arc::new(InodeHolds::default()),
             reporting_special: Vec::new(),
         };
         fs.attach_disk(backend)?;
@@ -3335,7 +3407,8 @@ impl BlockFs {
 
 impl Filesystem for BlockFs {
     fn root(&self) -> Arc<dyn VfsNode> {
-        Arc::new(BlockFsNode::new(0, self.inner.clone()))
+        let holds = self.inner.read().holds.clone();
+        Arc::new(BlockFsNode::new(0, self.inner.clone(), holds))
     }
 
     fn name(&self) -> &str {
@@ -3346,9 +3419,10 @@ impl Filesystem for BlockFs {
         false
     }
 
-    /// Inode numbers are the on-disk ones. A freed number is given to the
-    /// next new file, and handles carry no generation yet, so a handle to
-    /// a deleted file can open the file that took its number.
+    /// Inode numbers are the on-disk ones. A freed number is given to a
+    /// new file once no node in memory names the old one
+    /// ([`InodeHolds`]); handles carry no generation yet, so a handle to a
+    /// deleted file nothing holds can open the file that took its number.
     fn exportable(&self) -> bool {
         true
     }
@@ -3418,9 +3492,36 @@ mod tests {
         let other = root.mknod("q", NodeType::Pipe, perms, 0).unwrap();
         assert_ne!(crate::fs::inode_key(&other).1 as u32, old_ino);
         fs.inner.write().reporting_special.clear();
+        // Nothing in memory holds the old file any more.
+        drop(old);
         let reused = root.mknod("r", NodeType::Pipe, perms, 0).unwrap();
         assert_eq!(crate::fs::inode_key(&reused).1 as u32, old_ino);
         assert!(fs.inner.read().reporting_special.is_empty());
+    }
+
+    /// A deleted file's number is not given to a new file while a node in
+    /// memory still names it (an open file, a working directory, a Landlock
+    /// rule's anchor), as Linux keeps an inode until its last reference
+    /// goes: a rule on the old file must not cover the new one. Once the
+    /// last node goes, the number is free again.
+    #[test]
+    fn a_held_inode_number_is_not_reused() {
+        let fs = BlockFs::format(1024, 64).unwrap();
+        let root = fs.root();
+        let perms = Permissions::from_mode(0o755);
+        let old = root.mkdir("d", perms).unwrap();
+        let old_ino = crate::fs::inode_key(&old).1 as u32;
+        // A second node for the same file, as another lookup makes.
+        let again = root.lookup("d").unwrap();
+        root.unlink("d").unwrap();
+        let other = root.create("f", perms).unwrap();
+        assert_ne!(crate::fs::inode_key(&other).1 as u32, old_ino);
+        drop(old);
+        let still = root.create("g", perms).unwrap();
+        assert_ne!(crate::fs::inode_key(&still).1 as u32, old_ino);
+        drop(again);
+        let reused = root.create("h", perms).unwrap();
+        assert_eq!(crate::fs::inode_key(&reused).1 as u32, old_ino);
     }
 
     /// statfs reports the superblock's counts, and they move as a file

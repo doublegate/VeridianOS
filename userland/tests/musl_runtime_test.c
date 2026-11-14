@@ -5640,6 +5640,7 @@ static void test_mount_api(void);
 static void test_idmapped_mount(void);
 static void test_seccomp(void);
 static void test_seccomp_notify(void);
+static void test_landlock(void);
 static void test_mount_no_escape(void);
 static void test_pivot_root(void);
 static void test_mount_object_cap(void);
@@ -5720,6 +5721,7 @@ static const struct {
     {"idmapped_mount", test_idmapped_mount},
     {"seccomp", test_seccomp},
     {"seccomp_notify", test_seccomp_notify},
+    {"landlock", test_landlock},
     {"pivot_root", test_pivot_root},
     {"mount_object_cap", test_mount_object_cap},
     {"mount_modify_drop", test_mount_modify_drop},
@@ -11378,6 +11380,184 @@ static int t_notif_recv(int l, pid_t pid, struct t_notif *n)
     if (ioctl(l, T_NOTIF_RECV, n) != 0) return 0;
     return n->pid == (uint32_t)pid && n->data.nr == SYS_getppid && n->data.arch == T_AUDIT_ARCH;
 }
+/* Landlock (ADR 0028), as Linux 7.3's ABI 11. */
+#ifndef SYS_landlock_create_ruleset
+#define SYS_landlock_create_ruleset 444
+#define SYS_landlock_add_rule 445
+#define SYS_landlock_restrict_self 446
+#endif
+#define T_LL_EXECUTE (1u << 0)
+#define T_LL_WRITE_FILE (1u << 1)
+#define T_LL_READ_FILE (1u << 2)
+#define T_LL_READ_DIR (1u << 3)
+#define T_LL_REMOVE_FILE (1u << 5)
+#define T_LL_MAKE_DIR (1u << 7)
+#define T_LL_MAKE_REG (1u << 8)
+#define T_LL_REFER (1u << 13)
+#define T_LL_TRUNCATE (1u << 14)
+struct t_ll_attr {
+    uint64_t fs, net, scoped, quiet_fs, quiet_net, quiet_scoped;
+};
+struct t_ll_path {
+    uint64_t allowed;
+    int32_t parent_fd;
+} __attribute__((packed));
+static int t_ll_ruleset(uint64_t fs)
+{
+    struct t_ll_attr a = {0};
+    a.fs = fs;
+    return (int)syscall(SYS_landlock_create_ruleset, &a, sizeof(a), 0);
+}
+static int t_ll_allow(int rs, const char *dir, uint64_t allowed)
+{
+    int d = open(dir, O_PATH | O_CLOEXEC);
+    if (d < 0) return -1;
+    struct t_ll_path p = {allowed, d};
+    int r = (int)syscall(SYS_landlock_add_rule, rs, 1 /* PATH_BENEATH */, &p, 0);
+    close(d);
+    return r;
+}
+static int t_ll_errno(long r, int e)
+{
+    return r == -1 && errno == e;
+}
+static volatile int t_ll_go;
+static void *t_ll_thread(void *arg)
+{
+    (void)arg;
+    while (!t_ll_go) usleep(1000);
+    int fd = open("/tmp/ll/c/h", O_RDONLY);
+    return (void *)(intptr_t)(fd == -1 && errno == EACCES ? 0 : 1);
+}
+static void test_landlock(void)
+{
+    char why[96];
+    int f = 0;
+    /* The ABI version and errata; argument checks. */
+    if (syscall(SYS_landlock_create_ruleset, NULL, 0, 1 /* VERSION */) != 11) f |= 1;
+    if (syscall(SYS_landlock_create_ruleset, NULL, 0, 2 /* ERRATA */) != 0xf) f |= 1;
+    if (!t_ll_errno(syscall(SYS_landlock_create_ruleset, NULL, 0, 4), EINVAL)) f |= 2;
+    if (!t_ll_errno(syscall(SYS_landlock_create_ruleset, NULL, 0, 0), EFAULT)) f |= 2;
+    struct t_ll_attr zero = {0};
+    if (!t_ll_errno(syscall(SYS_landlock_create_ruleset, &zero, 4, 0), EINVAL)) f |= 2;
+    if (!t_ll_errno(syscall(SYS_landlock_create_ruleset, &zero, sizeof(zero), 0), ENOMSG)) f |= 2;
+    zero.fs = 1ull << 40;
+    if (!t_ll_errno(syscall(SYS_landlock_create_ruleset, &zero, sizeof(zero), 0), EINVAL)) f |= 2;
+    int pfd[2] = {-1, -1};
+    if (pipe(pfd) != 0) f |= 2;
+    struct t_ll_path bad = {T_LL_READ_FILE, 0};
+    if (!t_ll_errno(syscall(SYS_landlock_add_rule, pfd[0], 1, &bad, 0), EBADFD)) f |= 2;
+    int rs = t_ll_ruleset(T_LL_READ_FILE);
+    if (rs < 0) f |= 2;
+    bad.parent_fd = pfd[0];
+    if (!t_ll_errno(syscall(SYS_landlock_add_rule, rs, 1, &bad, 0), EBADFD)) f |= 2;
+    bad.allowed = 0;
+    if (!t_ll_errno(syscall(SYS_landlock_add_rule, rs, 1, &bad, 0), ENOMSG)) f |= 2;
+    if (!t_ll_errno(syscall(SYS_landlock_add_rule, rs, 9, &bad, 0), EINVAL)) f |= 2;
+    close(rs);
+    close(pfd[0]);
+    close(pfd[1]);
+    /* A tree: rules on a (read, write, make and remove files) and b
+     * (read only); none on c. */
+    mkdir("/tmp/ll", 0755);
+    mkdir("/tmp/ll/a", 0755);
+    mkdir("/tmp/ll/b", 0755);
+    mkdir("/tmp/ll/c", 0755);
+    close(open("/tmp/ll/a/f", O_CREAT | O_WRONLY | O_TRUNC, 0644));
+    close(open("/tmp/ll/b/g", O_CREAT | O_WRONLY | O_TRUNC, 0644));
+    int hf = open("/tmp/ll/c/h", O_CREAT | O_RDWR | O_TRUNC, 0644);
+    if (hf < 0 || write(hf, "x", 1) != 1) f |= 4;
+    pid_t c = fork();
+    if (c == 0) {
+        uint64_t handled = T_LL_READ_FILE | T_LL_WRITE_FILE | T_LL_READ_DIR | T_LL_REMOVE_FILE |
+                           T_LL_MAKE_DIR | T_LL_MAKE_REG | T_LL_REFER | T_LL_TRUNCATE;
+        int r = t_ll_ruleset(handled);
+        if (r < 0) _exit(10);
+        if (t_ll_allow(r, "/tmp/ll/a",
+                       T_LL_READ_FILE | T_LL_WRITE_FILE | T_LL_READ_DIR | T_LL_REMOVE_FILE |
+                           T_LL_MAKE_REG | T_LL_REFER | T_LL_TRUNCATE) != 0)
+            _exit(11);
+        if (t_ll_allow(r, "/tmp/ll/b", T_LL_READ_FILE | T_LL_READ_DIR) != 0) _exit(12);
+        /* A file rule may not carry directory rights. */
+        int fd = open("/tmp/ll/a/f", O_PATH);
+        struct t_ll_path fr = {T_LL_READ_DIR, fd};
+        if (!t_ll_errno(syscall(SYS_landlock_add_rule, r, 1, &fr, 0), EINVAL)) _exit(13);
+        close(fd);
+        pthread_t th;
+        void *res = (void *)1;
+        if (pthread_create(&th, NULL, t_ll_thread, NULL) != 0) _exit(14);
+        if (syscall(SYS_landlock_restrict_self, r, (1u << 4) /* NO_NEW_PRIVS */ | (1u << 3) /* TSYNC */) != 0)
+            _exit(15);
+        t_ll_go = 1;
+        pthread_join(th, &res);
+        int bits = 0;
+        if (res != NULL) bits |= 1 << 0;
+        if (prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 1) bits |= 1 << 1;
+        fd = open("/tmp/ll/a/f", O_RDWR);
+        if (fd < 0) bits |= 1 << 2;
+        if (fd >= 0 && ftruncate(fd, 0) != 0) bits |= 1 << 3;
+        close(fd);
+        fd = open("/tmp/ll/b/g", O_RDONLY);
+        if (fd < 0) bits |= 1 << 4;
+        /* Opened without TRUNCATE: ftruncate is refused even writable
+         * elsewhere, so check through the path. */
+        close(fd);
+        if (!t_ll_errno(open("/tmp/ll/b/g", O_WRONLY), EACCES)) bits |= 1 << 5;
+        if (!t_ll_errno(open("/tmp/ll/c/h", O_RDONLY), EACCES)) bits |= 1 << 6;
+        if (!t_ll_errno(truncate("/tmp/ll/b/g", 0), EACCES)) bits |= 1 << 7;
+        if (truncate("/tmp/ll/a/f", 0) != 0) bits |= 1 << 8;
+        fd = open("/tmp/ll/a/new", O_CREAT | O_WRONLY, 0644);
+        if (fd < 0) bits |= 1 << 9;
+        close(fd);
+        if (!t_ll_errno(open("/tmp/ll/b/new", O_CREAT | O_WRONLY, 0644), EACCES)) bits |= 1 << 10;
+        if (!t_ll_errno(mkdir("/tmp/ll/a/d", 0755), EACCES)) bits |= 1 << 11;
+        /* EEXIST before the Landlock check. */
+        if (!t_ll_errno(mkdir("/tmp/ll/a", 0755), EEXIST)) bits |= 1 << 12;
+        if (unlink("/tmp/ll/a/new") != 0) bits |= 1 << 13;
+        if (!t_ll_errno(unlink("/tmp/ll/b/g"), EACCES)) bits |= 1 << 14;
+        /* Renames: within a directory, the make and remove rights; into b,
+         * which may not make files, EACCES. */
+        if (rename("/tmp/ll/a/f", "/tmp/ll/a/f2") != 0) bits |= 1 << 15;
+        if (!t_ll_errno(rename("/tmp/ll/a/f2", "/tmp/ll/b/f2"), EACCES)) bits |= 1 << 16;
+        if (!t_ll_errno(link("/tmp/ll/a/f2", "/tmp/ll/b/x"), EACCES)) bits |= 1 << 17;
+        /* No mount changes under a filesystem domain. */
+        if (!t_ll_errno(mount("none", "/tmp/ll/a", "tmpfs", 0, NULL), EPERM)) bits |= 1 << 18;
+        /* A file opened before still works. */
+        char ch = 0;
+        if (pread(hf, &ch, 1, 0) != 1 || ch != 'x') bits |= 1 << 19;
+        /* At most 16 layers. */
+        int layers = 1, e = 0;
+        while (layers < 20) {
+            if (syscall(SYS_landlock_restrict_self, r, 0) != 0) {
+                e = errno;
+                break;
+            }
+            layers++;
+        }
+        if (layers != 16 || e != E2BIG) bits |= 1 << 20;
+        _exit(bits ? 64 + __builtin_ctz(bits) : 0);
+    }
+    int st = t_exit_status(c);
+    if (st != 0) {
+        f |= 8;
+        snprintf(why, sizeof(why), "f=%#x child=%d", f, st);
+        report("landlock", 0, why);
+        close(hf);
+        return;
+    }
+    close(hf);
+    /* Without no_new_privs, an unprivileged caller is EPERM. */
+    c = fork();
+    if (c == 0) {
+        int r = t_ll_ruleset(T_LL_READ_FILE);
+        if (r < 0 || setuid(65534) != 0) _exit(2);
+        _exit(t_ll_errno(syscall(SYS_landlock_restrict_self, r, 0), EPERM) ? 0 : 1);
+    }
+    if (t_exit_status(c) != 0) f |= 16;
+    snprintf(why, sizeof(why), "f=%#x", f);
+    report("landlock", f == 0, why);
+}
+
 static void test_seccomp_notify(void)
 {
     char why[96];
@@ -13680,6 +13860,7 @@ int main(int argc, char **argv)
     test_idmapped_mount();
     test_seccomp();
     test_seccomp_notify();
+    test_landlock();
     test_mount_no_escape();
     test_pivot_root();
     test_mount_object_cap();

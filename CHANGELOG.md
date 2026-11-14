@@ -110,6 +110,23 @@
   ID_VALID, SET_FLAGS and ADDFD ioctls, POLLHUP once no thread uses the filter. Filters are
   installed under the thread map (TSYNC also under the credential guard) and freed without
   recursion. Runtime tests seccomp and seccomp_notify.
+- Landlock (v0.28 item 5 system tier, ADR 0028): landlock_create_ruleset, landlock_add_rule and
+  landlock_restrict_self as Linux 7.3, ABI 11 with errata 1 to 4, through the new shared
+  `veridian-landlock` crate and one authority entry (`cap::authority::holds_path` and
+  `holds_net`). Up to 16 stacked layers, kept across fork, clone and exec; TSYNC and
+  NO_NEW_PRIVS. Rules name objects, not paths, so they follow renames and bind mounts.
+  Filesystem checks where Linux makes them: open (READ_FILE, WRITE_FILE, READ_DIR, with
+  TRUNCATE and IOCTL_DEV kept on the open file), exec of the program and its interpreter
+  (EXECUTE), creating each kind of node, removal, link and rename (REFER, EXDEV when a move
+  would gain rights), truncate and ftruncate, device ioctls, and connecting to a pathname UNIX
+  socket (RESOLVE_UNIX, free within the maker's domain). No mount changes under a filesystem
+  domain. TCP and UDP bind, connect and send by port, with Linux's address checks. Signal
+  scoping, and ptrace, process_vm, pidfd_getfd and kcmp limited to the caller's domain and
+  below. CONFIG_SECURITY_LANDLOCK is set. Runtime test landlock.
+- BlockFS does not give a deleted file's inode number to a new file while a node in memory
+  still names it (an open file, a working directory, a Landlock rule), as Linux keeps an
+  inode until its last reference goes. A rule, FIFO or socket binding on the old file can no
+  longer come to name the new one.
 - The new mount API (Linux 7.3 `fs/fsopen.c`, `fs/namespace.c`): fsopen, fsconfig, fsmount and
   fspick make and reconfigure a filesystem through a context descriptor, whose parameters are
   checked one at a time as Linux checks them and whose refusals read back from it (`e tmpfs:

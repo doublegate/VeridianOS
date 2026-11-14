@@ -456,6 +456,10 @@ pub struct Thread {
     /// seccomp's mode and filters (`process::seccomp`): per thread, shared
     /// with the threads and processes it creates, kept across exec.
     pub seccomp: super::seccomp::ThreadSeccomp,
+    /// The Landlock domain (ADR 0028): per thread like seccomp, shared with
+    /// the threads and processes it creates, kept across exec.
+    #[cfg(feature = "alloc")]
+    pub landlock: crate::security::landlock::ThreadLandlock,
     /// personality(2)'s value (`process::personality`): per thread, as on
     /// Linux, and inherited by every thread and process the thread creates.
     pub personality: core::sync::atomic::AtomicU32,
@@ -633,6 +637,8 @@ impl Thread {
             io: crate::syscall::ioprio::IoContext::new(),
             no_new_privs: AtomicBool::new(false),
             seccomp: super::seccomp::ThreadSeccomp::new(),
+            #[cfg(feature = "alloc")]
+            landlock: crate::security::landlock::ThreadLandlock::new(),
             personality: core::sync::atomic::AtomicU32::new(0),
             caps: Mutex::new(super::linux_caps::CapSets::ROOT),
             comm: Mutex::new(comm),

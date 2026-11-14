@@ -293,6 +293,9 @@ pub struct ExecFile {
     /// refuses it, nosuid ignores its set-ID bits and capabilities (ADR
     /// 0022 H3c).
     pub mnt_flags: u32,
+    /// The file's canonical path in the whole tree, for the Landlock check
+    /// of exec (`None` for a descriptor without one).
+    pub canonical: Option<String>,
 }
 
 #[cfg(feature = "alloc")]
@@ -310,14 +313,38 @@ impl ExecFile {
             filename: String::from(path),
             path_inaccessible: false,
             mnt_flags: mount_flags(&vfs, &canonical),
+            canonical: Some(canonical),
         })
     }
 
     /// EACCES for a file on a noexec mount, before the permission check
-    /// (Linux's may_open, MAY_EXEC on a regular file).
+    /// (Linux's may_open, MAY_EXEC on a regular file); and EACCES unless
+    /// the caller's Landlock domain allows READ_FILE and EXECUTE on it, as
+    /// opening it with FMODE_EXEC asks (hook_file_open).
     pub fn check_mount(&self) -> Result<(), KernelError> {
-        refuse_noexec(self.mnt_flags)
+        refuse_noexec(self.mnt_flags)?;
+        let vfs = crate::fs::get_vfs().as_caller();
+        if vfs.landlock().is_some() {
+            let path = self
+                .canonical
+                .as_deref()
+                .ok_or(KernelError::PermissionDenied { operation: "exec" })?;
+            landlock_exec(&vfs, path, &self.node)?;
+        }
+        Ok(())
     }
+}
+
+/// Landlock's check of an exec open (hook_file_open with __FMODE_EXEC):
+/// READ_FILE and EXECUTE.
+#[cfg(feature = "alloc")]
+fn landlock_exec(
+    vfs: &crate::fs::CallerView<'_>,
+    canonical: &str,
+    node: &alloc::sync::Arc<dyn crate::fs::VfsNode>,
+) -> Result<(), KernelError> {
+    use crate::security::landlock::ll::fs;
+    vfs.landlock_check(canonical, Some(node), fs::READ_FILE | fs::EXECUTE)
 }
 
 /// The flags of the mount serving canonical `path` in `vfs` (0 where no
@@ -467,6 +494,7 @@ pub(crate) fn read_executable(
     let vfs = crate::fs::get_vfs().as_caller();
     let (node, canonical) = vfs.resolve_path_canonical(path)?;
     refuse_noexec(mount_flags(&vfs, &canonical))?;
+    landlock_exec(&vfs, &canonical, &node)?;
     let read = read_exec_node(&node, caller)?;
     Ok((node, read))
 }

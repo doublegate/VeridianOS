@@ -466,6 +466,8 @@ use self::wayland_syscalls::*;
 mod network_ext_syscalls;
 // seccomp(2) and the check every call passes (v0.28 item 5)
 #[cfg(feature = "alloc")]
+pub(crate) mod landlock;
+#[cfg(feature = "alloc")]
 pub(crate) mod seccomp;
 use self::network_ext_syscalls::*;
 
@@ -612,6 +614,9 @@ pub enum SyscallError {
     /// A message longer than the queue's message size, or a buffer
     /// shorter than it (EMSGSIZE, errno 90).
     MessageTooLong = -143,
+    /// A descriptor of the wrong kind for the call, such as one that is not
+    /// a Landlock ruleset (EBADFD, errno 77).
+    BadFdState = -144,
     /// The call was interrupted and left a restart block (`restart`):
     /// Linux -ERESTART_RESTARTBLOCK, turned into EINTR or restart_syscall
     /// on the way back to user mode and never seen there.
@@ -1754,6 +1759,12 @@ fn handle_syscall(
         #[cfg(feature = "alloc")]
         Syscall::Seccomp => seccomp::sys_seccomp(arg1, arg2, arg3),
         #[cfg(feature = "alloc")]
+        Syscall::LandlockCreateRuleset => landlock::sys_landlock_create_ruleset(arg1, arg2, arg3),
+        #[cfg(feature = "alloc")]
+        Syscall::LandlockAddRule => landlock::sys_landlock_add_rule(arg1, arg2, arg3, arg4),
+        #[cfg(feature = "alloc")]
+        Syscall::LandlockRestrictSelf => landlock::sys_landlock_restrict_self(arg1, arg2),
+        #[cfg(feature = "alloc")]
         Syscall::FileGetattr => fileattr::sys_file_getattr(arg1, arg2, arg3, arg4, arg5),
         #[cfg(feature = "alloc")]
         Syscall::FileSetattr => fileattr::sys_file_setattr(arg1, arg2, arg3, arg4, arg5),
@@ -2559,6 +2570,9 @@ fn sys_get_robust_list(tid: usize, head_out: usize, len_out: usize) -> SyscallRe
                 pid,
                 &pid_ns,
                 crate::cap::Rights::MODIFY,
+            ) && debug::landlock_may_inspect(
+                #[cfg(feature = "alloc")]
+                thread.landlock.get().as_deref(),
             ),
         };
         let me = crate::process::creds::Caller::current();
@@ -2624,6 +2638,14 @@ fn sys_sendmsg(socket_fd: usize, msghdr_ptr: usize, _flags: usize) -> SyscallRes
         None
     };
 
+    // Landlock's hook_socket_sendmsg, with msg_name and msg_namelen.
+    #[cfg(feature = "alloc")]
+    if let Some(SocketHandle::Inet(id)) = with_socket_fd(socket_fd, |s| Some(s.handle()))
+        .ok()
+        .flatten()
+    {
+        landlock_inet(id, hdr[0], hdr[1] & 0xffff_ffff, NetHook::Send)?;
+    }
     with_socket_fd(socket_fd, |s| match s.handle() {
         // INET sockets cannot pass files.
         SocketHandle::Inet(_) if rights.is_some() => Err(SyscallError::InvalidArgument),
@@ -3684,6 +3706,8 @@ fn sys_socket_create(domain: usize, sock_type: usize, protocol: usize) -> Syscal
 fn sys_socket_bind(fd: usize, addr_ptr: usize, addr_len: usize) -> SyscallResult {
     match with_socket_fd(fd, SocketNode::handle)? {
         SocketHandle::Inet(id) => {
+            #[cfg(feature = "alloc")]
+            landlock_inet(id, addr_ptr, addr_len, NetHook::Bind)?;
             let addr = network_ext_syscalls::parse_sockaddr(addr_ptr, addr_len)?;
             crate::net::socket::with_socket_mut(id, |s| s.bind(addr))
                 .map_err(|_| SyscallError::InvalidState)?
@@ -3724,6 +3748,93 @@ fn sys_socket_bind(fd: usize, addr_ptr: usize, addr_len: usize) -> SyscallResult
     }
 }
 
+/// Which Landlock socket hook runs (hook_socket_bind, hook_socket_connect,
+/// hook_socket_sendmsg).
+#[cfg(feature = "alloc")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NetHook {
+    Bind,
+    Connect,
+    Send,
+}
+
+/// Landlock's check of an operation on INET socket `id` with the address
+/// at `addr_ptr` (`addr_len` bytes; none for a send without one), before
+/// the address is parsed, as Linux's LSM hooks run first. Only TCP and UDP
+/// sockets are checked; a UDP socket with no port yet also needs BIND_UDP
+/// on port 0, which its connect or send would take.
+#[cfg(feature = "alloc")]
+fn landlock_inet(
+    id: usize,
+    addr_ptr: usize,
+    addr_len: usize,
+    hook: NetHook,
+) -> Result<(), SyscallError> {
+    use crate::{
+        net::socket::{SocketDomain, SocketProtocol, SocketType},
+        security::landlock::{self as l, ll::net, NetRefusal},
+    };
+    let Some(d) = l::current() else {
+        return Ok(());
+    };
+    if !d.handles_net() {
+        return Ok(());
+    }
+    let Ok((domain, ty, proto, bound)) = crate::net::socket::with_socket(id, |s| {
+        (
+            s.domain,
+            s.socket_type,
+            s.protocol,
+            s.local_addr.is_some_and(|a| a.port != 0),
+        )
+    }) else {
+        return Ok(());
+    };
+    let family = match domain {
+        SocketDomain::Inet => l::AF_INET,
+        SocketDomain::Inet6 => l::AF_INET6,
+        SocketDomain::Unix => return Ok(()),
+    };
+    let tcp =
+        ty == SocketType::Stream && matches!(proto, SocketProtocol::Tcp | SocketProtocol::Default);
+    let udp =
+        ty == SocketType::Dgram && matches!(proto, SocketProtocol::Udp | SocketProtocol::Default);
+    let access = match (hook, tcp, udp) {
+        (NetHook::Bind, true, _) => net::BIND_TCP,
+        (NetHook::Bind, _, true) => net::BIND_UDP,
+        (NetHook::Connect, true, _) => net::CONNECT_TCP,
+        (NetHook::Connect | NetHook::Send, _, true) => net::CONNECT_SEND_UDP,
+        _ => return Ok(()),
+    };
+    let refused = |r: NetRefusal| match r {
+        NetRefusal::Invalid => SyscallError::InvalidArgument,
+        NetRefusal::AfNotSupported => SyscallError::AddressFamilyNotSupported,
+        NetRefusal::Denied => SyscallError::PermissionDenied,
+    };
+    // Past sockaddr_storage the call itself refuses the address (EINVAL).
+    let mut family_given = None;
+    if addr_ptr != 0 && addr_len <= 128 {
+        let mut raw = [0u8; 128];
+        userspace::read_user_bytes(addr_ptr, &mut raw[..addr_len])?;
+        let raw = &raw[..addr_len];
+        l::check_sockaddr(&d, family, raw, access, hook == NetHook::Connect).map_err(refused)?;
+        if raw.len() >= 2 {
+            family_given = Some(u16::from_ne_bytes([raw[0], raw[1]]));
+        }
+    } else if hook != NetHook::Send {
+        return Ok(());
+    }
+    let autobind = match hook {
+        NetHook::Connect => udp && family_given.is_some_and(|f| f != l::AF_UNSPEC),
+        NetHook::Send => true,
+        NetHook::Bind => false,
+    };
+    if autobind {
+        l::check_udp_autobind(&d, bound).map_err(refused)?;
+    }
+    Ok(())
+}
+
 /// SYS_listen: Start listening on a bound socket.
 fn sys_socket_listen(fd: usize, backlog: usize) -> SyscallResult {
     match with_socket_fd(fd, SocketNode::handle)? {
@@ -3747,6 +3858,8 @@ fn sys_socket_listen(fd: usize, backlog: usize) -> SyscallResult {
 fn sys_socket_connect(fd: usize, addr_ptr: usize, addr_len: usize) -> SyscallResult {
     match with_socket_fd(fd, SocketNode::handle)? {
         SocketHandle::Inet(id) => {
+            #[cfg(feature = "alloc")]
+            landlock_inet(id, addr_ptr, addr_len, NetHook::Connect)?;
             let addr = network_ext_syscalls::parse_sockaddr(addr_ptr, addr_len)?;
             if !crate::net::socket::reachable(id) {
                 return Err(SyscallError::NetworkUnreachable);

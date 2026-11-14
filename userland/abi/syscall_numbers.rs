@@ -393,6 +393,9 @@ pub mod sysno {
     pub const SYS_file_getattr: usize = 468;
     pub const SYS_file_setattr: usize = 469;
     pub const SYS_seccomp: usize = 317;
+    pub const SYS_landlock_create_ruleset: usize = 444;
+    pub const SYS_landlock_add_rule: usize = 445;
+    pub const SYS_landlock_restrict_self: usize = 446;
 }
 
 // Linux's generic table: calls RISC-V leaves to user space are absent.
@@ -745,6 +748,9 @@ pub mod sysno {
     pub const SYS_file_getattr: usize = 468;
     pub const SYS_file_setattr: usize = 469;
     pub const SYS_seccomp: usize = 277;
+    pub const SYS_landlock_create_ruleset: usize = 444;
+    pub const SYS_landlock_add_rule: usize = 445;
+    pub const SYS_landlock_restrict_self: usize = 446;
 }
 
 // Linux's generic table with arm64's ABIs (renameat included).
@@ -1098,4 +1104,7 @@ pub mod sysno {
     pub const SYS_file_getattr: usize = 468;
     pub const SYS_file_setattr: usize = 469;
     pub const SYS_seccomp: usize = 277;
+    pub const SYS_landlock_create_ruleset: usize = 444;
+    pub const SYS_landlock_add_rule: usize = 445;
+    pub const SYS_landlock_restrict_self: usize = 446;
 }

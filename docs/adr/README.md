@@ -40,3 +40,4 @@ Consequences (Michael Nygard's format).
 | [0025](0025-authority-rights.md) | the rights of the authority capabilities | accepted; supersedes [ADR 0024](0024-linux-personality.md), decision 7, only where it gives "all rights" (at launch, and to the creator of a user namespace). The rest of [ADR 0024](0024-linux-personality.md) stands. | 2026-11-05 |
 | [0026](0026-drop-by-rights.md) | dropping authority by rights | accepted; supersedes [ADR 0024](0024-linux-personality.md), decision 7, only its "Dropping" point (`CapabilityDrop(kind, id)` removes every capability naming the object). The rest of that ADR stands, as does the rights decision that amended it. | 2026-11-08 |
 | [0027](0027-missing-linux-calls.md) | the Linux system calls still missing after group 3 | proposed | 2026-11-11 |
+| [0028](0028-landlock.md) | Landlock through the authority entry | proposed | 2026-11-14 |

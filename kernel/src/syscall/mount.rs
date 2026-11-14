@@ -159,6 +159,9 @@ pub fn sys_mount(
     if !crate::cap::authority::current_may_change_mounts() {
         return Err(SyscallError::OperationNotPermitted);
     }
+    // Landlock: no mount changes under a filesystem domain (hook_sb_mount).
+    #[cfg(feature = "alloc")]
+    crate::security::landlock::may_change_mounts().map_err(super::map_kernel_error)?;
     let tree = view.mount_tree().clone();
     let mut mnt_flags = mount_flags(flags);
     // A remount keeps the atime flags unless it names one.
@@ -228,6 +231,9 @@ pub fn sys_umount2(target: usize, flags: usize) -> SyscallResult {
     if !crate::cap::authority::current_may_change_mounts() {
         return Err(SyscallError::OperationNotPermitted);
     }
+    // Landlock: no mount changes under a filesystem domain (hook_sb_umount).
+    #[cfg(feature = "alloc")]
+    crate::security::landlock::may_change_mounts().map_err(super::map_kernel_error)?;
     let how = Umount {
         force: flags & MNT_FORCE != 0,
         detach: flags & MNT_DETACH != 0,
@@ -255,6 +261,9 @@ pub fn sys_pivot_root(new_root: usize, put_old: usize) -> SyscallResult {
     if !crate::cap::authority::current_may_change_mounts() {
         return Err(SyscallError::OperationNotPermitted);
     }
+    // Landlock: no mount changes under a filesystem domain (hook_sb_pivotroot).
+    #[cfg(feature = "alloc")]
+    crate::security::landlock::may_change_mounts().map_err(super::map_kernel_error)?;
     let tree = view.mount_tree().clone();
     let root = String::from(view.root_path());
     tree.pivot_root(&root, &new, &old).map_err(mount_error)?;

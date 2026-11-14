@@ -77,6 +77,8 @@ pub(super) fn sys_net_sendto(
 
     match socket_handle(fd)? {
         SocketHandle::Inet(id) => {
+            #[cfg(feature = "alloc")]
+            super::landlock_inet(id, addr_ptr, addr_len, super::NetHook::Send)?;
             let dest = if addr_ptr != 0 {
                 Some(parse_sockaddr(addr_ptr, addr_len)?)
             } else {

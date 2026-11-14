@@ -430,6 +430,9 @@
 #define SYS_file_setattr                 469
 /* Security (v0.28 item 5, system tier) */
 #define SYS_seccomp                      317
+#define SYS_landlock_create_ruleset      444
+#define SYS_landlock_add_rule            445
+#define SYS_landlock_restrict_self       446
 
 #elif defined(__riscv) && __riscv_xlen == 64
 
@@ -812,6 +815,9 @@
 #define SYS_file_setattr                 469
 /* Security (v0.28 item 5, system tier) */
 #define SYS_seccomp                      277
+#define SYS_landlock_create_ruleset      444
+#define SYS_landlock_add_rule            445
+#define SYS_landlock_restrict_self       446
 
 #elif defined(__aarch64__)
 
@@ -1195,6 +1201,9 @@
 #define SYS_file_setattr                 469
 /* Security (v0.28 item 5, system tier) */
 #define SYS_seccomp                      277
+#define SYS_landlock_create_ruleset      444
+#define SYS_landlock_add_rule            445
+#define SYS_landlock_restrict_self       446
 
 #else
 #error "<veridian/sysno.h>: no system call numbers for this architecture"

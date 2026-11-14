@@ -227,6 +227,13 @@ pub struct File {
     /// vm_file).
     pub write_access: Option<alloc::sync::Arc<crate::fs::write_access::WriteAccess>>,
 
+    /// The Landlock rights the file was opened with, of those checked on
+    /// an open file (TRUNCATE, IOCTL_DEV), as Linux's
+    /// `landlock_file_security`: all of them unless a restricted open
+    /// recorded less (hook_file_alloc_security, hook_file_open). ftruncate
+    /// and device ioctls check this, not the caller's domain.
+    pub landlock_allowed: AtomicU32,
+
     /// What the node asks its open files to keep alive
     /// ([`VfsNode::held_by_open`]), dropped with the file.
     _held: Option<Arc<dyn core::any::Any + Send + Sync>>,
@@ -305,6 +312,7 @@ impl File {
             refcount: RwLock::new(1),
             path: None,
             flock_owner: AtomicU64::new(0),
+            landlock_allowed: AtomicU32::new(u32::MAX),
             ofd_locked: AtomicBool::new(false),
             opener: None,
             write_access: None,
@@ -329,6 +337,7 @@ impl File {
             refcount: RwLock::new(1),
             path: Some(path),
             flock_owner: AtomicU64::new(0),
+            landlock_allowed: AtomicU32::new(u32::MAX),
             ofd_locked: AtomicBool::new(false),
             opener: None,
             write_access: None,

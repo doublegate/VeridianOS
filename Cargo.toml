@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "kernel",
     "crates/veridian-cbpf",
+    "crates/veridian-landlock",
 ]
 exclude = [
     "userland/rust-std",

@@ -821,6 +821,12 @@ Page protections now follow `prot` (fixed in v0.27, N-132 to N-137). What remain
   works since v0.28 (ADR 0027 decision 27), user notification included; SECCOMP_RET_TRACE
   is ENOSYS until ptrace can attach a tracer (Track C item 8), as on Linux with none
   attached.
+- Landlock (ADR 0028) is complete for what exists, with these gaps:
+  - LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET has nothing to refuse until abstract UNIX sockets
+    arrive (Track C item 5, v0.29).
+  - Signals sent through SIGIO are not scoped, because no file sends SIGIO yet.
+  - The log flags are accepted and log nothing, because there is no audit subsystem.
+  - The MAC module's check still runs beside Landlock's until the MAC ADR retires it.
 - POSIX shared memory objects have no access control (N-88).
 
 ### Accounts and passwords (N-131, N-153)

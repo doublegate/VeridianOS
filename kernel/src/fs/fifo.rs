@@ -397,9 +397,9 @@ mod tests {
             .unwrap()
     }
 
-    /// BlockFS reuses a freed inode number: a new FIFO given the number of
-    /// an unlinked one that is still open gets its own pipe, and the old
-    /// one's open ends keep theirs.
+    /// An unlinked FIFO that is still open keeps its BlockFS inode number
+    /// (`blockfs::InodeHolds`): a new FIFO gets another number and its own
+    /// pipe, and the old one's open ends keep theirs.
     #[test]
     fn new_fifo_on_a_freed_blockfs_number_gets_a_new_pipe() {
         let fs = crate::fs::blockfs::BlockFs::format(1024, 64).unwrap();
@@ -410,10 +410,10 @@ mod tests {
         assert_eq!(old_end.write(0, b"old"), Ok(3));
         root.unlink("f").unwrap();
         let new = root.mknod("g", NodeType::Pipe, perms, 0).unwrap();
-        assert_eq!(
+        assert_ne!(
             super::super::inode_key(&new),
             super::super::inode_key(&old),
-            "the test needs the inode number reused"
+            "a held number is not reused"
         );
         let new_end = FifoEnd::open(new, true, true, false).unwrap();
         let mut b = [0u8; 8];
