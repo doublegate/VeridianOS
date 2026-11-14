@@ -157,8 +157,9 @@ impl DiskBackend for VirtioBlockBackend {
             crate::drivers::virtio::blk::get_device().ok_or(KernelError::NotInitialized {
                 subsystem: "virtio-blk",
             })?;
-        // The caller's I/O priority decides when its turn comes (ioprio).
-        let _turn = crate::drivers::virtio::blk::ARBITER.admit(crate::syscall::ioprio::current());
+        // No I/O-priority turn here: BlockFS calls with its own locks (spin
+        // locks) held, where waiting would sleep holding them, and those
+        // locks already serialise its requests (PR #45 review).
         let mut device = device_lock.lock();
 
         // One request per 4 KiB block (was eight 512-byte requests).
@@ -179,7 +180,6 @@ impl DiskBackend for VirtioBlockBackend {
             crate::drivers::virtio::blk::get_device().ok_or(KernelError::NotInitialized {
                 subsystem: "virtio-blk",
             })?;
-        let _turn = crate::drivers::virtio::blk::ARBITER.admit(crate::syscall::ioprio::current());
         let mut device = device_lock.lock();
 
         device.write_sectors(block_num * SECTORS_PER_BLOCK as u64, &data[..BLOCK_SIZE])?;

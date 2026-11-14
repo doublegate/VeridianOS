@@ -2,13 +2,14 @@
 //! maintainer's choice of an arbiter over asynchronous queues, which come
 //! with v0.29's asynchronous completion path).
 //!
-//! The virtio-blk and NVMe drivers run one request at a time behind the
-//! device's lock, so there is no queue to reorder. Instead, callers wait
-//! here for their turn at the device, and each turn goes to the waiter
-//! with the best priority: RT before BE before IDLE, by level within a
-//! class (the lower ioprio value), the earliest first between equals. Two
-//! rules keep anything from waiting forever, as Linux's I/O schedulers
-//! keep classes from starving each other:
+//! The NVMe driver runs one request at a time behind the device's lock, so
+//! there is no queue to reorder. Instead, callers wait here for their turn
+//! at the device (BlockFS on virtio-blk does not: it issues requests under
+//! its own spin locks, where a wait would sleep holding them), and each turn
+//! goes to the waiter with the best priority: RT before BE before IDLE, by
+//! level within a class (the lower ioprio value), the earliest first between
+//! equals. Two rules keep anything from waiting forever, as Linux's I/O
+//! schedulers keep classes from starving each other:
 //! - a waiter passed over for [`STARVE_NS`] goes next, whatever its class;
 //! - IDLE gets a turn only when no other class waits (or once starved).
 //!
