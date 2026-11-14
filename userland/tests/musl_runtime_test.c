@@ -5642,6 +5642,7 @@ static void test_seccomp(void);
 static void test_seccomp_notify(void);
 static void test_landlock(void);
 static void test_keyrings(void);
+static void test_lsm_calls(void);
 static void test_mount_no_escape(void);
 static void test_pivot_root(void);
 static void test_mount_object_cap(void);
@@ -5724,6 +5725,7 @@ static const struct {
     {"seccomp_notify", test_seccomp_notify},
     {"landlock", test_landlock},
     {"keyrings", test_keyrings},
+    {"lsm_calls", test_lsm_calls},
     {"pivot_root", test_pivot_root},
     {"mount_object_cap", test_mount_object_cap},
     {"mount_modify_drop", test_mount_modify_drop},
@@ -11669,6 +11671,35 @@ static void test_keyrings(void)
     report("keyrings", f == 0, why);
 }
 
+/* The security modules' calls: capability and Landlock, neither with
+ * process attributes. */
+#ifndef SYS_lsm_list_modules
+#define SYS_lsm_get_self_attr 459
+#define SYS_lsm_set_self_attr 460
+#define SYS_lsm_list_modules 461
+#endif
+static void test_lsm_calls(void)
+{
+    char why[96];
+    int f = 0;
+    uint64_t ids[4] = {0};
+    uint32_t size = sizeof(ids);
+    if (syscall(SYS_lsm_list_modules, ids, &size, 0) != 2 || size != 16 || ids[0] != 100 || ids[1] != 110)
+        f |= 1;
+    size = 8;
+    if (syscall(SYS_lsm_list_modules, ids, &size, 0) != -1 || errno != E2BIG || size != 16) f |= 2;
+    if (syscall(SYS_lsm_list_modules, ids, &size, 1) != -1 || errno != EINVAL) f |= 4;
+    uint8_t ctx[64] = {0};
+    size = sizeof(ctx);
+    if (syscall(SYS_lsm_get_self_attr, 100 /* CURRENT */, ctx, &size, 0) != -1 || errno != EOPNOTSUPP ||
+        size != 0)
+        f |= 8;
+    if (syscall(SYS_lsm_get_self_attr, 0, ctx, &size, 0) != -1 || errno != EINVAL) f |= 16;
+    if (syscall(SYS_lsm_set_self_attr, 100, ctx, 8, 0) != -1 || errno != EINVAL) f |= 32;
+    snprintf(why, sizeof(why), "f=%#x", f);
+    report("lsm_calls", f == 0, why);
+}
+
 static void test_seccomp_notify(void)
 {
     char why[96];
@@ -13973,6 +14004,7 @@ int main(int argc, char **argv)
     test_seccomp_notify();
     test_landlock();
     test_keyrings();
+    test_lsm_calls();
     test_mount_no_escape();
     test_pivot_root();
     test_mount_object_cap();

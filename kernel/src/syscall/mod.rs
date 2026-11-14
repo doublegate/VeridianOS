@@ -470,6 +470,8 @@ pub(crate) mod landlock;
 // The key retention service (v0.28 item 5)
 #[cfg(feature = "alloc")]
 pub(crate) mod keys;
+// The security modules' calls (v0.28 item 5)
+mod lsm;
 #[cfg(feature = "alloc")]
 pub(crate) mod seccomp;
 use self::network_ext_syscalls::*;
@@ -1769,6 +1771,9 @@ fn handle_syscall(
         Syscall::Cachestat => memctl::sys_cachestat(arg1, arg2, arg3, arg4),
         #[cfg(feature = "alloc")]
         Syscall::Seccomp => seccomp::sys_seccomp(arg1, arg2, arg3),
+        Syscall::LsmListModules => lsm::sys_lsm_list_modules(arg1, arg2, arg3),
+        Syscall::LsmGetSelfAttr => lsm::sys_lsm_get_self_attr(arg1, arg2, arg3, arg4),
+        Syscall::LsmSetSelfAttr => lsm::sys_lsm_set_self_attr(arg1, arg2, arg3, arg4),
         #[cfg(feature = "alloc")]
         Syscall::AddKey => keys::sys_add_key(arg1, arg2, arg3, arg4, arg5),
         #[cfg(feature = "alloc")]

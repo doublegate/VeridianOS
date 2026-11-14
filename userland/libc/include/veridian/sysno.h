@@ -436,6 +436,9 @@
 #define SYS_add_key                      248
 #define SYS_request_key                  249
 #define SYS_keyctl                       250
+#define SYS_lsm_get_self_attr            459
+#define SYS_lsm_set_self_attr            460
+#define SYS_lsm_list_modules             461
 
 #elif defined(__riscv) && __riscv_xlen == 64
 
@@ -824,6 +827,9 @@
 #define SYS_add_key                      217
 #define SYS_request_key                  218
 #define SYS_keyctl                       219
+#define SYS_lsm_get_self_attr            459
+#define SYS_lsm_set_self_attr            460
+#define SYS_lsm_list_modules             461
 
 #elif defined(__aarch64__)
 
@@ -1213,6 +1219,9 @@
 #define SYS_add_key                      217
 #define SYS_request_key                  218
 #define SYS_keyctl                       219
+#define SYS_lsm_get_self_attr            459
+#define SYS_lsm_set_self_attr            460
+#define SYS_lsm_list_modules             461
 
 #else
 #error "<veridian/sysno.h>: no system call numbers for this architecture"

@@ -475,3 +475,6 @@ landlock_restrict_self
 add_key
 request_key
 keyctl
+lsm_get_self_attr
+lsm_set_self_attr
+lsm_list_modules

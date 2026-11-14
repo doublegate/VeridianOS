@@ -132,6 +132,9 @@
   `/proc/sys/kernel/keys`. request_key with no usermode helper behaves as Linux without
   `/sbin/request-key` (ENOENT, a 60 s negative key). CONFIG_KEYS and CONFIG_PERSISTENT_KEYRINGS
   are set. Runtime test keyrings.
+- lsm_list_modules, lsm_get_self_attr and lsm_set_self_attr (Linux 7.3): the modules are the
+  capability module and Landlock; neither has process attributes, so after Linux's argument
+  checks getting or setting one is EOPNOTSUPP. Runtime test lsm_calls.
 - BlockFS does not give a deleted file's inode number to a new file while a node in memory
   still names it (an open file, a working directory, a Landlock rule), as Linux keeps an
   inode until its last reference goes. A rule, FIFO or socket binding on the old file can no
