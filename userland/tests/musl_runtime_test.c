@@ -9831,6 +9831,22 @@ static void test_files_sched(void)
     if (bfd >= 0)
         close(bfd);
     unlink(bpath);
+    /* A hole punched through a mapping made before the flag: EPERM
+     * (madvise_remove's vfs_fallocate), the data kept. */
+    int mfd = open("/tmp/veridian-mrm", O_CREAT | O_RDWR | O_TRUNC, 0644);
+    char *mm = MAP_FAILED;
+    if (mfd >= 0 && ftruncate(mfd, 4096) == 0)
+        mm = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, mfd, 0);
+    if (mm == MAP_FAILED || (mm[0] = 'k', t_setflags(mfd, T_FS_IMMUTABLE) != 0) ||
+        madvise(mm, 4096, MADV_REMOVE) != -1 || errno != EPERM || mm[0] != 'k')
+        f |= 262144;
+    if (mfd >= 0) {
+        t_setflags(mfd, 0);
+        close(mfd);
+    }
+    if (mm != MAP_FAILED)
+        munmap(mm, 4096);
+    unlink("/tmp/veridian-mrm");
     /* An immutable directory takes no new entry: EPERM, not EACCES. */
     const char *idir = "/tmp/veridian-idir";
     rmdir(idir);

@@ -124,7 +124,9 @@ impl Arbiter {
                     arbiter: Some(self),
                 };
             }
-            let key = (ioprio, s.next);
+            // Class and level only: the hint bits (3..13) sit between them
+            // and would rank BE 0 with a hint below BE 7 (PR #45 review).
+            let key = (ioprio & 0xe007, s.next);
             s.next += 1;
             s.waiting.insert(key, now());
             key

@@ -376,6 +376,11 @@ pub fn sys_remap_file_pages(
         vas.fill_owned_pages(start, &buf)
             .map_err(super::map_kernel_error)?;
         vas.set_backing(VirtualAddress(start), node, offset, backing.write.clone());
+        // The new mapping is installed writable from the old one's flags:
+        // an immutable file's pages are write-protected again before the
+        // lock goes (PR #45 review).
+        #[cfg(feature = "alloc")]
+        write_protect_locked(&vas, start as usize, size);
         finish_remap(&vas, &first, start, end, lock);
     }
     Ok(0)
@@ -1008,8 +1013,20 @@ fn mmap_inner(
     }
     #[cfg(feature = "alloc")]
     lock_new_mapping(&memory_space, mapped_addr, length, flags);
+    // An immutable file's pages are write-protected under the lock they
+    // were mapped under, so no other thread writes through them in between
+    // (PR #45 review); sys_mmap's pass after it covers a change begun since.
+    #[cfg(feature = "alloc")]
+    write_protect_locked(&memory_space, mapped_addr, length);
 
     Ok(mapped_addr)
+}
+
+/// [`write_protect_immutable`] on an address space already locked.
+#[cfg(feature = "alloc")]
+fn write_protect_locked(vas: &crate::mm::vas::VirtualAddressSpace, at: usize, length: usize) {
+    let end = at.saturating_add(length.div_ceil(PAGE_SIZE) * PAGE_SIZE);
+    vas.write_protect_file(None, at as u64, end as u64);
 }
 
 /// Map `size` bytes of `node`'s own pages MAP_SHARED with `prot`, holding
@@ -1243,6 +1260,9 @@ fn mprotect_inner(addr: usize, length: usize, prot: usize) -> SyscallResult {
     if prot & PROT_EXEC != 0 {
         memory_space.sync_code_pages(addr as u64, length as u64);
     }
+    // As mmap: under the lock the protection changed under.
+    #[cfg(feature = "alloc")]
+    write_protect_locked(&memory_space, addr, length);
 
     Ok(0)
 }
@@ -1647,6 +1667,8 @@ fn mremap_inner(
         #[cfg(feature = "alloc")]
         if let Ok(at) = done {
             relock(&vas, &request, &m, at);
+            // As mmap: under the lock the mapping moved or grew under.
+            write_protect_locked(&vas, at, new_len);
         }
         return done;
     }

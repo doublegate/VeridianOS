@@ -167,18 +167,24 @@ pub fn resolve_user_copy_fault(info: &PageFaultInfo) -> bool {
     let Some(process) = crate::process::try_current_process() else {
         return false;
     };
-    if info.reason != PageFaultReason::NotPresent {
-        #[cfg(feature = "alloc")]
-        if info.was_write {
-            // Never SIGBUS here: the copy returns EFAULT instead.
-            if let Some(refused) = process
-                .memory_space
-                .try_lock()
-                .and_then(|vas| vas.immutable_fault(info.faulting_address))
-            {
-                return !refused;
-            }
+    // A write to a shared file page write-protected for immutability:
+    // asked for any fault reason, since RISC-V reports every fault as a
+    // missing page (PR #45 review: a kernel copy into such a page failed
+    // there once the flag was cleared). Never SIGBUS here, and never a
+    // retry while a change is under way: the copy may hold a spin lock, so
+    // it returns EFAULT instead of spinning (the outcome once the flag is
+    // set).
+    #[cfg(feature = "alloc")]
+    if info.was_write {
+        if let Some(refused) = process
+            .memory_space
+            .try_lock()
+            .and_then(|vas| vas.immutable_fault(info.faulting_address))
+        {
+            return !refused && !crate::fs::attr::changing();
         }
+    }
+    if info.reason != PageFaultReason::NotPresent {
         return info.was_write && resolve_cow_in(&process, info, false).is_ok();
     }
     let as_user = PageFaultInfo {

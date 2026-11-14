@@ -2843,6 +2843,13 @@ impl VirtualAddressSpace {
                     operation: "MADV_REMOVE on a mapping that may not be written",
                 });
             }
+            // A hole punched in an immutable or append-only file is EPERM
+            // (madvise_remove's vfs_fallocate; PR #45 review), even through
+            // a mapping made before the flag.
+            #[cfg(feature = "alloc")]
+            if let Some(b) = &m.backing {
+                crate::fs::attr::may_change(&*b.node)?;
+            }
         }
         let mut files = Vec::new();
         for (_, m) in mappings.range(..VirtualAddress(end)).rev() {

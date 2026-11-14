@@ -175,8 +175,8 @@
   Immutable stops every write, through an already-open descriptor too, and a write through a
   shared mapping is SIGBUS, and a refused write or truncate leaves the set-ID bits and file
   capabilities; append-only allows only appending writes through an O_APPEND descriptor
-  (RWF_NOAPPEND on one is EPERM). Both refuse unlink, rename, link, chmod, chown, set times and
-  xattr changes; noatime keeps reads from changing the access time (tmpfs, ramfs); nodump and
+  (RWF_NOAPPEND on one is EPERM). Both refuse unlink, rename, link, chmod, chown, set times,
+  xattr changes and a hole punched through a mapping (MADV_REMOVE); noatime keeps reads from changing the access time (tmpfs, ramfs); nodump and
   noatime pass to new files.
   cachestat reports the pages of a range that are cached and dirty: tmpfs and memfd pages, and
   BlockFS's block cache and mapping pages. Runtime test files_sched.
