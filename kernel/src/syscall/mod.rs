@@ -2644,7 +2644,15 @@ fn sys_sendmsg(socket_fd: usize, msghdr_ptr: usize, _flags: usize) -> SyscallRes
         .ok()
         .flatten()
     {
-        landlock_inet(id, hdr[0], hdr[1] & 0xffff_ffff, NetHook::Send)?;
+        let name = if hdr[0] != 0 {
+            Some(network_ext_syscalls::read_sockaddr(
+                hdr[0],
+                hdr[1] & 0xffff_ffff,
+            )?)
+        } else {
+            None
+        };
+        landlock_inet(id, name.as_deref(), NetHook::Send)?;
     }
     with_socket_fd(socket_fd, |s| match s.handle() {
         // INET sockets cannot pass files.
@@ -3426,6 +3434,11 @@ const SOCKADDR_UN_LEN: usize = 110;
 /// supported and are rejected. `bind` used to read the name from offset 0,
 /// so every bind registered the family bytes as the path (review of the
 /// v0.26.0 stack, PR #14).
+///
+/// Abstract names, when they come, need Landlock's
+/// LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET checked on connect and send in the
+/// same change (`security::landlock::may_reach`, ADR 0028; MASTER_TODO
+/// item 10), or a sandboxed program reaches sockets outside it.
 fn parse_sockaddr_un(raw: &[u8]) -> Result<alloc::string::String, SyscallError> {
     if raw.len() <= 2 || raw.len() > SOCKADDR_UN_LEN {
         return Err(SyscallError::InvalidArgument);
@@ -3706,9 +3719,10 @@ fn sys_socket_create(domain: usize, sock_type: usize, protocol: usize) -> Syscal
 fn sys_socket_bind(fd: usize, addr_ptr: usize, addr_len: usize) -> SyscallResult {
     match with_socket_fd(fd, SocketNode::handle)? {
         SocketHandle::Inet(id) => {
+            let raw = network_ext_syscalls::read_sockaddr(addr_ptr, addr_len)?;
             #[cfg(feature = "alloc")]
-            landlock_inet(id, addr_ptr, addr_len, NetHook::Bind)?;
-            let addr = network_ext_syscalls::parse_sockaddr(addr_ptr, addr_len)?;
+            landlock_inet(id, Some(&raw), NetHook::Bind)?;
+            let addr = network_ext_syscalls::parse_sockaddr_bytes(&raw)?;
             crate::net::socket::with_socket_mut(id, |s| s.bind(addr))
                 .map_err(|_| SyscallError::InvalidState)?
                 .map_err(|e| match e {
@@ -3758,18 +3772,14 @@ enum NetHook {
     Send,
 }
 
-/// Landlock's check of an operation on INET socket `id` with the address
-/// at `addr_ptr` (`addr_len` bytes; none for a send without one), before
-/// the address is parsed, as Linux's LSM hooks run first. Only TCP and UDP
-/// sockets are checked; a UDP socket with no port yet also needs BIND_UDP
-/// on port 0, which its connect or send would take.
+/// Landlock's check of an operation on INET socket `id` with address
+/// `addr` (copied in once by the caller, which parses the same bytes; none
+/// for a send without one), before the address is parsed, as Linux's LSM
+/// hooks run first. Only TCP and UDP sockets are checked; a UDP socket with
+/// no port yet also needs BIND_UDP on port 0, which its connect or send
+/// would take.
 #[cfg(feature = "alloc")]
-fn landlock_inet(
-    id: usize,
-    addr_ptr: usize,
-    addr_len: usize,
-    hook: NetHook,
-) -> Result<(), SyscallError> {
+fn landlock_inet(id: usize, addr: Option<&[u8]>, hook: NetHook) -> Result<(), SyscallError> {
     use crate::{
         net::socket::{SocketDomain, SocketProtocol, SocketType},
         security::landlock::{self as l, ll::net, NetRefusal},
@@ -3811,12 +3821,8 @@ fn landlock_inet(
         NetRefusal::AfNotSupported => SyscallError::AddressFamilyNotSupported,
         NetRefusal::Denied => SyscallError::PermissionDenied,
     };
-    // Past sockaddr_storage the call itself refuses the address (EINVAL).
     let mut family_given = None;
-    if addr_ptr != 0 && addr_len <= 128 {
-        let mut raw = [0u8; 128];
-        userspace::read_user_bytes(addr_ptr, &mut raw[..addr_len])?;
-        let raw = &raw[..addr_len];
+    if let Some(raw) = addr {
         l::check_sockaddr(&d, family, raw, access, hook == NetHook::Connect).map_err(refused)?;
         if raw.len() >= 2 {
             family_given = Some(u16::from_ne_bytes([raw[0], raw[1]]));
@@ -3858,9 +3864,10 @@ fn sys_socket_listen(fd: usize, backlog: usize) -> SyscallResult {
 fn sys_socket_connect(fd: usize, addr_ptr: usize, addr_len: usize) -> SyscallResult {
     match with_socket_fd(fd, SocketNode::handle)? {
         SocketHandle::Inet(id) => {
+            let raw = network_ext_syscalls::read_sockaddr(addr_ptr, addr_len)?;
             #[cfg(feature = "alloc")]
-            landlock_inet(id, addr_ptr, addr_len, NetHook::Connect)?;
-            let addr = network_ext_syscalls::parse_sockaddr(addr_ptr, addr_len)?;
+            landlock_inet(id, Some(&raw), NetHook::Connect)?;
+            let addr = network_ext_syscalls::parse_sockaddr_bytes(&raw)?;
             if !crate::net::socket::reachable(id) {
                 return Err(SyscallError::NetworkUnreachable);
             }

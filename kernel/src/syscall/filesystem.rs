@@ -2229,6 +2229,8 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
         }
         FIOASYNC => {
             let on: i32 = super::userspace::read_user(arg)?;
+            // When files send SIGIO, the signal goes through Landlock's
+            // signal scope (hook_file_send_sigiotask; MASTER_TODO item 10).
             // No file sends SIGIO yet, so none can turn it on: Linux's
             // ENOTTY for a file without fasync. Turning it off is a no-op.
             return if on != 0 {

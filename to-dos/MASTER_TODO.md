@@ -488,6 +488,15 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
   9. [x] Decision point (decided 2026-11-05): v0.28.0 is cut here, after items 4 to 8, and
      released (item 17); items 10 to 16 are the v0.29 queue, worked straight after the release.
   10. [ ] (v0.29) Sprint F (networking, storage), with `knetd` (N-69) and INET socket readiness.
+      - [ ] With abstract AF_UNIX names: Landlock's LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET in the
+        same change, on stream connect and on datagram send to a socket not already connected
+        (hook_unix_stream_connect, hook_unix_may_send): `security::landlock::may_reach` between
+        the caller's domain and the domain recorded on the socket (`UnixSocket::landlock`),
+        EPERM. The runtime test `landlock` has a tripwire that fails if abstract sockets work
+        without it (ADR 0028).
+      - [ ] With SIGIO (F_SETOWN, O_ASYNC, FIOASYNC): Landlock's signal scope on the signal a
+        file sends (hook_file_set_fowner, hook_file_send_sigiotask), recording the owner's
+        domain at F_SETOWN; until then FIOASYNC refuses to turn SIGIO on.
   11. [ ] (v0.29) Sprint G (hardening).
   12. [ ] (v0.29) Sprint H (real hardware, the parts QEMU can check).
   13. [ ] (v0.29) RISC-V boot: HR-02, HR-04 to HR-06, HR-11.

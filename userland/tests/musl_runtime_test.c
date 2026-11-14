@@ -11546,6 +11546,33 @@ static void test_landlock(void)
         return;
     }
     close(hf);
+    /* Tripwire (ADR 0028, MASTER_TODO item 10): under
+     * LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET, an abstract socket made outside
+     * the domain must not be reached. Abstract names are not supported
+     * yet, so today the connect fails for that reason; once they are, it
+     * must still fail (EPERM), or the scope was not wired in. */
+    int srv = socket(AF_UNIX, SOCK_STREAM, 0);
+    struct sockaddr_un sa = {0};
+    sa.sun_family = AF_UNIX;
+    memcpy(sa.sun_path, "\0ll-tripwire", 12);
+    socklen_t salen = (socklen_t)(sizeof(sa.sun_family) + 12);
+    int bound = srv >= 0 && bind(srv, (struct sockaddr *)&sa, salen) == 0 && listen(srv, 1) == 0;
+    c = fork();
+    if (c == 0) {
+        struct t_ll_attr at = {0};
+        at.scoped = 1; /* LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET */
+        int r = (int)syscall(SYS_landlock_create_ruleset, &at, sizeof(at), 0);
+        if (r < 0 || syscall(SYS_landlock_restrict_self, r, 1u << 4 /* NO_NEW_PRIVS */) != 0)
+            _exit(2);
+        int cl = socket(AF_UNIX, SOCK_STREAM, 0);
+        long rc = connect(cl, (struct sockaddr *)&sa, salen);
+        /* Reached: the scope is missing. EPERM is the answer once abstract
+         * sockets exist; any failure is accepted until then. */
+        _exit(rc == 0 ? 1 : (bound && errno != EPERM) ? 3 : 0);
+    }
+    st = t_exit_status(c);
+    if (st != 0) f |= 32;
+    if (srv >= 0) close(srv);
     /* Without no_new_privs, an unprivileged caller is EPERM. */
     c = fork();
     if (c == 0) {

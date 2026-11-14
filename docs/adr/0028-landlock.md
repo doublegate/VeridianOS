@@ -84,6 +84,9 @@ Two facts shape the design:
 - **Scopes:** an abstract UNIX socket or a signal may reach only a process whose domain is the
   caller's or below it (`domain_is_scoped`). The same domain relation governs ptrace, process_vm,
   pidfd_getfd and `/proc/<pid>/mem`, as `hook_ptrace_access_check`.
+  Abstract UNIX sockets and SIGIO do not exist yet: whoever adds them adds these scope checks
+  in the same change (MASTER_TODO item 10), and the runtime test `landlock` has a tripwire
+  that fails if an abstract socket outside the domain can be reached.
 - **Mounts:** a process with a filesystem domain cannot mount, unmount, remount, move or
   pivot_root (EPERM), as the `sb_*` hooks.
 - Errors as Linux: EACCES for filesystem and network denials; EPERM for scopes (signals),
