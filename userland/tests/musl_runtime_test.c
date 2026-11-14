@@ -9765,6 +9765,41 @@ static void test_files_sched(void)
     if (!WIFSIGNALED(st) || WTERMSIG(st) != SIGBUS || rb != 2 || b2[0] != 'Z' || b2[1] != 'b')
         f |= 1024;
     t_setflags(fd, 0);
+    /* A file that maps its own pages (/dev/shm): a shared mapping made
+     * after the flag, and a mapping remap_file_pages rebuilds after it,
+     * are write-protected too (PR #45 review). */
+    for (int how = 0; how < 2; how++) {
+        c = fork();
+        if (c == 0) {
+            long pg = sysconf(_SC_PAGESIZE);
+            int sfd = open("/dev/shm/veridian-imm", O_CREAT | O_RDWR | O_TRUNC, 0644);
+            if (sfd < 0 || ftruncate(sfd, 2 * pg) != 0)
+                _exit(1);
+            char *sm = MAP_FAILED;
+            if (how == 1)
+                sm = mmap(NULL, 2 * pg, PROT_READ | PROT_WRITE, MAP_SHARED, sfd, 0);
+            if (t_setflags(sfd, T_FS_IMMUTABLE) != 0)
+                _exit(2);
+            if (how == 0)
+                sm = mmap(NULL, 2 * pg, PROT_READ | PROT_WRITE, MAP_SHARED, sfd, 0);
+            else if (sm != MAP_FAILED && syscall(SYS_remap_file_pages, sm, pg, 0, 1, 0) != 0)
+                _exit(3);
+            if (sm == MAP_FAILED)
+                _exit(4);
+            sm[0] = 'W';
+            _exit(5);
+        }
+        st = 0;
+        waitpid(c, &st, 0);
+        int sfd = open("/dev/shm/veridian-imm", O_RDONLY);
+        if (sfd >= 0) {
+            t_setflags(sfd, 0);
+            close(sfd);
+        }
+        unlink("/dev/shm/veridian-imm");
+        if (!WIFSIGNALED(st) || WTERMSIG(st) != SIGBUS)
+            f |= 1024;
+    }
     /* Append-only: O_APPEND to write, no O_TRUNC, O_APPEND stays, no
      * unlink. Without CAP_LINUX_IMMUTABLE it cannot be set. */
     if (t_setflags(fd, T_FS_APPEND) != 0 || open(path, O_WRONLY) != -1 || errno != EPERM ||

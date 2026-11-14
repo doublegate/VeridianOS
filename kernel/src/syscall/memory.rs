@@ -351,6 +351,11 @@ pub fn sys_remap_file_pages(
             .map_err(|_| SyscallError::OutOfMemory)?;
         vas.set_may_exec(at, first.may_exec);
         vas.set_backing(at, node, offset, backing.write.clone());
+        // As below: the file's own pages were mapped from the old flags,
+        // writable; an immutable file's are write-protected again before
+        // the lock goes (PR #45 review).
+        #[cfg(feature = "alloc")]
+        write_protect_locked(&vas, start as usize, size);
         finish_remap(&vas, &first, start, end, lock);
     } else {
         // The file's bytes there, then zeros to the end of the range (a
@@ -799,6 +804,11 @@ fn mmap_inner(
                 }
                 vas.set_backing(start, file.node.clone(), offset, file.write_access.clone());
                 lock_new_mapping(&vas, start.as_usize(), length, flags);
+                // An immutable file's pages are write-protected under the
+                // lock they were mapped under, as for the copied mappings
+                // below (PR #45 review).
+                #[cfg(feature = "alloc")]
+                write_protect_locked(&vas, start.as_usize(), length);
                 return Ok(start.as_usize());
             }
         }
