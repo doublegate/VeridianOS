@@ -252,12 +252,13 @@ The reference for every behaviour below is the Linux 7.3 source (kernel.org tarb
       flags, recursively with AT_RECURSIVE. statmount (by mount ID or descriptor) and listmount
       read the caller's namespace; listns lists the namespaces it can see.
     - **FSMOUNT_NAMESPACE and OPEN_TREE_NAMESPACE** (Linux 7.x create_new_namespace): the new
-      mount, or a copy of the mount at a directory (with its submounts under AT_RECURSIVE; a
-      caller from another user namespace than the namespace's owner may not leave them out,
-      EINVAL), becomes the root of a new mount namespace owned by the caller's user namespace,
-      returned as an nsfs descriptor for setns. They need CAP_SYS_ADMIN in the caller's user
-      namespace (ns_capable, not may_mount) and the object capability unshare(CLONE_NEWNS) needs
-      (ADR 0024). Linux puts the tree on an empty nullfs root, which every namespace has there;
+      mount, or a copy of the mount at a directory (with its submounts under AT_RECURSIVE),
+      becomes the root of a new mount namespace owned by the caller's user namespace, returned
+      as an nsfs descriptor for setns. They need CAP_SYS_ADMIN in the caller's user namespace
+      and the object capability unshare(CLONE_NEWNS) needs (ADR 0024). Stricter than Linux,
+      which keeps MNT_LOCKED and a context's own user namespace where this kernel does not:
+      fsmount's FSMOUNT_NAMESPACE keeps mount's check too, and leaving submounts out of a copy
+      (which shows what they cover) needs it as well (EINVAL otherwise). Linux puts the tree on an empty nullfs root, which every namespace has there;
       here the tree is the root, so such a namespace lists one mount fewer. nullfs itself is not
       a filesystem type a caller can open, on Linux either (ENODEV).
     - **Not yet** (KNOWN-LIMITATIONS): idmapped mounts (MOUNT_ATTR_IDMAP, EINVAL until then);

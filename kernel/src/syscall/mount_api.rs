@@ -132,12 +132,6 @@ fn open_new_namespace(tree: Arc<mount::Mounts>, cloexec: bool) -> SyscallResult 
     super::namespaces::open_ns_with(crate::process::ns::NsRef::Mnt(ns), cloexec)
 }
 
-/// The owner of the caller's mount namespace.
-fn current_mnt_owner() -> Result<Arc<crate::process::userns::UserNs>, SyscallError> {
-    let thread = crate::process::current_thread().ok_or(SyscallError::InvalidState)?;
-    Ok(thread.namespaces().mnt.owner.clone())
-}
-
 fn may_mount() -> Result<(), SyscallError> {
     if !Caller::current().capable(CAP_SYS_ADMIN)
         || !crate::cap::authority::current_may_change_mounts()
@@ -466,11 +460,15 @@ pub fn sys_fsmount(fs_fd: usize, flags: usize, attr_flags: usize) -> SyscallResu
     if flags & !(FSMOUNT_CLOEXEC | FSMOUNT_NAMESPACE) != 0 {
         return Err(SyscallError::InvalidArgument);
     }
+    // Linux skips may_mount for FSMOUNT_NAMESPACE, relying on the
+    // context's own user namespace and mount_too_revealing, which are not
+    // kept here: the mount check stays, so a context passed to a less
+    // privileged process does not become its namespace (commit security
+    // review).
     let new_ns = flags & FSMOUNT_NAMESPACE != 0;
+    may_mount()?;
     if new_ns {
         may_make_mount_ns()?;
-    } else {
-        may_mount()?;
     }
     if attr_flags & !attr::FSMOUNT_VALID != 0 {
         return Err(SyscallError::InvalidArgument);
@@ -686,8 +684,13 @@ pub fn sys_open_tree(dfd: usize, path: usize, flags: usize) -> SyscallResult {
         }
         let recursive = flags & AT_RECURSIVE != 0;
         let (tree, at, _) = tree_and_path(&canonical)?;
-        let foreign = !Arc::ptr_eq(&Caller::current().userns, &current_mnt_owner()?);
-        if foreign && !recursive && tree.has_submounts(&at) {
+        // Leaving submounts out shows what they cover. Linux refuses that
+        // to a caller from another user namespace than the namespace's
+        // owner and, through MNT_LOCKED, for mounts copied into a less
+        // privileged namespace; with no locked mounts kept here, only a
+        // caller who may mount in the first place may leave them out
+        // (EINVAL otherwise; commit security review).
+        if !recursive && tree.has_submounts(&at) && may_mount().is_err() {
             return Err(SyscallError::InvalidArgument);
         }
         let copy = tree

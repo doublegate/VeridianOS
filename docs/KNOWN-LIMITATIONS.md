@@ -416,7 +416,9 @@ What remains:
   to join, and mounting beneath waits for open files to keep the mount they were reached
   through); FSMOUNT_NAMESPACE and OPEN_TREE_NAMESPACE make a namespace whose root is the tree
   itself, where Linux puts it on an empty nullfs mount, so listmount and statmount there show one
-  mount fewer (there is no nullfs; as on Linux, fsopen("nullfs") is ENODEV); a detached tree's files are named by the tree's
+  mount fewer (there is no nullfs; as on Linux, fsopen("nullfs") is ENODEV), and, with no
+  MNT_LOCKED kept, FSMOUNT_NAMESPACE and a copy without its submounts need mount's own
+  privilege, where Linux lets a user namespace's root do them over its own mounts; a detached tree's files are named by the tree's
   id instead of a path (`fs::mount::DETACHED`), so making one of its mounts read-only is not
   EBUSY while a file in it is open for writing; a descriptor of an attached tree follows it
   through move_mount and MS_MOVE, but not through pivot_root; a working directory inside a

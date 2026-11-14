@@ -11358,7 +11358,9 @@ static void test_mount_api(void)
         if (un == 0) {
             if (setgid(65534) != 0 || setuid(65534) != 0) _exit(0);
             _exit(syscall(SYS_fsopen, "tmpfs", 0) == -1 && errno == EPERM &&
-                          syscall(SYS_open_tree, AT_FDCWD, "/tmp", 1) == -1 && errno == EPERM
+                          syscall(SYS_open_tree, AT_FDCWD, "/tmp", 1) == -1 && errno == EPERM &&
+                          syscall(SYS_open_tree, AT_FDCWD, "/tmp", 2 | AT_RECURSIVE) == -1 &&
+                          errno == EPERM
                       ? 0
                       : 1);
         }
