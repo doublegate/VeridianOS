@@ -11321,6 +11321,38 @@ static void test_mount_api(void)
         close(d2);
         if (inner < 0 || fstatat(inner, "f", &st, 0) != 0) g |= 4096;
         if (inner >= 0) close(inner);
+        /* OPEN_TREE_NAMESPACE and FSMOUNT_NAMESPACE (Linux 7.x): a new
+         * mount namespace whose root is the tree, entered with setns. */
+        mkdir("/tmp/ma-d", 0755);
+        int nsfd = -1, nsfd2 = -1;
+        if (mount("ns", "/tmp/ma-d", "tmpfs", 0, "") != 0 ||
+            close(open("/tmp/ma-d/nsf", O_CREAT | O_WRONLY, 0644)) != 0)
+            g |= 0x10000;
+        nsfd = syscall(SYS_open_tree, AT_FDCWD, "/tmp/ma-d", 2 /* OPEN_TREE_NAMESPACE */ | O_CLOEXEC);
+        if (nsfd < 0 || ioctl(nsfd, 0xb703 /* NS_GET_NSTYPE */) != CLONE_NEWNS ||
+            !(fcntl(nsfd, F_GETFD) & FD_CLOEXEC))
+            g |= 0x20000;
+        if (!(syscall(SYS_open_tree, AT_FDCWD, "/tmp/ma-d/nsf", 2) == -1 && errno == ENOTDIR) ||
+            !(syscall(SYS_open_tree, AT_FDCWD, "/tmp/ma-d", 2 | 1 /* CLONE */) == -1 &&
+              errno == EINVAL))
+            g |= 0x40000;
+        fd = syscall(SYS_fsopen, "tmpfs", 0);
+        if (fd >= 0 && syscall(SYS_fsconfig, fd, 6 /* CMD_CREATE */, NULL, NULL, 0) == 0)
+            nsfd2 = syscall(SYS_fsmount, fd, 2 /* FSMOUNT_NAMESPACE */, 0);
+        if (nsfd2 < 0 || ioctl(nsfd2, 0xb703) != CLONE_NEWNS) g |= 0x80000;
+        if (fd >= 0) close(fd);
+        pid_t in = fork();
+        if (in == 0) {
+            struct statfs sfs;
+            int ok = nsfd >= 0 && setns(nsfd, CLONE_NEWNS) == 0 && access("/nsf", F_OK) == 0;
+            ok = ok && nsfd2 >= 0 && setns(nsfd2, CLONE_NEWNS) == 0 && statfs("/", &sfs) == 0 &&
+                 sfs.f_type == 0x01021994 && access("/nsf", F_OK) != 0;
+            _exit(ok ? 0 : 1);
+        }
+        if (t_exit_status(in) != 0) g |= 0x100000;
+        if (nsfd >= 0) close(nsfd);
+        if (nsfd2 >= 0) close(nsfd2);
+        umount("/tmp/ma-d");
         /* Without CAP_SYS_ADMIN: EPERM. */
         pid_t un = fork();
         if (un == 0) {
@@ -11345,6 +11377,7 @@ static void test_mount_api(void)
     rmdir("/tmp/ma-b");
     rmdir("/tmp/ma-c");
     snprintf(why, sizeof(why), "f=%#x", f);
+    rmdir("/tmp/ma-d");
     report("mount_api", f == 0, why);
 }
 

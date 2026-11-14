@@ -557,13 +557,19 @@ const NS_GET_ID: u32 = ior(13, 8);
 /// Open an nsfs file for `ns` in the caller's table, read-only and
 /// close-on-exec, as Linux's open_related_ns.
 pub(super) fn open_ns(ns: NsRef) -> SyscallResult {
+    open_ns_with(ns, true)
+}
+
+/// [`open_ns`] with close-on-exec as `cloexec` says (fsmount's and
+/// open_tree's namespace descriptors take it from their flags).
+pub(super) fn open_ns_with(ns: NsRef, cloexec: bool) -> SyscallResult {
     use crate::fs::file::{File, OpenFlags};
     let file = File::new(Arc::new(NsFileNode::new(ns)), OpenFlags::read_only());
     let caller = process::current_process().ok_or(SyscallError::InvalidState)?;
     let fd = caller
         .file_table
         .lock()
-        .open_with_flags(Arc::new(file), true)
+        .open_with_flags(Arc::new(file), cloexec)
         .map_err(super::map_kernel_error)?;
     Ok(fd)
 }

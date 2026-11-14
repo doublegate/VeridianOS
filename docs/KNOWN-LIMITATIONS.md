@@ -413,7 +413,10 @@ What remains:
   Their filesystems are mount(2)'s; FSCONFIG_CMD_RECONFIGURE applies `ro` and `rw` only (as a
   remount); FSCONFIG_SET_BINARY, SET_PATH and SET_FD are taken by no filesystem here (EINVAL);
   move_mount's MOVE_MOUNT_BENEATH and MOVE_MOUNT_SET_GROUP are EINVAL (there are no peer groups
-  to join, and mounting beneath is not done); a detached tree's files are named by the tree's
+  to join, and mounting beneath waits for open files to keep the mount they were reached
+  through); FSMOUNT_NAMESPACE and OPEN_TREE_NAMESPACE make a namespace whose root is the tree
+  itself, where Linux puts it on an empty nullfs mount, so listmount and statmount there show one
+  mount fewer (there is no nullfs; as on Linux, fsopen("nullfs") is ENODEV); a detached tree's files are named by the tree's
   id instead of a path (`fs::mount::DETACHED`), so making one of its mounts read-only is not
   EBUSY while a file in it is open for writing; a descriptor of an attached tree follows it
   through move_mount and MS_MOVE, but not through pivot_root; a working directory inside a

@@ -882,6 +882,12 @@ impl Mounts {
         self.snapshot().mount_at(point).cloned()
     }
 
+    /// Whether anything is mounted under the mount point `point`
+    /// (Linux's __has_children for the mount there).
+    pub fn has_submounts(&self, point: &str) -> bool {
+        !self.snapshot().under(point).is_empty()
+    }
+
     /// The mount point serving canonical `path`.
     pub fn mount_point_of(&self, path: &str) -> String {
         String::from(self.snapshot().mount_of(&normalize_path(path, "/")))

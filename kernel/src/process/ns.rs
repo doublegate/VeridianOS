@@ -328,6 +328,18 @@ pub struct MntNs {
     pub mounts: Arc<crate::fs::mount::Mounts>,
 }
 
+impl MntNs {
+    /// A new mount namespace owned by `owner` whose tree is `mounts`
+    /// (fsmount's FSMOUNT_NAMESPACE, open_tree's OPEN_TREE_NAMESPACE).
+    pub fn new(owner: Arc<UserNs>, mounts: Arc<crate::fs::mount::Mounts>) -> Arc<Self> {
+        Arc::new(Self {
+            ident: NsIdent::fresh(NsKind::Mnt),
+            owner,
+            mounts,
+        })
+    }
+}
+
 /// An IPC namespace, which holds its System V objects and POSIX message
 /// queues, or a cgroup
 /// namespace, which holds nothing besides its identity (no hierarchy).

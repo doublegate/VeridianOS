@@ -104,6 +104,40 @@ mod ms {
 }
 
 /// Linux's may_mount, with ADR 0024's namespace capability.
+/// The check for FSMOUNT_NAMESPACE and OPEN_TREE_NAMESPACE (Linux:
+/// ns_capable(current_user_ns(), CAP_SYS_ADMIN), the new namespace being
+/// the caller's user namespace's), with the object capability unshare's
+/// CLONE_NEWNS takes (ADR 0024, step 3). EPERM.
+fn may_make_mount_ns() -> Result<(), SyscallError> {
+    let caller = Caller::current();
+    let thread = crate::process::current_thread().ok_or(SyscallError::InvalidState)?;
+    if !caller.ns_capable(&caller.userns, CAP_SYS_ADMIN)
+        || !crate::cap::authority::current_may_create_namespaces(
+            &thread.namespaces(),
+            &caller.userns,
+            crate::process::ns::CLONE_NEWNS,
+        )
+    {
+        return Err(SyscallError::OperationNotPermitted);
+    }
+    Ok(())
+}
+
+/// A new mount namespace holding `tree`, owned by the caller's user
+/// namespace, as a descriptor for setns (create_new_namespace). Linux puts
+/// the tree on an empty nullfs root; here the tree is the root itself, so
+/// listmount and statmount show one mount fewer (KNOWN-LIMITATIONS).
+fn open_new_namespace(tree: Arc<mount::Mounts>, cloexec: bool) -> SyscallResult {
+    let ns = crate::process::ns::MntNs::new(Caller::current().userns.clone(), tree);
+    super::namespaces::open_ns_with(crate::process::ns::NsRef::Mnt(ns), cloexec)
+}
+
+/// The owner of the caller's mount namespace.
+fn current_mnt_owner() -> Result<Arc<crate::process::userns::UserNs>, SyscallError> {
+    let thread = crate::process::current_thread().ok_or(SyscallError::InvalidState)?;
+    Ok(thread.namespaces().mnt.owner.clone())
+}
+
 fn may_mount() -> Result<(), SyscallError> {
     if !Caller::current().capable(CAP_SYS_ADMIN)
         || !crate::cap::authority::current_may_change_mounts()
@@ -432,10 +466,11 @@ pub fn sys_fsmount(fs_fd: usize, flags: usize, attr_flags: usize) -> SyscallResu
     if flags & !(FSMOUNT_CLOEXEC | FSMOUNT_NAMESPACE) != 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    may_mount()?;
-    if flags & FSMOUNT_NAMESPACE != 0 {
-        // A new mount namespace for the mount is not made here.
-        return Err(SyscallError::InvalidArgument);
+    let new_ns = flags & FSMOUNT_NAMESPACE != 0;
+    if new_ns {
+        may_make_mount_ns()?;
+    } else {
+        may_mount()?;
     }
     if attr_flags & !attr::FSMOUNT_VALID != 0 {
         return Err(SyscallError::InvalidArgument);
@@ -465,17 +500,29 @@ pub fn sys_fsmount(fs_fd: usize, flags: usize, attr_flags: usize) -> SyscallResu
         mnt_flags(attr_flags),
         sb_readonly,
     ));
-    let id = mount::register_detached(&tree);
-    // The context goes on to reconfigure what it mounted.
-    let ty = String::from(ctx.fs_type());
-    ctx.purpose = Purpose::Reconfigure {
-        ty,
-        target: Target::Detached(id),
+    // The context goes on to reconfigure what it mounted (vfs_clean_context):
+    // the new namespace's root, or the detached tree's.
+    let (target, id) = if new_ns {
+        (
+            Target::At {
+                tree: tree.clone(),
+                point: String::from("/"),
+            },
+            None,
+        )
+    } else {
+        let id = mount::register_detached(&tree);
+        (Target::Detached(id), Some(id))
     };
+    let ty = String::from(ctx.fs_type());
+    ctx.purpose = Purpose::Reconfigure { ty, target };
     ctx.phase = Phase::ReconfParams;
     ctx.options.clear();
     ctx.sb_readonly = None;
     drop(ctx);
+    let Some(id) = id else {
+        return open_new_namespace(tree, flags & FSMOUNT_CLOEXEC != 0);
+    };
     let held: Arc<dyn core::any::Any + Send + Sync> = tree;
     install(
         path_file(fs.root(), mount::detached_path(id, "/"), Some(held)),
@@ -614,9 +661,9 @@ pub fn sys_open_tree(dfd: usize, path: usize, flags: usize) -> SyscallResult {
     if flags & (OPEN_TREE_CLONE | OPEN_TREE_NAMESPACE) == OPEN_TREE_CLONE | OPEN_TREE_NAMESPACE {
         return Err(SyscallError::InvalidArgument);
     }
-    if flags & OPEN_TREE_NAMESPACE != 0 {
-        // A new mount namespace for the tree is not made here.
-        return Err(SyscallError::InvalidArgument);
+    let new_ns = flags & OPEN_TREE_NAMESPACE != 0;
+    if new_ns {
+        may_make_mount_ns()?;
     }
     if clone {
         may_mount()?;
@@ -629,6 +676,25 @@ pub fn sys_open_tree(dfd: usize, path: usize, flags: usize) -> SyscallResult {
         flags & AT_SYMLINK_NOFOLLOW == 0,
     )?;
     let cloexec = flags & O_CLOEXEC != 0;
+    if new_ns {
+        // create_new_namespace: a directory (ENOTDIR); the mount there,
+        // with its submounts under AT_RECURSIVE. A caller from another
+        // user namespace than the mount namespace's owner may not leave
+        // submounts out, which would show what they cover (EINVAL).
+        if node.node_type() != NodeType::Directory {
+            return Err(SyscallError::NotADirectory);
+        }
+        let recursive = flags & AT_RECURSIVE != 0;
+        let (tree, at, _) = tree_and_path(&canonical)?;
+        let foreign = !Arc::ptr_eq(&Caller::current().userns, &current_mnt_owner()?);
+        if foreign && !recursive && tree.has_submounts(&at) {
+            return Err(SyscallError::InvalidArgument);
+        }
+        let copy = tree
+            .detached_clone(&at, node.clone(), recursive)
+            .map_err(mount_error)?;
+        return open_new_namespace(Arc::new(copy), cloexec);
+    }
     if !clone {
         return install(path_file(node, canonical, None), cloexec);
     }

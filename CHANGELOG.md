@@ -107,9 +107,11 @@
   a descriptor for a detached tree, usable through `*at` calls, which move_mount attaches and
   whose last close drops it; move_mount also moves mounts; mount_setattr and open_tree_attr
   change mount flags and propagation types, all or nothing; statmount, listmount and listns
-  describe mounts and list mounts and namespaces. Runtime test mount_api. Not yet: the
-  FSMOUNT_NAMESPACE and OPEN_TREE_NAMESPACE flags, ID-mapped mounts, nullfs, MOVE_MOUNT_BENEATH
-  and MOVE_MOUNT_SET_GROUP (KNOWN-LIMITATIONS).
+  describe mounts and list mounts and namespaces; FSMOUNT_NAMESPACE and OPEN_TREE_NAMESPACE put
+  the new mount, or a copy of the tree at a directory, in a new mount namespace of the caller's
+  user namespace and return its descriptor for setns. Runtime test mount_api. Not yet: ID-mapped
+  mounts, MOVE_MOUNT_BENEATH (it waits for open files to keep their mount) and
+  MOVE_MOUNT_SET_GROUP (KNOWN-LIMITATIONS).
 - fchroot (Linux 7.3): chroot to a directory by descriptor, and with `FD_FAILFS_ROOT` to failfs,
   from whose root no absolute path resolves (EOPNOTSUPP) while lookups from real directories go on;
   unprivileged with no_new_privs, unshared filesystem state and no earlier chroot, as on Linux;
