@@ -250,11 +250,7 @@ fn open_path(
             let perms = creation_perms(mode);
             // One resolution of the parent for the MAC check, the permission
             // check and the creation, as mkdir and mknod do.
-            let made = view.mknod_checked(path, NodeType::File, perms, 0, |dir| {
-                check_dir_write(dir).map_err(|_| crate::error::KernelError::PermissionDenied {
-                    operation: "create directory entry",
-                })
-            });
+            let made = view.mknod_checked(path, NodeType::File, perms, 0, check_dir_write_kernel);
             match made {
                 Ok(node) => {
                     own_new_node(&node);
@@ -1092,11 +1088,7 @@ fn make_directory_node(
     perms: Permissions,
 ) -> Result<alloc::sync::Arc<dyn crate::fs::VfsNode>, SyscallError> {
     vfs()?
-        .mkdir_checked(path, perms, |dir| {
-            check_dir_write(dir).map_err(|_| crate::error::KernelError::PermissionDenied {
-                operation: "create directory entry",
-            })
-        })
+        .mkdir_checked(path, perms, check_dir_write_kernel)
         .map_err(super::map_kernel_error)
 }
 
@@ -2868,6 +2860,20 @@ pub(crate) fn check_dir_write(dir: &dyn crate::fs::VfsNode) -> Result<(), Syscal
     } else {
         Err(SyscallError::PermissionDenied)
     }
+}
+
+/// [`check_dir_write`] for the VFS's creation callbacks: an immutable
+/// directory stays EPERM, a missing permission EACCES (PR #45 review: both
+/// were EACCES).
+fn check_dir_write_kernel(dir: &dyn crate::fs::VfsNode) -> Result<(), crate::error::KernelError> {
+    check_dir_write(dir).map_err(|e| match e {
+        SyscallError::OperationNotPermitted => {
+            crate::error::KernelError::FsError(crate::error::FsError::OperationNotPermitted)
+        }
+        _ => crate::error::KernelError::PermissionDenied {
+            operation: "create directory entry",
+        },
+    })
 }
 
 /// Check that the caller may remove or rename entry `name` of `dir`: write
@@ -5074,10 +5080,7 @@ pub(crate) fn make_node(
     // Every type, regular files included, goes through one resolution of
     // the parent for the MAC check, the permission checks and the creation.
     let node = vfs()?.mknod_checked(path, kind, perms, rdev, |dir| {
-        let denied = crate::error::KernelError::PermissionDenied {
-            operation: "create directory entry",
-        };
-        check_dir_write(dir).map_err(|_| denied)?;
+        check_dir_write_kernel(dir)?;
         // A device also needs CREATE on the mount namespace (ADR 0024,
         // step 6): a device node reaches hardware, not just a file.
         let may_device = || {

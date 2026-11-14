@@ -9831,6 +9831,20 @@ static void test_files_sched(void)
     if (bfd >= 0)
         close(bfd);
     unlink(bpath);
+    /* An immutable directory takes no new entry: EPERM, not EACCES. */
+    const char *idir = "/tmp/veridian-idir";
+    rmdir(idir);
+    int dfd = mkdir(idir, 0755) == 0 ? open(idir, O_RDONLY | O_DIRECTORY) : -1;
+    if (dfd < 0 || t_setflags(dfd, T_FS_IMMUTABLE) != 0 ||
+        open("/tmp/veridian-idir/f", O_CREAT | O_WRONLY, 0644) != -1 || errno != EPERM ||
+        mkdir("/tmp/veridian-idir/d", 0755) != -1 || errno != EPERM ||
+        mknod("/tmp/veridian-idir/p", S_IFIFO | 0644, 0) != -1 || errno != EPERM)
+        f |= 131072;
+    if (dfd >= 0) {
+        t_setflags(dfd, 0);
+        close(dfd);
+    }
+    rmdir(idir);
     snprintf(why, sizeof(why), "f=%#lx sig=%d rb=%ld/%d:%c%c trunc=%d cs=%ld/%d %llu/%llu", f,
              WIFSIGNALED(st) ? WTERMSIG(st) : -1, rb, rb_err, b2[0] ? b2[0] : '?', b2[1] ? b2[1] : '?',
              trunc_err, csr, cs_err, cached, dirty);
