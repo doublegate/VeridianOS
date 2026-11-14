@@ -8,8 +8,9 @@
   msync, remap_file_pages, System V semaphore and shared memory, xattr and file-attribute tests
   among them) and 8 changed between failing results. With the mount API it passes 849: listmount03,
   listmount04, statmount08 and rt_sigtimedwait01 now pass, as do Open POSIX's sigpending 1-2/1-3 and
-  timer_getoverrun 2-1..2-3 (1,790); mount_setattr02 (idmapped mounts) fails and move_mount03
-  (detached-tree propagation) is broken instead of skipped, and msgstress01 times out.
+  timer_getoverrun 2-1..2-3 (1,790); mount_setattr02 now runs and fails (it needs MS_SHARED,
+  refused while there are no peer groups, ADR 0022), move_mount03 is broken instead of skipped
+  (MOVE_MOUNT_BENEATH is EINVAL), and msgstress01 times out.
 - The Linux system call tables are Linux 7.3's (`abi/linux/VERSION`, read by `gen_syscalls.py`
   and `syscall_coverage.py`, which named v7.2 in their code): 7.3 adds fchroot (472).
 - The gate (`scripts/dev/gate.sh`) runs its emulated guests side by side: the AArch64, RISC-V and
