@@ -433,6 +433,9 @@
 #define SYS_landlock_create_ruleset      444
 #define SYS_landlock_add_rule            445
 #define SYS_landlock_restrict_self       446
+#define SYS_add_key                      248
+#define SYS_request_key                  249
+#define SYS_keyctl                       250
 
 #elif defined(__riscv) && __riscv_xlen == 64
 
@@ -818,6 +821,9 @@
 #define SYS_landlock_create_ruleset      444
 #define SYS_landlock_add_rule            445
 #define SYS_landlock_restrict_self       446
+#define SYS_add_key                      217
+#define SYS_request_key                  218
+#define SYS_keyctl                       219
 
 #elif defined(__aarch64__)
 
@@ -1204,6 +1210,9 @@
 #define SYS_landlock_create_ruleset      444
 #define SYS_landlock_add_rule            445
 #define SYS_landlock_restrict_self       446
+#define SYS_add_key                      217
+#define SYS_request_key                  218
+#define SYS_keyctl                       219
 
 #else
 #error "<veridian/sysno.h>: no system call numbers for this architecture"

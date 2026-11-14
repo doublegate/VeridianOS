@@ -76,6 +76,10 @@ pub(crate) fn to_linux_errno(err: super::SyscallError) -> isize {
     const LINUX_ENOMSG: isize = -42;
     const LINUX_EMSGSIZE: isize = -90;
     const LINUX_EBADFD: isize = -77;
+    const LINUX_EDQUOT: isize = -122;
+    const LINUX_ENOKEY: isize = -126;
+    const LINUX_EKEYEXPIRED: isize = -127;
+    const LINUX_EKEYREVOKED: isize = -128;
 
     match err {
         SyscallError::InvalidSyscall => LINUX_ENOSYS,
@@ -147,6 +151,10 @@ pub(crate) fn to_linux_errno(err: super::SyscallError) -> isize {
         SyscallError::NoMessage => LINUX_ENOMSG,
         SyscallError::MessageTooLong => LINUX_EMSGSIZE,
         SyscallError::BadFdState => LINUX_EBADFD,
+        SyscallError::QuotaExceeded => LINUX_EDQUOT,
+        SyscallError::KeyNotAvailable => LINUX_ENOKEY,
+        SyscallError::KeyExpired => LINUX_EKEYEXPIRED,
+        SyscallError::KeyRevoked => LINUX_EKEYREVOKED,
         // Not an errno: the signal return path rewrites it (`restart`).
         SyscallError::RestartBlock => -516,
     }

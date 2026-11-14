@@ -39,6 +39,7 @@ ml-dsa = { version = "0.1.1", default-features = false, features = ["alloc"] }
 # the user-space Linux runtime later, Track M).
 veridian-cbpf = { path = "../crates/veridian-cbpf" }
 veridian-landlock = { path = "../crates/veridian-landlock" }
+veridian-keys = { path = "../crates/veridian-keys" }
 
 # Architecture-specific dependencies
 [target.'cfg(target_arch = "x86_64")'.dependencies]

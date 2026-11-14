@@ -732,6 +732,13 @@ fn thread_clone(
     thread.seccomp.copy_from(&current_thread.seccomp);
     #[cfg(feature = "alloc")]
     thread.landlock.copy_from(&current_thread.landlock);
+    // Its keyrings: the process's shared, a thread keyring of its own if
+    // the creator has one (copy_creds with CLONE_THREAD).
+    #[cfg(feature = "alloc")]
+    {
+        let keys = crate::syscall::keys::thread_keys(&current_thread.keys.lock());
+        *thread.keys.lock() = keys;
+    }
     let sets = *current_thread.caps.lock();
     *thread.caps.lock() = sets;
     #[cfg(feature = "alloc")]

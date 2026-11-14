@@ -332,6 +332,36 @@ The reference for every behaviour below is the Linux 7.3 source (kernel.org tarb
       Closing the listener answers what is outstanding with ENOSYS. An ERRNO or answer of
       EINTR is final and never restarted.
 
+### System tier: the key retention service
+
+28. add_key, request_key and keyctl implement Linux 7.3's key retention service core
+    (`security/keys/`): the `user`, `logon` and `keyring` types.
+    - **Placement:** the keys, quotas, permissions, searches and every operation's checks in
+      Linux's order are in the new `veridian-keys` crate (no_std, no unsafe), shared with the
+      user-space Linux runtime later, as `veridian-cbpf` and `veridian-landlock`. The kernel
+      decodes the calls, keeps each thread's keyrings and request_key default (Linux's cred
+      fields), and serves `/proc/keys`, `/proc/key-users` and `/proc/sys/kernel/keys`.
+    - **Keyrings:** thread, process and session keyrings; per user namespace, the user and
+      user-session keyrings in a register, as `look_up_user_keyrings`; persistent keyrings
+      (GET_PERSISTENT, three days, CAP_SETUID for another user); joining by name in the
+      caller's user namespace. fork drops the thread and process keyrings and keeps the
+      session one; CLONE_THREAD shares the process keyring and makes a new thread keyring if
+      the creator has one; exec drops both; a change of fsuid or fsgid moves the thread
+      keyring with it.
+    - **Keys:** random serials from 3; Linux's default permissions; the per-user quotas
+      (200 keys and 20,000 bytes, a million and 25 MB for the initial namespace's root), with
+      4 bytes per keyring link charged to the keyring's owner; possession by search from the
+      thread's keyrings; validity before permission; expiry, revocation and invalidation, and
+      the garbage collector's unlinking at expiry plus `gc_delay` (300 s).
+    - **No usermode helper.** request_key behaves as Linux does with no `/sbin/request-key`:
+      a key it would construct is linked, negated for 60 s, and the caller gets ENOENT; a
+      repeat within the 60 s gets ENOKEY. No instantiation authority is ever handed out, so
+      INSTANTIATE, NEGATE and REJECT are EPERM and ASSUME_AUTHORITY ENOKEY, as for a caller
+      that holds none. A helper can come later without changing the store.
+    - **Outside the core:** Diffie-Hellman, public keys and key notifications are not built
+      in (EOPNOTSUPP, as Linux without them); RESTRICT_KEYRING has only reject-all, a named
+      restriction ENOENT. KEYCTL_CAPABILITIES reports Linux's bytes for this set, 0xe3 0x03.
+
 ## Consequences
 
 - LTP's ipc tests (shmget*, shmat*, shmctl*, semget*, semop*, semctl*, msgget*, msgsnd*,

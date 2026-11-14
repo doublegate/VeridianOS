@@ -1089,13 +1089,17 @@ fn change_uids<R>(
     f: impl FnOnce(&mut crate::process::creds::Credentials, bool) -> R,
 ) -> Result<R, SyscallError> {
     let me = crate::process::current_thread().ok_or(SyscallError::InvalidState)?;
-    Ok(proc.change_uids(fs, |c| {
+    let r = proc.change_uids(fs, |c| {
         let may = me
             .caps
             .lock()
             .capable(crate::process::linux_caps::CAP_SETUID);
         f(c, may)
-    }))
+    });
+    // The thread keyring follows the filesystem ids (key_fsuid_changed).
+    #[cfg(feature = "alloc")]
+    super::keys::fsid_changed();
+    Ok(r)
 }
 
 /// A change of the group IDs or the supplementary groups (no capability
@@ -1108,14 +1112,19 @@ fn change_gids<R>(
     f: impl FnOnce(&mut crate::process::creds::Credentials, bool) -> R,
 ) -> Result<R, SyscallError> {
     let me = crate::process::current_thread().ok_or(SyscallError::InvalidState)?;
-    let _threads = proc.threads.lock();
-    Ok(proc.update_credentials(|c| {
+    let threads = proc.threads.lock();
+    let r = proc.update_credentials(|c| {
         let may = me
             .caps
             .lock()
             .capable(crate::process::linux_caps::CAP_SETGID);
         f(c, may)
-    }))
+    });
+    drop(threads);
+    // The thread keyring follows the filesystem ids (key_fsgid_changed).
+    #[cfg(feature = "alloc")]
+    super::keys::fsid_changed();
+    Ok(r)
 }
 
 /// setuid: Linux rules (`Credentials::setuid`); an ID the caller's user

@@ -5641,6 +5641,7 @@ static void test_idmapped_mount(void);
 static void test_seccomp(void);
 static void test_seccomp_notify(void);
 static void test_landlock(void);
+static void test_keyrings(void);
 static void test_mount_no_escape(void);
 static void test_pivot_root(void);
 static void test_mount_object_cap(void);
@@ -5722,6 +5723,7 @@ static const struct {
     {"seccomp", test_seccomp},
     {"seccomp_notify", test_seccomp_notify},
     {"landlock", test_landlock},
+    {"keyrings", test_keyrings},
     {"pivot_root", test_pivot_root},
     {"mount_object_cap", test_mount_object_cap},
     {"mount_modify_drop", test_mount_modify_drop},
@@ -11585,6 +11587,88 @@ static void test_landlock(void)
     report("landlock", f == 0, why);
 }
 
+/* The key retention service core (Linux 7.3 security/keys). */
+#define T_KEYCTL_GET_KEYRING_ID 0
+#define T_KEYCTL_JOIN_SESSION 1
+#define T_KEYCTL_UPDATE 2
+#define T_KEYCTL_REVOKE 3
+#define T_KEYCTL_DESCRIBE 6
+#define T_KEYCTL_READ 11
+#define T_KEYCTL_SET_TIMEOUT 15
+#define T_KEYCTL_CAPABILITIES 31
+static long t_keyctl(long op, long a, long b, long c, long d)
+{
+    return syscall(SYS_keyctl, op, a, b, c, d);
+}
+static void test_keyrings(void)
+{
+    char why[96];
+    int f = 0;
+    pid_t c = fork();
+    if (c == 0) {
+        int bits = 0;
+        /* A session keyring of its own. */
+        long ses = t_keyctl(T_KEYCTL_JOIN_SESSION, 0, 0, 0, 0);
+        if (ses < 3) bits |= 1 << 0;
+        long k = syscall(SYS_add_key, "user", "ltp:one", "hello", 5, -3 /* SESSION */);
+        if (k < 3) bits |= 1 << 1;
+        char buf[64] = {0};
+        if (t_keyctl(T_KEYCTL_READ, k, (long)buf, sizeof(buf), 0) != 5 || memcmp(buf, "hello", 5) != 0)
+            bits |= 1 << 2;
+        /* DESCRIBE: type;uid;gid;perm;description, the NUL counted. */
+        memset(buf, 0, sizeof(buf));
+        char want[64];
+        snprintf(want, sizeof(want), "user;%d;%d;3f010000;ltp:one", (int)getuid(), (int)getgid());
+        long n = t_keyctl(T_KEYCTL_DESCRIBE, k, (long)buf, sizeof(buf), 0);
+        if (n != (long)strlen(want) + 1 || strcmp(buf, want) != 0) bits |= 1 << 3;
+        /* add_key of the same description updates the key. */
+        if (syscall(SYS_add_key, "user", "ltp:one", "x", 1, -3) != k) bits |= 1 << 4;
+        if (t_keyctl(T_KEYCTL_READ, k, (long)buf, sizeof(buf), 0) != 1) bits |= 1 << 5;
+        /* The session keyring holds it: 4 bytes, its serial. */
+        int32_t ids[4] = {0};
+        if (t_keyctl(T_KEYCTL_READ, ses, (long)ids, sizeof(ids), 0) != 4 || ids[0] != k) bits |= 1 << 6;
+        if (t_keyctl(T_KEYCTL_REVOKE, k, 0, 0, 0) != 0 ||
+            t_keyctl(T_KEYCTL_READ, k, (long)buf, sizeof(buf), 0) != -1 || errno != EKEYREVOKED)
+            bits |= 1 << 7;
+        /* request_key: nothing to find, no callout: ENOKEY; with one, no
+         * helper runs: ENOENT, and a negative key is left (ENOKEY). */
+        if (syscall(SYS_request_key, "user", "ltp:none", NULL, 0) != -1 || errno != ENOKEY) bits |= 1 << 8;
+        if (syscall(SYS_request_key, "user", "ltp:two", "info", -3) != -1 || errno != ENOENT) bits |= 1 << 9;
+        if (syscall(SYS_request_key, "user", "ltp:two", "info", 0) != -1 || errno != ENOKEY) bits |= 1 << 10;
+        /* The user keyring is "_uid.<uid>". */
+        long uk = t_keyctl(T_KEYCTL_GET_KEYRING_ID, -4, 1, 0, 0);
+        memset(buf, 0, sizeof(buf));
+        snprintf(want, sizeof(want), "_uid.%d", (int)getuid());
+        if (uk < 3 || t_keyctl(T_KEYCTL_DESCRIBE, uk, (long)buf, sizeof(buf), 0) < 0 ||
+            !strstr(buf, want))
+            bits |= 1 << 11;
+        /* Errors of the special ids. */
+        if (t_keyctl(T_KEYCTL_GET_KEYRING_ID, -6, 0, 0, 0) != -1 || errno != EINVAL) bits |= 1 << 12;
+        if (syscall(SYS_add_key, "nosuch", "d", "x", 1, -3) != -1 || errno != ENODEV) bits |= 1 << 13;
+        if (syscall(SYS_add_key, ".dot", "d", "x", 1, -3) != -1 || errno != EPERM) bits |= 1 << 14;
+        unsigned char caps[4] = {0xff, 0xff, 0xff, 0xff};
+        if (t_keyctl(T_KEYCTL_CAPABILITIES, (long)caps, 4, 0, 0) != 2 || caps[0] != 0xe3 || caps[1] != 0x03 ||
+            caps[2] != 0 || caps[3] != 0)
+            bits |= 1 << 15;
+        /* /proc/keys lists the session keyring. */
+        char pk[4096];
+        snprintf(want, sizeof(want), "%08lx", ses);
+        if (t_read_text("/proc/keys", pk, sizeof(pk)) <= 0 || !strstr(pk, want)) bits |= 1 << 16;
+        if (t_read_text("/proc/sys/kernel/keys/maxkeys", pk, sizeof(pk)) <= 0 || atoi(pk) != 200)
+            bits |= 1 << 17;
+        /* A timeout expires the key. */
+        long t = syscall(SYS_add_key, "user", "ltp:t", "z", 1, -3);
+        if (t < 3 || t_keyctl(T_KEYCTL_SET_TIMEOUT, t, 1, 0, 0) != 0) bits |= 1 << 18;
+        sleep(2);
+        if (t_keyctl(T_KEYCTL_READ, t, (long)buf, sizeof(buf), 0) != -1 || errno != EKEYEXPIRED) bits |= 1 << 19;
+        _exit(bits ? 64 + __builtin_ctz(bits) : 0);
+    }
+    int st = t_exit_status(c);
+    if (st != 0) f |= 1;
+    snprintf(why, sizeof(why), "f=%#x child=%d", f, st);
+    report("keyrings", f == 0, why);
+}
+
 static void test_seccomp_notify(void)
 {
     char why[96];
@@ -13888,6 +13972,7 @@ int main(int argc, char **argv)
     test_seccomp();
     test_seccomp_notify();
     test_landlock();
+    test_keyrings();
     test_mount_no_escape();
     test_pivot_root();
     test_mount_object_cap();

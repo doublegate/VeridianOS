@@ -123,6 +123,15 @@
   domain. TCP and UDP bind, connect and send by port, with Linux's address checks. Signal
   scoping, and ptrace, process_vm, pidfd_getfd and kcmp limited to the caller's domain and
   below. CONFIG_SECURITY_LANDLOCK is set. Runtime test landlock.
+- The key retention service core (v0.28 item 5 system tier, ADR 0027 decision 28): add_key,
+  request_key and keyctl as Linux 7.3's `security/keys/`, through the new shared `veridian-keys`
+  crate. User, logon and keyring keys; thread, process, session, user, user-session and
+  persistent keyrings, inherited as Linux's credentials; quotas, permissions with possession,
+  searches, links with cycle checks, MOVE, reject-all restriction, timeouts, revocation,
+  invalidation and garbage collection; `/proc/keys`, `/proc/key-users` and
+  `/proc/sys/kernel/keys`. request_key with no usermode helper behaves as Linux without
+  `/sbin/request-key` (ENOENT, a 60 s negative key). CONFIG_KEYS and CONFIG_PERSISTENT_KEYRINGS
+  are set. Runtime test keyrings.
 - BlockFS does not give a deleted file's inode number to a new file while a node in memory
   still names it (an open file, a working directory, a Landlock rule), as Linux keeps an
   inode until its last reference goes. A rule, FIFO or socket binding on the old file can no

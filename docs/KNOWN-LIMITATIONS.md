@@ -821,6 +821,12 @@ Page protections now follow `prot` (fixed in v0.27, N-132 to N-137). What remain
   works since v0.28 (ADR 0027 decision 27), user notification included; SECCOMP_RET_TRACE
   is ENOSYS until ptrace can attach a tracer (Track C item 8), as on Linux with none
   attached.
+- The key retention service (ADR 0027 decision 28) is the core:
+  - There is no usermode helper. request_key behaves as Linux without `/sbin/request-key`
+    (ENOENT and a 60 s negative key), so no instantiation authority exists.
+  - Key descriptions and keyring names must be UTF-8 (EINVAL otherwise); Linux takes any bytes.
+  - Credentials are per process here, so a set*id call moves the calling thread's thread
+    keyring only, not its siblings'.
 - Landlock (ADR 0028) is complete for what exists, with these gaps:
   - LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET has nothing to refuse until abstract UNIX sockets
     arrive (Track C item 5, v0.29); the check is part of that task (MASTER_TODO item 10), and

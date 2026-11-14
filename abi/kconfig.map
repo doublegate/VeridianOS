@@ -43,6 +43,8 @@ CONFIG_CHECKPOINT_RESTORE n  # kcmp only; no PR_SET_MM, map_files or msg_next_id
 CONFIG_SECCOMP y
 CONFIG_SECCOMP_FILTER y
 CONFIG_SECURITY_LANDLOCK y needs=landlock_create_ruleset,landlock_add_rule,landlock_restrict_self  # ADR 0028, ABI 11
+CONFIG_KEYS y needs=add_key,request_key,keyctl  # ADR 0027 decision 28: the core, user and logon keys
+CONFIG_PERSISTENT_KEYRINGS y needs=keyctl
 CONFIG_BSD_PROCESS_ACCT n  # no acct(2)
 CONFIG_RT_GROUP_SCHED n  # no cgroup hierarchy
 CONFIG_PREEMPT_RT n
@@ -88,7 +90,6 @@ CONFIG_MEMORY_FAILURE n
 CONFIG_HWPOISON_INJECT n
 
 ## Keys and crypto
-CONFIG_KEYS n  # no add_key or keyctl
 CONFIG_KEY_DH_OPERATIONS n
 CONFIG_ASYMMETRIC_KEY_TYPE n
 CONFIG_X509_CERTIFICATE_PARSER n

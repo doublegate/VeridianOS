@@ -467,6 +467,9 @@ mod network_ext_syscalls;
 // seccomp(2) and the check every call passes (v0.28 item 5)
 #[cfg(feature = "alloc")]
 pub(crate) mod landlock;
+// The key retention service (v0.28 item 5)
+#[cfg(feature = "alloc")]
+pub(crate) mod keys;
 #[cfg(feature = "alloc")]
 pub(crate) mod seccomp;
 use self::network_ext_syscalls::*;
@@ -617,6 +620,14 @@ pub enum SyscallError {
     /// A descriptor of the wrong kind for the call, such as one that is not
     /// a Landlock ruleset (EBADFD, errno 77).
     BadFdState = -144,
+    /// The owner's key quota would be exceeded (EDQUOT, errno 122).
+    QuotaExceeded = -145,
+    /// No such key, or a negative one (ENOKEY, errno 126).
+    KeyNotAvailable = -146,
+    /// The key has expired (EKEYEXPIRED, errno 127).
+    KeyExpired = -147,
+    /// The key was revoked (EKEYREVOKED, errno 128).
+    KeyRevoked = -148,
     /// The call was interrupted and left a restart block (`restart`):
     /// Linux -ERESTART_RESTARTBLOCK, turned into EINTR or restart_syscall
     /// on the way back to user mode and never seen there.
@@ -1758,6 +1769,12 @@ fn handle_syscall(
         Syscall::Cachestat => memctl::sys_cachestat(arg1, arg2, arg3, arg4),
         #[cfg(feature = "alloc")]
         Syscall::Seccomp => seccomp::sys_seccomp(arg1, arg2, arg3),
+        #[cfg(feature = "alloc")]
+        Syscall::AddKey => keys::sys_add_key(arg1, arg2, arg3, arg4, arg5),
+        #[cfg(feature = "alloc")]
+        Syscall::RequestKey => keys::sys_request_key(arg1, arg2, arg3, arg4),
+        #[cfg(feature = "alloc")]
+        Syscall::Keyctl => keys::sys_keyctl(arg1, arg2, arg3, arg4, arg5),
         #[cfg(feature = "alloc")]
         Syscall::LandlockCreateRuleset => landlock::sys_landlock_create_ruleset(arg1, arg2, arg3),
         #[cfg(feature = "alloc")]

@@ -932,6 +932,13 @@ pub fn create_thread(
                 thread.landlock.copy_from(&creator.landlock);
                 let sets = *creator.caps.lock();
                 *thread.caps.lock() = sets;
+                // A thread of the process: its keyrings shared, a thread
+                // keyring of its own if the creator has one.
+                #[cfg(feature = "alloc")]
+                {
+                    let keys = crate::syscall::keys::thread_keys(&creator.keys.lock());
+                    *thread.keys.lock() = keys;
+                }
             }
 
             // Add thread to process

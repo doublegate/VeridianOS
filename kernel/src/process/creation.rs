@@ -1029,6 +1029,9 @@ fn exec_image(
         .store(0, core::sync::atomic::Ordering::Release);
     // The command name is the program's file name (N-227).
     *current_thread.comm.lock() = super::thread::comm_from(comm.as_bytes());
+    // The thread and process keyrings go (install_exec_creds).
+    #[cfg(feature = "alloc")]
+    crate::syscall::keys::exec_keys(&mut current_thread.keys.lock());
 
     // The image is replaced: a parent waiting in vfork may run again; the
     // memory it shared with this process is no longer this process's.

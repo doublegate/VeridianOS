@@ -513,6 +513,12 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
         new_thread.seccomp.copy_from(&current_thread.seccomp);
         #[cfg(feature = "alloc")]
         new_thread.landlock.copy_from(&current_thread.landlock);
+        // A new process: no thread or process keyring (copy_creds).
+        #[cfg(feature = "alloc")]
+        {
+            let keys = crate::syscall::keys::fork_keys(&current_thread.keys.lock());
+            *new_thread.keys.lock() = keys;
+        }
         new_thread.no_new_privs.store(
             opts.no_new_privs
                 || current_thread

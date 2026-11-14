@@ -296,6 +296,8 @@ enum Sysctl {
     /// `fs/mqueue/*`: the reader's IPC namespace's message-queue limits
     /// (`syscall::mqueue::SYSCTLS`).
     Mqueue(&'static str),
+    /// `kernel/keys/*`: the key quotas and delays (`syscall::keys::SYSCTLS`).
+    Keys(&'static str),
 }
 
 impl Sysctl {
@@ -322,6 +324,13 @@ impl Sysctl {
                         .map(|s| Self::Mqueue(s));
                 }
                 #[cfg(feature = "alloc")]
+                if let Some(n) = name.strip_prefix("sys/kernel/keys/") {
+                    return crate::syscall::keys::SYSCTLS
+                        .iter()
+                        .find(|s| **s == n)
+                        .map(|s| Self::Keys(s));
+                }
+                #[cfg(feature = "alloc")]
                 if let Some(n) = name.strip_prefix("sys/kernel/") {
                     return crate::syscall::sysvipc::SYSCTLS
                         .iter()
@@ -340,6 +349,8 @@ impl Sysctl {
             Self::Ipc(name) => crate::syscall::sysvipc::sysctl_text(name),
             #[cfg(feature = "alloc")]
             Self::Mqueue(name) => crate::syscall::mqueue::sysctl_text(name),
+            #[cfg(feature = "alloc")]
+            Self::Keys(name) => crate::syscall::keys::sysctl_text(name),
             _ => format!("{}\n", self.get()),
         }
     }
@@ -361,7 +372,7 @@ impl Sysctl {
                 .max
                 .load(Ordering::Acquire) as usize,
             Self::ThreadsMax => crate::process::rlimit::max_threads() as usize,
-            Self::Ipc(_) | Self::Mqueue(_) => 0,
+            Self::Ipc(_) | Self::Mqueue(_) | Self::Keys(_) => 0,
         }
     }
 
@@ -387,7 +398,7 @@ impl Sysctl {
     /// whole system's rather than a namespace's.
     fn writer_may(self, writer: &crate::process::creds::Caller) -> bool {
         match self {
-            Self::Inotify(_) | Self::UnprivilegedUsernsClone | Self::ThreadsMax => {
+            Self::Inotify(_) | Self::UnprivilegedUsernsClone | Self::ThreadsMax | Self::Keys(_) => {
                 writer.creds.euid == 0
             }
             Self::MaxUserNamespaces | Self::MaxPidNamespaces | Self::MaxNetNamespaces => {
@@ -429,8 +440,17 @@ impl Sysctl {
                     }
                 })
             }
+            #[cfg(feature = "alloc")]
+            Self::Keys(name) => {
+                return crate::syscall::keys::sysctl_write(name, text).map_err(|_| {
+                    KernelError::InvalidArgument {
+                        name: "value",
+                        value: "out of the sysctl's range",
+                    }
+                })
+            }
             #[cfg(not(feature = "alloc"))]
-            Self::Ipc(_) | Self::Mqueue(_) => {
+            Self::Ipc(_) | Self::Mqueue(_) | Self::Keys(_) => {
                 return Err(KernelError::FsError(FsError::PermissionDenied))
             }
             Self::UnprivilegedUsernsClone => (&userns::UNPRIVILEGED_CLONE, 1),
@@ -841,6 +861,20 @@ impl VfsNode for ProcNode {
                     name if Sysctl::from_name(name).is_some() => {
                         Sysctl::from_name(name).map_or_else(String::new, Sysctl::text)
                     }
+                    // The keys the opener may View, and every key user
+                    // its namespace maps (security/keys/proc.c).
+                    #[cfg(feature = "alloc")]
+                    "keys" => crate::syscall::keys::proc_keys(
+                        &opener
+                            .cloned()
+                            .unwrap_or_else(crate::process::creds::Caller::current),
+                    ),
+                    #[cfg(feature = "alloc")]
+                    "key-users" => crate::syscall::keys::proc_key_users(
+                        &opener
+                            .cloned()
+                            .unwrap_or_else(crate::process::creds::Caller::current),
+                    ),
                     // The reader's IPC namespace's System V objects.
                     #[cfg(feature = "alloc")]
                     name if name.starts_with("sysvipc/") => {
@@ -1097,6 +1131,15 @@ impl VfsNode for ProcNode {
                     inode: 0,
                 });
 
+                // The key retention service's (security/keys/proc.c).
+                for name in ["keys", "key-users"] {
+                    entries.push(DirEntry {
+                        name: String::from(name),
+                        node_type: NodeType::File,
+                        inode: 0,
+                    });
+                }
+
                 entries.push(DirEntry {
                     name: String::from("mounts"),
                     node_type: NodeType::Symlink,
@@ -1211,6 +1254,14 @@ impl VfsNode for ProcNode {
                         ("msgsize_max", NodeType::File),
                         ("queues_max", NodeType::File),
                     ],
+                    "sys/kernel/keys" => &[
+                        ("gc_delay", NodeType::File),
+                        ("maxbytes", NodeType::File),
+                        ("maxkeys", NodeType::File),
+                        ("persistent_keyring_expiry", NodeType::File),
+                        ("root_maxbytes", NodeType::File),
+                        ("root_maxkeys", NodeType::File),
+                    ],
                     "sys/fs/inotify" => &[
                         ("max_queued_events", NodeType::File),
                         ("max_user_instances", NodeType::File),
@@ -1221,6 +1272,7 @@ impl VfsNode for ProcNode {
                         ("core_pattern", NodeType::File),
                         ("domainname", NodeType::File),
                         ("hostname", NodeType::File),
+                        ("keys", NodeType::Directory),
                         ("msgmax", NodeType::File),
                         ("msgmnb", NodeType::File),
                         ("msgmni", NodeType::File),
@@ -1282,7 +1334,8 @@ impl VfsNode for ProcNode {
             ProcNodeType::Root => {
                 // Check for system files
                 match name {
-                    "version" | "uptime" | "meminfo" | "cpuinfo" | "loadavg" | "filesystems" => {
+                    "version" | "uptime" | "meminfo" | "cpuinfo" | "loadavg" | "filesystems"
+                    | "keys" | "key-users" => {
                         Ok(Arc::new(self.system_file(String::from(name))) as Arc<dyn VfsNode>)
                     }
                     "mounts" => Ok(
@@ -1372,6 +1425,17 @@ impl VfsNode for ProcNode {
                         ) as Arc<dyn VfsNode>),
                         _ => Err(KernelError::FsError(FsError::NotFound)),
                     },
+                    "sys/kernel/keys" => match name {
+                        "gc_delay"
+                        | "maxbytes"
+                        | "maxkeys"
+                        | "persistent_keyring_expiry"
+                        | "root_maxbytes"
+                        | "root_maxkeys" => Ok(Arc::new(
+                            self.system_file(format!("sys/kernel/keys/{}", name)),
+                        ) as Arc<dyn VfsNode>),
+                        _ => Err(KernelError::FsError(FsError::NotFound)),
+                    },
                     "sys/fs/inotify" => match name {
                         "max_queued_events" | "max_user_instances" | "max_user_watches" => Ok(
                             Arc::new(self.system_file(format!("sys/fs/inotify/{}", name)))
@@ -1394,6 +1458,9 @@ impl VfsNode for ProcNode {
                         ) as Arc<dyn VfsNode>),
                         "random" => Ok(Arc::new(
                             self.child(ProcNodeType::SubDir(String::from("sys/kernel/random"))),
+                        ) as Arc<dyn VfsNode>),
+                        "keys" => Ok(Arc::new(
+                            self.child(ProcNodeType::SubDir(String::from("sys/kernel/keys"))),
                         ) as Arc<dyn VfsNode>),
                         "unprivileged_userns_clone" => Ok(Arc::new(
                             self.system_file(String::from("sys/kernel/unprivileged_userns_clone")),
@@ -2349,6 +2416,7 @@ mod tests {
                     "core_pattern",
                     "domainname",
                     "hostname",
+                    "keys",
                     "msgmax",
                     "msgmnb",
                     "msgmni",
@@ -2368,6 +2436,17 @@ mod tests {
                 ][..],
             ),
             ("sys/kernel/random", &["boot_id"][..]),
+            (
+                "sys/kernel/keys",
+                &[
+                    "gc_delay",
+                    "maxbytes",
+                    "maxkeys",
+                    "persistent_keyring_expiry",
+                    "root_maxbytes",
+                    "root_maxkeys",
+                ][..],
+            ),
             (
                 "sys/user",
                 &[

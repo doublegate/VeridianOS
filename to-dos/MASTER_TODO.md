@@ -448,6 +448,9 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
        - [x] seccomp in full: strict mode, classic BPF filters by the shared `veridian-cbpf`
          crate, every action, TSYNC, user notification with its listener and ioctls, the status
          lines (ADR 0027 decision 27).
+       - [x] Keyrings core (ADR 0027 decision 28): add_key, request_key and keyctl through the
+         shared `veridian-keys` crate; user, logon and keyring keys, the special and persistent
+         keyrings, `/proc/keys`, `/proc/key-users`, `/proc/sys/kernel/keys`.
        - [x] Landlock, ABI 11 (ADR 0028): the three calls, every filesystem, network and scope
          check, through `cap::authority::holds_path` and `holds_net` and the shared
          `veridian-landlock` crate.

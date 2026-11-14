@@ -400,9 +400,14 @@ dependencies = [
  "spin",
  "uart_16550",
  "veridian-cbpf",
+ "veridian-keys",
  "veridian-landlock",
  "x86_64 0.15.4",
 ]
+
+[[package]]
+name = "veridian-keys"
+version = "0.27.0"
 
 [[package]]
 name = "veridian-landlock"

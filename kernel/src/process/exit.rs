@@ -568,6 +568,12 @@ pub fn exit_dispatched(exit_code: i32, group: bool) -> ! {
         // It stops using its seccomp filters (seccomp_filter_release): a
         // listener sees POLLHUP once no thread can notify it any more.
         thread.seccomp.release();
+        // Its keys go with it.
+        #[cfg(feature = "alloc")]
+        {
+            let keys = core::mem::take(&mut *thread.keys.lock());
+            crate::syscall::keys::release_keys(&keys);
+        }
         // The thread's CPU time stays with the process.
         process.add_exited_cpu_from(dispatch::take_current_usage);
         let clear_ptr = thread.clear_tid.load(Ordering::Acquire);
