@@ -98,6 +98,16 @@ impl ShmemPages {
         self.size
     }
 
+    /// How many of pages `first..=last` the file holds (cachestat: they
+    /// are always resident).
+    pub(crate) fn resident(&self, first: u64, last: u64) -> u64 {
+        let held = self.frames.len() as u64;
+        match super::page_span(self.size, first, last) {
+            Some((a, b)) if a < held => b.min(held - 1) - a + 1,
+            _ => 0,
+        }
+    }
+
     /// The memory the file holds: whole pages, what a size limit charges.
     pub(crate) fn allocated_bytes(&self) -> usize {
         self.frames.len() * PAGE

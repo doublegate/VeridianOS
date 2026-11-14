@@ -200,6 +200,18 @@ impl BlockCache {
         s.pinned = false;
     }
 
+    /// Whether `block` is in the cache, and if so whether it is dirty,
+    /// without counting a use (cachestat). A block being filled is not
+    /// in it yet.
+    pub(crate) fn state(&self, block: u32) -> Option<bool> {
+        let slot = *self.index.get(block as usize)?;
+        if slot == NO_SLOT {
+            return None;
+        }
+        let s = &self.slots[slot as usize];
+        (!s.filling).then_some(s.dirty)
+    }
+
     pub(crate) fn dirty_count(&self) -> usize {
         self.slots
             .iter()

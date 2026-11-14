@@ -21,6 +21,9 @@ pub struct MemfdNode {
     pages: Mutex<ShmemPages>,
     metadata: RwLock<Metadata>,
     seals: AtomicU32,
+    /// Attribute flags (`fs::attr`): a memfd is a shmem file, and keeps
+    /// them as tmpfs does.
+    attr: AtomicU32,
 }
 
 fn eperm() -> KernelError {
@@ -58,6 +61,7 @@ impl MemfdNode {
             } else {
                 seals::SEAL
             }),
+            attr: AtomicU32::new(0),
         })
     }
 
@@ -90,6 +94,9 @@ impl VfsNode for MemfdNode {
     }
 
     fn write(&self, offset: usize, data: &[u8]) -> Result<usize, KernelError> {
+        // Immutable: no write at all, an open descriptor's included
+        // (ext4_write_checks and ext4_setattr; the maintainer's choice).
+        super::attr::may_write(self)?;
         let end = super::ram_write_end(offset, data.len())?;
         let mut pages = self.pages.lock();
         if self.sealed(seals::WRITE | seals::FUTURE_WRITE)
@@ -103,6 +110,9 @@ impl VfsNode for MemfdNode {
     }
 
     fn truncate(&self, size: usize) -> Result<(), KernelError> {
+        // Immutable: no write at all, an open descriptor's included
+        // (ext4_write_checks and ext4_setattr; the maintainer's choice).
+        super::attr::may_write(self)?;
         let mut pages = self.pages.lock();
         if (self.sealed(seals::SHRINK) && size < pages.size())
             || (self.sealed(seals::GROW) && size > pages.size())
@@ -119,6 +129,9 @@ impl VfsNode for MemfdNode {
     /// F_SEAL_FUTURE_WRITE, and an allocation ending past the size under
     /// F_SEAL_GROW, even with KEEP_SIZE.
     fn fallocate(&self, request: super::falloc::Request) -> Result<(), KernelError> {
+        // Immutable: no write at all, an open descriptor's included
+        // (ext4_write_checks and ext4_setattr; the maintainer's choice).
+        super::attr::may_write(self)?;
         use super::falloc::Op;
         if !matches!(request.op, Op::Allocate | Op::PunchHole) {
             return Err(super::falloc::unsupported());
@@ -182,6 +195,23 @@ impl VfsNode for MemfdNode {
         _new_name: &str,
     ) -> Result<(), KernelError> {
         Err(KernelError::FsError(FsError::NotADirectory))
+    }
+
+    fn attr_flags(&self) -> Option<u32> {
+        Some(self.attr.load(Ordering::Relaxed))
+    }
+
+    fn cache_stat(&self, first: u64, last: u64) -> super::CacheStat {
+        super::CacheStat {
+            cached: self.pages.lock().resident(first, last),
+            dirty: 0,
+        }
+    }
+
+    fn set_attr_flags(&self, flags: u32) -> Result<(), KernelError> {
+        self.attr.store(flags, Ordering::Relaxed);
+        super::note_change(&mut self.metadata.write(), false);
+        Ok(())
     }
 
     fn chmod(&self, permissions: Permissions) -> Result<(), KernelError> {

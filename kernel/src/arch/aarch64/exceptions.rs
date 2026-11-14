@@ -272,8 +272,12 @@ extern "C" fn aarch64_user_exception(f: &mut super::switch::UserFrame, vector: u
                 } else {
                     SEGV_ACCERR
                 };
-                if crate::mm::page_fault::handle_page_fault(info).is_err() {
-                    fault(SIGSEGV, code, far, elr, f.x[30]);
+                match crate::mm::page_fault::handle_page_fault(info) {
+                    Ok(()) => {}
+                    Err(e) if crate::mm::page_fault::is_bus_error(&e) => {
+                        fault(7, crate::process::signals::BUS_ADRERR, far, elr, f.x[30])
+                    }
+                    Err(_) => fault(SIGSEGV, code, far, elr, f.x[30]),
                 }
             }
             // A BTI violation is SIGILL with ILL_ILLOPC, as Linux's

@@ -47,7 +47,7 @@ ltp-syscalls	brk01	PASS
 ltp-syscalls	brk02	PASS	
 ltp-syscalls	cacheflush01	CONF	tst_test.c:1429: TCONF: system doesn't support cacheflush()
 ltp-syscalls	cachestat01	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	cachestat02	CONF	../../../../include/lapi/mman.h:44: TCONF: syscall(451) __NR_cachestat not supported on your arch
+ltp-syscalls	cachestat02	PASS	
 ltp-syscalls	cachestat03	CONF	tst_hugepage.c:34: TCONF: hugetlbfs is not supported
 ltp-syscalls	cachestat04	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	capget01	PASS	
@@ -204,7 +204,7 @@ ltp-syscalls	execve03	FAIL	execve03.c:106: TFAIL: execve failed unexpectedly; ex
 ltp-syscalls	execve04	PASS	
 ltp-syscalls	execve05	FLAKY	PASS locally in 41 s of the 60 s limit, TIMEOUT on the GitHub runner (PR #34, 2026-10-30); last here: PASS
 ltp-syscalls	execve06	PASS	
-ltp-syscalls	execveat01	HANG	no output
+ltp-syscalls	execveat01	PASS	
 ltp-syscalls	execveat02	PASS	
 ltp-syscalls	execveat03	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	execvp01	PASS	
@@ -357,7 +357,7 @@ ltp-syscalls	fgetxattr03	PASS
 ltp-syscalls	file_attr01	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	file_attr02	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	file_attr03	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	file_attr04	CONF	../../../../include/lapi/fs.h:134: TCONF: syscall(469) __NR_file_setattr not supported on your arch
+ltp-syscalls	file_attr04	PASS	
 ltp-syscalls	file_attr05	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	finit_module01	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	finit_module02	BROK	tst_kconfig.c:658: TBROK: fopen(/proc/cmdline,r) failed: ENOENT (2)
@@ -378,11 +378,11 @@ ltp-syscalls	fork05	CONF	tst_test.c:1429: TCONF: Test only supports Intel 32 bit
 ltp-syscalls	fork06	TIMEOUT	tst_test.c:1895: TINFO: Overall timeout per run is 0h 01m 00s
 ltp-syscalls	fork07	FLAKY	PASS locally in 36 s of the 60 s limit, failed once on the GitHub runner and passed on its retry (PR #34, 2026-10-30); last here: PASS
 ltp-syscalls	fork08	PASS	
-ltp-syscalls	fork09	HANG	no output
+ltp-syscalls	fork09	TIMEOUT	fork09.c:34: TINFO: Opening files from parent
 ltp-syscalls	fork10	PASS	
 ltp-syscalls	fork11	FLAKY	TIMEOUT and WARN in two x86_64 runs (2026-10-22); the WARN was LTP's kernel-version check, gone since uname reports 7.3.0 (PR #34)
 ltp-syscalls	fork13	BROK	tst_sys_conf.c:118: TBROK: Failed to open '/proc/sys/kernel/pid_max' for writing: EACCES (13)
-ltp-syscalls	fork14	TIMEOUT	fork14.c:45: TINFO: mmap() failed
+ltp-syscalls	fork14	CONF	fork14.c:45: TINFO: mmap() failed
 ltp-syscalls	fpathconf01	PASS	
 ltp-syscalls	fremovexattr01	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	fremovexattr02	BROK	tst_device.c:450: TBROK: Failed to acquire device
@@ -535,7 +535,7 @@ ltp-syscalls	inotify07	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	inotify08	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	inotify09	TIMEOUT	../../../../include/tst_fuzzy_sync.h:255: TINFO: end_b - start_b  : { avg = 75203ns, avg_dev =  8721ns, dev_ratio = 0.12 }
 ltp-syscalls	inotify10	PASS	
-ltp-syscalls	inotify11	TIMEOUT	tst_kconfig.c:90: TINFO: Parsing kernel config '/boot/config-7.3.0-veridian'
+ltp-syscalls	inotify11	FLAKY	PASS locally in 36 to 44 s, TIMEOUT locally at times and on the GitHub runner in both runs of PR #45 (180 s, 2026-11-14): file creation and removal in a loop are slow (follow-up: directory operations, Track P); last here: PASS
 ltp-syscalls	inotify12	FAIL	inotify12.c:82: TFAIL: Could not parse inotify fdinfo
 ltp-syscalls	inotify_init1_01	PASS	
 ltp-syscalls	inotify_init1_02	PASS	
@@ -599,10 +599,10 @@ ltp-syscalls	ioperm01	FAIL	exit 5; ioperm01.c:33: TFAIL: ioperm() failed for por
 ltp-syscalls	ioperm02	FAIL	ioperm02.c:69: TFAIL: Unexpected results for Invalid I/O address ; returned -1 (expected -1), errno 38 (expected errno 22): ENOSYS (38)
 ltp-syscalls	iopl01	FAIL	exit 5; iopl01.c:34: TFAIL: iopl() failed for level 0, errno=38 : ENOSYS: ENOSYS (38)
 ltp-syscalls	iopl02	FAIL	iopl02.c:42: TFAIL: Invalid privilege level returned -1 expected -1, expected EINVAL got : ENOSYS (38)
-ltp-syscalls	ioprio_get01	CONF	ioprio.h:22: TCONF: syscall(252) __NR_ioprio_get not supported on your arch
-ltp-syscalls	ioprio_set01	CONF	ioprio.h:22: TCONF: syscall(252) __NR_ioprio_get not supported on your arch
-ltp-syscalls	ioprio_set02	CONF	ioprio.h:27: TCONF: syscall(251) __NR_ioprio_set not supported on your arch
-ltp-syscalls	ioprio_set03	CONF	ioprio.h:27: TCONF: syscall(251) __NR_ioprio_set not supported on your arch
+ltp-syscalls	ioprio_get01	PASS	
+ltp-syscalls	ioprio_set01	PASS	
+ltp-syscalls	ioprio_set02	PASS	
+ltp-syscalls	ioprio_set03	PASS	
 ltp-syscalls	kcmp01	PASS	
 ltp-syscalls	kcmp02	PASS	
 ltp-syscalls	kcmp03	PASS	
@@ -664,7 +664,7 @@ ltp-syscalls	lgetxattr01	PASS
 ltp-syscalls	lgetxattr02	PASS	
 ltp-syscalls	link02	PASS	
 ltp-syscalls	link04	PASS	
-ltp-syscalls	link05	HANG	no output
+ltp-syscalls	link05	FLAKY	PASS locally in 35 to 46 s, TIMEOUT locally at times and on the GitHub runner in both runs of PR #45 (TPASS printed, then removing the 1,000 links outlasts 180 s; 2026-11-14): directory operations are slow (follow-up, Track P); last here: PASS
 ltp-syscalls	link08	PASS	
 ltp-syscalls	linkat01	FAIL	linkat01   16  TFAIL  :  linkat01.c:276: linkat failed unexpectedly; expected 2 - No such file or directory: TEST_ERRNO=ENOTDIR(20): Not a directory
 ltp-syscalls	linkat02	BROK	linkat02    1  TBROK  :  tst_device.c:450: Failed to acquire device
@@ -701,7 +701,7 @@ ltp-syscalls	lstat02_64	PASS
 ltp-syscalls	lstat03	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	lstat03_64	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	madvise01	PASS	
-ltp-syscalls	madvise02	BROK	madvise02.c:94: TBROK: mlock failed: ENOSYS (38)
+ltp-syscalls	madvise02	FAIL	madvise02.c:177: TFAIL: madvise succeeded unexpectedly
 ltp-syscalls	madvise03	PASS	
 ltp-syscalls	madvise05	PASS	
 ltp-syscalls	madvise06	CONF	tst_test.c:1523: TCONF: Test needs at least 800MB SwapFree
@@ -718,7 +718,7 @@ ltp-syscalls	mbind01	CONF	tst_test.c:1429: TCONF: test requires libnuma developm
 ltp-syscalls	mbind02	CONF	tst_test.c:1429: TCONF: test requires libnuma development packages with LIBNUMA_API_VERSION >= 2
 ltp-syscalls	mbind03	CONF	tst_test.c:1429: TCONF: test requires libnuma development packages with LIBNUMA_API_VERSION >= 2
 ltp-syscalls	mbind04	CONF	tst_test.c:1429: TCONF: test requires libnuma development packages with LIBNUMA_API_VERSION >= 2
-ltp-syscalls	membarrier01	CONF	membarrier01.c:276: TCONF: syscall(324) __NR_membarrier not supported on your arch
+ltp-syscalls	membarrier01	PASS	
 ltp-syscalls	memcmp01	PASS	
 ltp-syscalls	memcpy01	PASS	
 ltp-syscalls	memfd_create01	BROK	memfd_create01.c:38: TPASS: fcntl(3, F_ADD_SEALS, 4) failed as expected: EPERM (1)
@@ -729,10 +729,10 @@ ltp-syscalls	memset01	PASS
 ltp-syscalls	migrate_pages01	CONF	migrate_pages01    1  TCONF  :  migrate_pages01.c:250: test requires libnuma development packages with LIBNUMA_API_VERSION >= 2
 ltp-syscalls	migrate_pages02	CONF	tst_test.c:1429: TCONF: test requires libnuma development packages with LIBNUMA_API_VERSION >= 2
 ltp-syscalls	migrate_pages03	CONF	tst_test.c:1429: TCONF: require libnuma >= 2 and it's development packages
-ltp-syscalls	mincore01	FAIL	mincore01    1  TFAIL  :  mincore01.c:200: mincore failed unexpectedly; expected: 22 - Invalid argument: TEST_ERRNO=ENOSYS(38): Function not implemented
+ltp-syscalls	mincore01	PASS	
 ltp-syscalls	mincore02	BROK	mincore02.c:47: TBROK: mmap(0,16384,PROT_READ | PROT_WRITE | PROT_EXEC(7),1,3,0) failed: EACCES (13)
-ltp-syscalls	mincore03	BROK	mincore03.c:59: TBROK: mincore failed: ENOSYS (38)
-ltp-syscalls	mincore04	BROK	mincore04.c:58: TBROK: mlock() failed: ENOSYS (38)
+ltp-syscalls	mincore03	FAIL	mincore03.c:68: TFAIL: mincore reports resident pages as 3, but expected 0
+ltp-syscalls	mincore04	PASS	
 ltp-syscalls	mkdir02	FAIL	mkdir02.c:32: TFAIL: New dir FAILED to inherit GID: has 65534, expected 4
 ltp-syscalls	mkdir03	PASS	
 ltp-syscalls	mkdir04	PASS	
@@ -751,18 +751,18 @@ ltp-syscalls	mknod08	PASS
 ltp-syscalls	mknod09	PASS	
 ltp-syscalls	mknodat01	PASS	
 ltp-syscalls	mknodat02	BROK	mknodat     1  TBROK  :  tst_device.c:450: Failed to acquire device
-ltp-syscalls	mlock01	FAIL	mlock01.c:34: TFAIL: mlock(0x400000003240, 1) failed: ENOSYS (38)
-ltp-syscalls	mlock02	FAIL	mlock02.c:41: TFAIL: mlock(0x400000005000, 4096) expected ENOMEM: ENOSYS (38)
+ltp-syscalls	mlock01	PASS	
+ltp-syscalls	mlock02	PASS	
 ltp-syscalls	mlock03	PASS	
-ltp-syscalls	mlock04	BROK	mlock04.c:38: TBROK: munlock() failed: ENOSYS (38)
-ltp-syscalls	mlock05	BROK	mlock05.c:95: TBROK: mlock() failed: ENOSYS (38)
-ltp-syscalls	mlock201	BROK	mlock201.c:101: TBROK: Expected 1 conversions got 0 FILE '/proc/self/status'
-ltp-syscalls	mlock202	CONF	mlock202.c:63: TCONF: syscall(325) __NR_mlock2 not supported on your arch
-ltp-syscalls	mlock203	BROK	mlock203.c:31: TBROK: Expected 1 conversions got 0 FILE '/proc/self/status'
-ltp-syscalls	mlockall01	FAIL	mlockall01    1  TFAIL  :  mlockall01.c:110: mlockall(MCL_CURRENT) Failed with return=-1: TEST_ERRNO=ENOSYS(38): Function not implemented
-ltp-syscalls	mlockall02	FAIL	mlockall02    1  TFAIL  :  mlockall02.c:128: mlock() Failed with wrong errno, expected errno=Process exceeds max locked pages, got errno=38 : Function not imple
-ltp-syscalls	mlockall03	FAIL	mlockall03    1  TFAIL  :  mlockall03.c:151: mlockall() Failed with wrong errno, expected errno=tried to lock more memory than the limit permitted, got errno=38
-ltp-syscalls	mmap01	BROK	mmap01.c:103: TBROK: msync(0x400000008000, 4096, 4) failed: ENOSYS (38)
+ltp-syscalls	mlock04	PASS	
+ltp-syscalls	mlock05	PASS	
+ltp-syscalls	mlock201	FAIL	mlock201.c:124: TFAIL: mlock2(0) locked 8 pages, expected 1
+ltp-syscalls	mlock202	PASS	
+ltp-syscalls	mlock203	PASS	
+ltp-syscalls	mlockall01	PASS	
+ltp-syscalls	mlockall02	PASS	
+ltp-syscalls	mlockall03	PASS	
+ltp-syscalls	mmap01	PASS	
 ltp-syscalls	mmap02	PASS	
 ltp-syscalls	mmap03	PASS	
 ltp-syscalls	mmap04	BROK	known: docs/KNOWN-LIMITATIONS.md (W^X by default, ADR 0017)
@@ -772,15 +772,15 @@ ltp-syscalls	mmap08	FAIL	mmap08.c:28: TFAIL: mmap(NULL, page_sz, PROT_WRITE, MAP
 ltp-syscalls	mmap09	PASS	
 ltp-syscalls	mmap12	FAIL	mmap12.c:47: TFAIL: pen dev pagemap failed: ENOENT (2)
 ltp-syscalls	mmap13	FAIL	mmap13.c:60: TFAIL: SIGBUS signal not received
-ltp-syscalls	mmap14	FAIL	mmap14.c:63: TFAIL: Expected 1024K locked, get 0K locked
+ltp-syscalls	mmap14	PASS	
 ltp-syscalls	mmap15	PASS	
 ltp-syscalls	mmap16	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	mmap17	PASS	
 ltp-syscalls	mmap18	FAIL	mmap18.c:163: TFAIL: Child: killed by SIGSEGV
 ltp-syscalls	mmap19	PASS	
 ltp-syscalls	mmap20	PASS	
-ltp-syscalls	mmap21_01	BROK	mmap21.c:48: TBROK: msync(0x400000008000, 4096, 4) failed: ENOSYS (38)
-ltp-syscalls	mmap21_02	BROK	mmap21.c:48: TBROK: msync(0x4000003ed000, 4096000, 4) failed: ENOSYS (38)
+ltp-syscalls	mmap21_01	PASS	
+ltp-syscalls	mmap21_02	PASS	
 ltp-syscalls	mmap22	CONF	tst_cgroup.c:893: TCONF: 'memory' controller required, but not available
 ltp-syscalls	mmap23	PASS	
 ltp-syscalls	mmap24	FAIL	mmap24.c:71: TFAIL: mapping at 0x400000004000 + 33554432 exceeds 2GB limit
@@ -815,14 +815,14 @@ ltp-syscalls	mprotect02	PASS
 ltp-syscalls	mprotect03	PASS	
 ltp-syscalls	mprotect04	PASS	
 ltp-syscalls	mprotect05	PASS	
-ltp-syscalls	mq_notify01	TIMEOUT	tst_memutils.c:153: TINFO: oom_score_adj does not exist, skipping the adjustment
+ltp-syscalls	mq_notify01	FAIL	mq_notify01.c:142: TFAIL: mq_notify failed unexpectedly, expected SUCCESS: EAFNOSUPPORT (97)
 ltp-syscalls	mq_notify02	PASS	
 ltp-syscalls	mq_notify03	TIMEOUT	mq_notify03.c:53: TFAIL: mq_notify(m, &sev) failed: EAFNOSUPPORT (97)
 ltp-syscalls	mq_open01	FAIL	mq_open01.c:263: TFAIL: NORMAL expected errno: 2: ENOENT (2)
 ltp-syscalls	mq_timedreceive01	PASS	
 ltp-syscalls	mq_timedsend01	PASS	
 ltp-syscalls	mq_unlink01	PASS	
-ltp-syscalls	mremap01	BROK	mremap01.c:103: TBROK: msync(0x400000004000, 8192000, 4) failed: ENOSYS (38)
+ltp-syscalls	mremap01	PASS	
 ltp-syscalls	mremap02	PASS	
 ltp-syscalls	mremap03	PASS	
 ltp-syscalls	mremap04	PASS	
@@ -831,8 +831,8 @@ ltp-syscalls	mremap06	FAIL	mremap06.c:55: TFAIL: page 0 wrong value -48 (0x0)
 ltp-syscalls	mremap07	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	mremap08	PASS	
 ltp-syscalls	mremap09	PASS	
-ltp-syscalls	mseal01	CONF	mseal01.c:40: TCONF: syscall(462) __NR_mseal not supported on your arch
-ltp-syscalls	mseal02	CONF	mseal02.c:47: TCONF: syscall(462) __NR_mseal not supported on your arch
+ltp-syscalls	mseal01	PASS	
+ltp-syscalls	mseal02	PASS	
 ltp-syscalls	msgctl01	PASS	
 ltp-syscalls	msgctl02	PASS	
 ltp-syscalls	msgctl03	PASS	
@@ -857,20 +857,20 @@ ltp-syscalls	msgsnd02	PASS
 ltp-syscalls	msgsnd05	BROK	msgsnd05.c:83: TBROK: msgget(1627460692, 780) failed: ENOSYS (38)
 ltp-syscalls	msgsnd06	BROK	msgsnd06.c:39: TBROK: msgget(1627460692, 780) failed: ENOSYS (38)
 ltp-syscalls	msgstress01	BROK	msgstress01.c:256: TBROK: Failed to open FILE '/proc/sys/kernel/msgmni' for reading: ENOENT (2)
-ltp-syscalls	msync01	FAIL	msync01     1  TFAIL  :  msync01.c:106: msync failed: TEST_ERRNO=ENOSYS(38): Function not implemented
+ltp-syscalls	msync01	PASS	
 ltp-syscalls	msync02	FAIL	msync02     1  TFAIL  :  msync02.c:97: msync failed: TEST_ERRNO=ENOSYS(38): Function not implemented
-ltp-syscalls	msync03	FAIL	msync03     1  TFAIL  :  msync03.c:148: msync failed unexpectedly; expected: 16 - Resource busy: TEST_ERRNO=ENOSYS(38): Function not implemented
+ltp-syscalls	msync03	PASS	
 ltp-syscalls	msync04	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	munlock01	BROK	munlock01.c:32: TBROK: mlock() failed: ENOSYS (38)
-ltp-syscalls	munlock02	BROK	munlock02.c:34: TBROK: mlock() failed: ENOSYS (38)
-ltp-syscalls	munlockall01	BROK	munlockall01.c:19: TBROK: Expected 1 conversions got 0 FILE '/proc/self/status'
+ltp-syscalls	munlock01	PASS	
+ltp-syscalls	munlock02	PASS	
+ltp-syscalls	munlockall01	PASS	
 ltp-syscalls	munmap01	PASS	
 ltp-syscalls	munmap03	PASS	
 ltp-syscalls	munmap04	TIMEOUT	tst_kconfig.c:90: TINFO: Parsing kernel config '/boot/config-7.3.0-veridian'
 ltp-syscalls	name_to_handle_at01	PASS	
 ltp-syscalls	name_to_handle_at02	PASS	
 ltp-syscalls	name_to_handle_at03	PASS	
-ltp-syscalls	nanosleep01	TIMEOUT	tst_timer_test.c:314: TFAIL: nanosleep() slept for too long
+ltp-syscalls	nanosleep01	FAIL	tst_timer_test.c:314: TFAIL: nanosleep() slept for too long
 ltp-syscalls	nanosleep02	PASS	
 ltp-syscalls	nanosleep04	PASS	
 ltp-syscalls	newuname01	FAIL	newuname01.c:32: TFAIL: name->sysname (VeridianOS) != "Linux" (Linux)
@@ -1065,8 +1065,8 @@ ltp-syscalls	recvmmsg01	BROK	tst_test.c:1973: TBROK: Test killed by SIGSEGV!
 ltp-syscalls	recvmsg01	BROK	recvmsg01.c:314: TBROK: no message ready in 2 sec
 ltp-syscalls	recvmsg02	CONF	recvmsg02.c:57: TCONF: socket(10, 524290, 0) failed: EAFNOSUPPORT (97)
 ltp-syscalls	recvmsg03	CONF	recvmsg03.c:38: TCONF: rds was not supported
-ltp-syscalls	remap_file_pages01	BROK	remap_file_pages01    1  TFAIL  :  remap_file_pages01.c:174: remap_file_pages error for page=0x48000000, remap_sz=8192, window_pages=14: errno=ENOSYS(38): Funct
-ltp-syscalls	remap_file_pages02	CONF	remap_file_pages02.c:79: TCONF: syscall(216) __NR_remap_file_pages not supported on your arch
+ltp-syscalls	remap_file_pages01	PASS	
+ltp-syscalls	remap_file_pages02	PASS	
 ltp-syscalls	removexattr01	PASS	
 ltp-syscalls	removexattr02	PASS	
 ltp-syscalls	rename01	BROK	tst_device.c:450: TBROK: Failed to acquire device
@@ -1151,9 +1151,9 @@ ltp-syscalls	semctl08	CONF	tst_test.c:1429: TCONF: test requires struct semid64_
 ltp-syscalls	semctl09	PASS	
 ltp-syscalls	semget01	PASS	
 ltp-syscalls	semget02	PASS	
-ltp-syscalls	semget05	TIMEOUT	semget05.c:39: TINFO: Current environment 0 semaphore arrays are already in use
-ltp-syscalls	semop01	BROK	semop01.c:82: TBROK: couldn't create semaphore in setup: EEXIST (17)
-ltp-syscalls	semop02	BROK	semop02.c:92: TBROK: couldn't create semaphore in setup: EEXIST (17)
+ltp-syscalls	semget05	PASS	
+ltp-syscalls	semop01	PASS	
+ltp-syscalls	semop02	PASS	
 ltp-syscalls	semop03	BROK	semop03.c:81: TBROK: couldn't create semaphore in setup: EEXIST (17)
 ltp-syscalls	semop04	PASS	
 ltp-syscalls	semop05	PASS	
@@ -1304,9 +1304,9 @@ ltp-syscalls	setuid04	PASS
 ltp-syscalls	setuid04_16	CONF	testcases/kernel/syscalls/setuid/../utils/compat_tst_16.h:84: TCONF: 16-bit version of setuid() is not supported on your platform
 ltp-syscalls	setxattr01	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	setxattr02	PASS	
-ltp-syscalls	setxattr03	BROK	setxattr03.c:139: TBROK: Set setxattr03immutable immutable failed: EINVAL (22)
+ltp-syscalls	setxattr03	PASS	
 ltp-syscalls	sgetmask01	CONF	sgetmask01    1  TCONF  :  sgetmask01.c:128: syscall(-1) __NR_ssetmask not supported on your arch
-ltp-syscalls	shmat01	TIMEOUT	shmat01.c:124: TPASS: shmat() succeeded to attach unaligned address with SHM_RND
+ltp-syscalls	shmat01	PASS	
 ltp-syscalls	shmat02	PASS	
 ltp-syscalls	shmat03	PASS	
 ltp-syscalls	shmat04	PASS	
@@ -1314,7 +1314,7 @@ ltp-syscalls	shmctl01	BROK	shmctl01.c:246: TBROK: shmget(0, 2048, 380) failed: E
 ltp-syscalls	shmctl02	PASS	
 ltp-syscalls	shmctl03	PASS	
 ltp-syscalls	shmctl04	PASS	
-ltp-syscalls	shmctl05	CONF	shmctl05.c:47: TCONF: syscall(216) __NR_remap_file_pages not supported on your arch
+ltp-syscalls	shmctl05	PASS	
 ltp-syscalls	shmctl06	CONF	tst_test.c:1429: TCONF: test requires struct shmid64_ds to have the time_high fields
 ltp-syscalls	shmctl07	PASS	
 ltp-syscalls	shmctl08	PASS	
@@ -1355,7 +1355,7 @@ ltp-syscalls	socket02	PASS
 ltp-syscalls	socketcall01	CONF	socketcall01.c:39: TCONF: syscall(-1) __NR_socketcall not supported on your arch
 ltp-syscalls	socketcall02	CONF	socketcall02.c:38: TCONF: syscall(-1) __NR_socketcall not supported on your arch
 ltp-syscalls	socketcall03	CONF	socketcall03.c:32: TCONF: syscall(-1) __NR_socketcall not supported on your arch
-ltp-syscalls	socketpair01	TIMEOUT	socketpair01.c:73: TFAIL: expected EPROTONOSUPPORT(93): EINVAL (22)
+ltp-syscalls	socketpair01	FAIL	socketpair01.c:73: TFAIL: expected EPROTONOSUPPORT(93): EINVAL (22)
 ltp-syscalls	socketpair02	PASS	
 ltp-syscalls	sockioctl01	BROK	sockioctl01    6  TBROK  :  sockioctl01.c:225: ioctl(3,SIOCGIFCONF,...) failed: errno=EINVAL(22): Invalid argument
 ltp-syscalls	splice01	PASS	
@@ -1944,22 +1944,22 @@ open-posix	conformance/interfaces/localtime/1-1	PASS
 open-posix	conformance/interfaces/mktime/1-1	PASS	
 open-posix	conformance/interfaces/mlock/2-1	PASS	
 open-posix	conformance/interfaces/mlock/4-1	PASS	
-open-posix	conformance/interfaces/mlock/5-1	BROK	Unexpected error: Function not implemented
+open-posix	conformance/interfaces/mlock/5-1	PASS	
 open-posix	conformance/interfaces/mlock/7-1	PASS	
-open-posix	conformance/interfaces/mlock/8-1	BROK	Unexpected error: Function not implemented
-open-posix	conformance/interfaces/mlock/10-1	BROK	Unexpected error: Function not implemented
-open-posix	conformance/interfaces/mlock/12-1	BROK	Unexpected error: Function not implemented
-open-posix	conformance/interfaces/mlock/speculative/12-1	BROK	Unexpected error: Function not implemented
+open-posix	conformance/interfaces/mlock/8-1	PASS	
+open-posix	conformance/interfaces/mlock/10-1	PASS	
+open-posix	conformance/interfaces/mlock/12-1	PASS	
+open-posix	conformance/interfaces/mlock/speculative/12-1	PASS	
 open-posix	conformance/interfaces/mlockall/2-1	PASS	
-open-posix	conformance/interfaces/mlockall/3-6	BROK	An error occurs when calling mlockall(): Function not implemented
-open-posix	conformance/interfaces/mlockall/3-7	BROK	An error occurs when calling mlockall(): Function not implemented
+open-posix	conformance/interfaces/mlockall/3-6	PASS	
+open-posix	conformance/interfaces/mlockall/3-7	PASS	
 open-posix	conformance/interfaces/mlockall/7-1	PASS	
-open-posix	conformance/interfaces/mlockall/8-1	BROK	Unexpected error: Function not implemented
+open-posix	conformance/interfaces/mlockall/8-1	PASS	
 open-posix	conformance/interfaces/mlockall/9-1	PASS	
-open-posix	conformance/interfaces/mlockall/13-1	FAIL	Unexpected error: Function not implemented
-open-posix	conformance/interfaces/mlockall/13-2	FAIL	Unexpected error: Function not implemented
-open-posix	conformance/interfaces/mlockall/15-1	BROK	Unexpected error: Function not implemented
-open-posix	conformance/interfaces/mlockall/speculative/15-1	BROK	Unexpected error: Function not implemented
+open-posix	conformance/interfaces/mlockall/13-1	PASS	
+open-posix	conformance/interfaces/mlockall/13-2	PASS	
+open-posix	conformance/interfaces/mlockall/15-1	PASS	
+open-posix	conformance/interfaces/mlockall/speculative/15-1	PASS	
 open-posix	conformance/interfaces/mmap/1-1	PASS	
 open-posix	conformance/interfaces/mmap/1-2	PASS	
 open-posix	conformance/interfaces/mmap/3-1	PASS	
@@ -1970,8 +1970,8 @@ open-posix	conformance/interfaces/mmap/6-3	PASS
 open-posix	conformance/interfaces/mmap/6-4	PASS	
 open-posix	conformance/interfaces/mmap/6-5	PASS	
 open-posix	conformance/interfaces/mmap/6-6	PASS	
-open-posix	conformance/interfaces/mmap/7-1	BROK	Error at msync(): Function not implemented
-open-posix	conformance/interfaces/mmap/7-2	BROK	Error at msync(): Function not implemented
+open-posix	conformance/interfaces/mmap/7-1	PASS	
+open-posix	conformance/interfaces/mmap/7-2	PASS	
 open-posix	conformance/interfaces/mmap/7-3	PASS	
 open-posix	conformance/interfaces/mmap/7-4	PASS	
 open-posix	conformance/interfaces/mmap/9-1	PASS	
@@ -1987,7 +1987,7 @@ open-posix	conformance/interfaces/mmap/13-1	FAIL	Test FAILED: st_atime was not u
 open-posix	conformance/interfaces/mmap/14-1	FAIL	Test FAILED: st_ctime and st_mtime were not updated properly
 open-posix	conformance/interfaces/mmap/16-1	PASS	
 open-posix	conformance/interfaces/mmap/17-1	PASS	
-open-posix	conformance/interfaces/mmap/18-1	BROK	Error at mlockall(): Function not implemented
+open-posix	conformance/interfaces/mmap/18-1	PASS	
 open-posix	conformance/interfaces/mmap/19-1	PASS	
 open-posix	conformance/interfaces/mmap/20-1	PASS	
 open-posix	conformance/interfaces/mmap/21-1	PASS	
@@ -2139,17 +2139,17 @@ open-posix	conformance/interfaces/mq_unlink/4-1	PASS
 open-posix	conformance/interfaces/mq_unlink/7-1	PASS	
 open-posix	conformance/interfaces/mq_unlink/speculative/7-2	PASS	
 open-posix	conformance/interfaces/munlock/2-1	PASS	
-open-posix	conformance/interfaces/munlock/7-1	BROK	An error occurs when calling mlock(): Function not implemented
+open-posix	conformance/interfaces/munlock/7-1	PASS	
 open-posix	conformance/interfaces/munlock/9-1	PASS	
-open-posix	conformance/interfaces/munlock/10-1	BROK	Unexpected error: Function not implemented
-open-posix	conformance/interfaces/munlock/11-1	BROK	Unexpected error: Function not implemented
-open-posix	conformance/interfaces/munlockall/5-1	FAIL	munlockall() returns -1 instead of zero.
+open-posix	conformance/interfaces/munlock/10-1	PASS	
+open-posix	conformance/interfaces/munlock/11-1	PASS	
+open-posix	conformance/interfaces/munlockall/5-1	PASS	
 open-posix	conformance/interfaces/munlockall/6-1	PASS	
 open-posix	conformance/interfaces/munmap/1-1	PASS	
 open-posix	conformance/interfaces/munmap/1-2	PASS	
 open-posix	conformance/interfaces/munmap/2-1	PASS	
 open-posix	conformance/interfaces/munmap/3-1	PASS	
-open-posix	conformance/interfaces/munmap/4-1	BROK	munmap/4-1.c Error at msync(): No error information
+open-posix	conformance/interfaces/munmap/4-1	PASS	
 open-posix	conformance/interfaces/munmap/7-1	PASS	
 open-posix	conformance/interfaces/munmap/8-1	PASS	
 open-posix	conformance/interfaces/munmap/9-1	PASS	

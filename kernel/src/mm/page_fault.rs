@@ -79,6 +79,20 @@ pub fn handle_page_fault(info: PageFaultInfo) -> Result<(), KernelError> {
         }
     }
 
+    // Then a write to a shared mapping of an immutable file (SIGBUS), or to
+    // one write-protected while a file became immutable and is writable
+    // again. After copy-on-write, so that path pays nothing for it;
+    // immutable_fault checks the page itself (RISC-V cannot tell a missing
+    // page from a protection fault).
+    #[cfg(feature = "alloc")]
+    if info.was_write {
+        match immutable_write(&info) {
+            Some(true) => return Err(bus_error()),
+            Some(false) => return Ok(()),
+            None => {}
+        }
+    }
+
     // Attempt stack growth.
     if let Ok(()) = try_stack_growth(&info) {
         return Ok(());
@@ -93,6 +107,36 @@ pub fn handle_page_fault(info: PageFaultInfo) -> Result<(), KernelError> {
 // ---------------------------------------------------------------------------
 // Sub-handlers
 // ---------------------------------------------------------------------------
+
+/// The error a fault the process gets SIGBUS for returns (BUS_ADRERR):
+/// a write through a shared mapping of an immutable file.
+fn bus_error() -> KernelError {
+    KernelError::FsError(crate::error::FsError::OperationNotPermitted)
+}
+
+/// Whether `err`, from [`handle_page_fault`], is a SIGBUS (BUS_ADRERR)
+/// rather than a SIGSEGV.
+pub fn is_bus_error(err: &KernelError) -> bool {
+    matches!(
+        err,
+        KernelError::FsError(crate::error::FsError::OperationNotPermitted)
+    )
+}
+
+/// [`crate::mm::VirtualAddressSpace::immutable_fault`] for the current
+/// process; a retry (an attribute change under way) yields first.
+#[cfg(feature = "alloc")]
+fn immutable_write(info: &PageFaultInfo) -> Option<bool> {
+    let process = crate::process::current_process()?;
+    let verdict = process
+        .memory_space
+        .lock()
+        .immutable_fault(info.faulting_address)?;
+    if !verdict && crate::fs::attr::changing() {
+        crate::sched::dispatch::yield_now();
+    }
+    Some(verdict)
+}
 
 /// Try to resolve the fault via demand paging.
 ///
@@ -123,6 +167,23 @@ pub fn resolve_user_copy_fault(info: &PageFaultInfo) -> bool {
     let Some(process) = crate::process::try_current_process() else {
         return false;
     };
+    // A write to a shared file page write-protected for immutability:
+    // asked for any fault reason, since RISC-V reports every fault as a
+    // missing page (PR #45 review: a kernel copy into such a page failed
+    // there once the flag was cleared). Never SIGBUS here, and never a
+    // retry while a change is under way: the copy may hold a spin lock, so
+    // it returns EFAULT instead of spinning (the outcome once the flag is
+    // set).
+    #[cfg(feature = "alloc")]
+    if info.was_write {
+        if let Some(refused) = process
+            .memory_space
+            .try_lock()
+            .and_then(|vas| vas.immutable_fault(info.faulting_address))
+        {
+            return !refused && !crate::fs::attr::changing();
+        }
+    }
     if info.reason != PageFaultReason::NotPresent {
         return info.was_write && resolve_cow_in(&process, info, false).is_ok();
     }

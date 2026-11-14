@@ -45,9 +45,28 @@ struct TmpNode {
     /// An O_TMPFILE file that linkat may still name
     /// ([`VfsNode::tmpfile_linkable`]).
     linkable: core::sync::atomic::AtomicBool,
+    /// Attribute flags (`fs::attr`): what chattr sets.
+    attr: core::sync::atomic::AtomicU32,
 }
 
 impl TmpNode {
+    /// A new node takes nodump and noatime from its directory
+    /// (shmem_get_inode, SHMEM_FL_INHERITED).
+    fn inherit_attr(&self, child: &TmpNode) {
+        // Regular files and directories only (shmem_get_inode, PR #45
+        // review): a symlink or special node keeps none.
+        if !matches!(
+            super::VfsNode::node_type(child),
+            super::NodeType::File | super::NodeType::Directory
+        ) {
+            return;
+        }
+        child.attr.store(
+            self.attr.load(Ordering::Relaxed) & super::attr::INHERITED,
+            Ordering::Relaxed,
+        );
+    }
+
     /// [`VfsNode::unlink`], and with `kind` [`VfsNode::unlink_kind`]: the
     /// entry's type is checked under the children lock the removal holds.
     fn unlink_checked(&self, name: &str, kind: Option<bool>) -> Result<(), KernelError> {
@@ -121,6 +140,7 @@ impl TmpNode {
             size_limit,
             links: core::sync::atomic::AtomicU32::new(1),
             linkable: core::sync::atomic::AtomicBool::new(false),
+            attr: core::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -155,6 +175,7 @@ impl TmpNode {
             size_limit,
             links: core::sync::atomic::AtomicU32::new(1),
             linkable: core::sync::atomic::AtomicBool::new(false),
+            attr: core::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -191,6 +212,7 @@ impl TmpNode {
             size_limit,
             links: core::sync::atomic::AtomicU32::new(1),
             linkable: core::sync::atomic::AtomicBool::new(false),
+            attr: core::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -346,12 +368,17 @@ impl VfsNode for TmpNode {
 
         let bytes_to_read = self.pages.read().read(offset, buffer);
 
-        self.metadata.write().accessed = crate::arch::timer::get_timestamp_secs();
+        if !super::attr::no_atime(self) {
+            self.metadata.write().accessed = crate::arch::timer::get_timestamp_secs();
+        }
 
         Ok(bytes_to_read)
     }
 
     fn write(&self, offset: usize, data: &[u8]) -> Result<usize, KernelError> {
+        // Immutable: no write at all, an open descriptor's included
+        // (ext4_write_checks and ext4_setattr; the maintainer's choice).
+        super::attr::may_write(self)?;
         if self.node_type != NodeType::File {
             return Err(KernelError::FsError(FsError::NotAFile));
         }
@@ -445,6 +472,7 @@ impl VfsNode for TmpNode {
             self.bytes_used.clone(),
             self.size_limit,
         ));
+        self.inherit_attr(&new_file);
         children.insert(String::from(name), new_file.clone());
         self.entry_added();
 
@@ -469,6 +497,7 @@ impl VfsNode for TmpNode {
             self.bytes_used.clone(),
             self.size_limit,
         ));
+        self.inherit_attr(&new_dir);
         children.insert(String::from(name), new_dir.clone());
         self.entry_added();
 
@@ -491,6 +520,9 @@ impl VfsNode for TmpNode {
     }
 
     fn truncate(&self, size: usize) -> Result<(), KernelError> {
+        // Immutable: no write at all, an open descriptor's included
+        // (ext4_write_checks and ext4_setattr; the maintainer's choice).
+        super::attr::may_write(self)?;
         if self.node_type != NodeType::File {
             return Err(KernelError::FsError(FsError::NotAFile));
         }
@@ -505,6 +537,9 @@ impl VfsNode for TmpNode {
     /// nothing past the end and a punched hole is zeroed in place
     /// (docs/KNOWN-LIMITATIONS.md).
     fn fallocate(&self, request: super::falloc::Request) -> Result<(), KernelError> {
+        // Immutable: no write at all, an open descriptor's included
+        // (ext4_write_checks and ext4_setattr; the maintainer's choice).
+        super::attr::may_write(self)?;
         use super::falloc::Op;
         if self.node_type != NodeType::File {
             return Err(KernelError::FsError(FsError::NotAFile));
@@ -668,6 +703,7 @@ impl VfsNode for TmpNode {
         );
         node.node_type = kind;
         node.metadata.get_mut().node_type = kind;
+        self.inherit_attr(&node);
         if matches!(kind, NodeType::CharDevice | NodeType::BlockDevice) {
             node.rdev = rdev;
         }
@@ -751,6 +787,7 @@ impl VfsNode for TmpNode {
             self.size_limit,
         );
         node.links.store(0, core::sync::atomic::Ordering::Release);
+        self.inherit_attr(&node);
         node.linkable
             .store(linkable, core::sync::atomic::Ordering::Release);
         Ok(Arc::new(node))
@@ -783,6 +820,7 @@ impl VfsNode for TmpNode {
             self.bytes_used.clone(),
             self.size_limit,
         ));
+        self.inherit_attr(&new_symlink);
         children.insert(String::from(name), new_symlink.clone());
         self.entry_added();
 
@@ -818,6 +856,23 @@ impl VfsNode for TmpNode {
         let mut metadata = self.metadata.write();
         metadata.permissions = permissions;
         super::note_change(&mut metadata, false);
+        Ok(())
+    }
+
+    fn attr_flags(&self) -> Option<u32> {
+        Some(self.attr.load(Ordering::Relaxed))
+    }
+
+    fn cache_stat(&self, first: u64, last: u64) -> super::CacheStat {
+        super::CacheStat {
+            cached: self.pages.read().resident(first, last),
+            dirty: 0,
+        }
+    }
+
+    fn set_attr_flags(&self, flags: u32) -> Result<(), KernelError> {
+        self.attr.store(flags, Ordering::Relaxed);
+        super::note_change(&mut self.metadata.write(), false);
         Ok(())
     }
 
