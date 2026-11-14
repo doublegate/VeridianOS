@@ -61,9 +61,10 @@ impl Default for Limits {
 
 impl Limits {
     /// The limits the first process starts with (Linux's INIT_RLIMITS,
-    /// sized to this kernel: the descriptor table and process table hold
-    /// 1024 each, a real-time signal queues up to RT_QUEUE_MAX).
-    pub const fn defaults() -> Self {
+    /// sized to this kernel: the descriptor table holds 1024, a real-time
+    /// signal queues up to RT_QUEUE_MAX, and RLIMIT_NPROC is half of the
+    /// boot-time threads-max, as fork_init sets it).
+    pub fn defaults() -> Self {
         const INF: Rlimit = Rlimit::both(RLIM_INFINITY);
         let mut l = [INF; RLIM_NLIMITS];
         l[RLIMIT_STACK] = Rlimit {
@@ -74,7 +75,7 @@ impl Limits {
             cur: 0,
             max: RLIM_INFINITY,
         };
-        l[RLIMIT_NPROC] = Rlimit::both(super::MAX_PROCESSES as u64);
+        l[RLIMIT_NPROC] = Rlimit::both(initial_nproc());
         l[RLIMIT_NOFILE] = Rlimit::both(crate::fs::file::MAX_FDS as u64);
         l[RLIMIT_MEMLOCK] = Rlimit::both(8 * 1024 * 1024);
         l[RLIMIT_SIGPENDING] = Rlimit::both(super::signals::RT_QUEUE_MAX as u64);
@@ -130,6 +131,67 @@ pub fn nproc_allows(tasks: usize, limit: u64) -> bool {
     (tasks as u64) < limit
 }
 
+/// kernel.threads-max's bounds (Linux's MIN_THREADS and MAX_THREADS, the
+/// latter FUTEX_TID_MASK).
+pub const MIN_THREADS: u32 = 20;
+pub const MAX_THREADS: u32 = 0x3fff_ffff;
+
+/// `/proc/sys/kernel/threads-max`: how many tasks may exist at once, 0
+/// until set (then [`default_max_threads`] applies).
+pub static THREADS_MAX: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Linux's set_max_threads: as many tasks as keep their kernel stacks
+/// (64 KiB each here, 16 pages) within an eighth of memory, within
+/// [`MIN_THREADS`]..=[`MAX_THREADS`].
+pub fn default_max_threads(total_frames: usize) -> u32 {
+    let stack_pages = 64 * 1024 / 4096;
+    let n = total_frames / (8 * stack_pages);
+    (n.min(MAX_THREADS as usize) as u32).max(MIN_THREADS)
+}
+
+/// The RLIMIT_NPROC every process starts from (fork_init's): half of
+/// threads-max as memory sets it at boot (a later threads-max write does
+/// not change it, as on Linux), worked out once.
+fn initial_nproc() -> u64 {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static NPROC: AtomicU64 = AtomicU64::new(0);
+    match NPROC.load(Ordering::Relaxed) {
+        0 => {
+            let frames = crate::mm::get_memory_stats().total_frames;
+            let n = initial_nproc_for(frames);
+            // Kept only once memory is known: a process made before the
+            // frame allocator counts its memory must not fix the floor
+            // value for good (PR #43 review).
+            if frames != 0 {
+                NPROC.store(n, Ordering::Relaxed);
+            }
+            n
+        }
+        n => n,
+    }
+}
+
+/// Half of [`default_max_threads`] for `total_frames` of memory.
+pub fn initial_nproc_for(total_frames: usize) -> u64 {
+    u64::from(default_max_threads(total_frames) / 2)
+}
+
+/// The system-wide task limit in force.
+pub fn max_threads() -> u32 {
+    match THREADS_MAX.load(core::sync::atomic::Ordering::Acquire) {
+        0 => default_max_threads(crate::mm::get_memory_stats().total_frames),
+        n => n,
+    }
+}
+
+/// How many tasks `process` counts as: its live threads, or 1 for a
+/// zombie not yet reaped (an exited thread is gone on Linux as soon as it
+/// exits; here it waits in the map for the reaper thread).
+#[cfg(feature = "alloc")]
+pub fn tasks_of(process: &super::Process) -> usize {
+    process.live_threads().max(1)
+}
+
 /// RLIMIT_NPROC (N-224) for `process` making a process or thread (Linux's
 /// copy_process): its real user may not already have as many tasks --
 /// threads, and processes not yet reaped -- as the limit allows. As on
@@ -151,25 +213,27 @@ pub fn check_nproc(process: &super::Process) -> Result<NprocGuard, SyscallError>
     // 0024, step 7), so root whose launcher took it away is limited too.
     let exempt =
         creds.ruid == 0 || caller.capable(CAP_SYS_RESOURCE) || caller.capable(CAP_SYS_ADMIN);
-    if exempt && crate::cap::authority::current_may_change_system() {
-        return Ok(NprocGuard { _held: None });
-    }
     let limit = process.limits().cur(RLIMIT_NPROC);
-    if limit == RLIM_INFINITY {
-        return Ok(NprocGuard { _held: None });
-    }
-    let guard = NPROC.lock();
-    let mut tasks = 0usize;
+    let limited =
+        !(exempt && crate::cap::authority::current_may_change_system()) && limit != RLIM_INFINITY;
+    // A limited creation is serialised with the others; the count of the
+    // whole system (kernel.threads-max, for everyone) and of the user come
+    // from one pass over the table, under that lock when there is one
+    // (PR #43 review). Like copy_process's nr_threads check, threads-max is
+    // not serialised for an unlimited creation.
+    let guard = limited.then(|| NPROC.lock());
+    let (mut all, mut mine) = (0usize, 0usize);
     super::table::PROCESS_TABLE.for_each(|p| {
-        if p.credentials().ruid == creds.ruid {
-            tasks += p.threads.lock().len().max(1);
+        let n = tasks_of(p);
+        all += n;
+        if limited && p.credentials().ruid == creds.ruid {
+            mine += n;
         }
     });
-    if nproc_allows(tasks, limit) {
-        Ok(NprocGuard { _held: Some(guard) })
-    } else {
-        Err(SyscallError::WouldBlock)
+    if all >= max_threads() as usize || limited && !nproc_allows(mine, limit) {
+        return Err(SyscallError::WouldBlock);
     }
+    Ok(NprocGuard { _held: guard })
 }
 
 /// Serialises RLIMIT_NPROC-limited task creation (see [`check_nproc`]).
@@ -253,6 +317,16 @@ pub fn nice_floor(limits: &Limits) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn threads_max_keeps_stacks_within_an_eighth_of_memory() {
+        // 256 MiB of 4 KiB frames, 64 KiB stacks: 512 tasks.
+        assert_eq!(super::default_max_threads(65_536), 512);
+        assert_eq!(super::default_max_threads(0), super::MIN_THREADS);
+        assert_eq!(super::default_max_threads(usize::MAX), super::MAX_THREADS);
+        // RLIMIT_NPROC starts at half of it: 2048 tasks per user at 2 GiB.
+        assert_eq!(super::initial_nproc_for(524_288), 2048);
+    }
+
     use super::*;
 
     #[test]

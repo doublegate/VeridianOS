@@ -4,7 +4,7 @@
 # Linux x86_64 system call it implements (its number comes from
 # abi/linux/syscall_64.tbl), or `private N` for a VeridianOS call with no
 # Linux equivalent. Private numbers are 1024 + the call's pre-v0.27 native
-# number, far above Linux's range (471 in v7.2), and never change.
+# number, far above Linux's range (472 in v7.3), and never change.
 #
 # tools/compat/gen_syscalls.py turns this file into
 #   kernel/src/syscall/numbers.rs              (the enum and its decoder)
@@ -47,6 +47,7 @@ getcwd
 chdir
 fchdir
 chroot
+fchroot
 kill
 umask
 uname

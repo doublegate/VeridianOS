@@ -23,7 +23,7 @@ pub struct Attribute {
 pub enum Token {
     /// <!DOCTYPE ...>
     Doctype(String),
-    /// <tag attr="val">
+    /// `<tag attr="val">`
     StartTag(String, Vec<Attribute>, bool),
     /// </tag>
     EndTag(String),

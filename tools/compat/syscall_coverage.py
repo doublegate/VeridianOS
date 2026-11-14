@@ -148,7 +148,8 @@ def stub_variants(body: str) -> set[str]:
     return variants
 
 
-RELEASE = "v7.2"
+# The Linux release the vendored tables come from (abi/linux/VERSION).
+RELEASE = (REPO / "abi/linux/VERSION").read_text().strip()
 # The generic table's ABIs per architecture (gen_syscalls.GENERIC_ABIS).
 GENERIC_ABIS = {
     "aarch64": {"common", "64", "renameat", "rlimit", "memfd_secret"},

@@ -7,7 +7,8 @@
   of 1,965 and libc-test 535 of 560, with no regression; 61 tests improved (the mlock, mseal,
   msync, remap_file_pages, System V semaphore and shared memory, xattr and file-attribute tests
   among them) and 8 changed between failing results.
-
+- The Linux system call tables are Linux 7.3's (`abi/linux/VERSION`, read by `gen_syscalls.py`
+  and `syscall_coverage.py`, which named v7.2 in their code): 7.3 adds fchroot (472).
 - The gate (`scripts/dev/gate.sh`) runs its emulated guests side by side: the AArch64, RISC-V and
   Sv39 runtime suites, the x86_64 suite and the conformance smoke run at once, and the release
   kernels build while the debug kernels boot. One guest uses one host CPU, so back to back they took
@@ -105,7 +106,12 @@
   describe mounts and list mounts and namespaces. Runtime test mount_api. Not yet: the
   FSMOUNT_NAMESPACE and OPEN_TREE_NAMESPACE flags, ID-mapped mounts, nullfs, MOVE_MOUNT_BENEATH
   and MOVE_MOUNT_SET_GROUP (KNOWN-LIMITATIONS).
-
+- fchroot (Linux 7.3): chroot to a directory by descriptor, and with `FD_FAILFS_ROOT` to failfs,
+  from whose root no absolute path resolves (EOPNOTSUPP) while lookups from real directories go on;
+  unprivileged with no_new_privs, unshared filesystem state and no earlier chroot, as on Linux;
+  a privileged caller leaving a chroot for failfs needs MODIFY on the mount namespace, as chroot
+  does (ADR 0024). fchdir takes `FD_FAILFS_ROOT` too, and getcwd reports a working directory the root cannot reach
+  as `(unreachable)`. Runtime test failfs, ported from Linux's failfs selftest.
 - System V IPC (v0.28 item 5, ADR 0027, proposed): shmget, shmat, shmdt, shmctl, semget, semop,
   semtimedop, semctl, msgget, msgsnd, msgrcv and msgctl, with Linux's semantics, each IPC
   namespace with its own objects (`kernel/src/syscall/sysvipc/`): identifiers with a sequence
@@ -785,6 +791,30 @@
 
 ### Fixed
 
+- No limit on threads per process, as on Linux: the cap of 256 is gone, and thread creation is
+  limited only by RLIMIT_NPROC per real user and by `kernel.threads-max` for the whole system
+  (new, `/proc/sys/kernel/threads-max`, root-writable within 20..=0x3fffffff; by default as many
+  tasks as keep their kernel stacks within an eighth of memory, Linux's set_max_threads). Both
+  count only live threads: an exited one waiting for the reaper thread counted before, so a
+  create-and-join loop failed with EAGAIN when the reaper fell behind (`musl_many_threads`, 4
+  vCPUs on 2 host CPUs), and RLIMIT_NPROC charged a user for threads that had exited. Every
+  path that makes a thread for a caller checks both limits: the native thread call and the
+  thread API used to rely on the per-process cap alone.
+  RLIMIT_NPROC now starts at half of the boot-time threads-max, as Linux's fork_init sets it
+  (2,048 tasks per user with 2 GiB of memory), instead of the process table's 1,024.
+- A signal whose action ignores it is queued when the receiving thread blocks it, as Linux's
+  sig_ignored decides (the action may change before it is unblocked; delivery still discards
+  it if it is ignored then). It was dropped when sent, so `sigpending` missed it and a handler
+  installed before the unblock never ran. A pending signal whose action ignores it does not end a
+  wait with EINTR (Linux restarts such a call, ERESTARTSYS); it goes at the next return to user
+  mode.
+- execve and execveat deny write access as soon as they have the file, as Linux's
+  do_open_execat does, so ETXTBSY comes before argv and envp are read and AT_EXECVE_CHECK
+  reports it too; the check-only call passed for a file open for writing.
+- A successful exec on x86_64 leaked what execveat's frame owned (the path, argv and envp, and a
+  reference to the calling thread, which kept the thread from being freed): the new image is
+  entered with iretq and that frame is never unwound. They are dropped before user mode.
+- Rustdoc: four unclosed-HTML-tag warnings (`Vec<u8>`, `<tag>`, `<title>`, `<form>` in prose).
 - Review points left open on merged pull requests (a sweep of PRs #1-#38):
   - A freed BlockFS FIFO or socket inode is not handed out again until the FIFO and socket
     tables have forgotten it; between the operation's end and that report a new file could

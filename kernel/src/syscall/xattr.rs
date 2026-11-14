@@ -92,7 +92,9 @@ fn target_in(
     let vfs = vfs()?;
     if path.is_empty() {
         if cwd_ok && dfd as u32 as i32 as usize == AT_FDCWD {
-            let (node, canonical) = vfs.locate(&vfs.get_cwd(), true).map_err(map_resolve_err)?;
+            // "." from the working directory: a failfs one is EOPNOTSUPP,
+            // and under a failfs root a real one still resolves (PR #44).
+            let (node, canonical) = vfs.resolve_path_canonical(".").map_err(map_resolve_err)?;
             if write {
                 want_write(&vfs, &canonical)?;
             }

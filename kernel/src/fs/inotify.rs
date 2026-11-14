@@ -536,7 +536,12 @@ pub fn on_path(path: &str, node: &Arc<dyn VfsNode>, mask: u32) {
     let Some(vfs) = super::try_get_vfs() else {
         return on_node(node, mask);
     };
-    let root = vfs.as_caller().get_root();
+    let mut root = vfs.as_caller().get_root();
+    // Under a failfs root paths are already whole (PR #44 review).
+    if root == super::FAILFS_ROOT {
+        root = String::from("/");
+    }
+    let path = path.strip_prefix(super::WHOLE_TREE).unwrap_or(path);
     let global = match (root.as_str(), path) {
         ("/", _) => String::from(path),
         (_, "/") => root,

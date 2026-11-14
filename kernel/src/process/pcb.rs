@@ -695,17 +695,29 @@ impl Process {
         threads.values().min_by_key(|t| t.tid.0).map(|t| t.tid)
     }
 
-    /// Add a thread to this process
+    /// Its threads that have not exited (an exited one stays in the map
+    /// until the reaper thread frees it, `user_task_reaped`).
+    #[cfg(feature = "alloc")]
+    pub fn live_threads(&self) -> usize {
+        self.threads
+            .lock()
+            .values()
+            .filter(|t| {
+                !matches!(
+                    t.get_state(),
+                    super::thread::ThreadState::Zombie | super::thread::ThreadState::Dead
+                )
+            })
+            .count()
+    }
+
+    /// Add a thread to this process. There is no limit per process, as on
+    /// Linux: RLIMIT_NPROC and kernel.threads-max are checked when a task
+    /// is made (`rlimit::check_nproc`).
     #[cfg(feature = "alloc")]
     pub fn add_thread(&self, thread: Thread) -> Result<Arc<Thread>, KernelError> {
         let tid = thread.tid;
         let mut threads = self.threads.lock();
-
-        if threads.len() >= super::MAX_THREADS_PER_PROCESS {
-            return Err(KernelError::ResourceExhausted {
-                resource: "threads per process",
-            });
-        }
 
         if threads.contains_key(&tid) {
             return Err(KernelError::AlreadyExists {
@@ -1243,6 +1255,25 @@ mod tests {
             .collect()
     }
 
+    /// Exited threads waiting for the reaper are not live: RLIMIT_NPROC
+    /// and kernel.threads-max count only live ones.
+    #[test]
+    fn exited_threads_are_not_live() {
+        let proc = make_process(5, "many");
+        let threads = with_threads(&proc, &[50, 51, 52]);
+        assert_eq!(proc.live_threads(), 3);
+        threads[0].set_state(super::super::thread::ThreadState::Zombie);
+        threads[1].set_state(super::super::thread::ThreadState::Dead);
+        assert_eq!(proc.live_threads(), 1);
+        assert_eq!(super::super::rlimit::tasks_of(&proc), 1);
+        threads[2].set_state(super::super::thread::ThreadState::Zombie);
+        assert_eq!(
+            super::super::rlimit::tasks_of(&proc),
+            1,
+            "a zombie counts once"
+        );
+    }
+
     /// A user-ID change fixes every thread's capability sets (ADR 0020,
     /// decision 5): dropping every root ID clears pP and pE everywhere; an
     /// fsuid leaving 0 drops only the filesystem capabilities, and coming
@@ -1361,6 +1392,31 @@ mod tests {
         pidns::release(other.pid.0);
     }
 
+    /// A namespace init's blocked SIGTERM (default action) is queued, also
+    /// while rt_sigtimedwait waits for it (real_blocked); unblocked, it is
+    /// deliverable but ends no wait, since delivery discards it (PR #43
+    /// review).
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn an_inits_default_signal_is_queued_but_interrupts_nothing() {
+        use crate::process::signals::{send_timer, sig_bit, SigInfo, TimerSend};
+        const SIGTERM: usize = 15;
+        let pid1 = make_process(1, "init");
+        let threads = with_threads(&pid1, &[1]);
+        threads[0]
+            .real_blocked
+            .store(sig_bit(SIGTERM), Ordering::Release);
+        let sent = send_timer(&pid1, None, SigInfo::timer(SIGTERM, 1, 0, 1));
+        assert_eq!(sent, TimerSend::Queued, "blocked before the wait");
+        threads[0].real_blocked.store(0, Ordering::Release);
+        let deliverable = crate::process::signals::deliverable(&pid1, &threads[0]);
+        assert_ne!(deliverable & sig_bit(SIGTERM), 0);
+        assert_eq!(
+            crate::process::signals::interrupting(&pid1, &threads[0]) & sig_bit(SIGTERM),
+            0
+        );
+    }
+
     /// A child reaper's own SIGCONT timer, with the default action,
     /// continues it after a stop from an ancestor: continuing happens when
     /// the signal is sent, before the check that ignores its delivery
@@ -1375,6 +1431,65 @@ mod tests {
         let sent = send_timer(&pid1, None, SigInfo::timer(SIGCONT, 1, 0, 1));
         assert_eq!(pid1.stop_signal.load(Ordering::Acquire), 0, "continued");
         assert_eq!(sent, TimerSend::Ignored, "nothing left to deliver");
+    }
+
+    /// A signal its action ignores is dropped when sent only if the
+    /// receiver does not block it (Linux's sig_ignored): blocked, it is
+    /// queued, since the action may change before it is unblocked.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_blocked_ignored_signal_is_queued() {
+        use crate::process::signals::{send_timer, sig_bit, SigInfo, TimerSend, SIGCHLD};
+        let proc = make_process(7, "blocker");
+        let threads = with_threads(&proc, &[7, 70]);
+        let sent = send_timer(&proc, None, SigInfo::timer(SIGCHLD, 1, 0, 1));
+        assert_eq!(sent, TimerSend::Ignored, "unblocked: dropped");
+        threads[0]
+            .sigmask
+            .store(sig_bit(SIGCHLD), Ordering::Release);
+        let sent = send_timer(&proc, None, SigInfo::timer(SIGCHLD, 2, 0, 1));
+        assert_eq!(
+            sent,
+            TimerSend::Queued,
+            "blocked by the thread the PID names"
+        );
+        assert_ne!(
+            proc.pending_signals.load(Ordering::Acquire) & sig_bit(SIGCHLD),
+            0
+        );
+        let sent = send_timer(&proc, Some(&threads[1]), SigInfo::timer(SIGCHLD, 3, 0, 1));
+        assert_eq!(
+            sent,
+            TimerSend::Ignored,
+            "the other thread does not block it"
+        );
+        // Unblocked while still ignored, it is deliverable (and goes when
+        // delivered) but does not end a wait with EINTR (PR #43 review).
+        threads[0].sigmask.store(0, Ordering::Release);
+        let deliverable = crate::process::signals::deliverable(&proc, &threads[0]);
+        assert_ne!(deliverable & sig_bit(SIGCHLD), 0);
+        assert_eq!(
+            crate::process::signals::interrupting(&proc, &threads[0]) & sig_bit(SIGCHLD),
+            0
+        );
+        // While rt_sigtimedwait waits for it, unblocked, the mask it had is
+        // still blocking (Linux's real_blocked): queued, not dropped.
+        proc.pending_signals.store(0, Ordering::Release);
+        threads[0]
+            .real_blocked
+            .store(sig_bit(SIGCHLD), Ordering::Release);
+        let sent = send_timer(&proc, None, SigInfo::timer(SIGCHLD, 4, 0, 1));
+        assert_eq!(sent, TimerSend::Queued, "blocked before the wait");
+        threads[0].real_blocked.store(0, Ordering::Release);
+        // After a non-leader's execve only that thread is left: its mask
+        // decides for a process-directed signal.
+        let lone = make_process(8, "lone");
+        let lone_threads = with_threads(&lone, &[80]);
+        lone_threads[0]
+            .sigmask
+            .store(sig_bit(SIGCHLD), Ordering::Release);
+        let sent = send_timer(&lone, None, SigInfo::timer(SIGCHLD, 5, 0, 1));
+        assert_eq!(sent, TimerSend::Queued, "the remaining thread blocks it");
     }
 
     /// In a user namespace, the setuid fixup's root is the namespace's: its

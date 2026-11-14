@@ -3,9 +3,10 @@
 
 Inputs:
     abi/syscalls.map          kernel variant -> Linux name or private number
-    abi/linux/syscall_64.tbl  Linux x86_64 numbers (vendored, v7.2)
+    abi/linux/syscall_64.tbl  Linux x86_64 numbers (vendored; release in
+                              abi/linux/VERSION)
     abi/linux/syscall.tbl     Linux's generic table, used by RISC-V and arm64
-                              (vendored, v7.2 scripts/syscall.tbl)
+                              (vendored scripts/syscall.tbl)
 
 Outputs (checked in; never edit them by hand):
     kernel/src/syscall/numbers.rs           the Syscall enum and its decoder
@@ -28,7 +29,7 @@ TBL = REPO / "abi/linux/syscall_64.tbl"
 GENERIC_TBL = REPO / "abi/linux/syscall.tbl"
 # The ABIs of the generic table each 64-bit architecture uses: common and 64
 # (scripts/Makefile.asm-headers) plus its own (arch/*/kernel/Makefile.syscalls,
-# v7.2): arm64 adds renameat, RISC-V its two riscv calls.
+# unchanged in v7.3): arm64 adds renameat, RISC-V its two riscv calls.
 GENERIC_ABIS = {
     "riscv64": {"common", "64", "riscv", "rlimit", "memfd_secret"},
     "aarch64": {"common", "64", "renameat", "rlimit", "memfd_secret"},
