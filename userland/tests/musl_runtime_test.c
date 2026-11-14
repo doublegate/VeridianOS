@@ -9738,6 +9738,8 @@ static void test_files_sched(void)
      * writing, no unlink, rename, chmod or truncate. */
     if (write(fd, "abcd", 4) != 4 || t_setflags(fd, T_FS_IMMUTABLE) != 0)
         f |= 128;
+    if (access(path, W_OK) != -1 || errno != EPERM || access(path, R_OK) != 0)
+        f |= 256;
     if (write(fd, "x", 1) != -1 || errno != EPERM || ftruncate(fd, 0) != -1 || errno != EPERM ||
         open(path, O_WRONLY) != -1 || errno != EPERM || unlink(path) != -1 || errno != EPERM ||
         rename(path, "/tmp/veridian-attr2") != -1 || errno != EPERM ||
@@ -9767,6 +9769,41 @@ static void test_files_sched(void)
     if (!WIFSIGNALED(st) || WTERMSIG(st) != SIGBUS || rb != 2 || b2[0] != 'Z' || b2[1] != 'b')
         f |= 1024;
     t_setflags(fd, 0);
+    /* A file that maps its own pages (/dev/shm): a shared mapping made
+     * after the flag, and a mapping remap_file_pages rebuilds after it,
+     * are write-protected too (PR #45 review). */
+    for (int how = 0; how < 2; how++) {
+        c = fork();
+        if (c == 0) {
+            long pg = sysconf(_SC_PAGESIZE);
+            int sfd = open("/dev/shm/veridian-imm", O_CREAT | O_RDWR | O_TRUNC, 0644);
+            if (sfd < 0 || ftruncate(sfd, 2 * pg) != 0)
+                _exit(1);
+            char *sm = MAP_FAILED;
+            if (how == 1)
+                sm = mmap(NULL, 2 * pg, PROT_READ | PROT_WRITE, MAP_SHARED, sfd, 0);
+            if (t_setflags(sfd, T_FS_IMMUTABLE) != 0)
+                _exit(2);
+            if (how == 0)
+                sm = mmap(NULL, 2 * pg, PROT_READ | PROT_WRITE, MAP_SHARED, sfd, 0);
+            else if (sm != MAP_FAILED && syscall(SYS_remap_file_pages, sm, pg, 0, 1, 0) != 0)
+                _exit(3);
+            if (sm == MAP_FAILED)
+                _exit(4);
+            sm[0] = 'W';
+            _exit(5);
+        }
+        st = 0;
+        waitpid(c, &st, 0);
+        int sfd = open("/dev/shm/veridian-imm", O_RDONLY);
+        if (sfd >= 0) {
+            t_setflags(sfd, 0);
+            close(sfd);
+        }
+        unlink("/dev/shm/veridian-imm");
+        if (!WIFSIGNALED(st) || WTERMSIG(st) != SIGBUS)
+            f |= 1024;
+    }
     /* Append-only: O_APPEND to write, no O_TRUNC, O_APPEND stays, no
      * unlink. Without CAP_LINUX_IMMUTABLE it cannot be set. */
     if (t_setflags(fd, T_FS_APPEND) != 0 || open(path, O_WRONLY) != -1 || errno != EPERM ||
@@ -9835,6 +9872,22 @@ static void test_files_sched(void)
     if (bfd >= 0)
         close(bfd);
     unlink(bpath);
+    /* A hole punched through a mapping made before the flag: EPERM
+     * (madvise_remove's vfs_fallocate), the data kept. */
+    int mfd = open("/tmp/veridian-mrm", O_CREAT | O_RDWR | O_TRUNC, 0644);
+    char *mm = MAP_FAILED;
+    if (mfd >= 0 && ftruncate(mfd, 4096) == 0)
+        mm = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, mfd, 0);
+    if (mm == MAP_FAILED || (mm[0] = 'k', t_setflags(mfd, T_FS_IMMUTABLE) != 0) ||
+        madvise(mm, 4096, MADV_REMOVE) != -1 || errno != EPERM || mm[0] != 'k')
+        f |= 262144;
+    if (mfd >= 0) {
+        t_setflags(mfd, 0);
+        close(mfd);
+    }
+    if (mm != MAP_FAILED)
+        munmap(mm, 4096);
+    unlink("/tmp/veridian-mrm");
     /* An immutable directory takes no new entry: EPERM, not EACCES. */
     const char *idir = "/tmp/veridian-idir";
     rmdir(idir);

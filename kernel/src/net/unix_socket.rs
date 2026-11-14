@@ -374,6 +374,10 @@ pub fn socket_bind(socket_id: u64, file: Arc<dyn VfsNode>, path: &str) -> Kernel
     }
 
     let key = crate::fs::inode_key(&file);
+    // Lock order: UNIX_SOCKETS before PATH_REGISTRY, as socket_close takes
+    // them (bind took them the other way round, so a bind and a close on
+    // two CPUs could deadlock; a parallel host-test run hung on it).
+    let mut sockets = UNIX_SOCKETS.lock();
     let mut paths = PATH_REGISTRY.lock();
     if paths.contains_key(&key) {
         return Err(KernelError::AlreadyExists {
@@ -382,7 +386,6 @@ pub fn socket_bind(socket_id: u64, file: Arc<dyn VfsNode>, path: &str) -> Kernel
         });
     }
 
-    let mut sockets = UNIX_SOCKETS.lock();
     let socket = sockets.get_mut(&socket_id).ok_or(KernelError::NotFound {
         resource: "unix_socket",
         id: socket_id,
