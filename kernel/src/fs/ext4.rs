@@ -656,6 +656,9 @@ pub struct Ext4Node {
     fs_state: Arc<RwLock<Ext4State>>,
     /// Symlink target (populated for symlinks)
     link_target: RwLock<Option<String>>,
+    /// The inode's i_flags, as FS_IOC_GETFLAGS shows them (the FS_*_FL
+    /// values are ext4's).
+    i_flags: u32,
 }
 
 impl Ext4Node {
@@ -684,6 +687,7 @@ impl Ext4Node {
             children: RwLock::new(BTreeMap::new()),
             fs_state,
             link_target: RwLock::new(None),
+            i_flags: inode.flags & super::attr::USER_VISIBLE,
         }
     }
 
@@ -866,6 +870,14 @@ impl VfsNode for Ext4Node {
     }
 
     fn chmod(&self, _permissions: Permissions) -> Result<(), KernelError> {
+        Err(KernelError::FsError(FsError::ReadOnly))
+    }
+
+    fn attr_flags(&self) -> Option<u32> {
+        Some(self.i_flags)
+    }
+
+    fn set_attr_flags(&self, _flags: u32) -> Result<(), KernelError> {
         Err(KernelError::FsError(FsError::ReadOnly))
     }
 }

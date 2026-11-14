@@ -10,6 +10,7 @@ use spin::RwLock;
 
 use crate::error::{FsError, KernelError};
 
+pub mod attr;
 pub mod blockdev;
 pub mod blockfs;
 pub mod devfs;
@@ -157,11 +158,14 @@ pub fn check_fsize_truncate(node: &dyn VfsNode, size: usize) -> Result<(), Kerne
 /// the set-user-ID and set-group-ID bits as [`Permissions::after_write`]
 /// says. Regular files only. As on Linux it runs before the data changes
 /// and its error is the write's, so a file that keeps its privileges is
-/// never changed (PR #33 review).
+/// never changed (PR #33 review). An immutable file refuses the write
+/// first (EPERM, as ext4_write_checks before file_modified), so a refused
+/// write leaves its privileges too (PR #45 review).
 pub fn remove_privs(node: &dyn VfsNode) -> Result<(), KernelError> {
     if node.node_type() != NodeType::File {
         return Ok(());
     }
+    attr::may_write(node)?;
     kill_file_caps(node)?;
     drop_set_id(node, &crate::process::creds::Caller::current())
 }
@@ -183,6 +187,10 @@ fn truncate_removing_privs_as(
     if node.node_type() != NodeType::File {
         return node.truncate(size);
     }
+    // An immutable or append-only file refuses the truncate before
+    // anything changes (may_setattr's ATTR_TOUCH check in notify_change,
+    // do_sys_ftruncate's IS_APPEND; callers check too).
+    attr::may_change(node)?;
     kill_file_caps(node)?;
     node.truncate(size)?;
     drop_set_id(node, caller)
@@ -389,6 +397,23 @@ impl Permissions {
     pub fn any_exec(&self) -> bool {
         self.owner_exec || self.group_exec || self.other_exec
     }
+}
+
+/// What cachestat reports of a range (`struct cachestat`'s first two
+/// fields; the other three are 0 here).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CacheStat {
+    pub cached: u64,
+    pub dirty: u64,
+}
+
+/// The pages of `first..=last` a file of `size` bytes has (cachestat
+/// counts nothing past its end): None when it has none of them, as for a
+/// range whose end wrapped below its start (Linux walks first..=last, so
+/// an inverted range counts nothing; PR #45 review).
+pub fn page_span(size: usize, first: u64, last: u64) -> Option<(u64, u64)> {
+    let pages = (size as u64).div_ceil(4096);
+    (first < pages && first <= last).then(|| (first, last.min(pages - 1)))
 }
 
 /// File metadata
@@ -684,6 +709,30 @@ pub trait VfsNode: Send + Sync {
     /// rejects an unmappable id before the inode changes).
     fn check_owner(&self, _uid: Option<u32>, _gid: Option<u32>) -> Result<(), KernelError> {
         Ok(())
+    }
+
+    /// cachestat's counts for pages `first..=last` of this node (Linux's
+    /// filemap_cachestat): how many are cached and how many of those are
+    /// dirty. Nothing is written back asynchronously and no eviction is
+    /// remembered, so the writeback and evicted counts are always 0 (ADR
+    /// 0027). A node with no pages counts none.
+    fn cache_stat(&self, _first: u64, _last: u64) -> CacheStat {
+        CacheStat::default()
+    }
+
+    /// The inode attribute flags (`attr::FS_*_FL`), for a filesystem that
+    /// keeps them (`fileattr_get`); None for one that keeps none (ENOTTY
+    /// from the ioctls, EOPNOTSUPP from file_getattr).
+    fn attr_flags(&self) -> Option<u32> {
+        None
+    }
+
+    /// Store new attribute flags, already checked by `attr::apply` (and
+    /// update the ctime). Permission checks are the caller's job.
+    fn set_attr_flags(&self, _flags: u32) -> Result<(), KernelError> {
+        Err(KernelError::NotImplemented {
+            feature: "attribute flags",
+        })
     }
 
     /// Set the access and/or modification time (seconds); `None` leaves
@@ -3408,6 +3457,36 @@ pub(crate) mod tests {
         ) -> Result<(), KernelError> {
             Err(KernelError::FsError(FsError::IoError))
         }
+    }
+
+    #[test]
+    fn an_immutable_file_keeps_its_privileges_when_a_write_is_refused() {
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        let node = root.create("prog", Permissions::from_mode(0o4755)).unwrap();
+        node.update_xattrs(&mut |a| a.set(xattr::XATTR_NAME_CAPS, &[0; 20], 0))
+            .unwrap();
+        node.set_attr_flags(attr::FS_IMMUTABLE_FL).unwrap();
+        assert!(remove_privs(&*node).is_err());
+        assert!(truncate_removing_privs(&*node, 0).is_err());
+        assert!(node.xattrs().unwrap().get(xattr::XATTR_NAME_CAPS).is_some());
+        assert_eq!(
+            node.metadata().unwrap().permissions.to_mode() & 0o4000,
+            0o4000
+        );
+    }
+
+    #[test]
+    fn a_noatime_file_keeps_its_atime_on_read() {
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        let node = root.create("f", Permissions::from_mode(0o644)).unwrap();
+        node.write(0, b"data").unwrap();
+        node.set_times(Some(7), None).unwrap();
+        node.set_attr_flags(attr::FS_NOATIME_FL).unwrap();
+        let mut buf = [0u8; 4];
+        node.read(0, &mut buf).unwrap();
+        assert_eq!(node.metadata().unwrap().accessed, 7);
     }
 
     #[test]

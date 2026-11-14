@@ -563,6 +563,7 @@ fn process_clone(
         share_files: on(CLONE_FILES),
         share_sighand: on(CLONE_SIGHAND),
         share_sysvsem: on(CLONE_SYSVSEM),
+        share_io: on(CLONE_IO),
         clone_parent: on(CLONE_PARENT),
         vfork: on(CLONE_VFORK),
         stack: (req.stack != 0).then_some(req.stack),
@@ -660,6 +661,11 @@ fn thread_clone(
     .kernel_stack_size(process::creation::DEFAULT_KERNEL_STACK_SIZE)
     // Scheduling parameters as Linux's sched_fork (N-221).
     .sched(current_thread.sched.lock().for_child())
+    // Its I/O context: shared with CLONE_IO, copied otherwise (__copy_io).
+    .io(super::ioprio::IoContext::for_child(
+        &current_thread.io,
+        req.on(CLONE_IO),
+    ))
     // And its CPU mask (Linux copies it too); every CPU was allowed.
     .cpu_affinity(current_thread.get_affinity())
     // The thread runs on the caller's stack (`newsp`, required above): no

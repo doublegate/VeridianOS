@@ -39,6 +39,8 @@ pub struct ForkOptions {
     /// CLONE_SYSVSEM: the child shares the System V semaphore undo list
     /// (a fork's child starts with none).
     pub share_sysvsem: bool,
+    /// CLONE_IO: the child shares the I/O context (its I/O priority).
+    pub share_io: bool,
     /// CLONE_PARENT: the child's parent is the caller's, and its exit
     /// signal the caller's own.
     pub clone_parent: bool,
@@ -99,6 +101,7 @@ impl Default for ForkOptions {
             share_files: false,
             share_sighand: false,
             share_sysvsem: false,
+            share_io: false,
             clone_parent: false,
             vfork: false,
             stack: None,
@@ -192,6 +195,9 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
     } else {
         current_process.clone()
     };
+    // For the check once the child is in the table (below).
+    #[cfg(feature = "alloc")]
+    let attr_generation = crate::fs::attr::generation();
     let new_process = ProcessBuilder::new(format!("{}-fork", current_process.name))
         .parent(parent.pid)
         .priority(*current_process.priority.lock())
@@ -336,6 +342,10 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
             .tid(super::ThreadId(new_pid.0))
             // Scheduling parameters as Linux's sched_fork (N-221).
             .sched(current_thread.sched.lock().for_child())
+            .io(crate::syscall::ioprio::IoContext::for_child(
+                &current_thread.io,
+                opts.share_io,
+            ))
             // A clone thread has no kernel-chosen stack (it runs on its own);
             // the child's main thread still needs a size for a later exec.
             .user_stack_size(
@@ -582,6 +592,19 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
 
     // Add process to table. A fresh pid cannot already be there.
     table::add_process(new_process)?;
+    // A file became, or is becoming, immutable since this fork began: the
+    // change's passes over the table may have come before the child was in
+    // it, so the child write-protects its shared mappings of immutable
+    // files (and, while a change is under way, of any file) itself. It has
+    // not run yet, so nothing was written through them (commit security
+    // review).
+    #[cfg(feature = "alloc")]
+    if crate::fs::attr::generation() != attr_generation || crate::fs::attr::changing() {
+        if let Some(child) = table::get_process(new_pid) {
+            let end = crate::mm::user_layout::user_space_end() as u64;
+            child.memory_space.lock().write_protect_file(None, 0, end);
+        }
+    }
     // Its namespace's init, or that of one above it, began exiting
     // meanwhile: its kill of the namespace may have missed this child,
     // which goes again (ENOMEM), as Linux's alloc_pid checks PIDNS_ADDING

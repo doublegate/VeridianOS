@@ -160,6 +160,9 @@ pub const CLD_CONTINUED: i32 = 6;
 /// Fault `si_code`s (x86 exceptions).
 pub const SEGV_MAPERR: i32 = 1;
 pub const SEGV_ACCERR: i32 = 2;
+/// SIGBUS: a nonexistent physical address (also a write a file refuses,
+/// as ext4's page_mkwrite).
+pub const BUS_ADRERR: i32 = 2;
 pub const FPE_INTDIV: i32 = 1;
 pub const FPE_FLTDIV: i32 = 3;
 pub const FPE_FLTOVF: i32 = 4;

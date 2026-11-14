@@ -696,8 +696,20 @@ fn page_fault(f: &mut TrapFrame, user: bool) {
         // Demand paging, copy-on-write and stack growth; NULL never maps.
         if cr2 >= 0x1000 {
             let info = crate::mm::page_fault::from_x86_64(ec, cr2, rip);
-            if crate::mm::page_fault::handle_page_fault(info).is_ok() {
-                return;
+            match crate::mm::page_fault::handle_page_fault(info) {
+                Ok(()) => return,
+                Err(e) if crate::mm::page_fault::is_bus_error(&e) => {
+                    let info = crate::process::signals::SigInfo::fault(
+                        7,
+                        crate::process::signals::BUS_ADRERR,
+                        cr2,
+                    );
+                    if queue_fault_signal(info) {
+                        return;
+                    }
+                    kill_user(7);
+                }
+                Err(_) => {}
             }
         }
         // SAFETY: COM1 is the kernel console on the supported platforms.

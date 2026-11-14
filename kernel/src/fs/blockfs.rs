@@ -157,6 +157,9 @@ impl DiskBackend for VirtioBlockBackend {
             crate::drivers::virtio::blk::get_device().ok_or(KernelError::NotInitialized {
                 subsystem: "virtio-blk",
             })?;
+        // No I/O-priority turn here: BlockFS calls with its own locks (spin
+        // locks) held, where waiting would sleep holding them, and those
+        // locks already serialise its requests (PR #45 review).
         let mut device = device_lock.lock();
 
         // One request per 4 KiB block (was eight 512-byte requests).
@@ -645,6 +648,9 @@ impl VfsNode for BlockFsNode {
     }
 
     fn write(&self, offset: usize, data: &[u8]) -> Result<usize, KernelError> {
+        // Immutable: no write at all, an open descriptor's included
+        // (ext4_write_checks and ext4_setattr; the maintainer's choice).
+        super::attr::may_write(self)?;
         self.mutate(|fs| fs.write_inode(self.inode_num, offset, data))
     }
 
@@ -702,11 +708,17 @@ impl VfsNode for BlockFsNode {
     }
 
     fn truncate(&self, size: usize) -> Result<(), KernelError> {
+        // Immutable: no write at all, an open descriptor's included
+        // (ext4_write_checks and ext4_setattr; the maintainer's choice).
+        super::attr::may_write(self)?;
         self.mutate(|fs| fs.truncate_inode(self.inode_num, size))
     }
 
     /// Allocate, zero range and punch hole (`BlockFsInner::fallocate_inode`).
     fn fallocate(&self, request: super::falloc::Request) -> Result<(), KernelError> {
+        // Immutable: no write at all, an open descriptor's included
+        // (ext4_write_checks and ext4_setattr; the maintainer's choice).
+        super::attr::may_write(self)?;
         if let super::falloc::Op::Other(_) = request.op {
             return Err(super::falloc::unsupported());
         }
@@ -735,6 +747,54 @@ impl VfsNode for BlockFsNode {
         let mut fs = self.fs.write();
         fs.check_writable()?;
         fs.chmod_inode(self.inode_num, permissions)
+    }
+
+    fn attr_flags(&self) -> Option<u32> {
+        let fs = self.fs.read();
+        fs.inode_table.get(self.inode_num as usize).map(|i| i.flags)
+    }
+
+    fn cache_stat(&self, first: u64, last: u64) -> super::CacheStat {
+        let fs = self.fs.read();
+        let Some(inode) = fs.inode_table.get(self.inode_num as usize).copied() else {
+            return super::CacheStat::default();
+        };
+        let Some((a, b)) = super::page_span(inode.size as usize, first, last) else {
+            return super::CacheStat::default();
+        };
+        let mapped = fs.page_cache.peek(u64::from(self.inode_num));
+        // The blocks first, a chunk at a time: resolving one may read an
+        // indirect block through the cache, so its lock is taken only after.
+        let mut stat = super::CacheStat::default();
+        let mut page = a;
+        while page <= b {
+            let end = b.min(page + 255);
+            let blocks: Vec<Option<u32>> = (page..=end)
+                .map(|p| fs.resolve_block(&inode, p as usize).ok().flatten())
+                .collect();
+            let cache = fs.cache.read();
+            for (p, blk) in (page..=end).zip(blocks) {
+                // A block is a page: cached if the block cache holds it
+                // (dirty as it says) or a mapping's page cache does. A hole
+                // is not.
+                let state = blk.and_then(|blk| cache.state(blk));
+                if state.is_some() || mapped.as_ref().is_some_and(|c| c.holds(p)) {
+                    stat.cached += 1;
+                }
+                if state == Some(true) {
+                    stat.dirty += 1;
+                }
+            }
+            drop(cache);
+            page = end + 1;
+        }
+        stat
+    }
+
+    fn set_attr_flags(&self, flags: u32) -> Result<(), KernelError> {
+        let mut fs = self.fs.write();
+        fs.check_writable()?;
+        fs.set_attr_inode(self.inode_num, flags)
     }
 
     fn chown(&self, uid: Option<u32>, gid: Option<u32>) -> Result<(), KernelError> {
@@ -1863,6 +1923,8 @@ impl BlockFsInner {
 
         let mode = permissions_to_mode(permissions, false);
         self.inode_table[inode_num as usize] = DiskInode::new(mode, 0, 0);
+        let ty = self.inode_table[inode_num as usize].node_type();
+        self.inode_table[inode_num as usize].flags = self.inherited_attr(parent, ty);
 
         // Add directory entry to parent
         if let Err(e) = self.write_dir_entry(parent, inode_num, name, DiskDirEntry::FT_REG_FILE) {
@@ -1900,6 +1962,8 @@ impl BlockFsInner {
 
         let mode = permissions_to_mode(permissions, true);
         let mut new_inode = DiskInode::new(mode, 0, 0);
+        let ty = new_inode.node_type();
+        new_inode.flags = self.inherited_attr(parent, ty);
         // Directories start with link count 2 (parent's entry + self ".")
         new_inode.links_count = 2;
         self.inode_table[inode_num as usize] = new_inode;
@@ -1966,6 +2030,8 @@ impl BlockFsInner {
 
         // Symlink inode: mode 0o120000 | 0o777 (rwx for all)
         let mut inode = DiskInode::new(0o120000 | 0o777, 0, 0);
+        let ty = inode.node_type();
+        inode.flags = self.inherited_attr(parent, ty);
         inode.links_count = 1;
         inode.size = target.len() as u32;
         self.inode_table[inode_num as usize] = inode;
@@ -2014,6 +2080,8 @@ impl BlockFsInner {
             .ok_or(KernelError::ResourceExhausted { resource: "inodes" })?;
         let mode = type_mode(kind) | (permissions.to_mode() & 0o7777) as u16;
         let mut inode = DiskInode::new(mode, 0, 0);
+        let ty = inode.node_type();
+        inode.flags = self.inherited_attr(parent, ty);
         if matches!(kind, NodeType::CharDevice | NodeType::BlockDevice) {
             inode.direct_blocks[0] = rdev;
         }
@@ -2564,6 +2632,32 @@ impl BlockFsInner {
     }
 
     /// Change the permission bits on an inode, preserving the type bits.
+    /// The attribute flags a new node in directory `parent` takes from it
+    /// (nodump and noatime, `fs::attr::INHERITED`).
+    fn inherited_attr(&self, parent: u32, ty: NodeType) -> u32 {
+        // Regular files and directories only, as ext4_init_new_inode
+        // (PR #45 review).
+        if !matches!(ty, NodeType::File | NodeType::Directory) {
+            return 0;
+        }
+        self.inode_table
+            .get(parent as usize)
+            .map_or(0, |d| d.flags & super::attr::INHERITED)
+    }
+
+    /// Store an inode's attribute flags (the on-disk inode's `flags`, at
+    /// ext4's i_flags offset, unused before; no format change: older
+    /// images read 0) and move its ctime.
+    fn set_attr_inode(&mut self, inode_num: u32, flags: u32) -> Result<(), KernelError> {
+        let inode = self
+            .inode_table
+            .get_mut(inode_num as usize)
+            .ok_or(KernelError::FsError(FsError::NotFound))?;
+        inode.flags = flags;
+        inode.ctime = now_secs();
+        Ok(())
+    }
+
     fn chmod_inode(&mut self, inode_num: u32, permissions: Permissions) -> Result<(), KernelError> {
         let inode = self
             .inode_table

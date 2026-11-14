@@ -151,6 +151,12 @@ fn read_name(ptr: usize) -> Result<String, SyscallError> {
 
 /// Linux's xattr_permission and the capability checks, for `node`.
 fn check(node: &Arc<dyn VfsNode>, name: &str, write: bool) -> Result<(), SyscallError> {
+    // xattr_permission: no change on an immutable or append-only node
+    // (EPERM), before any namespace rule.
+    #[cfg(feature = "alloc")]
+    if write {
+        crate::fs::attr::may_change(&**node).map_err(super::map_kernel_error)?;
+    }
     let meta = node.metadata().map_err(super::map_kernel_error)?;
     xattr::check_access(&Caller::current(), &meta, name, write).map_err(super::map_kernel_error)
 }

@@ -4,6 +4,7 @@
 //! device-specific drivers.
 
 pub mod ahci;
+pub mod block_arbiter;
 pub mod bluetooth;
 pub mod console;
 pub mod console_input;

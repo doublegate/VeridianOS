@@ -337,36 +337,54 @@ pub fn sys_msync(start: usize, len: usize, flags: usize) -> SyscallResult {
         return Err(SyscallError::Busy);
     }
     if flags & (MS_SYNC | MS_ASYNC) != 0 {
-        // Each page is copied out under the address space's lock, checking
-        // that it is still mapped to the same frame: another thread may
-        // unmap it (and the frame be reused) once the lock is dropped, and
-        // only the copy goes to the file. A page unmapped meanwhile is
-        // skipped, as Linux's msync would no longer find it.
-        let mut buf = alloc::vec![0u8; PAGE as usize];
-        for (node, offset, addr, frames) in copies {
-            let size = node.metadata().map_or(0, |m| m.size);
-            for (i, frame) in frames.iter().enumerate() {
-                let at = offset + i * PAGE as usize;
-                if at >= size {
-                    break;
-                }
-                let n = (size - at).min(PAGE as usize);
-                let page = addr + i as u64 * PAGE;
-                if !proc
-                    .memory_space
-                    .lock()
-                    .copy_mapped_page(page, *frame, &mut buf[..n])
-                {
-                    continue;
-                }
-                node.write(at, &buf[..n]).map_err(super::map_kernel_error)?;
-            }
-        }
+        write_back(&proc, copies)?;
     }
     if hole.is_some() {
         return Err(SyscallError::OutOfMemory);
     }
     Ok(0)
+}
+
+/// Write `copies` (`shared_file_copies` of `proc`'s space) back to their
+/// files. Each page is copied out under the address space's lock, checking
+/// that it is still mapped to the same frame: another thread may unmap it
+/// (and the frame be reused) once the lock is dropped, and only the copy
+/// goes to the file. A page unmapped meanwhile is skipped, as Linux's msync
+/// would no longer find it. An immutable file is skipped: nothing can have
+/// written its mappings since it became one (they fault, SIGBUS).
+pub(crate) fn write_back(
+    proc: &process::Process,
+    copies: alloc::vec::Vec<(
+        alloc::sync::Arc<dyn crate::fs::VfsNode>,
+        usize,
+        u64,
+        alloc::vec::Vec<crate::mm::FrameNumber>,
+    )>,
+) -> Result<(), SyscallError> {
+    let mut buf = alloc::vec![0u8; PAGE as usize];
+    for (node, offset, addr, frames) in copies {
+        if crate::fs::attr::of(&*node) & crate::fs::attr::FS_IMMUTABLE_FL != 0 {
+            continue;
+        }
+        let size = node.metadata().map_or(0, |m| m.size);
+        for (i, frame) in frames.iter().enumerate() {
+            let at = offset + i * PAGE as usize;
+            if at >= size {
+                break;
+            }
+            let n = (size - at).min(PAGE as usize);
+            let page = addr + i as u64 * PAGE;
+            if !proc
+                .memory_space
+                .lock()
+                .copy_mapped_page(page, *frame, &mut buf[..n])
+            {
+                continue;
+            }
+            node.write(at, &buf[..n]).map_err(super::map_kernel_error)?;
+        }
+    }
+    Ok(())
 }
 
 /// madvise advice another process's memory may be given (Linux's
@@ -628,5 +646,72 @@ mod tests {
             msync_range(usize::MAX & !0xfff, 0x2000, MS_SYNC),
             Err(SyscallError::OutOfMemory)
         );
+    }
+}
+
+/// cachestat(fd, range, cstat, flags) (mm/filemap.c): how many pages of
+/// `range` (`struct cachestat_range`: off, len; len 0 to the end of the
+/// file) are cached and dirty, in `struct cachestat` (nr_cache, nr_dirty,
+/// nr_writeback, nr_evicted, nr_recently_evicted; the last three are 0
+/// here, ADR 0027). Checked as Linux: EBADF, EFAULT for the range, EPERM
+/// unless the file is open for writing or the caller owns it or may write
+/// it (can_do_cachestat), then EINVAL for flags.
+pub fn sys_cachestat(fd: usize, range_ptr: usize, out_ptr: usize, flags: usize) -> SyscallResult {
+    let file = super::file_calls::open_file(fd)?;
+    let [off, len]: [u64; 2] = super::userspace::read_user(range_ptr)?;
+    if !file.flags.write {
+        let caller = crate::process::creds::Caller::current();
+        let meta = file.node.metadata().map_err(super::map_kernel_error)?;
+        if !caller.owner_or_capable(meta.uid)
+            && !crate::fs::permission(&caller, &meta, crate::fs::MAY_WRITE)
+        {
+            return Err(SyscallError::OperationNotPermitted);
+        }
+    }
+    if flags as u32 != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let (first, last) = cachestat_pages(off, len);
+    let stat = file.node.cache_stat(first, last);
+    super::userspace::write_user(out_ptr, [stat.cached, stat.dirty, 0u64, 0, 0])?;
+    Ok(0)
+}
+
+/// The pages `[off, off + len)` covers (len 0: to the end), as Linux
+/// computes them in 64 bits.
+fn cachestat_pages(off: u64, len: u64) -> (u64, u64) {
+    let last = if len == 0 {
+        u64::MAX
+    } else {
+        off.wrapping_add(len).wrapping_sub(1) >> 12
+    };
+    (off >> 12, last)
+}
+
+#[cfg(test)]
+mod cachestat_tests {
+    use super::*;
+
+    #[test]
+    fn the_range_is_counted_in_whole_pages() {
+        assert_eq!(cachestat_pages(0, 0), (0, u64::MAX));
+        assert_eq!(cachestat_pages(0, 1), (0, 0));
+        assert_eq!(cachestat_pages(4095, 2), (0, 1));
+        assert_eq!(cachestat_pages(8192, 4096), (2, 2));
+    }
+
+    #[test]
+    fn nothing_past_the_end_of_the_file_counts() {
+        assert_eq!(crate::fs::page_span(0, 0, u64::MAX), None);
+        assert_eq!(crate::fs::page_span(1, 0, u64::MAX), Some((0, 0)));
+        assert_eq!(crate::fs::page_span(8193, 1, u64::MAX), Some((1, 2)));
+        assert_eq!(crate::fs::page_span(4096, 1, 5), None);
+    }
+
+    #[test]
+    fn a_wrapped_range_counts_nothing() {
+        let (first, last) = cachestat_pages(8192, u64::MAX - 4095);
+        assert_eq!((first, last), (2, 0));
+        assert_eq!(crate::fs::page_span(16384, first, last), None);
     }
 }

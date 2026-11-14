@@ -435,7 +435,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
        fsconfig, fsmount, fspick, mount_setattr, statmount, listmount, listns; decided:
        quotactl and quotactl_fd.
      - [ ] Sockets: shutdown, recvmmsg, sendmmsg.
-     - [ ] Files and scheduling: cachestat, file_getattr, file_setattr, ioprio_get, ioprio_set;
+     - [x] Files and scheduling: cachestat, file_getattr, file_setattr, ioprio_get, ioprio_set;
        memfd_secret moved to the memory group's follow-up. fanotify and rseq (with rseq_slice_yield) stay ENOSYS, as decided
        in group 3.
      - [ ] The system tier, decided per call: syslog, vhangup, acct, reboot, swapon, swapoff,

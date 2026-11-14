@@ -2843,6 +2843,13 @@ impl VirtualAddressSpace {
                     operation: "MADV_REMOVE on a mapping that may not be written",
                 });
             }
+            // A hole punched in an immutable or append-only file is EPERM
+            // (madvise_remove's vfs_fallocate; PR #45 review), even through
+            // a mapping made before the flag.
+            #[cfg(feature = "alloc")]
+            if let Some(b) = &m.backing {
+                crate::fs::attr::may_change(&*b.node)?;
+            }
         }
         let mut files = Vec::new();
         for (_, m) in mappings.range(..VirtualAddress(end)).rev() {
@@ -3493,6 +3500,24 @@ impl VirtualAddressSpace {
             .translate_page(VirtualAddress(page))
             .map_err(|_| bad)?;
         let shared = super::frame_refs::is_shared(frame);
+        // A writable shared file page write-protected for an immutable
+        // change that has ended (or for another file's) is writable again,
+        // as a user fault finds it (immutable_fault); the kernel writes the
+        // frame directly, so the entry is left for that fault (PR #45
+        // review: process_vm_writev and the like failed there).
+        #[cfg(feature = "alloc")]
+        let flags = match &mapping.backing {
+            Some(b)
+                if mapping.mapping_type == MappingType::Shared
+                    && mapping.flags.contains(PageFlags::WRITABLE)
+                    && !flags.contains(PageFlags::WRITABLE)
+                    && crate::fs::attr::of(&*b.node) & crate::fs::attr::FS_IMMUTABLE_FL == 0
+                    && !crate::fs::attr::changing() =>
+            {
+                flags | PageFlags::WRITABLE
+            }
+            _ => flags,
+        };
         match private_write_policy(
             mapping.mapping_type,
             mapping.may_write,
@@ -4099,6 +4124,109 @@ impl VirtualAddressSpace {
         }
 
         Ok(())
+    }
+
+    /// Clear the write bit of every present page of this space's writable
+    /// shared mappings of `node` (or, with `node` None, of any immutable
+    /// file in `[start, end)`), leaving the mappings' own flags: the next
+    /// write faults, and [`Self::immutable_fault`] decides it (an immutable
+    /// file's mappings take no write, as ext4's page_mkwrite refuses one;
+    /// the maintainer's choice).
+    #[cfg(feature = "alloc")]
+    pub fn write_protect_file(
+        &self,
+        node: Option<&alloc::sync::Arc<dyn crate::fs::VfsNode>>,
+        start: u64,
+        end: u64,
+    ) {
+        let pt_root = self.page_table_root.load(Ordering::Acquire);
+        if pt_root == 0 {
+            return;
+        }
+        let mappings = self.mappings.lock();
+        // SAFETY: pt_root is this space's root table through the physical
+        // map; the mappings lock (held) serialises page-table changes.
+        let mut mapper = unsafe { create_mapper_from_root(pt_root) };
+        let mut changed = false;
+        for m in Self::overlapping(&mappings, start, end) {
+            let Some(b) = m.backing.as_ref() else {
+                continue;
+            };
+            let ours = match node {
+                // By inode: BlockFS gives each lookup its own node, so a
+                // mapping made through another open of the file is a
+                // different Arc (PR #45 review).
+                Some(n) => crate::fs::inode_key(&b.node) == crate::fs::inode_key(n),
+                // An immutable file's, and while a file is becoming one,
+                // any file's: a mapping made meanwhile is one the freeze
+                // may not have seen (commit security review).
+                None => {
+                    crate::fs::attr::changing()
+                        || crate::fs::attr::of(&*b.node) & crate::fs::attr::FS_IMMUTABLE_FL != 0
+                }
+            };
+            if !ours
+                || m.mapping_type != MappingType::Shared
+                || !m.flags.contains(PageFlags::WRITABLE)
+            {
+                continue;
+            }
+            for i in 0..(m.size / 4096) as u64 {
+                let va = VirtualAddress(m.start.0 + i * 4096);
+                if let Ok((_, flags)) = mapper.translate_page(va) {
+                    if flags.contains(PageFlags::WRITABLE) {
+                        let _ = mapper.update_page_flags(va, flags.without(PageFlags::WRITABLE));
+                        changed = true;
+                    }
+                }
+            }
+        }
+        drop(mappings);
+        if changed {
+            super::tlb::flush_all_in(self.get_page_table());
+        }
+    }
+
+    /// A write fault on a present page at `addr`: if it is a page of a
+    /// writable shared file mapping whose write bit
+    /// [`Self::write_protect_file`] cleared, Some(true) when the file is
+    /// immutable (SIGBUS), Some(false) once the page may be written again
+    /// (the write bit is back, or an attribute change is under way and the
+    /// access is to be retried). None for any other fault.
+    #[cfg(feature = "alloc")]
+    pub fn immutable_fault(&self, addr: u64) -> Option<bool> {
+        let pt_root = self.page_table_root.load(Ordering::Acquire);
+        if pt_root == 0 {
+            return None;
+        }
+        let page = VirtualAddress(addr & !0xfff);
+        let mappings = self.mappings.lock();
+        let (_, m) = mappings
+            .range(..=page)
+            .next_back()
+            .filter(|(_, m)| m.contains(page))?;
+        let node = m.backing.as_ref()?.node.clone();
+        if m.mapping_type != MappingType::Shared || !m.flags.contains(PageFlags::WRITABLE) {
+            return None;
+        }
+        // SAFETY: as in `write_protect_file`.
+        let mut mapper = unsafe { create_mapper_from_root(pt_root) };
+        let (_, flags) = mapper.translate_page(page).ok()?;
+        if flags.contains(PageFlags::WRITABLE) {
+            return None;
+        }
+        if crate::fs::attr::of(&*node) & crate::fs::attr::FS_IMMUTABLE_FL != 0 {
+            return Some(true);
+        }
+        // Checked under this space's lock: a change that starts after this
+        // write-protects the page again only after the lock is dropped.
+        if crate::fs::attr::changing() {
+            return Some(false);
+        }
+        let _ = mapper.update_page_flags(page, flags | PageFlags::WRITABLE);
+        drop(mappings);
+        super::tlb::flush_pages_in(self.get_page_table(), &[page.0]);
+        Some(false)
     }
 
     /// Get memory statistics

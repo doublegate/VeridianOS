@@ -446,6 +446,9 @@ pub struct Thread {
     /// setpriority; N-221). The dispatcher task running the thread follows
     /// them.
     pub sched: Mutex<SchedParams>,
+    /// The I/O context (ioprio_set; ADR 0027): shared with CLONE_IO,
+    /// copied otherwise.
+    pub io: Arc<crate::syscall::ioprio::IoContext>,
     /// prctl(PR_SET_NO_NEW_PRIVS): exec never grants this thread more
     /// privilege (no setuid or setgid). It cannot be cleared, and every
     /// thread and process the thread creates inherits it.
@@ -624,6 +627,7 @@ impl Thread {
             altstack: Mutex::new(super::signals::SigAltStack::default()),
             robust_list: AtomicUsize::new(0),
             sched: Mutex::new(SchedParams::default()),
+            io: crate::syscall::ioprio::IoContext::new(),
             no_new_privs: AtomicBool::new(false),
             personality: core::sync::atomic::AtomicU32::new(0),
             caps: Mutex::new(super::linux_caps::CapSets::ROOT),
@@ -931,6 +935,7 @@ pub struct ThreadBuilder {
     tls_base: Option<usize>,
     fs: Option<Arc<ThreadFs>>,
     sched: SchedParams,
+    io: Option<Arc<crate::syscall::ioprio::IoContext>>,
     tid: Option<ThreadId>,
 }
 
@@ -956,6 +961,7 @@ impl ThreadBuilder {
             fs: None,
             tid: None,
             sched: SchedParams::default(),
+            io: None,
         }
     }
 
@@ -1006,6 +1012,14 @@ impl ThreadBuilder {
     /// creator's: [`SchedParams::for_child`]).
     pub fn sched(mut self, sched: SchedParams) -> Self {
         self.sched = sched;
+        self
+    }
+
+    /// The thread's I/O context
+    /// ([`crate::syscall::ioprio::IoContext::for_child`] of its creator's);
+    /// a new one by default.
+    pub fn io(mut self, io: Arc<crate::syscall::ioprio::IoContext>) -> Self {
+        self.io = Some(io);
         self
     }
 
@@ -1118,6 +1132,9 @@ impl ThreadBuilder {
 
         thread.priority = self.priority;
         *thread.sched.lock() = self.sched;
+        if let Some(io) = self.io {
+            thread.io = io;
+        }
         thread.set_affinity(self.cpu_affinity);
         thread.clear_tid.store(self.clear_tid, Ordering::Release);
         if let Some(base) = self.tls_base {

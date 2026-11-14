@@ -657,11 +657,20 @@ impl BlockDevice for NvmeController {
 }
 
 /// Controllers brought up at boot.
-static CONTROLLERS: Mutex<Vec<Arc<Mutex<NvmeController>>>> = Mutex::new(Vec::new());
+/// Each with the arbiter that orders its users by I/O priority.
+#[allow(clippy::type_complexity)]
+static CONTROLLERS: Mutex<
+    Vec<(
+        Arc<super::block_arbiter::Arbiter>,
+        Arc<Mutex<NvmeController>>,
+    )>,
+> = Mutex::new(Vec::new());
 
-/// Run `f` on controller `index`, if present.
+/// Run `f` on controller `index`, if present, once the caller's I/O
+/// priority has its turn ([`super::block_arbiter`]).
 pub fn with_controller<R>(index: usize, f: impl FnOnce(&mut NvmeController) -> R) -> Option<R> {
-    let ctrl = CONTROLLERS.lock().get(index).cloned()?;
+    let (arbiter, ctrl) = CONTROLLERS.lock().get(index).cloned()?;
+    let _turn = arbiter.admit(crate::syscall::ioprio::current());
     let mut guard = ctrl.lock();
     Some(f(&mut guard))
 }
@@ -714,7 +723,10 @@ pub fn init() -> Result<(), KernelError> {
             };
             let index = controller_count();
             match NvmeController::new(mmio, bar_size as usize, index) {
-                Ok(ctrl) => CONTROLLERS.lock().push(Arc::new(Mutex::new(ctrl))),
+                Ok(ctrl) => CONTROLLERS.lock().push((
+                    Arc::new(super::block_arbiter::Arbiter::new()),
+                    Arc::new(Mutex::new(ctrl)),
+                )),
                 Err(e) => crate::println!("[NVME] controller init failed: {:?}", e),
             }
         }

@@ -351,6 +351,11 @@ pub fn sys_remap_file_pages(
             .map_err(|_| SyscallError::OutOfMemory)?;
         vas.set_may_exec(at, first.may_exec);
         vas.set_backing(at, node, offset, backing.write.clone());
+        // As below: the file's own pages were mapped from the old flags,
+        // writable; an immutable file's are write-protected again before
+        // the lock goes (PR #45 review).
+        #[cfg(feature = "alloc")]
+        write_protect_locked(&vas, start as usize, size);
         finish_remap(&vas, &first, start, end, lock);
     } else {
         // The file's bytes there, then zeros to the end of the range (a
@@ -376,6 +381,11 @@ pub fn sys_remap_file_pages(
         vas.fill_owned_pages(start, &buf)
             .map_err(super::map_kernel_error)?;
         vas.set_backing(VirtualAddress(start), node, offset, backing.write.clone());
+        // The new mapping is installed writable from the old one's flags:
+        // an immutable file's pages are write-protected again before the
+        // lock goes (PR #45 review).
+        #[cfg(feature = "alloc")]
+        write_protect_locked(&vas, start as usize, size);
         finish_remap(&vas, &first, start, end, lock);
     }
     Ok(0)
@@ -444,7 +454,10 @@ pub fn sys_mmap(
     // mapping under the lock it checks the limit and makes the mapping
     // under (`lock_new_mapping`), so concurrent mmaps cannot each pass the
     // limit, and nothing can replace the range in between (PR #41 review).
-    mmap_inner(addr, length, prot, flags, fd_or_packed)
+    let at = mmap_inner(addr, length, prot, flags, fd_or_packed)?;
+    #[cfg(feature = "alloc")]
+    write_protect_immutable(at, length);
+    Ok(at)
 }
 
 /// Lock a mapping just made at `at` by an mmap of `length` with `flags`,
@@ -483,6 +496,19 @@ fn map_unit(flags: usize) -> usize {
 fn mapped_len(flags: usize, length: usize) -> u64 {
     let unit = map_unit(flags);
     length.div_ceil(unit).saturating_mul(unit) as u64
+}
+
+/// A writable shared mapping of an immutable file made or widened (mmap
+/// through a descriptor opened before the flag was set, mprotect, mremap)
+/// keeps its pages read-only, so a write faults to SIGBUS (`fs::attr`).
+#[cfg(feature = "alloc")]
+fn write_protect_immutable(at: usize, length: usize) {
+    if let Some(proc) = process::current_process() {
+        let end = at.saturating_add(length.div_ceil(PAGE_SIZE) * PAGE_SIZE);
+        proc.memory_space
+            .lock()
+            .write_protect_file(None, at as u64, end as u64);
+    }
 }
 
 /// MAP_LOCKED's flag bit.
@@ -686,6 +712,16 @@ fn mmap_inner(
         if !file.flags.read || (shared && prot & PROT_WRITE != 0 && !file.flags.write) {
             return Err(SyscallError::PermissionDenied);
         }
+        // do_mmap: an append-only file is never mapped MAP_SHARED through a
+        // descriptor open for writing (EACCES): the mapping could rewrite
+        // it anywhere (commit security review).
+        #[cfg(feature = "alloc")]
+        if shared
+            && file.flags.write
+            && crate::fs::attr::of(&*file.node) & crate::fs::attr::FS_APPEND_FL != 0
+        {
+            return Err(SyscallError::PermissionDenied);
+        }
         if noexec && prot & PROT_EXEC != 0 {
             return Err(SyscallError::OperationNotPermitted);
         }
@@ -768,6 +804,11 @@ fn mmap_inner(
                 }
                 vas.set_backing(start, file.node.clone(), offset, file.write_access.clone());
                 lock_new_mapping(&vas, start.as_usize(), length, flags);
+                // An immutable file's pages are write-protected under the
+                // lock they were mapped under, as for the copied mappings
+                // below (PR #45 review).
+                #[cfg(feature = "alloc")]
+                write_protect_locked(&vas, start.as_usize(), length);
                 return Ok(start.as_usize());
             }
         }
@@ -982,8 +1023,20 @@ fn mmap_inner(
     }
     #[cfg(feature = "alloc")]
     lock_new_mapping(&memory_space, mapped_addr, length, flags);
+    // An immutable file's pages are write-protected under the lock they
+    // were mapped under, so no other thread writes through them in between
+    // (PR #45 review); sys_mmap's pass after it covers a change begun since.
+    #[cfg(feature = "alloc")]
+    write_protect_locked(&memory_space, mapped_addr, length);
 
     Ok(mapped_addr)
+}
+
+/// [`write_protect_immutable`] on an address space already locked.
+#[cfg(feature = "alloc")]
+fn write_protect_locked(vas: &crate::mm::vas::VirtualAddressSpace, at: usize, length: usize) {
+    let end = at.saturating_add(length.div_ceil(PAGE_SIZE) * PAGE_SIZE);
+    vas.write_protect_file(None, at as u64, end as u64);
 }
 
 /// Map `size` bytes of `node`'s own pages MAP_SHARED with `prot`, holding
@@ -1121,6 +1174,13 @@ fn current_personality() -> u32 {
 }
 
 pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> SyscallResult {
+    let r = mprotect_inner(addr, length, prot)?;
+    #[cfg(feature = "alloc")]
+    write_protect_immutable(addr, length);
+    Ok(r)
+}
+
+fn mprotect_inner(addr: usize, length: usize, prot: usize) -> SyscallResult {
     /// No effect on x86_64 (Linux accepts it).
     const PROT_SEM: usize = 0x8;
     // As Linux's do_mprotect_pkey (N-240), in its order: a page-aligned
@@ -1210,6 +1270,9 @@ pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> SyscallResult {
     if prot & PROT_EXEC != 0 {
         memory_space.sync_code_pages(addr as u64, length as u64);
     }
+    // As mmap: under the lock the protection changed under.
+    #[cfg(feature = "alloc")]
+    write_protect_locked(&memory_space, addr, length);
 
     Ok(0)
 }
@@ -1482,7 +1545,10 @@ pub fn sys_mremap(
     flags: usize,
     new_addr: usize,
 ) -> SyscallResult {
-    mremap_inner(old_addr, old_len, new_len, flags, new_addr)
+    let at = mremap_inner(old_addr, old_len, new_len, flags, new_addr)?;
+    #[cfg(feature = "alloc")]
+    write_protect_immutable(at, new_len);
+    Ok(at)
 }
 
 /// The body of mremap(2).
@@ -1611,6 +1677,8 @@ fn mremap_inner(
         #[cfg(feature = "alloc")]
         if let Ok(at) = done {
             relock(&vas, &request, &m, at);
+            // As mmap: under the lock the mapping moved or grew under.
+            write_protect_locked(&vas, at, new_len);
         }
         return done;
     }
