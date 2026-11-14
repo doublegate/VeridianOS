@@ -3,19 +3,19 @@
 <!-- mc-core: 0.2.0 | mode=import | lang=rust -->
 # AGENTS.md — VeridianOS
 
-@/home/parobek/.claude/master-core/AGENTS.base.md
-@/home/parobek/.claude/master-core/lang/rust.md
-@/home/parobek/.claude/master-core/modules/10-commits-and-versioning.md
-@/home/parobek/.claude/master-core/modules/20-testing-and-accuracy.md
-@/home/parobek/.claude/master-core/modules/30-quality-gates.md
-@/home/parobek/.claude/master-core/modules/40-docs-and-adrs.md
-@/home/parobek/.claude/master-core/modules/50-architecture-patterns.md
-@/home/parobek/.claude/master-core/modules/60-security.md
-@/home/parobek/.claude/master-core/modules/70-release-ceremony.md
-@/home/parobek/.claude/master-core/modules/80-phase-sprint-workflow.md
-@/home/parobek/.claude/master-core/modules/90-multi-language-integration.md
-@/home/parobek/.claude/master-core/modules/91-agent-system-architecture.md
-@/home/parobek/.claude/master-core/modules/95-named-pattern-library.md
+@~/.claude/master-core/AGENTS.base.md
+@~/.claude/master-core/lang/rust.md
+@~/.claude/master-core/modules/10-commits-and-versioning.md
+@~/.claude/master-core/modules/20-testing-and-accuracy.md
+@~/.claude/master-core/modules/30-quality-gates.md
+@~/.claude/master-core/modules/40-docs-and-adrs.md
+@~/.claude/master-core/modules/50-architecture-patterns.md
+@~/.claude/master-core/modules/60-security.md
+@~/.claude/master-core/modules/70-release-ceremony.md
+@~/.claude/master-core/modules/80-phase-sprint-workflow.md
+@~/.claude/master-core/modules/90-multi-language-integration.md
+@~/.claude/master-core/modules/91-agent-system-architecture.md
+@~/.claude/master-core/modules/95-named-pattern-library.md
 
 <<< MC-PROJECT-START >>>
 ## Project: VeridianOS
@@ -37,7 +37,7 @@ pkill -9 -f qemu-system; sleep 2; qemu-system-x86_64 ...
 
 ## VeridianOS Overview
 
-Next-generation microkernel OS in Rust. Capability-based security, user-space drivers as the design goal (today they run in ring 0, critique C6; see docs/KNOWN-LIMITATIONS.md), multi-arch (x86_64, AArch64, RISC-V). All phases (0-12) complete, v0.26.0. See CLAUDE.local.md for current state and `docs/audit/AUDIT-VERIFICATION-2026-10-05.md` for the open audit remediation checklist.
+Next-generation microkernel OS in Rust. Capability-based security, user-space drivers as the design goal (today they run in ring 0, critique C6; see docs/KNOWN-LIMITATIONS.md), multi-arch (x86_64, AArch64, RISC-V). All phases (0-12) complete, v0.27.0 (v0.28 next). See CLAUDE.local.md for current state and `docs/audit/AUDIT-VERIFICATION-2026-10-05.md` for the open audit remediation checklist.
 
 ## Essential Commands
 
@@ -50,8 +50,8 @@ Next-generation microkernel OS in Rust. Capability-based security, user-space dr
 
 # Manual
 cargo build --target targets/x86_64-veridian.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc
-cargo build --target aarch64-unknown-none -p veridian-kernel
-cargo build --target riscv64gc-unknown-none-elf -p veridian-kernel
+cargo build --target aarch64-unknown-none-softfloat -p veridian-kernel
+cargo build --target riscv64imac-unknown-none-elf -p veridian-kernel
 ```
 
 **Notes**: x86_64 requires custom target JSON with kernel code model (R_X86_64_32S relocation fix). Kernel linked at 0xFFFFFFFF80100000.
@@ -85,7 +85,7 @@ qemu-system-x86_64 -enable-kvm \
 ```bash
 ./build-kernel.sh aarch64 dev
 qemu-system-aarch64 -M virt -cpu cortex-a72 -m 256M \
-    -kernel target/aarch64-unknown-none/debug/veridian-kernel \
+    -kernel target/aarch64-unknown-none-softfloat/debug/veridian-kernel \
     -serial stdio -display none
 # Add -device ramfb for graphical display | Add -s -S for GDB
 ```
@@ -95,7 +95,7 @@ qemu-system-aarch64 -M virt -cpu cortex-a72 -m 256M \
 ```bash
 ./build-kernel.sh riscv64 dev
 qemu-system-riscv64 -M virt -m 256M -bios default \
-    -kernel target/riscv64gc-unknown-none-elf/debug/veridian-kernel \
+    -kernel target/riscv64imac-unknown-none-elf/debug/veridian-kernel \
     -serial stdio -display none
 # Add -device ramfb for graphical display | Add -s -S for GDB
 ```
@@ -105,10 +105,10 @@ qemu-system-riscv64 -M virt -m 256M -bios default \
 | Arch | Boot | Firmware | Image | KVM |
 |------|------|----------|-------|-----|
 | x86_64 | UEFI disk | OVMF.4m.fd `-drive if=pflash` | `target/x86_64-veridian/debug/veridian-uefi.img` | `-enable-kvm` (REQUIRED) |
-| AArch64 | Direct `-kernel` | None | `target/aarch64-unknown-none/debug/veridian-kernel` | N/A (TCG) |
-| RISC-V | `-kernel` + `-bios default` | OpenSBI | `target/riscv64gc-unknown-none-elf/debug/veridian-kernel` | N/A (TCG) |
+| AArch64 | Direct `-kernel` | None | `target/aarch64-unknown-none-softfloat/debug/veridian-kernel` | N/A (TCG) |
+| RISC-V | `-kernel` + `-bios default` | OpenSBI | `target/riscv64imac-unknown-none-elf/debug/veridian-kernel` | N/A (TCG) |
 
-**Expected**: All 3 archs boot Stage 6 BOOTOK, 34/34 tests. x86_64 shows Ring 3 entry.
+**Expected**: All 3 archs boot Stage 6 BOOTOK with every test passed. Default build (one CPU): x86_64 43/43, AArch64 64/64, RISC-V 57/57; `-smp 4`: 47/47, 68/68, 61/61 (AArch64 and RISC-V boot with `-device ramfb`); `scripts/dev/gate.sh --boot --rootfs --smp` runs both, plus the BusyBox and runtime suites on all three, on one and four CPUs (AArch64 and RISC-V roots from `scripts/build-musl-rootfs.sh`). Skips are tests needing more than one CPU. x86_64 shows Ring 3 entry.
 
 #### QEMU 10.2 Pitfalls
 - **DO NOT** use `timeout` -- causes "drive exists" errors. Use background+kill: `cmd </dev/null > log 2>&1 &; PID=$!; sleep N; kill $PID`
@@ -130,81 +130,38 @@ qemu-system-riscv64 -M virt -m 256M -bios default \
 cargo fmt --all
 BS="-Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem"
 cargo clippy --target targets/x86_64-veridian.json -p veridian-kernel $BS -- -D warnings
-cargo clippy --target aarch64-unknown-none -p veridian-kernel $BS -- -D warnings
-cargo clippy --target riscv64gc-unknown-none-elf -p veridian-kernel $BS -- -D warnings
+cargo clippy --target aarch64-unknown-none-softfloat -p veridian-kernel $BS -- -D warnings
+cargo clippy --target riscv64imac-unknown-none-elf -p veridian-kernel $BS -- -D warnings
 
-# Host-target unit tests (4,475 passing). Plain `cargo test` does not work:
+# Host-target unit tests (4,735 passing). Plain `cargo test` does not work:
 # .cargo/config.toml defaults the target to bare metal.
 cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu
 
 # In-kernel boot tests: boot each arch in QEMU (commands above) and check for
-# "[INIT] Results: 34/34 passed" followed by BOOTOK.
+# "[INIT] Results: N/N passed" (plus "(S skipped)" on AArch64/RISC-V) followed by BOOTOK.
 ```
 
 ### Development Tools
 
 ```bash
-rustup toolchain install nightly-2025-01-15
+rustup toolchain install nightly-2025-11-15   # matches rust-toolchain.toml; plain `cargo` fetches it automatically
 rustup component add rust-src llvm-tools-preview
 cargo install bootimage cargo-xbuild cargo-watch cargo-expand cargo-audit cargo-nextest
-```
-
-## Architecture
-
-### Microkernel Design
-- **Core**: Memory management, scheduling, IPC, hardware abstraction
-- **User-space drivers (design goal, C6)**: Capability-controlled MMIO, interrupt forwarding, IOMMU DMA. Today drivers run in ring 0 inside the kernel (docs/KNOWN-LIMITATIONS.md)
-- **Zero-copy IPC**: Shared memory mapping, <1us fast path
-- **Security**: 64-bit capability tokens, post-quantum (ML-DSA-65 verification per FIPS 204; experimental non-standard Kyber, N-57)
-
-### Memory Layout (x86_64)
-```
-User:   0x0000_0000_0000_0000 - 0x0000_7FFF_FFFF_FFFF (128 TB)
-Kernel: 0xFFFF_8000_0000_0000 - 0xFFFF_FFFF_FFFF_FFFF (128 TB)
-  Physical mapping: 0xFFFF_8000_0000_0000 | Heap: 0xFFFF_C000_0000_0000
-  Stacks: 0xFFFF_E000_0000_0000 | MMIO: 0xFFFF_F000_0000_0000
-```
-
-### Project Structure
-```
-kernel/src/{arch/, mm/, sched/, cap/, ipc/, syscall/, process/, perf/, desktop/, browser/}
-kernel/src/drivers/   # Device drivers (in the kernel today; user-space drivers are planned, critique C6)
-kernel/src/services/  # System services: shell, VFS glue, CRI/CNI/CSI (also in the kernel)
-userland/         # User applications and libraries
-  libc/           # C library shims
-  qt6/            # Qt 6 QPA plugin and shims
-  kf6/            # KDE Frameworks 6 backends
-  kwin/           # KWin compositor backend
-  plasma/         # Plasma Desktop components
-  integration/    # KDE integration tests
-tools/            # Build tools and utilities
-  cross/          # KDE cross-compilation scripts (15 build scripts)
-debug/            # Debug logs and scripts (gitignored)
-verification/     # Kani proofs + TLA+ specs
 ```
 
 ## Development Patterns
 
 ### Build System
-- Standard bare metal targets (x86_64-unknown-none, aarch64-unknown-none, riscv64gc-unknown-none-elf)
+- Bare metal targets: `targets/x86_64-veridian.json`, `aarch64-unknown-none-softfloat`, `riscv64imac-unknown-none-elf`. The AArch64 and RISC-V kernels are soft-float (N-178): no kernel code may use the FP/SIMD registers, which belong to user threads; only the FP save/restore code names them (`.arch_extension fp`, `.option arch, +d`)
 - x86_64 uses `targets/x86_64-veridian.json` (kernel code model) -- CI must use this, not `x86_64-unknown-none`
 - `-Zbuild-std` handled by .cargo/config.toml; Cargo.lock committed
 - Feature flags: `alloc` for heap-dependent code, `#[cfg(feature = "alloc")]`
 
 ### Rust 2024 GlobalState Pattern (CURRENT)
-```rust
-use crate::sync::once_lock::GlobalState;
-static MANAGER: GlobalState<Manager> = GlobalState::new();
-
-pub fn init() -> Result<(), Error> {
-    MANAGER.init(Manager::new()).map_err(|_| Error::AlreadyInitialized)?;
-    Ok(())
-}
-pub fn with_manager<R, F: FnOnce(&Manager) -> R>(f: F) -> Option<R> { MANAGER.with(f) }
-// For mutation: GlobalState<RwLock<Manager>> with .with(|lock| { let mut m = lock.write(); f(&mut m) })
-```
-120+ static mut eliminated. The justified ones left (early boot, per-CPU, heap) carry SAFETY docs:
-`PER_CPU_DATA`, `READY_QUEUE_STATIC`, `HEAP_MEMORY`, `BOOT_INFO`, `EARLY_SERIAL`. The TSS stacks
+`GlobalState<T>` from `crate::sync::once_lock`; example code in `docs/agents/project-reference.md`.
+120+ static mut eliminated. The justified ones left (early boot, per-CPU) carry SAFETY docs:
+`PER_CPU_DATA`, `BOOT_INFO`, `EARLY_SERIAL` (`extern` declarations of boot.S symbols in the
+`kmap` modules are not Rust statics). The TSS stacks
 became an `UnsafeCell` wrapper (`IstStack`, `arch/x86_64/gdt.rs`) in v0.26.0; new code must not add
 `static mut`.
 
@@ -216,49 +173,10 @@ became an `UnsafeCell` wrapper (`IstStack`, `arch/x86_64/gdt.rs`) in v0.26.0; ne
 - `vec!` macro needs `use alloc::vec;` in test modules for host-target coverage
 - No floating point in kernel -- integer/fixed-point only
 
-### Clippy Fix Patterns
-
-| Pattern | Fix |
-|---------|-----|
-| new_without_default | Add Default impl |
-| manual_flatten | Use iter().flatten() |
-| Unused vars on non-x86_64 | `#[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]` |
-| Empty loop | Replace `loop {}` with `panic!("message")` |
-
-### IPC Patterns
-SmallMessage (<=64 bytes) fast path register-based <1us | LargeMessage zero-copy SharedRegion | 64-bit capability tokens with generation counter | Global O(1) registry | Token bucket rate limiting | NUMA-aware | ProcessId = u64
-
 ### Architecture-Specific
 - **x86_64**: Bootloader crate, UEFI GOP 1280x800, GDT/IDT, CMOS RTC
 - **AArch64**: PL011 UART 0x09000000, stack 0x80000. Iterator-based code hangs -- use `safe_iter.rs` / `aarch64_for!` macro. print! must use DirectUartWriter (LLVM loop bug)
 - **RISC-V**: OpenSBI, UART 0x10000000. Frame allocator memory start must be AFTER kernel end
-
-### Performance Targets (All Achieved)
-IPC <1us | Context switch <10us | Memory alloc <1us | Capability lookup O(1) | 1000+ processes | Kernel ~15K LOC
-
-## Common Tasks
-
-### Adding a System Call
-1. Define capability requirements in `kernel/src/cap/`
-2. Add handler in `kernel/src/syscall/`
-3. Create user-space wrapper in `userland/libs/libveridian/`
-4. Add tests
-
-### Debugging Kernel Panics
-- QEMU `-s -S` for GDB (server :1234, start paused)
-- `gdb-multiarch` for cross-arch; scripts in `scripts/gdb/`
-- `debug/kernel-debug.sh x86_64 60` | `debug/gdb-kernel.sh`
-- Docs: `docs/GDB-DEBUGGING.md`
-
-### Key Technical Patterns
-| Pattern | Details |
-|---------|---------|
-| R_X86_64_32S relocation | Kernel must be in top 2GB |
-| PIC initialization | Must mask interrupts during init |
-| Static heap | Use static arrays, not arbitrary addresses |
-| OnceLock soundness | set() error path must extract value before dropping Box |
-| #[must_use] on errors | Catches ignored KernelError at compile time |
-| Memory barriers | `arch/barriers.rs`: memory_fence(), data_sync_barrier() |
 
 ## Key Files
 
@@ -266,18 +184,14 @@ IPC <1us | Context switch <10us | Memory alloc <1us | Capability lookup O(1) | 1
 |------|---------|
 | `kernel/src/arch/` | Architecture-specific (aarch64/safe_iter.rs, x86_64/rtc.rs) |
 | `kernel/src/mm/` | Memory management (hybrid bitmap+buddy, VMM, VAS) |
-| `kernel/src/ipc/` | IPC (fast path <1us, registry) |
-| `kernel/src/sched/` | Scheduler (CFS, SMP, NUMA, work-stealing) |
+| `kernel/src/ipc/` | IPC (endpoint queues, registry; capabilities name registered endpoints) |
+| `kernel/src/sched/` | Dispatcher (ADR 0006) with EEVDF/RT/deadline policy classes (ADR 0007); one CPU runs tasks until D5 |
 | `kernel/src/cap/` | Capability system (inheritance, revocation, cache) |
 | `kernel/src/perf/` | Counters, benchmarks, tracepoints (10 events) |
-| `kernel/src/process/sync.rs` | Mutex, Semaphore, PiMutex |
 | `kernel/src/test_framework.rs` | No-std test infrastructure |
 
-## Documentation
-- **GitHub Pages**: <https://doublegate.github.io/VeridianOS/>
-- **mdBook**: `docs/book/src/` | Build: `mdbook build` in `docs/book/`
-- **Design docs**: `docs/design/{MEMORY-ALLOCATOR,IPC,SCHEDULER,CAPABILITY-SYSTEM}-DESIGN.md`
-- **TODO tracking**: `to-dos/{MASTER,TESTING,ISSUES,RELEASE}_TODO.md` (completed phase TODOs in `to-dos/archive/`)
+## Reference Docs (read when relevant; not imported)
+- `docs/agents/project-reference.md` -- microkernel design summary, x86_64 memory layout, project directory tree, GlobalState example code, Clippy fix patterns, IPC patterns, performance targets, common tasks (adding a syscall, debugging kernel panics), key technical patterns, documentation links (GitHub Pages, mdBook, design docs, TODO tracking)
 
 <<< MC-PROJECT-END >>>
 
