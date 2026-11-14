@@ -63,9 +63,6 @@ pub use crate::arch::context::{ArchThreadContext, ThreadContext};
 /// their parent via waitpid().
 pub const MAX_PROCESSES: usize = 1024;
 
-/// Maximum threads per process
-pub const MAX_THREADS_PER_PROCESS: usize = 256;
-
 /// Process and thread IDs share one space, as on Linux: a process's first
 /// thread has the process's ID as its thread ID (`ThreadBuilder::tid`), and
 /// every other thread an ID no process has, so gettid, tkill and tgkill name
@@ -720,7 +717,8 @@ pub fn user_task_reaped(process: Option<alloc::sync::Arc<Process>>, tid: u64) {
     // lives on is gone for good, as on Linux: its entry (and the kernel
     // stack its builder allocated) is freed now. C libraries join through
     // the CLONE_CHILD_CLEARTID futex, not the kernel, so nothing else ever
-    // removed it, and a process stopped creating threads after 255.
+    // removed it. Until then it is not live, so RLIMIT_NPROC and
+    // threads-max do not count it (`rlimit::tasks_of`).
     if let Some(p) = &process {
         let exited = p.get_thread(ThreadId(tid)).is_some_and(|t| {
             matches!(
@@ -774,7 +772,7 @@ pub fn wait_interrupted() -> bool {
         return false;
     };
     match process.kill_pending.load(Ordering::Acquire) {
-        0 => signals::deliverable(&process, &thread) != 0,
+        0 => signals::interrupting(&process, &thread) != 0,
         // An exec in progress interrupts every thread but the exec'ing one.
         exit::EXEC_PENDING => process.exec_tid.load(Ordering::Acquire) != thread.tid.0,
         _ => true,
@@ -863,6 +861,14 @@ pub fn create_thread(
             use alloc::string::String;
 
             use thread::ThreadBuilder;
+
+            // RLIMIT_NPROC and kernel.threads-max, as clone checks them:
+            // with no per-process limit, every path that makes a thread for a
+            // caller must (commit security review). Checked before anything
+            // is allocated, so a refusal leaks nothing (PR #43 review), and
+            // held until the thread is in its process.
+            let _nproc = crate::process::rlimit::check_nproc(&process)
+                .map_err(|_| crate::error::KernelError::WouldBlock)?;
 
             // Build thread with real stack allocation via ThreadBuilder
             let sched = current_thread()

@@ -1002,7 +1002,8 @@ bitflags! {
 ```rust
 // System-wide limits
 pub const MAX_PROCESSES: usize = 65536;
-pub const MAX_THREADS_PER_PROCESS: usize = 4096;
+// Threads: no per-process limit; RLIMIT_NPROC per real user and
+// /proc/sys/kernel/threads-max for the whole system, as on Linux.
 pub const MAX_CAPABILITIES_PER_PROCESS: usize = 65536;
 pub const MAX_OPEN_FILES_PER_PROCESS: usize = 1024;
 pub const MAX_MEMORY_PER_PROCESS: usize = 128 * 1024 * 1024 * 1024; // 128GB

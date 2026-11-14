@@ -411,6 +411,12 @@ pub struct Thread {
     /// Signals this thread blocks (Linux layout: bit `sig - 1`; N-96, N-109).
     pub sigmask: AtomicU64,
 
+    /// While rt_sigtimedwait waits with the waited-for signals unblocked,
+    /// the mask it had before (Linux's real_blocked): such a signal is still
+    /// blocked for the ignored-signal check, so it is queued, not dropped
+    /// (PR #43 review). 0 otherwise.
+    pub real_blocked: AtomicU64,
+
     /// Signals sent to this thread alone (tkill, tgkill, faults), same layout.
     /// Process-directed signals pend on the process.
     pub sigpending: AtomicU64,
@@ -611,6 +617,7 @@ impl Thread {
             clear_tid: AtomicUsize::new(0),
             id_pending: AtomicBool::new(false),
             sigmask: AtomicU64::new(0),
+            real_blocked: AtomicU64::new(0),
             sigpending: AtomicU64::new(0),
             rt_queue: super::signals::RtQueue::new(),
             saved_sigmask: AtomicU64::new(0),

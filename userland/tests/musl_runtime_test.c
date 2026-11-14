@@ -5088,6 +5088,14 @@ static void *nop_thread(void *arg)
     return arg;
 }
 
+static void *wait_pipe_thread(void *arg)
+{
+    char c;
+    while (read((int)(long)arg, &c, 1) < 0 && errno == EINTR)
+        ;
+    return NULL;
+}
+
 static void test_many_threads(void)
 {
     int made = 0, err = 0;
@@ -5101,9 +5109,33 @@ static void test_many_threads(void)
         pthread_join(t, 0);
         made++;
     }
-    static char why[48];
-    snprintf(why, sizeof(why), "made %d of 600, error %d", made, err);
-    report("musl_many_threads", made == 600, why);
+    /* No limit per process, as on Linux: 300 threads at once (the old
+     * cap was 256), each waiting on a pipe, then all released. */
+    int pfd[2], live = 0, lerr = 0;
+    pthread_t many[300];
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 16384);
+    if (pipe(pfd) == 0) {
+        for (; live < 300; live++) {
+            int rc = pthread_create(&many[live], &attr, wait_pipe_thread, (void *)(long)pfd[0]);
+            if (rc != 0) {
+                lerr = rc;
+                break;
+            }
+        }
+        for (int i = 0; i < live; i++)
+            if (write(pfd[1], "x", 1) != 1) lerr = -1;
+        for (int i = 0; i < live; i++)
+            pthread_join(many[i], 0);
+        close(pfd[0]);
+        close(pfd[1]);
+    }
+    pthread_attr_destroy(&attr);
+    static char why[80];
+    snprintf(why, sizeof(why), "made %d of 600, error %d; %d of 300 at once, error %d", made, err,
+             live, lerr);
+    report("musl_many_threads", made == 600 && live == 300 && lerr == 0, why);
 }
 
 /* Fixes from the review of v0.27.0 (PRs #20-#25) that need a real process
@@ -7540,6 +7572,14 @@ static void test_execveat(void)
     }
     /* Following the symlink is fine. */
     if (execveat_status(AT_FDCWD, link_path, t_argv, 0) != 0) f |= 16384;
+    /* A memfd may be executed while its creation descriptor is still open
+     * read-write: Linux's alloc_file takes no write access, unlike an open
+     * (fexecve of a memfd built in memory). */
+    int mfd = memfd_create("exec", 0);
+    if (mfd < 0 || write(mfd, "#!/bin/sh\nexit 0\n", 17) != 17 ||
+        musl_execveat(mfd, "", NULL, NULL, AT_EMPTY_PATH | AT_EXECVE_CHECK) != 0)
+        f |= 32768;
+    if (mfd >= 0) close(mfd);
 
     close(bin);
     close(dfd);
