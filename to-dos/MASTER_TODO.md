@@ -431,9 +431,11 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
          XSAVE) and AArch64 POE, its own PR.
        - [ ] memfd_secret on a splittable physical map (all three architectures, guards on every
          kernel path to user frames through it), its own PR; ENOSYS until then.
-     - [ ] The new mount API on H3's mount objects: open_tree, open_tree_attr, move_mount, fsopen,
-       fsconfig, fsmount, fspick, mount_setattr, statmount, listmount, listns; decided:
-       quotactl and quotactl_fd.
+     - [x] The new mount API on H3's mount objects: open_tree, open_tree_attr, move_mount, fsopen,
+       fsconfig, fsmount, fspick, mount_setattr, statmount, listmount, listns, with
+       FSMOUNT_NAMESPACE, OPEN_TREE_NAMESPACE, locked mounts and idmapped mounts (ADR 0027
+       decision 24); quotactl and quotactl_fd ENOSYS (with the sockets). MOVE_MOUNT_BENEATH
+       moved to item 6.
      - [ ] Sockets: shutdown, recvmmsg, sendmmsg.
      - [x] Files and scheduling: cachestat, file_getattr, file_setattr, ioprio_get, ioprio_set;
        memfd_secret moved to the memory group's follow-up. fanotify and rseq (with rseq_slice_yield) stay ENOSYS, as decided

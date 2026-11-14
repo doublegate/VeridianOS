@@ -419,7 +419,10 @@ What remains:
   mount fewer (there is no nullfs; as on Linux, fsopen("nullfs") is ENODEV); locked mounts
   (MNT_LOCKED) are kept, but a locked mount's lazy unmount with its parent drops it rather than
   leaving it connected as Linux's UMOUNT_CONNECTED does, and mount_too_revealing treats any
-  locked submount as hiding something (Linux allows one over a permanently empty directory); a
+  locked submount as hiding something (Linux allows one over a permanently empty directory);
+  idmapped mounts are offered on tmpfs, ramfs and BlockFS only (Linux has more filesystems with
+  FS_ALLOW_IDMAP), every superblock's own user namespace is the initial one, and a file
+  capability's root ID is mapped but no POSIX ACLs exist to map; a
   detached tree's files are named by the tree's
   id instead of a path (`fs::mount::DETACHED`), so making one of its mounts read-only is not
   EBUSY while a file in it is open for writing; a descriptor of an attached tree follows it

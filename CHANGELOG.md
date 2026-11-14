@@ -112,8 +112,9 @@
   user namespace and return its descriptor for setns, with Linux 7.3's rules. Locked mounts
   (MNT_LOCKED, MNT_LOCK_*): a mount namespace copied for a less privileged owner cannot have its
   mounts unmounted, moved or left out of a copy, nor their restrictive flags cleared, so what
-  they hide stays hidden. Runtime test mount_api. Not yet: ID-mapped
-  mounts, MOVE_MOUNT_BENEATH (it waits for open files to keep their mount) and
+  they hide stays hidden. ID-mapped mounts (MOUNT_ATTR_IDMAP) on tmpfs, ramfs and BlockFS:
+  owners read and are stored through a user namespace's maps (EOVERFLOW when one cannot be).
+  Runtime tests mount_api and idmapped_mount. Not yet: MOVE_MOUNT_BENEATH (it waits for open files to keep their mount) and
   MOVE_MOUNT_SET_GROUP (KNOWN-LIMITATIONS).
 - fchroot (Linux 7.3): chroot to a directory by descriptor, and with `FD_FAILFS_ROOT` to failfs,
   from whose root no absolute path resolves (EOPNOTSUPP) while lookups from real directories go on;

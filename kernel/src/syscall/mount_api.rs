@@ -753,11 +753,81 @@ const MOUNT_ATTR_SIZE_VER0: usize = 32;
 const PAGE_SIZE: usize = 4096;
 
 /// What mount_setattr was asked to change (Linux's mount_kattr).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone)]
 struct Kattr {
     set: u32,
     clr: u32,
     propagation: Option<Propagation>,
+    /// MOUNT_ATTR_IDMAP's change: Some(Some(maps)) to make the mounts
+    /// idmapped, Some(None) to clear a fresh copy's maps.
+    idmap: Option<Option<Arc<crate::fs::idmap::MntIdmap>>>,
+}
+
+impl PartialEq for Kattr {
+    fn eq(&self, other: &Self) -> bool {
+        self.set == other.set
+            && self.clr == other.clr
+            && self.propagation == other.propagation
+            && self.idmap.is_none() == other.idmap.is_none()
+    }
+}
+
+impl Eq for Kattr {}
+
+impl core::fmt::Debug for Kattr {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Kattr")
+            .field("set", &self.set)
+            .field("clr", &self.clr)
+            .field("propagation", &self.propagation)
+            .field("idmap", &self.idmap.as_ref().map(|m| m.is_some()))
+            .finish()
+    }
+}
+
+/// build_mount_idmapped: MOUNT_ATTR_IDMAP's maps from `userns_fd`, a user
+/// namespace's nsfs descriptor. Clearing them is only for a fresh copy's
+/// own (`replace`, open_tree_attr with OPEN_TREE_CLONE; EINVAL otherwise);
+/// the fd past INT_MAX or not a user namespace's is EINVAL, a bad one
+/// EBADF; the initial user namespace (whose maps would be the
+/// filesystem's own) and one the caller lacks CAP_SYS_ADMIN over are
+/// EPERM.
+fn build_idmap(
+    set: u64,
+    clr: u64,
+    userns_fd: u64,
+    replace: bool,
+) -> Result<Option<Option<Arc<crate::fs::idmap::MntIdmap>>>, SyscallError> {
+    if (set | clr) & attr::IDMAP == 0 {
+        return Ok(None);
+    }
+    if clr & attr::IDMAP != 0 {
+        if !replace {
+            return Err(SyscallError::InvalidArgument);
+        }
+        if set & attr::IDMAP == 0 {
+            return Ok(Some(None));
+        }
+    }
+    if userns_fd > i32::MAX as u64 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let file = file_of(userns_fd as usize)?;
+    let ns = file
+        .node
+        .as_any()
+        .and_then(|a| a.downcast_ref::<crate::fs::nsfs::NsFileNode>())
+        .ok_or(SyscallError::InvalidArgument)?;
+    let crate::process::ns::NsRef::User(userns) = ns.ns() else {
+        return Err(SyscallError::InvalidArgument);
+    };
+    if Arc::ptr_eq(userns, &crate::process::userns::initial()) {
+        return Err(SyscallError::OperationNotPermitted);
+    }
+    if !Caller::current().ns_capable(userns, CAP_SYS_ADMIN) {
+        return Err(SyscallError::OperationNotPermitted);
+    }
+    Ok(Some(Some(crate::fs::idmap::MntIdmap::of(userns))))
 }
 
 /// struct mount_attr's fields checked and turned into mount flags
@@ -775,10 +845,7 @@ fn build_kattr(set: u64, clr: u64, propagation: u64) -> Result<Kattr, SyscallErr
     if (set | clr) & !valid != 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    if (set | clr) & attr::IDMAP != 0 {
-        // ID-mapped mounts are not made here.
-        return Err(SyscallError::InvalidArgument);
-    }
+    let (set, clr) = (set & !attr::IDMAP, clr & !attr::IDMAP);
     let mut kclr = mnt_flags(clr & !attr::ATIME) & !mnt::RELATIME;
     let mut kset = mnt_flags(set & !attr::ATIME) & !mnt::RELATIME;
     if clr & attr::ATIME != 0 {
@@ -800,6 +867,7 @@ fn build_kattr(set: u64, clr: u64, propagation: u64) -> Result<Kattr, SyscallErr
         set: kset,
         clr: kclr,
         propagation,
+        idmap: None,
     })
 }
 
@@ -824,7 +892,7 @@ pub fn sys_mount_setattr(
         return Err(SyscallError::InvalidArgument);
     }
     may_mount()?;
-    let kattr = read_mount_attr(uattr, usize_)?;
+    let kattr = read_mount_attr(uattr, usize_, false)?;
     let Some(kattr) = kattr else {
         return Ok(0);
     };
@@ -835,13 +903,17 @@ pub fn sys_mount_setattr(
         false,
         flags & AT_SYMLINK_NOFOLLOW == 0,
     )?;
-    setattr_at(&canonical, kattr, flags & AT_RECURSIVE != 0)
+    setattr_at(&canonical, kattr, flags & AT_RECURSIVE != 0, false)
 }
 
 /// struct mount_attr from user memory (copy_struct_from_user): None when
 /// it asks for nothing, else what it asks for, checked. Bytes past the
 /// fields this kernel knows must be zero (E2BIG).
-fn read_mount_attr(uattr: usize, size: usize) -> Result<Option<Kattr>, SyscallError> {
+fn read_mount_attr(
+    uattr: usize,
+    size: usize,
+    replace: bool,
+) -> Result<Option<Kattr>, SyscallError> {
     let mut buf = alloc::vec![0u8; size];
     read_user_bytes(uattr, &mut buf)?;
     if buf[MOUNT_ATTR_SIZE_VER0..].iter().any(|&b| b != 0) {
@@ -852,26 +924,32 @@ fn read_mount_attr(uattr: usize, size: usize) -> Result<Option<Kattr>, SyscallEr
         b.copy_from_slice(&buf[i * 8..i * 8 + 8]);
         u64::from_ne_bytes(b)
     };
-    let (set, clr, propagation) = (field(0), field(1), field(2));
+    let (set, clr, propagation, userns_fd) = (field(0), field(1), field(2), field(3));
     if set == 0 && clr == 0 && propagation == 0 {
         return Ok(None);
     }
-    build_kattr(set, clr, propagation).map(Some)
+    let mut kattr = build_kattr(set, clr, propagation)?;
+    kattr.idmap = build_idmap(set, clr, userns_fd, replace)?;
+    Ok(Some(kattr))
 }
 
 /// do_mount_setattr on the mount whose root is at `canonical`: EINVAL if
 /// it is not one.
-fn setattr_at(canonical: &str, kattr: Kattr, recursive: bool) -> SyscallResult {
-    let (tree, at, _) = tree_and_path(canonical)?;
+fn setattr_at(canonical: &str, kattr: Kattr, recursive: bool, replace: bool) -> SyscallResult {
+    let (tree, at, id) = tree_and_path(canonical)?;
     if !is_mount_root(&tree, &at) {
         return Err(SyscallError::InvalidArgument);
     }
     let writers = |p: &str| super::mount::writing_under(p, &tree);
-    tree.setattr(
+    // An idmapped mount is made only in a detached tree, never one
+    // already visible in a namespace (can_idmap_mount).
+    let idmap = kattr.idmap.map(|maps| (maps, replace, id.is_some()));
+    tree.setattr_idmapped(
         &at,
         kattr.set,
         kattr.clr,
         kattr.propagation,
+        idmap,
         recursive,
         writers,
     )
@@ -902,12 +980,15 @@ pub fn sys_open_tree_attr(
         if usize_ < MOUNT_ATTR_SIZE_VER0 {
             return Err(SyscallError::InvalidArgument);
         }
-        let Some(kattr) = read_mount_attr(uattr, usize_)? else {
+        // A fresh copy's maps may be replaced or cleared (open_tree_attr's
+        // MOUNT_KATTR_IDMAP_REPLACE with OPEN_TREE_CLONE).
+        let replace = flags & OPEN_TREE_CLONE != 0;
+        let Some(kattr) = read_mount_attr(uattr, usize_, replace)? else {
             return Ok(0);
         };
         let file = file_of(fd)?;
         let canonical = file.path.clone().unwrap_or_default();
-        setattr_at(&canonical, kattr, flags & AT_RECURSIVE != 0)
+        setattr_at(&canonical, kattr, flags & AT_RECURSIVE != 0, replace)
     })();
     match result {
         Ok(_) => Ok(fd),
@@ -1131,7 +1212,8 @@ fn statmount_bytes(
         put64(&mut h, 48, facts.parent_unique);
         put32(&mut h, 56, m.ids().id);
         put32(&mut h, 60, facts.parent_id);
-        put64(&mut h, 64, attr_flags(flags));
+        let idmapped = if m.idmap().is_some() { attr::IDMAP } else { 0 };
+        put64(&mut h, 64, attr_flags(flags) | idmapped);
         let prop = if flags & mnt::UNBINDABLE != 0 {
             ms::UNBINDABLE
         } else {
@@ -1183,8 +1265,41 @@ fn statmount_bytes(
     if let Some(point) = &facts.point {
         string(&mut h, &mut out_mask, sm::MNT_POINT, 108, point)?;
     }
-    // No filesystem here shows options, has a subtype or an ID mapping.
+    // No filesystem here shows options or has a subtype.
     string(&mut h, &mut out_mask, sm::SB_SOURCE, 124, m.source())?;
+    // An idmapped mount's maps, "inside outside count" per extent with the
+    // outside IDs as the caller's user namespace sees them, an extent it
+    // cannot see whole left out (statmount_mnt_idmap).
+    if let Some(map) = m.idmap() {
+        let reader = Caller::current().userns;
+        for (gid, flag, num_at, str_at) in [
+            (false, sm::MNT_UIDMAP, 152, 156),
+            (true, sm::MNT_GIDMAP, 160, 164),
+        ] {
+            if mask & flag == 0 {
+                continue;
+            }
+            let up = |k: u32| {
+                if gid {
+                    reader.gid_up(k)
+                } else {
+                    reader.uid_up(k)
+                }
+            };
+            let lines: Vec<String> = map
+                .extents(gid)
+                .into_iter()
+                .filter_map(|(first, lower, count)| {
+                    let seen = up(lower)?;
+                    let last = up(lower.checked_add(count.checked_sub(1)?)?)?;
+                    (last.checked_sub(seen)? == count - 1)
+                        .then(|| alloc::format!("{first} {seen} {count}"))
+                })
+                .collect();
+            put32(&mut h, num_at, lines.len() as u32);
+            string(&mut h, &mut out_mask, flag, str_at, &lines.join("\0"))?;
+        }
+    }
     if mask & sm::MNT_NS_ID != 0 {
         if let Some(id) = facts.ns_id {
             out_mask |= sm::MNT_NS_ID;
@@ -1373,6 +1488,7 @@ mod tests {
                 set: mnt::READONLY,
                 clr: mnt::NOEXEC,
                 propagation: Some(Propagation::Private),
+                idmap: None,
             })
         );
         let inval = Err(SyscallError::InvalidArgument);
@@ -1387,13 +1503,35 @@ mod tests {
                 set: mnt::NOATIME,
                 clr: mnt::RELATIME | mnt::NOATIME,
                 propagation: None,
+                idmap: None,
             })
         );
         assert_eq!(
             build_kattr(attr::STRICTATIME, attr::ATIME, 0).map(|k| k.set),
             Ok(0)
         );
-        assert_eq!(build_kattr(attr::IDMAP, 0, 0), inval);
+        // MOUNT_ATTR_IDMAP is no mount flag; its maps are build_idmap's.
+        assert_eq!(build_kattr(attr::IDMAP, 0, 0).map(|k| k.set), Ok(0));
+    }
+
+    /// build_mount_idmapped's checks that need no descriptor: clearing
+    /// maps only for a fresh copy (clearing alone resets them), the
+    /// descriptor no larger than INT_MAX.
+    #[test]
+    fn idmap_changes_are_checked_as_linux_checks_them() {
+        assert!(matches!(build_idmap(0, 0, 0, false), Ok(None)));
+        assert!(matches!(
+            build_idmap(0, attr::IDMAP, 0, false),
+            Err(SyscallError::InvalidArgument)
+        ));
+        assert!(matches!(
+            build_idmap(0, attr::IDMAP, 0, true),
+            Ok(Some(None))
+        ));
+        assert!(matches!(
+            build_idmap(attr::IDMAP, 0, 1 << 31, false),
+            Err(SyscallError::InvalidArgument)
+        ));
     }
 
     /// copy_mnt_id_req's field checks and the layout read.

@@ -643,6 +643,7 @@ pub fn map_kernel_error(err: crate::error::KernelError) -> SyscallError {
             FsError::NoData => SyscallError::NoData,
             FsError::TextBusy => SyscallError::TextBusy,
             FsError::MessageTooLong => SyscallError::MessageTooLong,
+            FsError::Overflow => SyscallError::Overflow,
             FsError::Canceled => SyscallError::Canceled,
             FsError::OutOfRange => SyscallError::RangeError,
             FsError::NoProcess => SyscallError::ProcessNotFound,

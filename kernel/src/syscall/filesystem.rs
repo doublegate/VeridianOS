@@ -2639,7 +2639,9 @@ pub(crate) fn creation_perms(mode: usize) -> Permissions {
 pub(crate) fn own_new_node(node: &alloc::sync::Arc<dyn crate::fs::VfsNode>) {
     let creds = Caller::current().creds;
     let (uid, gid) = (creds.fsuid, creds.fsgid);
-    if uid != 0 || gid != 0 {
+    // Filesystems make nodes root's; through an idmapped mount even root's
+    // IDs are stored mapped (check_dir_write refused unmappable ones).
+    if uid != 0 || gid != 0 || node.view_of().is_some() {
         let _ = node.chown(Some(uid), Some(gid));
     }
 }
@@ -2859,6 +2861,19 @@ pub(crate) fn parent_dir_canonical(
 /// Creating or removing an entry in `dir` needs write and search permission
 /// on it (FS-SEC-02).
 pub(crate) fn check_dir_write(dir: &dyn crate::fs::VfsNode) -> Result<(), SyscallError> {
+    // A new entry's owner must be storable through an idmapped mount
+    // (may_create's fsuidgid_has_mapping: EOVERFLOW, before the mode
+    // bits).
+    if dir.view_of().is_some() {
+        let creds = Caller::current().creds;
+        dir.check_owner(Some(creds.fsuid), Some(creds.fsgid))
+            .map_err(super::map_kernel_error)?;
+    }
+    dir_write_allowed(dir)
+}
+
+/// Write and search permission on `dir` for a change of its entries.
+fn dir_write_allowed(dir: &dyn crate::fs::VfsNode) -> Result<(), SyscallError> {
     // An immutable directory takes no entry and loses none (EPERM, before
     // the mode bits: inode_permission).
     #[cfg(feature = "alloc")]
@@ -2880,6 +2895,10 @@ fn check_dir_write_kernel(dir: &dyn crate::fs::VfsNode) -> Result<(), crate::err
         SyscallError::OperationNotPermitted => {
             crate::error::KernelError::FsError(crate::error::FsError::OperationNotPermitted)
         }
+        // An owner an idmapped mount cannot store (may_create).
+        SyscallError::Overflow => {
+            crate::error::KernelError::FsError(crate::error::FsError::Overflow)
+        }
         _ => crate::error::KernelError::PermissionDenied {
             operation: "create directory entry",
         },
@@ -2893,7 +2912,7 @@ pub(crate) fn check_may_remove(
     dir: &dyn crate::fs::VfsNode,
     name: &str,
 ) -> Result<(), SyscallError> {
-    check_dir_write(dir)?;
+    dir_write_allowed(dir)?;
     let entry = dir.lookup(name).map_err(map_resolve_err)?;
     // may_delete: nothing leaves an append-only directory, and an
     // append-only or immutable entry is not removed (EPERM).

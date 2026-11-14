@@ -5637,6 +5637,7 @@ static void test_namespaces_mnt(void);
 static void test_mount_calls(void);
 static void test_mount_flags(void);
 static void test_mount_api(void);
+static void test_idmapped_mount(void);
 static void test_mount_no_escape(void);
 static void test_pivot_root(void);
 static void test_mount_object_cap(void);
@@ -5714,6 +5715,7 @@ static const struct {
     {"mount_calls", test_mount_calls},
     {"mount_flags", test_mount_flags},
     {"mount_api", test_mount_api},
+    {"idmapped_mount", test_idmapped_mount},
     {"pivot_root", test_pivot_root},
     {"mount_object_cap", test_mount_object_cap},
     {"mount_modify_drop", test_mount_modify_drop},
@@ -11197,6 +11199,80 @@ struct t_mount_attr {
     uint64_t attr_set, attr_clr, propagation, userns_fd;
 };
 
+static int t_write_text(const char *path, const char *text);
+
+/* An idmapped mount (mount_setattr's MOUNT_ATTR_IDMAP, Linux's
+ * fs/mnt_idmapping.c): a detached tmpfs mount made idmapped through a user
+ * namespace mapping 0..999 to 100000..100999 shows root's file as owned
+ * by 100000; root's own IDs have no mapping there, so it cannot create
+ * through it (EOVERFLOW); a second mapping is EPERM. */
+static void test_idmapped_mount(void)
+{
+    char why[96];
+    int f = 0, p1[2], p2[2];
+    if (pipe(p1) != 0 || pipe(p2) != 0) {
+        report("idmapped_mount", 0, "pipe");
+        return;
+    }
+    pid_t c = fork();
+    if (c == 0) {
+        char b;
+        close(p1[0]);
+        close(p2[1]);
+        if (unshare(CLONE_NEWUSER) != 0) _exit(1);
+        write(p1[1], "x", 1);
+        read(p2[0], &b, 1);
+        _exit(0);
+    }
+    close(p1[1]);
+    close(p2[0]);
+    char b = 0, path[64];
+    if (read(p1[0], &b, 1) != 1) f |= 1;
+    snprintf(path, sizeof(path), "/proc/%d/uid_map", (int)c);
+    if (t_write_text(path, "0 100000 1000") != 0) f |= 2;
+    snprintf(path, sizeof(path), "/proc/%d/gid_map", (int)c);
+    if (t_write_text(path, "0 100000 1000") != 0) f |= 2;
+    snprintf(path, sizeof(path), "/proc/%d/ns/user", (int)c);
+    int ufd = open(path, O_RDONLY | O_CLOEXEC);
+    int fd = syscall(SYS_fsopen, "tmpfs", 0), mfd = -1;
+    if (fd >= 0 && syscall(SYS_fsconfig, fd, 6 /* CMD_CREATE */, NULL, NULL, 0) == 0)
+        mfd = syscall(SYS_fsmount, fd, 0, 0);
+    int file = mfd >= 0 ? openat(mfd, "f", O_CREAT | O_WRONLY, 0644) : -1;
+    if (ufd < 0 || mfd < 0 || file < 0) f |= 4;
+    if (file >= 0) close(file);
+    struct t_mount_attr a = {.attr_set = 0x100000 /* MOUNT_ATTR_IDMAP */, .userns_fd = ufd};
+    long r = syscall(SYS_mount_setattr, mfd, "", AT_EMPTY_PATH, &a, sizeof(a));
+    int set_err = r == 0 ? 0 : errno;
+    struct stat st = {0};
+    if (r != 0 || fstatat(mfd, "f", &st, 0) != 0 || st.st_uid != 100000 || st.st_gid != 100000)
+        f |= 8;
+    if (!(openat(mfd, "g", O_CREAT | O_WRONLY, 0644) == -1 && errno == EOVERFLOW)) f |= 16;
+    if (!(syscall(SYS_mount_setattr, mfd, "", AT_EMPTY_PATH, &a, sizeof(a)) == -1 && errno == EPERM))
+        f |= 32;
+    /* The initial user namespace's maps are the filesystem's own: EPERM. */
+    int self_ns = open("/proc/self/ns/user", O_RDONLY | O_CLOEXEC);
+    int mfd2 = -1;
+    int fd2 = syscall(SYS_fsopen, "tmpfs", 0);
+    if (fd2 >= 0 && syscall(SYS_fsconfig, fd2, 6, NULL, NULL, 0) == 0)
+        mfd2 = syscall(SYS_fsmount, fd2, 0, 0);
+    struct t_mount_attr a2 = {.attr_set = 0x100000, .userns_fd = self_ns};
+    if (!(syscall(SYS_mount_setattr, mfd2, "", AT_EMPTY_PATH, &a2, sizeof(a2)) == -1 &&
+          errno == EPERM))
+        f |= 64;
+    write(p2[1], "x", 1);
+    t_exit_status(c);
+    close(p1[0]);
+    close(p2[1]);
+    if (ufd >= 0) close(ufd);
+    if (self_ns >= 0) close(self_ns);
+    if (fd >= 0) close(fd);
+    if (fd2 >= 0) close(fd2);
+    if (mfd >= 0) close(mfd);
+    if (mfd2 >= 0) close(mfd2);
+    snprintf(why, sizeof(why), "f=%#x set=%d uid=%u", f, set_err, (unsigned)st.st_uid);
+    report("idmapped_mount", f == 0, why);
+}
+
 /* The new mount API (Linux 7.3 fs/fsopen.c, fs/namespace.c), in a mount
  * namespace of its own: a tmpfs made through a context (its parameters
  * checked one at a time and refusals readable from it), mounted detached
@@ -13340,6 +13416,7 @@ int main(int argc, char **argv)
     test_mount_calls();
     test_mount_flags();
     test_mount_api();
+    test_idmapped_mount();
     test_mount_no_escape();
     test_pivot_root();
     test_mount_object_cap();

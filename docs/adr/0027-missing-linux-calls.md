@@ -276,8 +276,22 @@ The reference for every behaviour below is the Linux 7.3 source (kernel.org tarb
       privilege instead; that is gone. Linux puts the tree on an empty nullfs root, which every namespace has there;
       here the tree is the root, so such a namespace lists one mount fewer. nullfs itself is not
       a filesystem type a caller can open, on Linux either (ENODEV).
-    - **Not yet** (KNOWN-LIMITATIONS): idmapped mounts (MOUNT_ATTR_IDMAP, EINVAL until then);
-      MOVE_MOUNT_BENEATH, until open files keep the mount they were reached through.
+    - **Idmapped mounts** (MOUNT_ATTR_IDMAP with a user namespace's nsfs descriptor, Linux's
+      `fs/mnt_idmapping.c`): owners stored as `k` read through the mount as the namespace's map
+      takes `k` (make_vfsuid), and owners given through it are stored as the map takes them
+      back (from_vfsuid; EOVERFLOW without one, also for a creator whose IDs it cannot store,
+      may_create). Checked as Linux: a detached mount only, of tmpfs, ramfs or BlockFS (the
+      maintainer's choice, 2026-11-11), not the initial user namespace's maps (EPERM),
+      CAP_SYS_ADMIN over the namespace (EPERM), not over maps a mount already shows unless it
+      is open_tree_attr's fresh copy (EPERM; clearing likewise only there); copies keep the
+      maps; statmount reports MOUNT_ATTR_IDMAP and the maps. The design differs from Linux's,
+      which passes the map into every VFS call: the mount's root is a translating view of its
+      node (`fs::idmap::IdmappedNode`), so everything reached through it is seen mapped and the
+      checks above it need not know. That is the shape a file server's per-mount handle takes
+      once filesystems leave the kernel (Track M); a host test keeps the view forwarding every
+      VfsNode method, so a new one cannot silently fall back to a default there.
+    - **Not yet** (KNOWN-LIMITATIONS): MOVE_MOUNT_BENEATH, until open files keep the mount they
+      were reached through.
 
 ## Consequences
 

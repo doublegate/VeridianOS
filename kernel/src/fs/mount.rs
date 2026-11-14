@@ -272,6 +272,9 @@ pub struct Mount {
     flags: AtomicU32,
     /// MNT_EXPIRE's mark.
     expiry: AtomicBool,
+    /// The ID maps an idmapped mount shows its owners through (Linux's
+    /// mnt_idmap; None for the filesystem's own, nop_mnt_idmap).
+    idmap: Mutex<Option<Arc<super::idmap::MntIdmap>>>,
 }
 
 impl Drop for Mount {
@@ -326,6 +329,7 @@ impl Mount {
             root_path,
             flags: AtomicU32::new(mnt),
             expiry: AtomicBool::new(false),
+            idmap: Mutex::new(None),
         })
     }
 
@@ -338,17 +342,26 @@ impl Mount {
         m
     }
 
+    /// The ID maps it shows owners through, if it is idmapped.
+    pub fn idmap(&self) -> Option<Arc<super::idmap::MntIdmap>> {
+        self.idmap.lock().clone()
+    }
+
     /// A new mount of the same filesystem rooted at `root`, which is at
     /// `root_path` in it (a bind mount); private, with the flag locks but
     /// not LOCKED (clone_mnt clears MNT_INTERNAL_FLAGS).
     fn bound(&self, root: Arc<dyn VfsNode>, root_path: String) -> Arc<Self> {
-        Self::on(
+        let m = Self::on(
             self.sb.clone(),
             self.source.clone(),
-            root,
+            super::base_node(&root),
             root_path,
             self.flags() & (flags::SETTABLE | flags::LOCKS),
-        )
+        );
+        // A copy shows owners as the original does (clone_mnt copies
+        // mnt_idmap).
+        *m.idmap.lock() = self.idmap();
+        m
     }
 
     /// Set lock bits ([`flags::LOCKS`], [`flags::LOCKED`]); they are never
@@ -402,9 +415,14 @@ impl Mount {
         &self.sb.fs
     }
 
-    /// The node a walk entering the mount finds.
+    /// The node a walk entering the mount finds: through an idmapped
+    /// mount's maps, a view of it ([`super::idmap`]), so everything reached
+    /// from it is seen that way.
     pub fn root(&self) -> Arc<dyn VfsNode> {
-        self.root.clone()
+        match self.idmap() {
+            Some(map) => super::idmap::view(self.root.clone(), &map),
+            None => self.root.clone(),
+        }
     }
 
     pub fn ids(&self) -> MountIds {
@@ -1115,6 +1133,26 @@ impl Mounts {
         recursive: bool,
         writers: impl Fn(&str) -> bool,
     ) -> Result<(), MountError> {
+        self.setattr_idmapped(point, set, clr, ty, None, recursive, writers)
+    }
+
+    /// [`Mounts::setattr`] with MOUNT_ATTR_IDMAP's change too: `idmap`
+    /// Some((maps, replace, detached)) gives each mount `maps` (None
+    /// clears them), checked per mount as Linux's can_idmap_mount: only in
+    /// a detached tree (`detached`, EINVAL otherwise), on a filesystem that
+    /// allows it (tmpfs, ramfs, BlockFS; EINVAL), and not over maps a mount
+    /// already shows unless `replace` (a fresh copy's own, EPERM).
+    #[allow(clippy::too_many_arguments)]
+    pub fn setattr_idmapped(
+        &self,
+        point: &str,
+        set: u32,
+        clr: u32,
+        ty: Option<Propagation>,
+        idmap: Option<(Option<Arc<super::idmap::MntIdmap>>, bool, bool)>,
+        recursive: bool,
+        writers: impl Fn(&str) -> bool,
+    ) -> Result<(), MountError> {
         let table = self.snapshot();
         let top = table.mount_at(point).cloned().ok_or(MountError::Invalid)?;
         if ty == Some(Propagation::Shared) {
@@ -1134,6 +1172,22 @@ impl Mounts {
         if targets.iter().any(|(_, m)| !m.keeps_locked_flags(new(m))) {
             return Err(MountError::Perm);
         }
+        if let Some((maps, replace, detached)) = &idmap {
+            if maps.is_some() {
+                for (_, m) in &targets {
+                    if !detached {
+                        return Err(MountError::Invalid);
+                    }
+                    if m.idmap().is_some() && !replace {
+                        return Err(MountError::Perm);
+                    }
+                    let ty = linux_fs_type(m.fs().name());
+                    if !matches!(ty, "tmpfs" | "ramfs" | "blockfs") {
+                        return Err(MountError::Invalid);
+                    }
+                }
+            }
+        }
         for (path, m) in &targets {
             if new(m) & flags::READONLY != 0 && !m.has(flags::READONLY) && writers(path) {
                 return Err(MountError::Busy);
@@ -1143,6 +1197,9 @@ impl Mounts {
             m.set_flags(new(m));
             if let Some(ty) = ty {
                 m.set_unbindable(ty == Propagation::Unbindable);
+            }
+            if let Some((maps, ..)) = &idmap {
+                *m.idmap.lock() = maps.clone();
             }
         }
         Ok(())
@@ -1962,6 +2019,62 @@ mod tests {
         );
         // The root's filesystem with a locked mount under it is not.
         assert_eq!(locked.fully_visible("ramfs", flags::RELATIME), None);
+    }
+
+    /// MOUNT_ATTR_IDMAP (can_idmap_mount): a detached tmpfs mount shows its
+    /// owners through the maps, a copy keeps them; a mount in a namespace,
+    /// or one already idmapped without REPLACE, is refused; REPLACE with
+    /// no maps clears them.
+    #[test]
+    fn an_idmapped_mount_shows_mapped_owners() {
+        use crate::fs::idmap::MntIdmap;
+        let vfs = work_tree();
+        let t = vfs.mounts();
+        let tree = t.detached_new(tmpfs(), "id".into(), flags::RELATIME, false);
+        let root = tree.mount_at("/").unwrap();
+        root.root()
+            .create("f", crate::fs::Permissions::default())
+            .unwrap();
+        let map = MntIdmap::of(&crate::process::userns::test_child(
+            b"0 100000 1000\n",
+            b"0 100000 1000\n",
+        ));
+        let set = |m: Option<Arc<MntIdmap>>, replace, detached| {
+            tree.setattr_idmapped("/", 0, 0, None, Some((m, replace, detached)), false, |_| {
+                false
+            })
+        };
+        assert_eq!(
+            set(Some(map.clone()), false, false),
+            Err(MountError::Invalid)
+        );
+        assert_eq!(set(Some(map.clone()), false, true), Ok(()));
+        let seen = root.root().lookup("f").unwrap().metadata().unwrap();
+        assert_eq!((seen.uid, seen.gid), (100000, 100000));
+        assert_eq!(set(Some(map.clone()), false, true), Err(MountError::Perm));
+        let copy = tree.detached_clone("/", root.root(), false).unwrap();
+        assert!(copy.mount_at("/").unwrap().idmap().is_some());
+        assert_eq!(set(None, true, true), Ok(()));
+        assert_eq!(root.root().lookup("f").unwrap().metadata().unwrap().uid, 0);
+        // Not a filesystem that allows it.
+        let proc_tree = t.detached_new(
+            Arc::new(crate::fs::procfs::ProcFs::new()),
+            "p".into(),
+            flags::RELATIME,
+            false,
+        );
+        assert_eq!(
+            proc_tree.setattr_idmapped(
+                "/",
+                0,
+                0,
+                None,
+                Some((Some(map), false, true)),
+                false,
+                |_| false
+            ),
+            Err(MountError::Invalid)
+        );
     }
 
     #[test]

@@ -234,6 +234,8 @@ pub enum FsError {
     /// A message longer than the buffer (EMSGSIZE): reading a filesystem
     /// context's message log with too small a buffer
     MessageTooLong,
+    /// An owner an idmapped mount cannot store (EOVERFLOW)
+    Overflow,
 }
 
 /// Result type alias for kernel operations

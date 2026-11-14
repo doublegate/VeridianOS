@@ -23,6 +23,7 @@ pub mod file;
 pub mod flock;
 #[cfg(feature = "alloc")]
 pub mod fscontext;
+pub mod idmap;
 pub mod inotify;
 #[cfg(feature = "alloc")]
 pub mod memfd;
@@ -967,6 +968,13 @@ pub trait VfsNode: Send + Sync {
     /// directory 2 and one per subdirectory, 0 once it is removed. The
     /// default, for a node outside a tree that counts them, is 1, or 2 for
     /// a directory.
+    /// The node this one is a view of (an idmapped mount's,
+    /// [`idmap::IdmappedNode`]); None for a real node. Links, renames and
+    /// identity use the real node ([`base_node`]).
+    fn view_of(&self) -> Option<Arc<dyn VfsNode>> {
+        None
+    }
+
     fn link_count(&self) -> u32 {
         if self.node_type() == NodeType::Directory {
             2
@@ -1019,8 +1027,15 @@ pub const fn make_dev(major: u32, minor: u32) -> u32 {
 /// the filesystem has one (BlockFS), otherwise the node's address, which
 /// stays unique while the table holds the node.
 pub(crate) fn inode_key(node: &Arc<dyn VfsNode>) -> (u64, u64) {
+    let node = base_node(node);
     node.file_identity()
-        .unwrap_or((0, Arc::as_ptr(node) as *const () as u64))
+        .unwrap_or((0, Arc::as_ptr(&node) as *const () as u64))
+}
+
+/// The real node behind `node`: itself, or what an idmapped mount's view
+/// shows ([`VfsNode::view_of`]).
+pub fn base_node(node: &Arc<dyn VfsNode>) -> Arc<dyn VfsNode> {
+    node.view_of().unwrap_or_else(|| node.clone())
 }
 
 /// A special inode found by number (BlockFS's `file_identity`) lost its
