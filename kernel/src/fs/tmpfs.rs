@@ -360,7 +360,9 @@ impl VfsNode for TmpNode {
 
         let bytes_to_read = self.pages.read().read(offset, buffer);
 
-        self.metadata.write().accessed = crate::arch::timer::get_timestamp_secs();
+        if !super::attr::no_atime(self) {
+            self.metadata.write().accessed = crate::arch::timer::get_timestamp_secs();
+        }
 
         Ok(bytes_to_read)
     }

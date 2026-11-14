@@ -179,14 +179,18 @@
 - Files and scheduling calls (v0.28 item 5, ADR 0027 decisions 19-22). ioprio_set and
   ioprio_get, per thread (CLONE_IO shares it, any other clone or fork copies it), with Linux's
   rules for RT, other users' threads, process groups and users; an unset priority follows the
-  scheduling (nice, SCHED_IDLE, real-time). virtio-blk and NVMe admit requests in priority order
-  (RT, BE, IDLE; a waiter passed over for a second goes next).
+  scheduling (nice, SCHED_IDLE, real-time). NVMe admits requests in priority order (RT, BE, IDLE;
+  a waiter passed over for a second goes next); BlockFS on virtio-blk already runs its requests
+  one at a time under its own locks, so the priority does not reorder them yet.
   Inode attribute flags: immutable, append-only, nodump and noatime through chattr's ioctls
   (FS_IOC_GETFLAGS/SETFLAGS, FS_IOC_FSGETXATTR/FSSETXATTR) and file_getattr/file_setattr, kept by
   BlockFS (in the on-disk inode, no format change), tmpfs, ramfs and memfd, and read from ext4.
   Immutable stops every write, through an already-open descriptor too, and a write through a
-  shared mapping is SIGBUS; append-only allows only appending writes. Both refuse unlink, rename,
-  link, chmod, chown, set times and xattr changes; nodump and noatime pass to new files.
+  shared mapping is SIGBUS, and a refused write or truncate leaves the set-ID bits and file
+  capabilities; append-only allows only appending writes through an O_APPEND descriptor
+  (RWF_NOAPPEND on one is EPERM). Both refuse unlink, rename, link, chmod, chown, set times and
+  xattr changes; noatime keeps reads from changing the access time (tmpfs, ramfs); nodump and
+  noatime pass to new files.
   cachestat reports the pages of a range that are cached and dirty: tmpfs and memfd pages, and
   BlockFS's block cache and mapping pages. Runtime test files_sched.
 

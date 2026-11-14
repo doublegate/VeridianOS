@@ -96,9 +96,7 @@ fn freeze_mappings(node: &Arc<dyn VfsNode>) -> Result<(), SyscallError> {
             .lock()
             .shared_file_copies(0, end)
             .into_iter()
-            .filter(|(n, ..)| {
-                core::ptr::eq(Arc::as_ptr(n) as *const u8, Arc::as_ptr(node) as *const u8)
-            })
+            .filter(|(n, ..)| crate::fs::inode_key(n) == crate::fs::inode_key(node))
             .collect();
         super::memctl::write_back(p, copies)?;
     }
@@ -154,17 +152,17 @@ pub fn ioctl(file: &crate::fs::file::File, cmd: u32, arg: usize) -> Option<Sysca
 fn checked(
     path_ptr: usize,
     dfd: usize,
-    usize_: usize,
+    size: usize,
     at_flags: usize,
 ) -> Result<usize, SyscallError> {
     let at_flags = at_flags as u32 as usize;
     if at_flags & !(super::filesystem::AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    if usize_ > PAGE {
+    if size > PAGE {
         return Err(SyscallError::ArgumentListTooLong);
     }
-    if usize_ < FILE_ATTR_SIZE {
+    if size < FILE_ATTR_SIZE {
         return Err(SyscallError::InvalidArgument);
     }
     Ok(if path_ptr == 0 && (dfd as u32 as i32) >= 0 {

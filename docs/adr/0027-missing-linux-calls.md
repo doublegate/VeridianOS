@@ -175,7 +175,11 @@ The reference for every behaviour below is the Linux 7.3 source (kernel.org tarb
     virtio-blk and NVMe drivers run one request at a time behind the device's lock, so callers
     wait here and each turn goes to the best priority waiting: RT before BE before IDLE, by level
     within a class, the earliest first between equals. A waiter passed over for a second goes
-    next, whatever its class, and IDLE goes only when no other class waits.
+    next, whatever its class, and IDLE goes only when no other class waits. NVMe's callers take
+    a turn; BlockFS, virtio-blk's only user, does not: it issues requests under its own spin
+    locks, which already serialise them and under which waiting would sleep holding a spin lock
+    (PR #45 review). Its requests are ordered once v0.29's completion path lets BlockFS wait
+    without its locks.
 21. Inode attribute flags (`kernel/src/fs/attr.rs`, `kernel/src/syscall/fileattr.rs`):
     - **The set:** Linux tmpfs's, the maintainer's choice: immutable, append-only, nodump and
       noatime, through FS_IOC_GETFLAGS/SETFLAGS, FS_IOC_FSGETXATTR/FSSETXATTR and

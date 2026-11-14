@@ -707,4 +707,11 @@ mod cachestat_tests {
         assert_eq!(crate::fs::page_span(8193, 1, u64::MAX), Some((1, 2)));
         assert_eq!(crate::fs::page_span(4096, 1, 5), None);
     }
+
+    #[test]
+    fn a_wrapped_range_counts_nothing() {
+        let (first, last) = cachestat_pages(8192, u64::MAX - 4095);
+        assert_eq!((first, last), (2, 0));
+        assert_eq!(crate::fs::page_span(16384, first, last), None);
+    }
 }

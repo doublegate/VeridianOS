@@ -697,11 +697,6 @@ fn completion_is_ours(used: Option<(u16, u32)>, head: u16) -> bool {
 }
 
 /// Get a reference to the global virtio-blk device, if initialized.
-/// Orders the device's users by I/O priority (ioprio_set): taken before
-/// the device's lock for each request (`drivers::block_arbiter`).
-pub static ARBITER: crate::drivers::block_arbiter::Arbiter =
-    crate::drivers::block_arbiter::Arbiter::new();
-
 pub fn get_device() -> Option<&'static Mutex<VirtioBlkDevice>> {
     VIRTIO_BLK.get()
 }
