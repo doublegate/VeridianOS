@@ -370,6 +370,9 @@ pub fn start_thread(
     let mut gs_base = 0;
     // Likewise its segment registers (copy_thread); a fresh program has
     // them null.
+    // Assigned only on the bare-metal build (the host has no registers to
+    // read).
+    #[cfg_attr(not(target_os = "none"), allow(unused_mut))]
     let mut segs = crate::arch::x86_64::ldt::Segments::default();
     if inherit_fpu {
         // The kernel is soft-float, so the CPU still holds the calling
