@@ -1,0 +1,59 @@
+# Contributor Licence Agreement check (ADR 0028, CLA.md). A pull request's
+# authors must have signed the CLA before it can be merged; they sign by
+# posting the comment the check asks for. Signatures are stored in the
+# `cla-signatures` branch of this repository. The logic is in
+# .github/scripts/cla-check.sh (`--selftest` checks it offline).
+#
+# pull_request_target and issue_comment run this workflow from the default
+# branch with a token that can write. That is safe here because nothing from
+# the pull request is checked out or run: the checkout is the default branch,
+# the script reads the pull request only through the API, and every value
+# from the event reaches it in an environment variable, never in the script.
+name: CLA
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  statuses: write
+
+# One run at a time across the repository, so two signatures never race on
+# the signatures file (the script also retries on a conflict).
+concurrency:
+  group: cla-check
+  cancel-in-progress: false
+
+jobs:
+  cla:
+    # Comments count only on open pull requests. This filter is loose, so a
+    # trailing newline or a pasted "> " does not skip the job silently; the
+    # script then accepts only the signing text itself or `recheck`.
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      (github.event.issue.pull_request && github.event.issue.state == 'open' &&
+       (contains(github.event.comment.body, 'recheck') ||
+        contains(github.event.comment.body, 'I hereby sign the CLA')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Check signatures
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number || github.event.issue.number }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_USER: ${{ github.event.comment.user.login }}
+          COMMENT_USER_ID: ${{ github.event.comment.user.id }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+        run: bash .github/scripts/cla-check.sh

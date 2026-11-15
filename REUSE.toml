@@ -1,0 +1,91 @@
+# Licensing of every file in the repository, by path (REUSE 3.3,
+# https://reuse.software). ADR 0028 decides the split; LICENSING.md explains it.
+# `reuse lint` (CI, `.github/workflows/reuse.yml`) checks that every file is
+# covered. A file's own SPDX header, where it has one, is used instead of the
+# annotation that matches it (precedence "closest"), except where an
+# annotation says "override". The GPL tiers say "override": a file's licence
+# there is its directory's, so a file moved in from a permissive directory
+# with its old MIT OR Apache-2.0 header still comes under the GPL.
+#
+# Later annotations take precedence over earlier ones for the same file:
+# the permissive default comes first, the copyleft parts and the third-party
+# files after it.
+
+version = 1
+
+# Everything others build against or reuse, and everything not part of the
+# operating system's trusted base: the ABI, libc and the other user-space
+# libraries, the runtime, the crates, the tools, the tests, the build system,
+# the documentation.
+[[annotations]]
+path = "**"
+precedence = "closest"
+SPDX-FileCopyrightText = "2025-2026 DoubleGate and the VeridianOS contributors"
+SPDX-License-Identifier = "MIT OR Apache-2.0"
+
+# The kernel, the system servers and the Linux runtime: GPL-3.0-or-later with
+# the user-space exception (programs using them only through system calls,
+# IPC protocols and the published user-space libraries are not covered).
+[[annotations]]
+path = [
+    "kernel/**",
+    "userland/init/**",
+    "servers/**",
+    "drivers/**",
+    "userland/servers/**",
+    "userland/linuxd/**",
+    "userland/vinit/**",
+    # The Linux personality's semantics, compiled into the kernel now and
+    # into linuxd later (ADR 0028 decision 1).
+    "crates/personality-linux/**",
+]
+precedence = "override"
+SPDX-FileCopyrightText = "2025-2026 DoubleGate and the VeridianOS contributors"
+SPDX-License-Identifier = "GPL-3.0-or-later AND LicenseRef-VeridianOS-syscall-exception"
+
+# The driver and server framework: under the GPL without the exception, so
+# a driver or system server built on it is GPL too, or takes a commercial
+# licence (ADR 0028 decision 1a). Client-side libraries stay permissive.
+[[annotations]]
+path = [
+    "crates/server-framework/**",
+    "crates/veridian-driver/**",
+    "crates/veridian-ring/**",
+    "crates/*-server/**",
+    "userland/server-framework/**",
+]
+precedence = "override"
+SPDX-FileCopyrightText = "2025-2026 DoubleGate and the VeridianOS contributors"
+SPDX-License-Identifier = "GPL-3.0-or-later"
+
+# Linux's system call tables, vendored unchanged (their own header names the
+# deprecated identifier "GPL-2.0", which is GPL-2.0-only).
+[[annotations]]
+path = ["abi/linux/syscall_64.tbl", "abi/linux/syscall.tbl"]
+precedence = "override"
+SPDX-FileCopyrightText = "The Linux kernel authors"
+SPDX-License-Identifier = "GPL-2.0-only WITH Linux-syscall-note"
+
+# Patches to other projects, each under the license of the files it changes.
+[[annotations]]
+path = [
+    "ports/*/patches/**",
+    "tools/busybox/patches/**",
+    "tools/cross/*-patches/**",
+]
+precedence = "override"
+SPDX-FileCopyrightText = "The authors of the patched programs, and the VeridianOS contributors"
+SPDX-License-Identifier = "LicenseRef-Upstream-Patch"
+
+# The licence texts of the fonts mdBook bundles with the published book.
+[[annotations]]
+path = "docs/book/book/fonts/SOURCE-CODE-PRO-LICENSE.txt"
+precedence = "override"
+SPDX-FileCopyrightText = "2010, 2012 Adobe Systems Incorporated"
+SPDX-License-Identifier = "OFL-1.1"
+
+[[annotations]]
+path = "docs/book/book/fonts/OPEN-SANS-LICENSE.txt"
+precedence = "override"
+SPDX-FileCopyrightText = "Google Inc. and the Open Sans authors"
+SPDX-License-Identifier = "Apache-2.0"
