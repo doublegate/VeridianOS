@@ -134,7 +134,7 @@ cargo clippy --target aarch64-unknown-none-softfloat -p veridian-kernel $BS -- -
 cargo clippy --target riscv64imac-unknown-none-elf -p veridian-kernel $BS -- -D warnings
 
 # Host-target unit tests (4,735 passing). Plain `cargo test` does not work:
-# .cargo/config.toml defaults the target to bare metal.
+# it also builds kernel/Cargo.toml's no_std [[bin]] and [[test]] targets.
 cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu
 
 # In-kernel boot tests: boot each arch in QEMU (commands above) and check for

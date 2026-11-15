@@ -1,6 +1,6 @@
 # Agent Project Reference — VeridianOS
 
-Reference material moved out of the root `AGENTS.md`, and brought up to date on the way, (also `CLAUDE.md` / `GEMINI.md`) to keep that file within agent rule-file size limits. Read the section you need.
+Reference material moved out of the root `AGENTS.md` (also `CLAUDE.md` / `GEMINI.md`), and brought up to date on the way, to keep that file within agent rule-file size limits. Read the section you need.
 
 ## Architecture
 
@@ -32,9 +32,12 @@ userland/         # User applications and libraries
   kwin/           # KWin compositor backend
   plasma/         # Plasma Desktop components
   integration/    # KDE integration tests
-tools/            # Build tools and utilities
-  cross/          # KDE cross-compilation scripts (15 build scripts)
-debug/            # Debug logs and scripts (gitignored)
+abi/              # The system call map (syscalls.map) and the vendored Linux tables
+tools/            # Build tools and utilities (compat/, docs/, the generators)
+  cross/          # KDE cross-compilation (build-*.sh, veridian-paths.sh)
+scripts/          # Build, boot, rootfs, compat and debug scripts (dev/gate.sh)
+tests/            # Compat expected lists (tests/compat/) and test data
+debug/            # Local debug logs (gitignored)
 verification/     # Kani proofs + TLA+ specs
 ```
 
