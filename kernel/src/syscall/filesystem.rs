@@ -1699,6 +1699,7 @@ fn enter_directory(
     let fs = thread.fs();
     let root = fs.root.lock().clone();
     *fs.cwd.lock() = crate::fs::root_relative(canonical, &root);
+    fs.repin();
     Ok(0)
 }
 
@@ -1811,7 +1812,7 @@ fn do_utimes(
             .lock()
             .get(dirfd as u32 as usize)
             .ok_or(SyscallError::BadFileDescriptor)?;
-        (file.node.clone(), Some(file), None)
+        (fd_node(&file), Some(file), None)
     } else {
         let path = resolve_at_path(dirfd, &read_user_path(path_ptr)?)?;
         let vfs = vfs()?;
@@ -1927,6 +1928,7 @@ pub fn sys_fchdir(fd: usize) -> SyscallResult {
     #[cfg(feature = "alloc")]
     if fd as u32 as i32 == FD_FAILFS_ROOT {
         *thread.fs().cwd.lock() = alloc::string::String::from(crate::fs::FAILFS_ROOT);
+        thread.fs().repin();
         return Ok(0);
     }
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
@@ -1935,7 +1937,7 @@ pub fn sys_fchdir(fd: usize) -> SyscallResult {
         .lock()
         .get_path(fd as u32 as usize)
         .ok_or(SyscallError::BadFileDescriptor)?;
-    let (node, path) = (file.node.clone(), fd_directory_path(&file)?);
+    let (node, path) = (fd_node(&file), fd_directory_path(&file)?);
     // `path` is relative to the root; enter_directory wants the whole-tree
     // path it maps back. A directory in a detached tree outside the root
     // keeps its own path (`fs::mount::DETACHED`), never joined to the root.
@@ -2001,35 +2003,53 @@ pub const FD_FAILFS_ROOT: i32 = -10004;
 /// and keeps the whole-tree path (unreachable, as getcwd reports). A
 /// failfs working directory stays failfs.
 fn set_root(thread: &process::Thread, new_root: alloc::string::String) {
-    use crate::fs::FAILFS_ROOT;
     let fs = thread.fs();
     let cwd = fs.cwd.lock().clone();
     let old_root = fs.root.lock().clone();
-    let new_cwd = if cwd == FAILFS_ROOT {
-        cwd
-    } else {
-        // The working directory in the whole tree, then seen from the new
-        // root.
-        let cwd_global = if old_root == "/" || old_root == FAILFS_ROOT {
-            cwd
-        } else if cwd == "/" {
-            old_root
-        } else {
-            alloc::format!("{}{}", old_root, cwd)
-        };
-        if new_root == "/" || new_root == FAILFS_ROOT {
-            cwd_global
-        } else if cwd_global == new_root {
-            alloc::string::String::from("/")
-        } else {
-            match cwd_global.strip_prefix(new_root.as_str()) {
-                Some(rest) if rest.starts_with('/') => alloc::string::String::from(rest),
-                _ => alloc::string::String::from("/"),
-            }
-        }
-    };
+    let new_cwd = cwd_after_chroot(cwd, &old_root, &new_root);
     *fs.root.lock() = new_root;
     *fs.cwd.lock() = new_cwd;
+    fs.repin();
+}
+
+/// The working directory `cwd` (relative to `old_root`) once `new_root` is
+/// the root ([`set_root`]).
+fn cwd_after_chroot(
+    cwd: alloc::string::String,
+    old_root: &str,
+    new_root: &str,
+) -> alloc::string::String {
+    use crate::fs::FAILFS_ROOT;
+    if cwd == FAILFS_ROOT {
+        return cwd;
+    }
+    // The working directory in the whole tree: a path in a detached tree is
+    // a whole path already, never joined to the old root (PR #47 review).
+    let detached = crate::fs::mount::is_detached_path;
+    let cwd_global = if old_root == "/" || old_root == FAILFS_ROOT || detached(&cwd) {
+        cwd
+    } else if cwd == "/" {
+        alloc::string::String::from(old_root)
+    } else {
+        alloc::format!("{}{}", old_root, cwd)
+    };
+    // Then seen from the new root. One in a detached tree the new root does
+    // not contain stays where it is, as chroot leaves Linux's fs->pwd
+    // (getcwd then reports it unreachable).
+    let under = |dir: &str, root: &str| {
+        dir == root || dir.starts_with(&alloc::format!("{}/", root.trim_end_matches('/')))
+    };
+    let stays = detached(&cwd_global) && !(detached(new_root) && under(&cwd_global, new_root));
+    if stays || new_root == "/" || new_root == FAILFS_ROOT {
+        cwd_global
+    } else if cwd_global == new_root {
+        alloc::string::String::from("/")
+    } else {
+        match cwd_global.strip_prefix(new_root) {
+            Some(rest) if rest.starts_with('/') => alloc::string::String::from(rest),
+            _ => alloc::string::String::from("/"),
+        }
+    }
 }
 
 /// fchroot(fd, flags) (Linux 7.3, fs/open.c): chroot to the directory
@@ -2086,10 +2106,11 @@ pub fn sys_fchroot(fd: usize, flags: usize) -> SyscallResult {
         .ok()
         .and_then(|fd| proc.file_table.lock().get_path(fd))
         .ok_or(SyscallError::BadFileDescriptor)?;
-    if file.node.node_type() != crate::fs::NodeType::Directory {
+    let node = fd_node(&file);
+    if node.node_type() != crate::fs::NodeType::Directory {
         return Err(SyscallError::NotADirectory);
     }
-    let meta = file.node.metadata().map_err(super::map_kernel_error)?;
+    let meta = node.metadata().map_err(super::map_kernel_error)?;
     if !crate::fs::permission(&caller, &meta, crate::fs::MAY_EXEC) {
         return Err(SyscallError::PermissionDenied);
     }
@@ -3458,7 +3479,7 @@ fn set_file_status_flags(
         return Err(SyscallError::OperationNotPermitted);
     }
     if arg & status::NOATIME != 0 && old & status::NOATIME == 0 {
-        let meta = file.node.metadata().map_err(super::map_kernel_error)?;
+        let meta = fd_node(file).metadata().map_err(super::map_kernel_error)?;
         if !owner_ok(meta.uid) {
             return Err(SyscallError::OperationNotPermitted);
         }
@@ -4214,7 +4235,7 @@ pub(crate) fn exec_file_at(
             .as_deref()
             .map_or(0, |p| crate::process::creation::mount_flags(&vfs, p));
         return Ok(crate::process::creation::ExecFile {
-            node: file.node.clone(),
+            node: fd_node(&file),
             filename: format!("/dev/fd/{}", dfd),
             comm: base(&exe_path),
             exe_path,
@@ -5080,13 +5101,18 @@ pub fn sys_fchown(fd: usize, uid: usize, gid: usize) -> SyscallResult {
 /// it (PR #47 review). Only the same file counts (the same inode): one
 /// renamed away, its name since taken by another, keeps its own node, as
 /// does any file outside a detached tree.
-fn fd_node(file: &crate::fs::file::File) -> alloc::sync::Arc<dyn crate::fs::VfsNode> {
-    let same = |a: &dyn crate::fs::VfsNode, b: &dyn crate::fs::VfsNode| matches!((a.metadata(), b.metadata()), (Ok(x), Ok(y)) if x.inode == y.inode);
+pub(super) fn fd_node(file: &crate::fs::file::File) -> alloc::sync::Arc<dyn crate::fs::VfsNode> {
+    // The same file by its identity, not its inode number alone, which
+    // repeats across filesystems (PR #47 review).
+    let same = |a: &alloc::sync::Arc<dyn crate::fs::VfsNode>,
+                b: &alloc::sync::Arc<dyn crate::fs::VfsNode>| {
+        crate::fs::inode_key(a) == crate::fs::inode_key(b)
+    };
     if let Some(path) = file.path.as_deref() {
         if crate::fs::mount::parse_detached(path).is_some() {
             if let Ok(view) = vfs() {
                 if let Ok((node, _)) = view.locate(path, false) {
-                    if same(&*node, &*file.node) {
+                    if same(&node, &file.node) {
                         return node;
                     }
                 }
@@ -5220,6 +5246,35 @@ pub(crate) fn find_socket_file(
 
 #[cfg(test)]
 mod tests {
+
+    /// chroot and fchroot move the working directory into the new root's
+    /// view. One in a detached tree is a whole path: never joined to the
+    /// old root, kept where it is unless the new root is in that tree above
+    /// it (PR #47 review).
+    #[test]
+    fn chroot_keeps_a_detached_working_directory_whole() {
+        let s = alloc::string::String::from;
+        let dt = |p: &str| crate::fs::mount::detached_path(7, p);
+        assert_eq!(cwd_after_chroot(s("/b"), "/jail", "/jail"), "/b");
+        assert_eq!(cwd_after_chroot(s("/b"), "/jail", "/"), "/jail/b");
+        assert_eq!(cwd_after_chroot(s("/b"), "/", "/other"), "/");
+        // From a chroot, into failfs or another root: the detached working
+        // directory stays as it is.
+        assert_eq!(
+            cwd_after_chroot(dt("/sub"), "/jail", crate::fs::FAILFS_ROOT),
+            dt("/sub")
+        );
+        assert_eq!(cwd_after_chroot(dt("/sub"), "/jail", "/other"), dt("/sub"));
+        // A new root in the tree above it sees it from there.
+        assert_eq!(cwd_after_chroot(dt("/in/sub"), "/", &dt("/in")), "/sub");
+        assert_eq!(cwd_after_chroot(dt("/in"), "/", &dt("/in")), "/");
+        assert_eq!(
+            cwd_after_chroot(dt("/inner"), "/", &dt("/in")),
+            dt("/inner")
+        );
+        // Under a detached root, a relative one is a path in the tree.
+        assert_eq!(cwd_after_chroot(s("/sub"), &dt("/in"), "/"), dt("/in/sub"));
+    }
     use alloc::sync::Arc;
 
     use crate::fs::{

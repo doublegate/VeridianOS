@@ -11280,7 +11280,16 @@ static void test_idmapped_mount(void)
     close(p1[1]);
     close(p2[0]);
     char b = 0, path[64];
-    if (read(p1[0], &b, 1) != 1) f |= 1;
+    if (read(p1[0], &b, 1) != 1) {
+        /* The child exited before it was ready (unshare failed): nothing
+         * reads p2 any more, and writing it would raise SIGPIPE and end
+         * the runner (PR #47 review). */
+        close(p1[0]);
+        close(p2[1]);
+        t_exit_status(c);
+        report("idmapped_mount", 0, "child not ready (unshare)");
+        return;
+    }
     snprintf(path, sizeof(path), "/proc/%d/uid_map", (int)c);
     if (t_write_text(path, "0 100000 1000") != 0) f |= 2;
     snprintf(path, sizeof(path), "/proc/%d/gid_map", (int)c);

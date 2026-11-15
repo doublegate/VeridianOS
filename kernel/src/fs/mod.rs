@@ -1124,9 +1124,16 @@ pub const PSEUDO_MOUNT: MountIds = MountIds {
 /// components lexically. `..` at the root stays at the root. The result
 /// always starts with `/` and never ends with one (except `/` itself).
 pub(crate) fn normalize_path(path: &str, cwd: &str) -> String {
-    // A path in a detached tree stays one.
+    // A path in a detached tree stays one, and so does a relative path
+    // from a working directory in one (PR #47 review).
     if let Some((id, rest)) = mount::parse_detached(path) {
         return mount::detached_path(id, &normalize_path(rest, "/"));
+    }
+    if !path.starts_with('/') {
+        if let Some((id, rest)) = mount::parse_detached(cwd) {
+            let rest = if rest.is_empty() { "/" } else { rest };
+            return mount::detached_path(id, &normalize_path(path, rest));
+        }
     }
     // A whole-tree path (failfs) stays one.
     if let Some(rest) = path.strip_prefix(WHOLE_TREE) {
@@ -2138,35 +2145,61 @@ impl Vfs {
         // Linux allows): absolute paths, and relative ones from a working
         // directory under that root, resolve in the tree, confined to the
         // root as any chroot is.
+        // `path` and `cwd` go to the walk as they are, relative to the
+        // root as for any root, so a relative lookup stays relative (as
+        // RESOLVE_BENEATH needs; PR #47 review).
         if let Some((id, at)) = mount::parse_detached(&ctx.root) {
             let gone = || KernelError::FsError(crate::error::FsError::NotFound);
-            let in_root = if path.starts_with('/') {
-                String::from(path)
-            } else if cwd == "/" {
-                alloc::format!("/{path}")
+            let at = if at.is_empty() { "/" } else { at };
+            let (tree, point) = mount::detached_place(id).ok_or_else(gone)?;
+            let Some(point) = point else {
+                let (node, canon) = tree.snapshot().resolve_in(
+                    path,
+                    cwd,
+                    at,
+                    follow_last,
+                    0,
+                    ctx.creds.clone(),
+                    ctx.resolve,
+                )?;
+                return Ok((node, mount::detached_path(id, &canon)));
+            };
+            // Attached since: the root is where the tree went, and still a
+            // root there (PR #47 review).
+            let root = if at == "/" {
+                point.clone()
+            } else if point == "/" {
+                String::from(at)
             } else {
-                alloc::format!("{cwd}/{path}")
+                alloc::format!("{point}{at}")
             };
-            return match mount::detached_place(id).ok_or_else(gone)? {
-                (tree, None) => {
-                    let root = if at.is_empty() { "/" } else { at };
-                    let (node, canon) = tree.snapshot().resolve_in(
-                        &in_root,
-                        "/",
-                        root,
-                        follow_last,
-                        0,
-                        ctx.creds.clone(),
-                        ctx.resolve,
-                    )?;
-                    Ok((node, mount::detached_path(id, &canon)))
-                }
-                // Attached since: where its files are now.
-                (_, Some(_)) => {
-                    let joined = alloc::format!("{}{}", ctx.root, in_root);
-                    Self::lookup_detached(ctx, &joined, follow_last)
-                }
+            let (node, canon) = tree.snapshot().resolve_in(
+                path,
+                cwd,
+                &root,
+                follow_last,
+                0,
+                ctx.creds.clone(),
+                ctx.resolve,
+            )?;
+            if Arc::ptr_eq(&tree, &ctx.mounts) {
+                return Ok((node, canon));
+            }
+            // Another namespace's tree: still named by the id.
+            if !path_is_under(&canon, &point) {
+                return Err(gone());
+            }
+            let rel = if point == "/" {
+                canon.clone()
+            } else {
+                String::from(&canon[point.len()..])
             };
+            let rel = if rel.is_empty() {
+                String::from("/")
+            } else {
+                rel
+            };
+            return Ok((node, mount::detached_path(id, &rel)));
         }
         ctx.mounts.snapshot().resolve_in(
             path,

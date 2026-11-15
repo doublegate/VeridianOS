@@ -127,8 +127,12 @@ impl IdmappedNode {
         Ok((uid, gid))
     }
 
-    /// A v3 `security.capability`'s root id as `to` maps it (rootid at
-    /// byte 20); other values unchanged. EOVERFLOW when it does not map.
+    /// The `security.capability` value with its root as `to` maps it, as
+    /// Linux shifts a file capability's root through a mount's idmap: a
+    /// v3's root id (byte 20), and a v2's implicit root 0, which becomes a
+    /// v3 with the mapped root (the effective flag kept). Other values are
+    /// left alone. EINVAL when `to` does not map the root (cap_convert_nscap
+    /// on a root from_vfsuid cannot store).
     fn map_caps(
         set: &mut xattr::XattrSet,
         to: impl Fn(u32) -> Option<u32>,
@@ -136,13 +140,19 @@ impl IdmappedNode {
         let Some(v) = set.get(xattr::XATTR_NAME_CAPS) else {
             return Ok(());
         };
-        if v.len() != 24 || v[3] != 0x03 {
-            return Ok(());
-        }
-        let root = u32::from_le_bytes([v[20], v[21], v[22], v[23]]);
-        let mapped = to(root).ok_or_else(overflow)?;
-        let mut new = Vec::from(v);
-        new[20..24].copy_from_slice(&mapped.to_le_bytes());
+        let root = match (v.len(), v.get(3)) {
+            (24, Some(0x03)) => u32::from_le_bytes([v[20], v[21], v[22], v[23]]),
+            (20, Some(0x02)) => 0,
+            _ => return Ok(()),
+        };
+        let mapped = to(root).ok_or(KernelError::InvalidArgument {
+            name: "security.capability",
+            value: "a root the mount's idmap does not map",
+        })?;
+        let effective = v[0] & 0x01;
+        let mut new = Vec::from(&v[..20]);
+        new[0..4].copy_from_slice(&(0x0300_0000u32 | u32::from(effective)).to_le_bytes());
+        new.extend_from_slice(&mapped.to_le_bytes());
         set.set(xattr::XATTR_NAME_CAPS, &new, 0)
     }
 }
@@ -354,8 +364,19 @@ impl VfsNode for IdmappedNode {
     ) -> Result<(), KernelError> {
         let map = self.map.clone();
         self.inner.update_xattrs(&mut |set| {
+            let stored = set.get(xattr::XATTR_NAME_CAPS).map(Vec::from);
             Self::map_caps(set, |k| Some(map.seen_uid(k)))?;
+            let shown = set.get(xattr::XATTR_NAME_CAPS).map(Vec::from);
             f(set)?;
+            // A capability the update did not touch is put back as it was
+            // stored: a root the view cannot map back must not fail a change
+            // to another xattr (PR #47 review).
+            if set.get(xattr::XATTR_NAME_CAPS) == shown.as_deref() {
+                if let Some(stored) = stored {
+                    return set.set(xattr::XATTR_NAME_CAPS, &stored, 0);
+                }
+                return Ok(());
+            }
             Self::map_caps(set, |u| map.stored_uid(u))
         })
     }
@@ -496,10 +517,13 @@ mod tests {
         assert_eq!(f.metadata().unwrap().uid, NO_ID);
     }
 
-    /// A v3 file capability's root id reads through the map and is stored
-    /// back through it; a root the map does not reach cannot be written
-    /// (EOVERFLOW); other values, a v2 capability among them, pass as they
-    /// are.
+    /// A file capability's root reads through the map and is stored back
+    /// through it, as Linux's cap_inode_getsecurity and cap_convert_nscap
+    /// shift it through the mount's idmap: a v3's root id, and a v2's
+    /// implicit root 0, which reads as a v3 with the shifted root. A root
+    /// the map does not reach is EINVAL to write. An update that leaves the
+    /// capability alone keeps it byte for byte, however it reads (PR #47
+    /// review).
     #[test]
     fn file_capability_roots_map() {
         use crate::fs::{ramfs::RamFs, Filesystem};
@@ -510,39 +534,65 @@ mod tests {
             .unwrap();
         let v3 = |root: u32| {
             let mut v = alloc::vec![0u8; 24];
-            v[0..4].copy_from_slice(&0x0300_0000u32.to_le_bytes());
+            v[0..4].copy_from_slice(&0x0300_0001u32.to_le_bytes());
+            v[4] = 1;
             v[20..24].copy_from_slice(&root.to_le_bytes());
             v
         };
-        real.update_xattrs(&mut |set| set.set(xattr::XATTR_NAME_CAPS, &v3(3), 0))
-            .unwrap();
+        let v2 = [
+            0x01, 0x00, 0x00, 0x02, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        let caps = |n: &Arc<dyn VfsNode>| {
+            n.xattrs()
+                .unwrap()
+                .get(xattr::XATTR_NAME_CAPS)
+                .map(Vec::from)
+        };
+        let store = |v: &[u8]| {
+            real.update_xattrs(&mut |set| set.set(xattr::XATTR_NAME_CAPS, v, 0))
+                .unwrap()
+        };
+        let einval = |r: Result<(), KernelError>| {
+            assert!(
+                matches!(r, Err(KernelError::InvalidArgument { .. })),
+                "{r:?}"
+            )
+        };
+        store(&v3(3));
         let map = MntIdmap::of(&ns(b"0 100000 1000\n"));
         let f = view(real.clone(), &map);
-        let seen = f.xattrs().unwrap();
-        assert_eq!(seen.get(xattr::XATTR_NAME_CAPS), Some(&v3(100003)[..]));
-        // Written through the view: stored unmapped.
+        assert_eq!(caps(&f), Some(v3(100003)));
+        // Written through the view: stored unmapped; off the map, EINVAL.
         f.update_xattrs(&mut |set| set.set(xattr::XATTR_NAME_CAPS, &v3(100009), 0))
             .unwrap();
-        assert_eq!(
-            real.xattrs().unwrap().get(xattr::XATTR_NAME_CAPS),
-            Some(&v3(9)[..])
-        );
-        assert_eq!(
-            f.update_xattrs(&mut |set| set.set(xattr::XATTR_NAME_CAPS, &v3(7), 0)),
-            Err(KernelError::FsError(FsError::Overflow))
-        );
-        // A v2 capability (20 bytes, no root id) and other names pass.
-        let v2 = [
-            0x00, 0x00, 0x00, 0x02, 1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        ];
-        f.update_xattrs(&mut |set| {
-            set.set(xattr::XATTR_NAME_CAPS, &v2, 0)?;
-            set.set("user.note", b"x", 0)
-        })
-        .unwrap();
-        let stored = real.xattrs().unwrap();
-        assert_eq!(stored.get(xattr::XATTR_NAME_CAPS), Some(&v2[..]));
-        assert_eq!(stored.get("user.note"), Some(&b"x"[..]));
+        assert_eq!(caps(&real), Some(v3(9)));
+        einval(f.update_xattrs(&mut |set| set.set(xattr::XATTR_NAME_CAPS, &v3(7), 0)));
+        // A v2 capability's root is the filesystem's 0: through the view it
+        // is a v3 with the shifted root, the effective flag kept; with 0
+        // off the map, no root at all.
+        store(&v2);
+        assert_eq!(caps(&f), Some(v3(100000)));
+        let off = MntIdmap::of(&ns(b"1 100001 999\n"));
+        assert_eq!(caps(&view(real.clone(), &off)), Some(v3(NO_ID)));
+        // A v2 written through a view is a v3 with root 0 shifted back
+        // (cap_convert_nscap keeps v2 only on a mount with no idmap); EINVAL
+        // when the map does not reach 0.
+        let same = MntIdmap::of(&ns(b"0 0 1000\n"));
+        view(real.clone(), &same)
+            .update_xattrs(&mut |set| set.set(xattr::XATTR_NAME_CAPS, &v2, 0))
+            .unwrap();
+        assert_eq!(caps(&real), Some(v3(0)));
+        einval(f.update_xattrs(&mut |set| set.set(xattr::XATTR_NAME_CAPS, &v2, 0)));
+        // Another xattr changed next to a capability whose root the view
+        // does not reach: the capability stays as it is.
+        store(&v3(5000));
+        f.update_xattrs(&mut |set| set.set("user.note", b"x", 0))
+            .unwrap();
+        assert_eq!(caps(&real), Some(v3(5000)));
+        assert_eq!(real.xattrs().unwrap().get("user.note"), Some(&b"x"[..]));
+        f.update_xattrs(&mut |set| set.remove("user.note").map(|_| ()))
+            .unwrap();
+        assert_eq!(caps(&real), Some(v3(5000)));
     }
 
     /// Everything reached or made through a view is a view (mapped owners)

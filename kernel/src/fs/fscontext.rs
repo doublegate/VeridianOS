@@ -25,6 +25,11 @@ use crate::error::{FsError, KernelError};
 /// (Linux's fc_log ring of 8).
 pub const LOG_SIZE: usize = 8;
 
+/// The most bytes of options a context collects: one page, the most data
+/// mount(2) takes (copy_mount_options), so a context holder cannot grow the
+/// heap without bound by repeating fsconfig (PR #47 review).
+pub const MAX_OPTIONS: usize = 4096;
+
 /// Where a context is in its life (Linux's fs_context_phase).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
@@ -50,8 +55,13 @@ pub enum Purpose {
 
 /// The mount a reconfiguring context is for.
 pub enum Target {
-    /// The mount at `point` in `tree`.
-    At { tree: Arc<Mounts>, point: String },
+    /// `mount`, in `tree`, where it is now: picked at `point`, which it
+    /// may have left since (PR #47 review).
+    At {
+        tree: Arc<Mounts>,
+        point: String,
+        mount: Arc<super::mount::Mount>,
+    },
     /// The root of the detached tree with this id, wherever it is now
     /// (`mount::detached_place`).
     Detached(u64),
@@ -173,7 +183,12 @@ impl FsContext {
                 if !option.contains(',')
                     && mount::check_option(self.fs_type(), &option, self.owner).is_ok()
                 {
-                    if !self.options.is_empty() {
+                    let comma = usize::from(!self.options.is_empty());
+                    if self.options.len() + comma + option.len() > MAX_OPTIONS {
+                        let message = alloc::format!("{}: options too large", self.fs_type());
+                        return self.invalid(&message);
+                    }
+                    if comma == 1 {
                         self.options.push(',');
                     }
                     self.options.push_str(&option);
@@ -352,6 +367,27 @@ mod tests {
         assert_eq!(read(100).as_deref(), Ok("e Non-string source\n"));
         assert_eq!(read(100).as_deref(), Ok("e Multiple sources\n"));
         assert_eq!(read(100), Err(KernelError::FsError(FsError::NoData)));
+    }
+
+    /// The options a context collects stay within one page, as the data of
+    /// mount(2) does: a parameter that would cross it is EINVAL and changes
+    /// nothing (PR #47 review).
+    #[test]
+    fn options_stay_within_a_page() {
+        let mut c = tmpfs_ctx();
+        let mut ok = 0;
+        while c.set("mode", Value::String("700")).is_ok() {
+            ok += 1;
+            assert!(ok < MAX_OPTIONS, "no bound");
+        }
+        assert!(c.options.len() <= MAX_OPTIONS);
+        let before = c.options.clone();
+        assert_eq!(c.set("mode", Value::String("700")), Err(CtxError::Invalid));
+        assert_eq!(c.options, before);
+        assert_eq!(
+            c.take_message(100).as_deref(),
+            Ok("e tmpfs: options too large\n")
+        );
     }
 
     /// The log keeps the last eight messages; outside a parameter phase a

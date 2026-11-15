@@ -412,25 +412,31 @@ fn reconfigure(ctx: &mut FsContext) -> SyscallResult {
     let Purpose::Reconfigure { target, .. } = &ctx.purpose else {
         return Err(SyscallError::Busy);
     };
-    if !Caller::current().capable(CAP_SYS_ADMIN) {
+    // As every change to a mount: CAP_SYS_ADMIN, as Linux's
+    // vfs_cmd_reconfigure checks, and MODIFY on the mount namespace, which
+    // a caller may have dropped since fspick (PR #47 review).
+    if let Err(e) = may_mount() {
         ctx.phase = Phase::Failed;
-        return Err(SyscallError::OperationNotPermitted);
+        return Err(e);
     }
+    // The picked mount itself, where it is now (not whatever is at the
+    // place it was picked at); a detached tree's root, wherever it went.
     let place = match target {
-        Target::At { tree, point } => Some((tree.clone(), point.clone())),
-        Target::Detached(id) => mount::detached_place(*id)
-            .map(|(tree, at)| (tree, at.unwrap_or_else(|| String::from("/")))),
+        Target::At { tree, mount, .. } => tree
+            .point_of(mount)
+            .map(|point| (tree.clone(), point, mount.clone())),
+        Target::Detached(id) => mount::detached_place(*id).and_then(|(tree, at)| {
+            let point = at.unwrap_or_else(|| String::from("/"));
+            let mount = tree.mount_at(&point)?;
+            Some((tree, point, mount))
+        }),
     };
-    let Some((tree, point)) = place else {
-        ctx.phase = Phase::Failed;
-        return Err(SyscallError::InvalidArgument);
-    };
-    let Some(mount) = tree.mount_at(&point) else {
+    let Some((tree, point, mount)) = place else {
         ctx.phase = Phase::Failed;
         return Err(SyscallError::InvalidArgument);
     };
     let writers = || super::mount::writing_under(&point, &tree);
-    if let Err(e) = tree.reconfigure(&point, mount.flags(), ctx.sb_readonly, writers) {
+    if let Err(e) = tree.reconfigure_mount(&mount, mount.flags(), ctx.sb_readonly, writers) {
         ctx.phase = Phase::Failed;
         return Err(mount_error(e));
     }
@@ -540,6 +546,7 @@ pub fn sys_fsmount(fs_fd: usize, flags: usize, attr_flags: usize) -> SyscallResu
             Target::At {
                 tree: tree.clone(),
                 point: String::from("/"),
+                mount: tree.mount_at("/").ok_or(SyscallError::InvalidArgument)?,
             },
             None,
         )
@@ -587,7 +594,11 @@ pub fn sys_fspick(dfd: usize, path: usize, flags: usize) -> SyscallResult {
     let ty = String::from(mount::linux_fs_type(mount.fs().name()));
     let target = match id {
         Some(id) if at == "/" => Target::Detached(id),
-        _ => Target::At { tree, point: at },
+        _ => Target::At {
+            tree,
+            point: at,
+            mount: mount.clone(),
+        },
     };
     let caller = Caller::current();
     let ctx = FsContext::new(
@@ -651,10 +662,13 @@ pub fn sys_move_mount(
             if to_id.is_some() {
                 return Err(SyscallError::InvalidArgument);
             }
+            // The registry follows inside the move, so two moves record
+            // their places in the order they happen (PR #47 review).
             from_tree
-                .move_mount(&from_at, from_is_dir, &to_at, to_is_dir)
+                .move_mount_then(&from_at, from_is_dir, &to_at, to_is_dir, || {
+                    mount::moved_in(&from_tree, &from_at, &to_at)
+                })
                 .map_err(mount_error)?;
-            mount::moved_in(&from_tree, &from_at, &to_at);
         }
         // A detached tree's root: attached, into the caller's namespace or
         // another detached tree.
@@ -663,10 +677,11 @@ pub fn sys_move_mount(
                 return Err(SyscallError::InvalidArgument);
             }
             to_tree
-                .attach_tree(&from_tree, &to_at, to_is_dir)
+                .attach_tree_then(&from_tree, &to_at, to_is_dir, || {
+                    mount::mark_attached(id, &to_tree, &to_at);
+                    mount::transferred(&from_tree, &to_tree, &to_at);
+                })
                 .map_err(mount_error)?;
-            mount::mark_attached(id, &to_tree, &to_at);
-            mount::transferred(&from_tree, &to_tree, &to_at);
         }
     }
     Ok(0)
@@ -1413,17 +1428,51 @@ pub fn sys_statmount(req: usize, buf: usize, bufsize: usize, flags: usize) -> Sy
 }
 
 /// The unique ids listmount returns from `full` (a namespace's mounts as
-/// `(point, unique id)`): every mount under `origin`'s place but
-/// `origin`, ascending (descending with `reverse`), after `last` (0 for
-/// the first call), at most `nr`.
-fn list_ids(full: &[(String, u64)], origin: u64, last: u64, reverse: bool, nr: usize) -> Vec<u64> {
-    let Some((at, _)) = full.iter().find(|(_, id)| *id == origin) else {
+/// `(canonical point, unique id, parent's unique id)`, the namespace root
+/// its own parent): Linux's do_listmount. A mount is listed when it is
+/// reachable from `origin_path` in mount `origin` (is_path_reachable: its
+/// parents lead to `origin`, at a place under `origin_path`), and is not
+/// `skip` (the id asked for; LSMT_ROOT skips none); ascending (descending
+/// with `reverse`), after `last` (0 for the first call), at most `nr`.
+fn list_ids(
+    full: &[(String, u64, u64)],
+    origin: u64,
+    origin_path: &str,
+    skip: u64,
+    last: u64,
+    reverse: bool,
+    nr: usize,
+) -> Vec<u64> {
+    let parent_of = |id: u64| {
+        full.iter()
+            .find(|(_, i, _)| *i == id)
+            .map(|(p, _, up)| (p.as_str(), *up))
+    };
+    if parent_of(origin).is_none() {
         return Vec::new();
+    }
+    let reachable = |id: u64, point: &str| {
+        // Bounded by the number of mounts, should a parent chain loop.
+        let (mut m, mut at) = (id, point);
+        for _ in 0..=full.len() {
+            if m == origin {
+                return crate::fs::path_is_under(at, origin_path);
+            }
+            let Some((p, up)) = parent_of(m) else {
+                return false;
+            };
+            if up == m {
+                return false;
+            }
+            at = p;
+            m = up;
+        }
+        false
     };
     let mut ids: Vec<u64> = full
         .iter()
-        .filter(|(p, id)| *id != origin && crate::fs::path_is_under(p, at))
-        .map(|(_, id)| *id)
+        .filter(|(p, id, _)| *id != skip && reachable(*id, p))
+        .map(|(_, id, _)| *id)
         .filter(|&id| last == 0 || if reverse { id < last } else { id > last })
         .collect();
     ids.sort_unstable();
@@ -1449,19 +1498,29 @@ pub fn sys_listmount(req: usize, ids: usize, nr: usize, flags: usize) -> Syscall
         return Err(SyscallError::InvalidArgument);
     }
     let (tree, root, _) = requested_tree(&r)?;
-    let full: Vec<(String, u64)> = tree
-        .listing("/")
-        .into_iter()
-        .map(|(p, m, _)| (p, m.ids().unique))
+    let listing = tree.listing("/");
+    let unique_of = |id: u32| {
+        listing
+            .iter()
+            .find(|(_, m, _)| m.ids().id == id)
+            .map_or(0, |(_, m, _)| m.ids().unique)
+    };
+    let full: Vec<(String, u64, u64)> = listing
+        .iter()
+        .map(|(p, m, parent)| (p.clone(), m.ids().unique, unique_of(*parent)))
         .collect();
-    let origin = if r.mnt_id == LSMT_ROOT {
+    // LSMT_ROOT starts at the caller's root directory, which may be inside
+    // a mount (a chroot): only what that directory reaches is listed.
+    let (origin, origin_path) = if r.mnt_id == LSMT_ROOT {
         let point = tree.mount_point_of(&root);
-        tree.mount_at(&point)
+        let unique = tree
+            .mount_at(&point)
             .ok_or(SyscallError::ResourceNotFound)?
             .ids()
-            .unique
+            .unique;
+        (unique, crate::fs::normalize_path(&root, "/"))
     } else {
-        if !full.iter().any(|(_, id)| *id == r.mnt_id) {
+        if !full.iter().any(|(_, id, _)| *id == r.mnt_id) {
             return Err(SyscallError::ResourceNotFound);
         }
         let reachable = tree
@@ -1471,9 +1530,21 @@ pub fn sys_listmount(req: usize, ids: usize, nr: usize, flags: usize) -> Syscall
         if !reachable && !Caller::current().capable(CAP_SYS_ADMIN) {
             return Err(SyscallError::OperationNotPermitted);
         }
-        r.mnt_id
+        let at = full
+            .iter()
+            .find(|(_, id, _)| *id == r.mnt_id)
+            .map_or_else(|| String::from("/"), |(p, _, _)| p.clone());
+        (r.mnt_id, at)
     };
-    let out = list_ids(&full, origin, r.param, flags & LISTMOUNT_REVERSE != 0, nr);
+    let out = list_ids(
+        &full,
+        origin,
+        &origin_path,
+        r.mnt_id,
+        r.param,
+        flags & LISTMOUNT_REVERSE != 0,
+        nr,
+    );
     if !out.is_empty() {
         super::userspace::write_user_slice(ids, &out)?;
     }
@@ -1595,23 +1666,51 @@ mod tests {
     /// id order either way, after the last id, at most `nr`.
     #[test]
     fn listmount_lists_below_the_origin_in_id_order() {
-        let s = |p: &str, id: u64| (String::from(p), id);
+        // (point, unique id, parent's unique id): 13 covers 12 at /a, 11
+        // is on 13; /jail/x and /outside sit on the root mount.
+        let s = |p: &str, id: u64, parent: u64| (String::from(p), id, parent);
         let full = [
-            s("/", 10),
-            s("/a", 12),
-            s("/a/b", 11),
-            s("/c", 14),
-            s("/a", 13),
+            s("/", 10, 10),
+            s("/a", 12, 10),
+            s("/a", 13, 12),
+            s("/a/b", 11, 13),
+            s("/c", 14, 10),
         ];
+        let below =
+            |origin, at, last, reverse, nr| list_ids(&full, origin, at, origin, last, reverse, nr);
+        assert_eq!(below(10, "/", 0, false, 10), alloc::vec![11, 12, 13, 14]);
+        assert_eq!(below(12, "/a", 0, false, 10), alloc::vec![11, 13]);
+        assert_eq!(below(10, "/", 12, false, 10), alloc::vec![13, 14]);
+        assert_eq!(below(10, "/", 0, true, 2), alloc::vec![14, 13]);
+        assert_eq!(below(10, "/", 13, true, 10), alloc::vec![12, 11]);
+        assert!(below(99, "/", 0, false, 10).is_empty());
+        // The mount on top does not reach the one it covers (is_path_reachable
+        // walks parents, not paths; PR #47 review).
+        assert_eq!(below(13, "/a", 0, false, 10), alloc::vec![11]);
+    }
+
+    /// LSMT_ROOT lists what the caller's root reaches, its own mount
+    /// included (do_listmount skips only the id asked for, and LTP's
+    /// listmount01 expects exactly the root's id), and nothing outside a
+    /// chroot's directory (PR #47 review).
+    #[test]
+    fn listmount_from_the_root_is_clipped_to_it() {
+        let s = |p: &str, id: u64, parent: u64| (String::from(p), id, parent);
+        let full = [
+            s("/", 10, 10),
+            s("/jail/x", 15, 10),
+            s("/outside", 16, 10),
+            s("/jail/x/y", 17, 15),
+        ];
+        let root = |at| list_ids(&full, 10, at, LSMT_ROOT, 0, false, 10);
+        assert_eq!(root("/"), alloc::vec![10, 15, 16, 17]);
+        assert_eq!(root("/jail"), alloc::vec![15, 17]);
+        // A chroot that is itself a mount's root lists that mount.
+        let only = [s("/", 10, 10), s("/m", 20, 10)];
         assert_eq!(
-            list_ids(&full, 10, 0, false, 10),
-            alloc::vec![11, 12, 13, 14]
+            list_ids(&only, 20, "/m", LSMT_ROOT, 0, false, 10),
+            alloc::vec![20]
         );
-        assert_eq!(list_ids(&full, 12, 0, false, 10), alloc::vec![11, 13]);
-        assert_eq!(list_ids(&full, 10, 12, false, 10), alloc::vec![13, 14]);
-        assert_eq!(list_ids(&full, 10, 0, true, 2), alloc::vec![14, 13]);
-        assert_eq!(list_ids(&full, 10, 13, true, 10), alloc::vec![12, 11]);
-        assert!(list_ids(&full, 99, 0, false, 10).is_empty());
     }
 
     /// mnt_to_attr_flags.
