@@ -8,7 +8,7 @@ VeridianOS is licensed by component (ADR 0028), as of the commit that adds this 
 
 | Component | Licence | Paths |
 |---|---|---|
-| The kernel, the system servers, the Linux runtime | **GPL-3.0-or-later** with the [VeridianOS user-space exception](LICENSES/LicenseRef-VeridianOS-syscall-exception.txt) | `kernel/`, `userland/init/`; as they are created, `servers/`, `drivers/`, `userland/servers/`, `userland/linuxd/`, `userland/vinit/` |
+| The kernel, the system servers, the Linux runtime | **GPL-3.0-or-later** with the [VeridianOS user-space exception](LICENSES/LicenseRef-VeridianOS-syscall-exception.txt) | `kernel/`, `userland/init/`; as they are created, `servers/`, `drivers/`, `userland/servers/`, `userland/linuxd/`, `userland/vinit/`, and `crates/personality-linux/` (the Linux semantics the kernel and `linuxd` run) |
 | The driver and server framework: the server and driver libraries, the driver SDK, the ring helpers, the server side of the interface definitions | **GPL-3.0-or-later**, without the exception | `crates/server-framework/`, `crates/veridian-driver/`, `crates/veridian-ring/`, `crates/*-server/`, `userland/server-framework/`, as they are created; server stubs the IDL compiler generates carry this licence |
 | Everything programs and other projects build against as clients, and everything outside the trusted base | **MIT OR Apache-2.0**, at your option | everything else, notably `abi/`, `userland/libc`, `libm`, `ld-veridian`, `libcurses`, `libwayland`, `rust-std`, `crates/`, the user programs, the tools, the tests, the build system and the documentation |
 

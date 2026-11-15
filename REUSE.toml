@@ -33,6 +33,9 @@ path = [
     "userland/servers/**",
     "userland/linuxd/**",
     "userland/vinit/**",
+    # The Linux personality's semantics, compiled into the kernel now and
+    # into linuxd later (ADR 0028 decision 1).
+    "crates/personality-linux/**",
 ]
 precedence = "closest"
 SPDX-FileCopyrightText = "2025-2026 DoubleGate and the VeridianOS contributors"

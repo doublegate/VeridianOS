@@ -27,6 +27,7 @@ On `main` the human author of every commit is the maintainer, with AI co-authors
 
 1. **The kernel, the system servers and the Linux runtime are GPL-3.0-or-later with the VeridianOS user-space exception** (`LICENSES/LicenseRef-VeridianOS-syscall-exception.txt`, an additional permission under GPL-3.0 section 7).
    - This covers `kernel/`, `userland/init/`, and the server and runtime directories as they are created: `servers/`, `drivers/`, `userland/servers/`, `userland/linuxd/`, `userland/vinit/`.
+   - It also covers `crates/personality-linux/` (maintainer, 2026-11-15): the Linux semantics compiled into the kernel now and into `linuxd` later. Years of Linux-matching work will live there, and a permissive licence would let it be reused in a closed Linux-compatible system. `crates/abi-linux/` (the generated numbers, errno values and structures programs are built against) stays permissive.
    - **GPL-3.0 rather than GPL-2.0:**
      - Its patent licence.
      - Its "installation information" rule, which stops devices that lock out modified versions.
@@ -44,7 +45,7 @@ On `main` the human author of every commit is the maintainer, with AI co-authors
 2. **Everything that others build against as clients, or that is not part of the trusted base, stays MIT OR Apache-2.0:**
    - `abi/` (the generated syscall numbers among it);
    - `userland/libc`, `libm`, `ld-veridian`, `libcurses`, `libwayland`, `rust-std`;
-   - `crates/` (`veridian-cbpf`, `veridian-landlock`, `veridian-keys`, and from v0.29 `abi-linux`, `personality-linux`, `veridian-rt` and the IDL);
+   - `crates/` (`veridian-cbpf`, `veridian-landlock`, `veridian-keys`, and from v0.29 `abi-linux`, `veridian-rt`'s client parts and the IDL compiler), apart from the framework of decision 1a and `personality-linux`;
    - the user programs (`vsh`, `coreutils`, `programs`), the desktop integration code, the tools, the tests, the build system and the documentation.
 
    Permissive code may be used in the GPL parts. The reverse is not allowed.
