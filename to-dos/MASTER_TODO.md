@@ -436,7 +436,9 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
        FSMOUNT_NAMESPACE, OPEN_TREE_NAMESPACE, locked mounts and idmapped mounts (ADR 0027
        decision 24); quotactl and quotactl_fd ENOSYS (with the sockets). MOVE_MOUNT_BENEATH
        moved to item 6.
-     - [ ] Sockets: shutdown, recvmmsg, sendmmsg.
+     - [ ] Sockets: shutdown, recvmmsg, sendmmsg. With them (found 2026-11-14 from LTP
+       landlock08): bind() to port 0 takes a free port from `ip_local_port_range`
+       (inet_csk_get_port), and an address is taken at bind(), not at listen().
      - [x] Files and scheduling: cachestat, file_getattr, file_setattr, ioprio_get, ioprio_set;
        memfd_secret moved to the memory group's follow-up. fanotify and rseq (with rseq_slice_yield) stay ENOSYS, as decided
        in group 3.
@@ -462,6 +464,13 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
        - [x] Landlock, ABI 11 (ADR 0028): the three calls, every filesystem, network and scope
          check, through `cap::authority::holds_path` and `holds_net` and the shared
          `veridian-landlock` crate.
+       - [ ] modify_ldt (x86_64): Linux's GDT layout, a per-mm LDT, selectors kept per thread,
+         iret faults as SIGSEGV (decision 29).
+     - [ ] Cheap LTP fixes (found from the system tier's run, 2026-11-14): `/proc/<pid>/stat` in
+       Linux's format (do_task_stat; 27 LTP tests are TBROK on its ENOENT through
+       TST_PROCESS_STATE_WAIT, and Open POSIX's `include/proc.h` reads it); F_GETPIPE_SZ,
+       F_SETPIPE_SZ and `/proc/sys/fs/pipe-max-size`; a per-test limit that covers a test's own
+       `.runtime` (keyctl02 passes, then is killed at 60 s).
      - [ ] Linux AIO (io_setup, io_destroy, io_submit, io_cancel, io_getevents, io_pgetevents) and
        io_uring (io_uring_setup, io_uring_enter, io_uring_register) move to v0.29: they need an
        asynchronous completion path in the kernel.

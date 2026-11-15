@@ -175,17 +175,24 @@ their check, for a few shared reasons:
 - **Missing calls.** mlock, msync, sched_getparam and the other calls the
   coverage tables list as missing (v0.28 item 5, ADR 0027);
   most of `/proc/sys` (it has `kernel/pid_max`, `kernel/cap_last_cap`, `kernel/core_pattern`,
-  `kernel/ostype`, `kernel/osrelease`, `kernel/version` and the System V limits), parts of `/proc/<pid>/stat` and `status`; `/proc/<pid>/exe` (only
-  `/proc/self/exe` exists), and `/proc/<pid>/cmdline` holds the process name rather than its
-  arguments.
+  `kernel/ostype`, `kernel/osrelease`, `kernel/version` and the System V limits), parts of
+  `status`; `/proc/<pid>/exe` (only `/proc/self/exe` exists), and `/proc/<pid>/cmdline` holds
+  the process name rather than its arguments.
+- **No `/proc/<pid>/stat`.** The file does not exist, so every test that waits for another
+  process to reach a state (LTP's `TST_PROCESS_STATE_WAIT`, Open POSIX's `include/proc.h`) stops
+  there: 27 LTP tests are TBROK on its ENOENT (among them the futex, epoll_wait, pause,
+  msgsnd/msgrcv and landlock10 tests; the cheap LTP fixes of MASTER_TODO item 5).
+- **Tests that run for a set time.** A test that declares a `.runtime` (keyctl02: 60 s) is given
+  that time plus LTP's own timeout, more than the 60-second limit per test under KVM, so the
+  harness kills it after its last check: keyctl02 reports TPASS and is then a TIMEOUT.
+- **seccomp01 and musl.** Its last case installs a filter that allows clone but not fork, then
+  forks. musl's fork uses SYS_fork where the architecture has one (x86_64), so the child is
+  killed by SIGSYS, as it would be on Linux with musl; the test expects glibc's clone.
 - **Memory exhaustion.** libc-test's `malloc-oom`, `malloc-brk-fail` and `pthread_create-oom`
   run until the time limit on all three architectures after the full LTP and Open POSIX runs in
   the same guest (on RISC-V they stopped the whole guest until the runs of 2026-10-30), but
   reached ENOMEM within 10 to 16 s when libc-test ran on its own (x86_64): how they end depends
   on what ran before.
-- **A new process can be missing from /proc for a moment.** Open POSIX tests that wait for a
-  child's state in `/proc/<pid>/stat` (its `include/proc.h`) read it right after fork and now and
-  then find no such file (`sem_timedwait/9-1`, once in four x86_64 runs; it is marked FLAKY).
 - **Stress tests are slow.** Open POSIX's `shm_open/23-1` (1,000 processes) does not finish within
   the limit; tearing down that many processes takes longer than a minute.
 - **wordexp.** libc-test's `functional/wordexp` runs until the time limit on all three
@@ -747,6 +754,11 @@ affected. Below the socket layer:
   segments carry checksum 0, `accept` returns a fresh socket instead of the connection, in-window
   sequence numbers are not checked (RFC 5961 injection), and the initial sequence number is a
   global counter (RFC 6528). Whether to adopt smoltcp is decided at the start of sprint F3.
+- **Port 0 (the sockets group, MASTER_TODO item 5).** bind() to port 0 keeps port 0 instead of
+  choosing a free port from `ip_local_port_range`, so getsockname reports 0 and a second port-0
+  bind is EADDRINUSE, and an address counts as taken only once listen() registers it, not at
+  bind() as on Linux. LTP's landlock08 stops on this before its Landlock checks (the EACCES
+  ones pass).
 - **UDP (N-66, N-67):** datagrams are delivered last-in first-out, a port-0 socket captures every
   datagram, checksums are not verified and the IPv6 pseudo-header is missing.
 - **IPv4 and ARP (N-70 to N-72):** an ARP miss sends the packet to the broadcast address, the ARP
@@ -847,6 +859,10 @@ Page protections now follow `prot` (fixed in v0.27, N-132 to N-137). What remain
   - Signals sent through SIGIO are not scoped, because no file sends SIGIO yet; the scope is
     part of the task that adds SIGIO (MASTER_TODO item 10).
   - The log flags are accepted and log nothing, because there is no audit subsystem.
+  - LTP checks only part of it: landlock08 (network rules) stops on port 0, landlock09
+    (abstract socket scope) on the missing abstract names, and landlock10 (signal scope) on the
+    missing `/proc/<pid>/stat`, each before its Landlock check. The runtime test `landlock`
+    covers the network rules and the signal scope.
   - The MAC module's check still runs beside Landlock's until the MAC ADR retires it.
 - POSIX shared memory objects have no access control (N-88).
 

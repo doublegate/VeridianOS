@@ -11591,6 +11591,58 @@ static void test_landlock(void)
         _exit(t_ll_errno(syscall(SYS_landlock_restrict_self, r, 0), EPERM) ? 0 : 1);
     }
     if (t_exit_status(c) != 0) f |= 16;
+    /* LANDLOCK_SCOPE_SIGNAL (hook_task_kill): a scoped domain cannot
+     * signal a process outside it, and can signal its own child. */
+    pid_t outside = fork();
+    if (outside == 0) {
+        pause();
+        _exit(0);
+    }
+    c = fork();
+    if (c == 0) {
+        struct t_ll_attr at = {0};
+        at.scoped = 2; /* LANDLOCK_SCOPE_SIGNAL */
+        int r = (int)syscall(SYS_landlock_create_ruleset, &at, sizeof(at), 0);
+        if (r < 0 || syscall(SYS_landlock_restrict_self, r, 1u << 4 /* NO_NEW_PRIVS */) != 0)
+            _exit(2);
+        if (!t_ll_errno(kill(outside, SIGKILL), EPERM)) _exit(1);
+        pid_t in = fork();
+        if (in == 0) {
+            pause();
+            _exit(0);
+        }
+        int ok = kill(in, SIGKILL) == 0;
+        int ws = 0;
+        waitpid(in, &ws, 0);
+        _exit(ok && WIFSIGNALED(ws) && WTERMSIG(ws) == SIGKILL ? 0 : 3);
+    }
+    if (t_exit_status(c) != 0) f |= 64;
+    kill(outside, SIGKILL);
+    waitpid(outside, NULL, 0);
+    /* Network rules: under a domain handling BIND_TCP, bind() reaches only
+     * the ports a rule allows (EACCES otherwise). */
+    c = fork();
+    if (c == 0) {
+        struct t_ll_attr at = {0};
+        at.net = 1; /* LANDLOCK_ACCESS_NET_BIND_TCP */
+        int r = (int)syscall(SYS_landlock_create_ruleset, &at, sizeof(at), 0);
+        struct {
+            uint64_t allowed, port;
+        } np = {1, 34567};
+        if (r < 0 || syscall(SYS_landlock_add_rule, r, 2 /* NET_PORT */, &np, 0) != 0 ||
+            syscall(SYS_landlock_restrict_self, r, 1u << 4 /* NO_NEW_PRIVS */) != 0)
+            _exit(2);
+        struct sockaddr_in in4 = {0};
+        in4.sin_family = AF_INET;
+        in4.sin_port = htons(34567);
+        int s1 = socket(AF_INET, SOCK_STREAM, 0);
+        if (s1 < 0 || bind(s1, (struct sockaddr *)&in4, sizeof(in4)) != 0) _exit(3);
+        in4.sin_port = htons(34568);
+        int s2 = socket(AF_INET, SOCK_STREAM, 0);
+        _exit(s2 >= 0 && t_ll_errno(bind(s2, (struct sockaddr *)&in4, sizeof(in4)), EACCES) ? 0 : 1);
+    }
+    st = t_exit_status(c);
+    if (st != 0) f |= 128 | (st << 8);
     snprintf(why, sizeof(why), "f=%#x", f);
     report("landlock", f == 0, why);
 }
