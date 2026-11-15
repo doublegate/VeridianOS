@@ -613,6 +613,10 @@ pub fn exit_dispatched(exit_code: i32, group: bool) -> ! {
             })
         };
         if !others_alive {
+            // Its accounting record, before the namespace is torn down, as
+            // do_exit's acct_process.
+            #[cfg(feature = "alloc")]
+            crate::syscall::acct::process_exited(&process, process.wait_status() as u32);
             // The init of a PID namespace takes the rest of it along first.
             if process.is_ns_init() {
                 zap_pid_ns(&process);
@@ -643,6 +647,12 @@ pub fn exit_dispatched(exit_code: i32, group: bool) -> ! {
 fn zap_pid_ns(init: &Process) {
     let ns = init.pid_ns();
     ns.stop_adding();
+    // reboot(2) inside the namespace: its init is reported killed by the
+    // signal it recorded, as zap_pid_namespace's group_exit_code.
+    match ns.reboot_signal() {
+        0 => {}
+        sig => init.set_term_signal(sig),
+    }
     let others = || {
         let mut left = Vec::new();
         table::PROCESS_TABLE.for_each(|p| {

@@ -5643,6 +5643,9 @@ static void test_seccomp_notify(void);
 static void test_landlock(void);
 static void test_keyrings(void);
 static void test_lsm_calls(void);
+static void test_acct(void);
+static void test_syslog(void);
+static void test_reboot(void);
 static void test_mount_no_escape(void);
 static void test_pivot_root(void);
 static void test_mount_object_cap(void);
@@ -5726,6 +5729,9 @@ static const struct {
     {"landlock", test_landlock},
     {"keyrings", test_keyrings},
     {"lsm_calls", test_lsm_calls},
+    {"acct", test_acct},
+    {"syslog", test_syslog},
+    {"reboot", test_reboot},
     {"pivot_root", test_pivot_root},
     {"mount_object_cap", test_mount_object_cap},
     {"mount_modify_drop", test_mount_modify_drop},
@@ -11700,6 +11706,148 @@ static void test_lsm_calls(void)
     report("lsm_calls", f == 0, why);
 }
 
+/* BSD process accounting, version 3 records (Linux 7.3 kernel/acct.c). */
+struct t_acct_v3 {
+    char ac_flag, ac_version;
+    uint16_t ac_tty;
+    uint32_t ac_exitcode, ac_uid, ac_gid, ac_pid, ac_ppid, ac_btime, ac_etime;
+    uint16_t ac_utime, ac_stime, ac_mem, ac_io, ac_rw, ac_minflt, ac_majflt, ac_swaps;
+    char ac_comm[16];
+};
+static void test_acct(void)
+{
+    char why[96];
+    int f = 0;
+    if (sizeof(struct t_acct_v3) != 64) f |= 1;
+    const char *path = "/tmp/veridian-acct";
+    int fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+    if (fd < 0) f |= 2;
+    close(fd);
+    if (syscall(SYS_acct, "/tmp") != -1 || errno != EISDIR) f |= 4;
+    if (syscall(SYS_acct, path) != 0) f |= 8;
+    pid_t c = fork();
+    if (c == 0)
+        _exit(7);
+    int st = 0;
+    waitpid(c, &st, 0);
+    if (syscall(SYS_acct, NULL) != 0) f |= 16;
+    /* The child's record: forked without exec (AFORK), its exit status,
+     * this process as its parent. */
+    fd = open(path, O_RDONLY);
+    struct t_acct_v3 r;
+    int found = 0;
+    while (fd >= 0 && read(fd, &r, sizeof(r)) == (ssize_t)sizeof(r)) {
+        if ((pid_t)r.ac_pid == c) {
+            found = 1;
+            if (r.ac_version != 3 || !(r.ac_flag & 0x01) || r.ac_exitcode != (7u << 8) ||
+                (pid_t)r.ac_ppid != getpid() || r.ac_uid != getuid())
+                f |= 32;
+        }
+    }
+    if (fd >= 0) close(fd);
+    if (!found) f |= 64;
+    unlink(path);
+    /* Without CAP_SYS_PACCT: EPERM. */
+    c = fork();
+    if (c == 0)
+        _exit(setuid(65534) == 0 && syscall(SYS_acct, NULL) == -1 && errno == EPERM ? 0 : 1);
+    if (t_exit_status(c) != 0) f |= 128;
+    snprintf(why, sizeof(why), "f=%#x", f);
+    report("acct", f == 0, why);
+}
+
+/* syslog(2) over the kernel log ring. */
+static void test_syslog(void)
+{
+    char why[96];
+    int f = 0;
+    static char logbuf[16384];
+    long n = syscall(SYS_syslog, 3 /* READ_ALL */, logbuf, sizeof(logbuf));
+    if (n <= 0 || strncmp(logbuf, "<4>[", 4) != 0) f |= 1;
+    if (syscall(SYS_syslog, 10 /* SIZE_BUFFER */, NULL, 0) != 131072) f |= 2;
+    if (syscall(SYS_syslog, 8 /* CONSOLE_LEVEL */, NULL, 0) != -1 || errno != EINVAL) f |= 4;
+    if (syscall(SYS_syslog, 99, NULL, 0) != -1 || errno != EINVAL) f |= 8;
+    if (syscall(SYS_syslog, 3, NULL, 10) != -1 || errno != EINVAL) f |= 16;
+    char pk[64];
+    if (t_read_text("/proc/sys/kernel/printk", pk, sizeof(pk)) <= 0 || strcmp(pk, "7\t4\t1\t7\n") != 0)
+        f |= 32;
+    if (t_read_text("/proc/sys/kernel/dmesg_restrict", pk, sizeof(pk)) <= 0 || strcmp(pk, "1\n") != 0)
+        f |= 64;
+    /* dmesg_restrict: an unprivileged reader is EPERM even for READ_ALL. */
+    pid_t c = fork();
+    if (c == 0)
+        _exit(setuid(65534) == 0 && syscall(SYS_syslog, 3, logbuf, sizeof(logbuf)) == -1 && errno == EPERM ? 0
+                                                                                                        : 1);
+    if (t_exit_status(c) != 0) f |= 128;
+    snprintf(why, sizeof(why), "f=%#x", f);
+    report("syslog", f == 0, why);
+}
+
+#ifndef CLONE_NEWPID
+#define CLONE_NEWPID 0x20000000
+#endif
+#define T_REBOOT_MAGIC1 0xfee1deadu
+#define T_REBOOT_MAGIC2 672274793u
+#define T_REBOOT_RESTART 0x01234567u
+#define T_REBOOT_HALT 0xcdef0123u
+#define T_REBOOT_CAD_ON 0x89abcdefu
+#define T_REBOOT_CAD_OFF 0u
+
+/* reboot(cmd) from a process in a new PID namespace: the namespace's init
+ * is reported killed by `sig`; a command other than the four is EINVAL
+ * first. 0 when both held. */
+static int reboot_in_pidns(unsigned cmd, int sig)
+{
+    pid_t a = fork();
+    if (a == 0) {
+        if (unshare(CLONE_NEWPID) != 0) _exit(2);
+        pid_t init = fork();
+        if (init == 0) {
+            pid_t c = fork();
+            if (c == 0) {
+                if (!(syscall(SYS_reboot, T_REBOOT_MAGIC1, T_REBOOT_MAGIC2, T_REBOOT_CAD_ON, 0) == -1 &&
+                      errno == EINVAL))
+                    _exit(3);
+                syscall(SYS_reboot, T_REBOOT_MAGIC1, T_REBOOT_MAGIC2, cmd, 0);
+                _exit(4);
+            }
+            for (;;) pause();
+        }
+        int st = 0;
+        if (waitpid(init, &st, 0) != init) _exit(5);
+        _exit(WIFSIGNALED(st) && WTERMSIG(st) == sig ? 0 : 6);
+    }
+    return t_exit_status(a);
+}
+
+/* reboot(2): the checks, Ctrl-Alt-Del, and reboot inside a PID namespace
+ * (the machine itself is not restarted here). */
+static void test_reboot(void)
+{
+    char why[96];
+    int f = 0;
+    if (!(syscall(SYS_reboot, 0, 0, T_REBOOT_RESTART, 0) == -1 && errno == EINVAL)) f |= 1;
+    if (!(syscall(SYS_reboot, T_REBOOT_MAGIC1, 1, T_REBOOT_RESTART, 0) == -1 && errno == EINVAL)) f |= 1;
+    if (syscall(SYS_reboot, T_REBOOT_MAGIC1, T_REBOOT_MAGIC2, T_REBOOT_CAD_OFF, 0) != 0) f |= 2;
+    if (syscall(SYS_reboot, T_REBOOT_MAGIC1, T_REBOOT_MAGIC2, T_REBOOT_CAD_ON, 0) != 0) f |= 2;
+    if (!(syscall(SYS_reboot, T_REBOOT_MAGIC1, T_REBOOT_MAGIC2, 0x45584543u /* KEXEC */, 0) == -1 &&
+          errno == EINVAL))
+        f |= 4;
+    /* Without CAP_SYS_BOOT: EPERM, before the magic is looked at. */
+    pid_t c = fork();
+    if (c == 0)
+        _exit(setuid(65534) == 0 && syscall(SYS_reboot, 0, 0, T_REBOOT_RESTART, 0) == -1 && errno == EPERM
+                  ? 0
+                  : 1);
+    if (t_exit_status(c) != 0) f |= 8;
+    int r = reboot_in_pidns(T_REBOOT_RESTART, SIGHUP);
+    if (r != 0) f |= 16 | (r << 8);
+    r = reboot_in_pidns(T_REBOOT_HALT, SIGINT);
+    if (r != 0) f |= 32 | (r << 12);
+    snprintf(why, sizeof(why), "f=%#x", f);
+    report("reboot", f == 0, why);
+}
+
 static void test_seccomp_notify(void)
 {
     char why[96];
@@ -14005,6 +14153,9 @@ int main(int argc, char **argv)
     test_landlock();
     test_keyrings();
     test_lsm_calls();
+    test_acct();
+    test_syslog();
+    test_reboot();
     test_mount_no_escape();
     test_pivot_root();
     test_mount_object_cap();

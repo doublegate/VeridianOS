@@ -362,6 +362,39 @@ The reference for every behaviour below is the Linux 7.3 source (kernel.org tarb
       in (EOPNOTSUPP, as Linux without them); RESTRICT_KEYRING has only reject-all, a named
       restriction ENOENT. KEYCTL_CAPABILITIES reports Linux's bytes for this set, 0xe3 0x03.
 
+### System tier: the kernel log, accounting and the machine calls
+
+29. The remaining calls of the tier follow Linux 7.3, with these choices:
+    - **syslog** reads a kernel log ring (`printk`) that keeps every line the kernel prints,
+      in syslog's text form, in 128 KiB that need no heap. The print path never waits for the
+      ring: a print that finds it busy loses its text there, not on the console. The console
+      shows messages below `console_loglevel` (default 7), so CONSOLE_OFF and CONSOLE_LEVEL
+      work. A panic or a fatal trap first raises the level to 15, as Linux's console_verbose,
+      so a program that lowered it cannot hide a crash; the x86_64 fault report writes to the
+      port directly anyway, and the CPU stall dump is taken by the host through QEMU. **`dmesg_restrict` starts at 1**, where Linux's built-in default is 0: the log
+      names kernel addresses that KASLR is meant to hide, and Debian's and Ubuntu's kernels
+      ship it on. It is a sysctl, so the old behaviour is one write away (CAP_SYS_ADMIN).
+      `/proc/kmsg` and `/dev/kmsg` come with the device and proc work (Track C item 3).
+    - **acct** writes version 3 records per PID namespace, as the opener, when a process's
+      last thread exits, with Linux's free-space pause and resume. Memory and fault counts,
+      ASU and the terminal are 0 until they are counted.
+    - **vhangup** is CAP_SYS_TTY_CONFIG, then the hangup of the caller's controlling
+      terminal, which no process has until the terminal work of v0.29 (Linux returns 0 for
+      such a process too).
+    - **iopl and ioperm** give ports only through IoPort capabilities, which nothing is
+      granted yet (Track M, M2): turning ports on and iopl 3 are EPERM for every caller,
+      levels 1 and 2 (which open no ports) need CAP_SYS_RAWIO, as on Linux.
+    - **reboot** checks CAP_SYS_BOOT in the user namespace owning the caller's PID namespace,
+      then the magic numbers. Inside a PID namespace below the initial one it is Linux's
+      reboot_pid_ns: the namespace's init is killed and reported killed by SIGHUP (restart)
+      or SIGINT (halt, power off). On the machine it also needs MODIFY on the `System`
+      object. The other CPUs are stopped first (each is sent the reschedule interrupt and
+      halts in it); restart is the PCI reset register, then the keyboard controller, then a
+      triple fault on x86_64, PSCI SYSTEM_RESET on AArch64 and SBI SRST on RISC-V; power off
+      is ACPI S5, PSCI SYSTEM_OFF and SBI SRST (or the legacy shutdown call), halting where it
+      does not take. As on Linux nothing is synced. KEXEC and SW_SUSPEND are EINVAL, as a
+      Linux built without kexec and hibernation; kexec has its plan in MASTER_TODO item 18.
+
 ## Consequences
 
 - LTP's ipc tests (shmget*, shmat*, shmctl*, semget*, semop*, semctl*, msgget*, msgsnd*,

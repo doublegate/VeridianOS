@@ -448,6 +448,11 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
        - [x] seccomp in full: strict mode, classic BPF filters by the shared `veridian-cbpf`
          crate, every action, TSYNC, user notification with its listener and ioctls, the status
          lines (ADR 0027 decision 27).
+       - [x] syslog and the kernel log ring; dmesg_restrict on by default (decision 29).
+       - [x] acct (version 3, per PID namespace), vhangup, iopl and ioperm (IoPort
+         capabilities only; none granted yet, Track M M2).
+       - [x] reboot: CAP_SYS_BOOT, magic numbers, reboot_pid_ns, restart/halt/power off on
+         three architectures (decision 29). Ctrl-Alt-Del is not reported by the keyboard yet.
        - [x] lsm_list_modules, lsm_get_self_attr, lsm_set_self_attr: capability and Landlock
          reported; no process attributes (EOPNOTSUPP). `/sys/kernel/security/lsm` waits for
          sysfs (Track C item 3).
@@ -500,6 +505,10 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
         the caller's domain and the domain recorded on the socket (`UnixSocket::landlock`),
         EPERM. The runtime test `landlock` has a tripwire that fails if abstract sockets work
         without it (ADR 0028).
+      - [ ] With controlling terminals (TIOCSCTTY, TIOCNOTTY, the session's terminal; the pty
+        and n_tty work): vhangup hangs the caller's controlling terminal up (tty_vhangup_self:
+        its descriptors read end of file and write EIO, SIGHUP and SIGCONT to the session),
+        which today has none to hang up, as a Linux process without one.
       - [ ] With SIGIO (F_SETOWN, O_ASYNC, FIOASYNC): Landlock's signal scope on the signal a
         file sends (hook_file_set_fowner, hook_file_send_sigiotask), recording the owner's
         domain at F_SETOWN; until then FIOASYNC refuses to turn SIGIO on.

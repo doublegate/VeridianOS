@@ -13,6 +13,10 @@ pub enum Conduit {
     Smc,
 }
 
+/// `SYSTEM_OFF` and `SYSTEM_RESET` (SMC32 function ids).
+const PSCI_0_2_FN_SYSTEM_OFF: u64 = 0x8400_0008;
+const PSCI_0_2_FN_SYSTEM_RESET: u64 = 0x8400_0009;
+
 /// `CPU_ON`, SMC64 calling convention.
 const PSCI_0_2_FN64_CPU_ON: u64 = 0xC400_0003;
 
@@ -72,6 +76,20 @@ fn call(conduit: Conduit, fid: u64, a1: u64, a2: u64, a3: u64) -> i64 {
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub fn cpu_on(conduit: Conduit, mpidr: u64, entry: u64, context: u64) -> i64 {
     call(conduit, PSCI_0_2_FN64_CPU_ON, mpidr, entry, context)
+}
+
+/// Power the machine off (PSCI SYSTEM_OFF). Returns only if the firmware
+/// refused.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub fn system_off(conduit: Conduit) {
+    let _ = call(conduit, PSCI_0_2_FN_SYSTEM_OFF, 0, 0, 0);
+}
+
+/// Reset the machine (PSCI SYSTEM_RESET). Returns only if the firmware
+/// refused.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub fn system_reset(conduit: Conduit) {
+    let _ = call(conduit, PSCI_0_2_FN_SYSTEM_RESET, 0, 0, 0);
 }
 
 #[cfg(test)]

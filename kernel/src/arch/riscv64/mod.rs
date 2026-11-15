@@ -361,6 +361,7 @@ fn kill_user(signal: u32) -> ! {
 
 /// Report an unexpected supervisor-mode trap and stop.
 extern "C" fn riscv_fatal_trap(scause: usize, sepc: usize, stval: usize) -> ! {
+    crate::printk::console_verbose();
     panic!(
         "unexpected supervisor trap: scause={:#x} sepc={:#x} stval={:#x}",
         scause, sepc, stval

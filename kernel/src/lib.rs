@@ -103,6 +103,7 @@ pub fn get_allocator() -> &'static LockedHeap {
 #[macro_use]
 pub mod print;
 pub mod print_capture;
+pub mod printk;
 
 mod intrinsics;
 

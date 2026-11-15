@@ -1172,6 +1172,15 @@ fn kick_cpu(cpu: usize) {
     let _ = cpu;
 }
 
+/// Interrupt every other online CPU once (the reschedule IPI), as stopping
+/// the machine needs (`arch::power`).
+pub fn kick_others() {
+    let online = (crate::arch::smp_boot::online_cpus() as usize).min(crate::sched::smp::MAX_CPUS);
+    for cpu in 0..online {
+        kick_cpu(cpu);
+    }
+}
+
 /// membarrier's expedited barrier: interrupt every other online CPU and wait
 /// until each has taken the interrupt, whose handler runs a full barrier
 /// before counting it (`arch::percpu::note_ipi`), and, returning, a core

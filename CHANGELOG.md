@@ -138,7 +138,22 @@
 - The syscall coverage reports count the calls that return ENOSYS by a recorded decision
   (modules, kexec, swap, uprobes, NUMA, disk quotas, perf_event_open, bpf) as `declined`, each
   with its reason and the release planned to bring it in (MASTER_TODO item 18), apart from
-  the `missing` ones still to be written: 25 missing on x86_64, 21 on AArch64, 23 on RISC-V.
+  the `missing` ones still to be written: 19 missing on x86_64, 17 on AArch64, 19 on RISC-V.
+- syslog(2) and the kernel log ring (ADR 0027 decision 29): every line the kernel prints is
+  kept in syslog's form in a 128 KiB ring; READ (waiting), READ_ALL, READ_CLEAR, CLEAR,
+  CONSOLE_OFF, CONSOLE_ON, CONSOLE_LEVEL, SIZE_UNREAD and SIZE_BUFFER; the console follows
+  `console_loglevel`; `/proc/sys/kernel/printk` and `dmesg_restrict`, which starts at 1.
+- acct(2) (Linux 7.3 `kernel/acct.c`): BSD process accounting with version 3 records, per PID
+  namespace, written as the opener when a process's last thread exits, paused below 2 % free
+  space and resumed above 4 %. CONFIG_BSD_PROCESS_ACCT and _V3 set. Runtime test acct.
+- vhangup (EPERM without CAP_SYS_TTY_CONFIG, else nothing to hang up, as a Linux process
+  without a controlling terminal) and iopl and ioperm, whose ports come only from IoPort
+  capabilities, of which none is granted yet: turning ports on is EPERM, iopl 3 EPERM.
+- reboot(2) (Linux 7.3 `kernel/reboot.c`, ADR 0027 decision 29): CAP_SYS_BOOT and the magic
+  numbers; inside a PID namespace the namespace's init is killed and reported killed by
+  SIGHUP or SIGINT; on the machine (which also needs the `System` object) restart, halt and
+  power off on all three architectures after stopping the other CPUs, and CAD_ON/CAD_OFF.
+  Runtime test reboot.
 - BlockFS does not give a deleted file's inode number to a new file while a node in memory
   still names it (an open file, a working directory, a Landlock rule), as Linux keeps an
   inode until its last reference goes. A rule, FIFO or socket binding on the old file can no

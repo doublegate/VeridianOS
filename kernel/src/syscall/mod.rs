@@ -472,6 +472,11 @@ pub(crate) mod landlock;
 pub(crate) mod keys;
 // The security modules' calls (v0.28 item 5)
 mod lsm;
+// The system tier's smaller calls (v0.28 item 5)
+pub(crate) mod system;
+// BSD process accounting (v0.28 item 5)
+#[cfg(feature = "alloc")]
+pub(crate) mod acct;
 #[cfg(feature = "alloc")]
 pub(crate) mod seccomp;
 use self::network_ext_syscalls::*;
@@ -1771,6 +1776,13 @@ fn handle_syscall(
         Syscall::Cachestat => memctl::sys_cachestat(arg1, arg2, arg3, arg4),
         #[cfg(feature = "alloc")]
         Syscall::Seccomp => seccomp::sys_seccomp(arg1, arg2, arg3),
+        Syscall::Vhangup => system::sys_vhangup(),
+        Syscall::Syslog => system::sys_syslog(arg1, arg2, arg3),
+        Syscall::Reboot => system::sys_reboot(arg1, arg2, arg3, arg4),
+        #[cfg(feature = "alloc")]
+        Syscall::Acct => acct::sys_acct(arg1),
+        Syscall::Iopl => system::sys_iopl(arg1),
+        Syscall::Ioperm => system::sys_ioperm(arg1, arg2, arg3),
         Syscall::LsmListModules => lsm::sys_lsm_list_modules(arg1, arg2, arg3),
         Syscall::LsmGetSelfAttr => lsm::sys_lsm_get_self_attr(arg1, arg2, arg3, arg4),
         Syscall::LsmSetSelfAttr => lsm::sys_lsm_set_self_attr(arg1, arg2, arg3, arg4),
@@ -5307,7 +5319,7 @@ mod tests {
         // Linux numbers with no call yet, and the gap below the private
         // range, are not decoded.
         assert!(Syscall::try_from(179).is_err()); // quotactl
-        assert!(Syscall::try_from(153).is_err()); // vhangup
+        assert!(Syscall::try_from(174).is_err()); // create_module (removed)
         assert!(Syscall::try_from(500).is_err());
         assert!(Syscall::try_from(1023).is_err());
     }

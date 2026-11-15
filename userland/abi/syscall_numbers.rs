@@ -402,6 +402,12 @@ pub mod sysno {
     pub const SYS_lsm_get_self_attr: usize = 459;
     pub const SYS_lsm_set_self_attr: usize = 460;
     pub const SYS_lsm_list_modules: usize = 461;
+    pub const SYS_vhangup: usize = 153;
+    pub const SYS_iopl: usize = 172;
+    pub const SYS_ioperm: usize = 173;
+    pub const SYS_acct: usize = 163;
+    pub const SYS_syslog: usize = 103;
+    pub const SYS_reboot: usize = 169;
 }
 
 // Linux's generic table: calls RISC-V leaves to user space are absent.
@@ -763,6 +769,10 @@ pub mod sysno {
     pub const SYS_lsm_get_self_attr: usize = 459;
     pub const SYS_lsm_set_self_attr: usize = 460;
     pub const SYS_lsm_list_modules: usize = 461;
+    pub const SYS_vhangup: usize = 58;
+    pub const SYS_acct: usize = 89;
+    pub const SYS_syslog: usize = 116;
+    pub const SYS_reboot: usize = 142;
 }
 
 // Linux's generic table with arm64's ABIs (renameat included).
@@ -1125,4 +1135,8 @@ pub mod sysno {
     pub const SYS_lsm_get_self_attr: usize = 459;
     pub const SYS_lsm_set_self_attr: usize = 460;
     pub const SYS_lsm_list_modules: usize = 461;
+    pub const SYS_vhangup: usize = 58;
+    pub const SYS_acct: usize = 89;
+    pub const SYS_syslog: usize = 116;
+    pub const SYS_reboot: usize = 142;
 }

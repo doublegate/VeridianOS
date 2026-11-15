@@ -821,6 +821,19 @@ Page protections now follow `prot` (fixed in v0.27, N-132 to N-137). What remain
   works since v0.28 (ADR 0027 decision 27), user notification included; SECCOMP_RET_TRACE
   is ENOSYS until ptrace can attach a tracer (Track C item 8), as on Linux with none
   attached.
+- The kernel log has no `/proc/kmsg` or `/dev/kmsg` yet (Track C item 3); syslog(2) reads it.
+  A line printed while another CPU or an interrupt holds the ring is not kept there (it still
+  reaches the console).
+- acct records leave ac_mem, ac_minflt, ac_majflt and ASU at 0 (not counted), and ac_tty at 0
+  (no controlling terminals). `/proc/sys/kernel/acct` is not there; the thresholds are Linux's
+  defaults (4, 2, 30).
+- iopl and ioperm give no ports: ports come from IoPort capabilities (Track M, M2, with the
+  TSS I/O bitmap), and none is granted yet, so LTP's iopl01 and ioperm01, which expect root to
+  get them, fail by that decision.
+- reboot(2)'s CAD_ON and CAD_OFF set Linux's C_A_D flag, but the keyboard does not report
+  Ctrl-Alt-Del yet, so the combination does nothing either way. A CPU spinning with interrupts
+  masked when the machine is stopped is left running for the second the stop waits (there
+  is no NMI stop), as Linux without one.
 - The key retention service (ADR 0027 decision 28) is the core:
   - There is no usermode helper. request_key behaves as Linux without `/sbin/request-key`
     (ENOENT and a 60 s negative key), so no instantiation authority exists.

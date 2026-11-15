@@ -32,8 +32,13 @@ macro_rules! println {
 #[macro_export]
 macro_rules! print {
     ($($arg:tt)*) => ({
-        $crate::serial::_serial_print(format_args!($($arg)*));
-        $crate::graphics::fbcon::_fbcon_print(format_args!($($arg)*));
+        // The log ring keeps every line; the console shows it below
+        // console_loglevel (`printk`).
+        $crate::printk::record(format_args!($($arg)*));
+        if $crate::printk::console_enabled() {
+            $crate::serial::_serial_print(format_args!($($arg)*));
+            $crate::graphics::fbcon::_fbcon_print(format_args!($($arg)*));
+        }
         $crate::print_capture::_capture_print(format_args!($($arg)*));
     });
 }
@@ -55,10 +60,13 @@ macro_rules! println {
 macro_rules! print {
     ($($arg:tt)*) => ({
         use core::fmt::Write;
-        $crate::print::with_console(|| {
-            let mut _w = $crate::arch::aarch64::direct_uart::DirectUartWriter;
-            let _ = _w.write_fmt(format_args!($($arg)*));
-        });
+        $crate::printk::record(format_args!($($arg)*));
+        if $crate::printk::console_enabled() {
+            $crate::print::with_console(|| {
+                let mut _w = $crate::arch::aarch64::direct_uart::DirectUartWriter;
+                let _ = _w.write_fmt(format_args!($($arg)*));
+            });
+        }
     });
 }
 
@@ -73,7 +81,12 @@ macro_rules! println {
 #[cfg(target_arch = "riscv64")]
 #[macro_export]
 macro_rules! print {
-    ($($arg:tt)*) => ($crate::serial::_serial_print(format_args!($($arg)*)));
+    ($($arg:tt)*) => ({
+        $crate::printk::record(format_args!($($arg)*));
+        if $crate::printk::console_enabled() {
+            $crate::serial::_serial_print(format_args!($($arg)*));
+        }
+    });
 }
 
 #[cfg(target_arch = "riscv64")]
@@ -103,7 +116,12 @@ macro_rules! kprint {
     // Literal-only: works on all architectures
     ($lit:literal) => {{
         #[cfg(target_arch = "aarch64")]
-        $crate::arch::aarch64::direct_uart::direct_print_str($lit);
+        {
+            $crate::printk::record_str($lit);
+            if $crate::printk::console_enabled() {
+                $crate::arch::aarch64::direct_uart::direct_print_str($lit);
+            }
+        }
         #[cfg(not(target_arch = "aarch64"))]
         $crate::print!($lit);
     }};
@@ -121,14 +139,24 @@ macro_rules! kprintln {
     // No args: just a newline
     () => {{
         #[cfg(target_arch = "aarch64")]
-        $crate::arch::aarch64::direct_uart::direct_print_str("\n");
+        {
+            $crate::printk::record_str("\n");
+            if $crate::printk::console_enabled() {
+                $crate::arch::aarch64::direct_uart::direct_print_str("\n");
+            }
+        }
         #[cfg(not(target_arch = "aarch64"))]
         $crate::println!();
     }};
     // Literal-only: works on all architectures including AArch64
     ($lit:literal) => {{
         #[cfg(target_arch = "aarch64")]
-        $crate::arch::aarch64::direct_uart::direct_print_str(concat!($lit, "\n"));
+        {
+            $crate::printk::record_str(concat!($lit, "\n"));
+            if $crate::printk::console_enabled() {
+                $crate::arch::aarch64::direct_uart::direct_print_str(concat!($lit, "\n"));
+            }
+        }
         #[cfg(not(target_arch = "aarch64"))]
         $crate::println!($lit);
     }};

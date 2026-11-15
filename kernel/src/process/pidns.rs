@@ -39,6 +39,10 @@ pub struct PidNs {
     pub level: usize,
     /// The kernel uid charged for it (max_pid_namespaces).
     creator: u32,
+    /// reboot(2) from inside it: the signal its init is reported killed by
+    /// (Linux's pid_ns->reboot: SIGHUP to restart, SIGINT to halt), 0 when
+    /// none.
+    reboot: core::sync::atomic::AtomicU32,
     state: Mutex<State>,
 }
 
@@ -92,6 +96,7 @@ pub fn initial() -> Arc<PidNs> {
                 parent: None,
                 level: 0,
                 creator: 0,
+                reboot: core::sync::atomic::AtomicU32::new(0),
                 state: Mutex::new(State {
                     ids: BTreeMap::new(),
                     next: 1,
@@ -126,6 +131,7 @@ impl PidNs {
             parent: Some(parent.clone()),
             level: parent.level + 1,
             creator,
+            reboot: core::sync::atomic::AtomicU32::new(0),
             state: Mutex::new(State {
                 ids: BTreeMap::new(),
                 next: 1,
@@ -133,6 +139,17 @@ impl PidNs {
                 adding: true,
             }),
         }))
+    }
+
+    /// Record reboot(2)'s signal for its init (reboot_pid_ns).
+    pub fn set_reboot(&self, sig: u32) {
+        self.reboot
+            .store(sig, core::sync::atomic::Ordering::Release);
+    }
+
+    /// The signal recorded by [`set_reboot`](Self::set_reboot), 0 if none.
+    pub fn reboot_signal(&self) -> u32 {
+        self.reboot.load(core::sync::atomic::Ordering::Acquire)
     }
 
     pub fn is_initial(&self) -> bool {

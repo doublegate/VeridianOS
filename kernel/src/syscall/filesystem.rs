@@ -301,15 +301,33 @@ pub(super) fn open_node(
     regular: bool,
     follow: bool,
 ) -> SyscallResult {
+    const O_CLOEXEC: usize = 0x8_0000;
+    let process = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let file = open_file(node, created, canonical, flags, regular, follow)?;
+    let fd = process
+        .file_table
+        .lock()
+        .open_with_flags(file, flags & O_CLOEXEC != 0)
+        .map_err(super::map_kernel_error);
+    fd
+}
+
+/// [`open_node`]'s open file, every check made, without a descriptor: what
+/// the kernel keeps for itself (acct's file, Linux's file_open_name).
+pub(super) fn open_file(
+    node: alloc::sync::Arc<dyn crate::fs::VfsNode>,
+    created: bool,
+    canonical: alloc::string::String,
+    flags: usize,
+    regular: bool,
+    follow: bool,
+) -> Result<alloc::sync::Arc<crate::fs::file::File>, SyscallError> {
     #[cfg(target_arch = "aarch64")]
     const O_DIRECTORY: usize = 0x4000;
     #[cfg(not(target_arch = "aarch64"))]
     const O_DIRECTORY: usize = 0x1_0000;
-    const O_CLOEXEC: usize = 0x8_0000;
     use crate::fs::NodeType;
 
-    let process = process::current_process().ok_or(SyscallError::InvalidState)?;
-    let cloexec = flags & O_CLOEXEC != 0;
     let node_type = node.node_type();
     if flags & O_PATH as usize != 0 {
         // An O_PATH open only names the file (Linux's do_o_path): no
@@ -325,11 +343,7 @@ pub(super) fn open_node(
             crate::fs::file::status::PATH,
             core::sync::atomic::Ordering::AcqRel,
         );
-        return process
-            .file_table
-            .lock()
-            .open_with_flags(alloc::sync::Arc::new(file), cloexec)
-            .map_err(super::map_kernel_error);
+        return Ok(alloc::sync::Arc::new(file));
     }
     let open_flags = OpenFlags::from_bits(flags as u32).ok_or(SyscallError::InvalidArgument)?;
     // O_CREAT names a file: an existing directory is EISDIR even read-only.
@@ -454,10 +468,7 @@ pub(super) fn open_node(
     if truncated {
         crate::fs::inotify::on_file(&file, crate::fs::inotify::IN_MODIFY);
     }
-    let file_table = process.file_table.lock();
-    file_table
-        .open_with_flags(alloc::sync::Arc::new(file), cloexec)
-        .map_err(super::map_kernel_error)
+    Ok(alloc::sync::Arc::new(file))
 }
 
 /// The flags open(2) and openat(2) act on, as Linux's build_open_how:

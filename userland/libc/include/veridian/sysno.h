@@ -439,6 +439,12 @@
 #define SYS_lsm_get_self_attr            459
 #define SYS_lsm_set_self_attr            460
 #define SYS_lsm_list_modules             461
+#define SYS_vhangup                      153
+#define SYS_iopl                         172
+#define SYS_ioperm                       173
+#define SYS_acct                         163
+#define SYS_syslog                       103
+#define SYS_reboot                       169
 
 #elif defined(__riscv) && __riscv_xlen == 64
 
@@ -830,6 +836,10 @@
 #define SYS_lsm_get_self_attr            459
 #define SYS_lsm_set_self_attr            460
 #define SYS_lsm_list_modules             461
+#define SYS_vhangup                      58
+#define SYS_acct                         89
+#define SYS_syslog                       116
+#define SYS_reboot                       142
 
 #elif defined(__aarch64__)
 
@@ -1222,6 +1232,10 @@
 #define SYS_lsm_get_self_attr            459
 #define SYS_lsm_set_self_attr            460
 #define SYS_lsm_list_modules             461
+#define SYS_vhangup                      58
+#define SYS_acct                         89
+#define SYS_syslog                       116
+#define SYS_reboot                       142
 
 #else
 #error "<veridian/sysno.h>: no system call numbers for this architecture"

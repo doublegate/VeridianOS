@@ -298,6 +298,11 @@ enum Sysctl {
     Mqueue(&'static str),
     /// `kernel/keys/*`: the key quotas and delays (`syscall::keys::SYSCTLS`).
     Keys(&'static str),
+    /// `kernel/printk`: the console log level and its fixed companions
+    /// (`printk::levels`).
+    Printk,
+    /// `kernel/dmesg_restrict` (`syscall::system::DMESG_RESTRICT`).
+    DmesgRestrict,
 }
 
 impl Sysctl {
@@ -315,6 +320,8 @@ impl Sysctl {
             "sys/user/max_pid_namespaces" => Some(Self::MaxPidNamespaces),
             "sys/user/max_net_namespaces" => Some(Self::MaxNetNamespaces),
             "sys/kernel/threads-max" => Some(Self::ThreadsMax),
+            "sys/kernel/printk" => Some(Self::Printk),
+            "sys/kernel/dmesg_restrict" => Some(Self::DmesgRestrict),
             _ => {
                 #[cfg(feature = "alloc")]
                 if let Some(n) = name.strip_prefix("sys/fs/mqueue/") {
@@ -351,6 +358,10 @@ impl Sysctl {
             Self::Mqueue(name) => crate::syscall::mqueue::sysctl_text(name),
             #[cfg(feature = "alloc")]
             Self::Keys(name) => crate::syscall::keys::sysctl_text(name),
+            Self::Printk => {
+                let [a, b, c, d] = crate::printk::levels();
+                format!("{a}\t{b}\t{c}\t{d}\n")
+            }
             _ => format!("{}\n", self.get()),
         }
     }
@@ -372,7 +383,10 @@ impl Sysctl {
                 .max
                 .load(Ordering::Acquire) as usize,
             Self::ThreadsMax => crate::process::rlimit::max_threads() as usize,
-            Self::Ipc(_) | Self::Mqueue(_) | Self::Keys(_) => 0,
+            Self::Ipc(_) | Self::Mqueue(_) | Self::Keys(_) | Self::Printk => 0,
+            Self::DmesgRestrict => {
+                crate::syscall::system::DMESG_RESTRICT.load(Ordering::Relaxed) as usize
+            }
         }
     }
 
@@ -398,9 +412,13 @@ impl Sysctl {
     /// whole system's rather than a namespace's.
     fn writer_may(self, writer: &crate::process::creds::Caller) -> bool {
         match self {
-            Self::Inotify(_) | Self::UnprivilegedUsernsClone | Self::ThreadsMax | Self::Keys(_) => {
-                writer.creds.euid == 0
-            }
+            Self::Inotify(_)
+            | Self::UnprivilegedUsernsClone
+            | Self::ThreadsMax
+            | Self::Keys(_)
+            | Self::Printk => writer.creds.euid == 0,
+            // proc_dointvec_minmax_sysadmin: CAP_SYS_ADMIN.
+            Self::DmesgRestrict => writer.capable(crate::process::linux_caps::CAP_SYS_ADMIN),
             Self::MaxUserNamespaces | Self::MaxPidNamespaces | Self::MaxNetNamespaces => {
                 writer.capable(crate::process::linux_caps::CAP_SYS_RESOURCE)
             }
@@ -452,6 +470,32 @@ impl Sysctl {
             #[cfg(not(feature = "alloc"))]
             Self::Ipc(_) | Self::Mqueue(_) | Self::Keys(_) => {
                 return Err(KernelError::FsError(FsError::PermissionDenied))
+            }
+            // The first value sets the console level; the others are fixed
+            // here, as their values are (__do_proc_dointvec over four ints).
+            Self::Printk => {
+                let level = core::str::from_utf8(text)
+                    .ok()
+                    .and_then(|t| t.split_whitespace().next())
+                    .and_then(|v| v.parse::<u8>().ok())
+                    .ok_or(KernelError::InvalidArgument {
+                        name: "value",
+                        value: "not a console level",
+                    })?;
+                crate::printk::set_console_level(level);
+                return Ok(());
+            }
+            Self::DmesgRestrict => {
+                let v = core::str::from_utf8(text)
+                    .ok()
+                    .and_then(|t| t.trim().parse::<u8>().ok())
+                    .filter(|v| *v <= 1)
+                    .ok_or(KernelError::InvalidArgument {
+                        name: "value",
+                        value: "out of the sysctl's range",
+                    })?;
+                crate::syscall::system::DMESG_RESTRICT.store(v == 1, Ordering::Relaxed);
+                return Ok(());
             }
             Self::UnprivilegedUsernsClone => (&userns::UNPRIVILEGED_CLONE, 1),
             Self::ThreadsMax => (
@@ -1270,6 +1314,7 @@ impl VfsNode for ProcNode {
                     "sys/kernel" => &[
                         ("cap_last_cap", NodeType::File),
                         ("core_pattern", NodeType::File),
+                        ("dmesg_restrict", NodeType::File),
                         ("domainname", NodeType::File),
                         ("hostname", NodeType::File),
                         ("keys", NodeType::Directory),
@@ -1279,6 +1324,7 @@ impl VfsNode for ProcNode {
                         ("osrelease", NodeType::File),
                         ("ostype", NodeType::File),
                         ("pid_max", NodeType::File),
+                        ("printk", NodeType::File),
                         ("random", NodeType::Directory),
                         ("sem", NodeType::File),
                         ("shm_rmid_forced", NodeType::File),
@@ -1462,6 +1508,10 @@ impl VfsNode for ProcNode {
                         "keys" => Ok(Arc::new(
                             self.child(ProcNodeType::SubDir(String::from("sys/kernel/keys"))),
                         ) as Arc<dyn VfsNode>),
+                        "printk" | "dmesg_restrict" => {
+                            Ok(Arc::new(self.system_file(format!("sys/kernel/{}", name)))
+                                as Arc<dyn VfsNode>)
+                        }
                         "unprivileged_userns_clone" => Ok(Arc::new(
                             self.system_file(String::from("sys/kernel/unprivileged_userns_clone")),
                         )
@@ -2414,6 +2464,7 @@ mod tests {
                 &[
                     "cap_last_cap",
                     "core_pattern",
+                    "dmesg_restrict",
                     "domainname",
                     "hostname",
                     "keys",
@@ -2423,6 +2474,7 @@ mod tests {
                     "osrelease",
                     "ostype",
                     "pid_max",
+                    "printk",
                     "random",
                     "sem",
                     "shm_rmid_forced",
