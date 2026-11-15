@@ -670,6 +670,10 @@ jobs:
                     fi
                   done
                   cp -r downloads/veridian-docs/* release/docs/
+                  # The licences go with the binaries: the kernel is GPL-3.0-or-later
+                  # with the user-space exception, the rest MIT OR Apache-2.0 (ADR 0028).
+                  cp COPYING LICENSE-MIT LICENSE-APACHE LICENSING.md release/
+                  cp -r LICENSES release/
                   cat > release/VERSION << EOF
                   VERSION=$(cat Cargo.toml | grep '^version' | head -1 | cut -d'"' -f2)
                   GIT_SHA=${{ github.sha }}
@@ -722,8 +726,13 @@ jobs:
                   - [Issue Tracker](https://github.com/doublegate/VeridianOS/issues)
                   - [Documentation](https://doublegate.github.io/VeridianOS/)
                   ## ⚖️ License
-                  VeridianOS is licensed under either of the MIT License or the Apache
-                  License 2.0, at your option.
+                  The kernels in this archive are licensed under GPL-3.0-or-later (COPYING)
+                  with the VeridianOS user-space exception (LICENSES/), which leaves programs
+                  that use VeridianOS as clients outside the GPL. The documentation and the
+                  rest of VeridianOS are licensed under MIT (LICENSE-MIT) or Apache-2.0
+                  (LICENSE-APACHE), at your option. LICENSING.md explains the split; the
+                  source for every binary is at https://github.com/doublegate/VeridianOS at
+                  the Git SHA above. Commercial licences: COMMERCIAL.md in the repository.
                   EOF
                   tar czf veridian-release-${{ github.sha }}.tar.gz -C release .
                   cd release && zip -r ../veridian-release-${{ github.sha }}.zip . && cd ..

@@ -65,7 +65,7 @@ On `main` the human author of every commit is the maintainer, with AI co-authors
    - `Cargo.toml` gives the kernel `GPL-3.0-or-later`. Cargo's field cannot express the exception, so `REUSE.toml` is authoritative.
 
 5. **A contributor licence agreement keeps commercial licensing open.**
-   - Every contributor signs `CLA.md` once, through the CLA Assistant workflow, which records signatures in the repository.
+   - Every contributor signs `CLA.md` once, through the CLA workflow (`.github/workflows/cla.yml`, logic in `.github/scripts/cla-check.sh`), which checks every commit author of a pull request and records signatures in the repository's `cla-signatures` branch. CLA.md is governed by Delaware law.
    - It grants the maintainer a broad, irrevocable licence to the contribution, including the right to relicense it under any terms, commercial ones included. It also grants a patent licence.
    - Contributors keep their copyright, so it is a licence, not an assignment (as the Harmony agreements allow).
    - Changes to the Linux Driver Container are GPL-2.0 and are not covered by the relicensing grant, since they derive from Linux.

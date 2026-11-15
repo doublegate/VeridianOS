@@ -46,7 +46,7 @@ Contributions to the Linux Driver Container (ADR 0030: the `drivers-linux/` dire
 
 ## 8. General
 
-This agreement is governed by the law of the Project Owner's place of residence, without regard to its conflict-of-law rules. If a provision is held unenforceable, the rest remains in effect.
+This agreement is governed by the laws of the State of Delaware, United States, without regard to its conflict-of-law rules, and the state and federal courts located in Delaware have exclusive jurisdiction over any dispute arising from it. If a provision is held unenforceable, the rest remains in effect.
 
 ---
 
