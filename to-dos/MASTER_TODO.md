@@ -464,8 +464,9 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
        - [x] Landlock, ABI 11 (ADR 0028): the three calls, every filesystem, network and scope
          check, through `cap::authority::holds_path` and `holds_net` and the shared
          `veridian-landlock` crate.
-       - [ ] modify_ldt (x86_64): Linux's GDT layout, a per-mm LDT, selectors kept per thread,
-         iret faults as SIGSEGV (decision 29).
+       - [x] modify_ldt (x86_64): Linux's GDT layout, a per-mm LDT, selectors kept per thread,
+         iret faults as SIGSEGV (decision 29). LTP's modify_ldt tests are i386-only (TCONF on
+         x86_64); the runtime test modify_ldt covers it.
      - [ ] Cheap LTP fixes (found from the system tier's run, 2026-11-14): `/proc/<pid>/stat` in
        Linux's format (do_task_stat; 27 LTP tests are TBROK on its ENOENT through
        TST_PROCESS_STATE_WAIT, and Open POSIX's `include/proc.h` reads it); F_GETPIPE_SZ,

@@ -342,6 +342,12 @@ pub struct Process {
     /// Read by sys_exec before enter_usermode to set MSR 0xC0000100.
     pub tls_fs_base: AtomicU64,
 
+    /// x86_64: the address space's local descriptor table (modify_ldt),
+    /// made on its first write. A fork child gets a copy, a CLONE_VM child
+    /// the same table, and exec drops it (`arch::x86_64::ldt`).
+    #[cfg(all(target_arch = "x86_64", feature = "alloc"))]
+    pub ldt: spin::Mutex<Option<alloc::sync::Arc<crate::arch::x86_64::ldt::Ldt>>>,
+
     /// Container ID (0 = not containerized). Inherited by forked children
     /// so processes cannot escape their container namespace.
     pub container_id: AtomicU64,
@@ -667,6 +673,8 @@ impl Process {
             umask: AtomicU32::new(0o022),
             uname_linux: crate::utils::uname::UnameMode::new(),
             tls_fs_base: AtomicU64::new(0),
+            #[cfg(all(target_arch = "x86_64", feature = "alloc"))]
+            ldt: spin::Mutex::new(None),
             container_id: AtomicU64::new(0),
             clear_child_tid: AtomicU64::new(0),
         }

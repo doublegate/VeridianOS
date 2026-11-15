@@ -368,12 +368,20 @@ pub fn start_thread(
     // A new thread or a fork child inherits the caller's GS base (Linux
     // copies it with the thread); a fresh program starts with 0.
     let mut gs_base = 0;
+    // Likewise its segment registers (copy_thread); a fresh program has
+    // them null.
+    let mut segs = crate::arch::x86_64::ldt::Segments::default();
     if inherit_fpu {
         // The kernel is soft-float, so the CPU still holds the calling
         // thread's user vector state.
         area.save();
         gs_base = crate::arch::x86_64::switch::read_user_gs_base();
+        #[cfg(target_os = "none")]
+        {
+            segs = crate::arch::x86_64::ldt::read_segments();
+        }
     }
+    let ldt = process.ldt.lock().clone();
     process
         .dispatched
         .store(true, core::sync::atomic::Ordering::Release);
@@ -385,6 +393,8 @@ pub fn start_thread(
         fs_base,
         area,
         gs_base,
+        segs,
+        ldt,
         policy,
         thread.get_affinity() as u64,
     )?;

@@ -445,6 +445,7 @@
 #define SYS_acct                         163
 #define SYS_syslog                       103
 #define SYS_reboot                       169
+#define SYS_modify_ldt                   154
 
 #elif defined(__riscv) && __riscv_xlen == 64
 

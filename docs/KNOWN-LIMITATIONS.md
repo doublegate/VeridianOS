@@ -264,6 +264,11 @@ handlers for every exception. What remains depends on the dispatcher:
 - The syscall frame pointer and user RSP scratch are per CPU; the dispatcher saves and restores
   them with each task rather than keeping them on the task's own stack (N-167, N-35).
 - A fatal kernel fault stops only the faulting CPU; the others keep running until SMP stage S2.
+- **32-bit code (modify_ldt, ADR 0027 decision 29).** As a Linux kernel without IA32 emulation
+  and X86_16BIT: 32-bit segments run, but a SYSCALL from them is ENOSYS, `int 0x80` and
+  SYSENTER fault, and 16-bit segments are refused. The table is a fixed 64 KiB per address
+  space once a program writes it (Linux sizes it to the highest entry). The sigcontext's `fs`
+  and `gs` are 0, as Linux's 64-bit frame.
 
 ### Signals (N-99, N-104, N-105, N-170; sprint D)
 

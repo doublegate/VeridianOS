@@ -338,6 +338,10 @@ pub fn sys_execveat(
                     }
                 }
 
+                // No LDT and null segment registers in the new program.
+                #[cfg(all(target_os = "none", feature = "alloc"))]
+                crate::arch::x86_64::ldt::exec_reset();
+
                 // Set FS_BASE (MSR 0xC0000100) for TLS if the process has one.
                 // Must be done BEFORE enter_usermode since iretq doesn't
                 // restore FS_BASE. wrmsr uses ECX=MSR, EDX:EAX=value.

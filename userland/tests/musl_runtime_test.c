@@ -5674,6 +5674,7 @@ static void test_fhandle(void);
 static void test_ioctl(void);
 #if defined(__x86_64__)
 static void test_ustat_sysfs(void);
+static void test_modify_ldt(void);
 #endif
 static void test_pid_levels(void);
 static void test_inotify_mount_ns(void);
@@ -5782,6 +5783,7 @@ static const struct {
     {"mount_no_escape", test_mount_no_escape},
 #if defined(__x86_64__)
     {"ustat_sysfs", test_ustat_sysfs},
+    {"modify_ldt", test_modify_ldt},
 #endif
     {"pid_levels", test_pid_levels},
     {"inotify_mount_ns", test_inotify_mount_ns},
@@ -11900,6 +11902,162 @@ static void test_reboot(void)
     report("reboot", f == 0, why);
 }
 
+#if defined(__x86_64__)
+/* modify_ldt (x86_64, Linux's arch/x86/kernel/ldt.c without IA32
+ * emulation). Its result is an int returned as an unsigned 32-bit value,
+ * so an error is 0xffffffe9-like, not -1 (LTP's lapi/ldt.h). */
+struct t_user_desc {
+    unsigned int entry_number, base_addr, limit, flags;
+};
+#define T_LDT_32 1u
+#define T_LDT_CODE (2u << 1)
+#define T_LDT_RO (1u << 3)
+#define T_LDT_PAGES (1u << 4)
+#define T_LDT_NP (1u << 5)
+static long t_ldt(int func, void *p, unsigned long n)
+{
+    long r = syscall(SYS_modify_ldt, func, p, n);
+    if (r > 0 && (int)r < 0) {
+        errno = -(int)r;
+        return -1;
+    }
+    return r;
+}
+static long t_ldt_set(unsigned entry, unsigned base, unsigned limit, unsigned flags)
+{
+    struct t_user_desc d = {entry, base, limit, flags};
+    return t_ldt(0x11, &d, sizeof(d));
+}
+static volatile unsigned long t_ldt_word = 0x1122334455667788ul;
+static unsigned long t_ldt_gs_read(unsigned short sel)
+{
+    unsigned long v;
+    __asm__ volatile("mov %w1, %%gs\n\tmov %%gs:0, %0\n\tmov %w2, %%gs"
+                     : "=r"(v) : "r"(sel), "r"(0) : "memory");
+    return v;
+}
+/* A page below 4 GiB with 32-bit code at 0 (a loop of `count`, then
+ * ebx = 42 and a far jump to 64-bit code at 0x40, which exits with ebx)
+ * entered by a far jump through LDT entry 1 (selector 0x0f). With count 0
+ * the 32-bit code spins forever. */
+static void t_ldt_far_child(unsigned count)
+{
+    unsigned char *pg = mmap((void *)0x20000000, 4096, PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    if (pg != (void *)0x20000000) _exit(20);
+    unsigned char c32[] = {
+        0xb9, 0, 0, 0, 0,          /* mov ecx, count */
+        0x49,                      /* dec ecx */
+        0x75, 0xfd,                /* jnz .-1 */
+        0xbb, 42, 0, 0, 0,         /* mov ebx, 42 */
+        0xea, 0x40, 0, 0, 0x20, 0x33, 0x00, /* ljmp 0x33:0x20000040 */
+    };
+    memcpy(&c32[1], &count, 4);
+    memcpy(pg, c32, sizeof(c32));
+    if (count == 0) {
+        pg[0] = 0xeb; /* jmp . */
+        pg[1] = 0xfe;
+    }
+    unsigned char c64[] = {
+        0xb8, 60, 0, 0, 0,  /* mov eax, 60 (exit) */
+        0x89, 0xdf,         /* mov edi, ebx */
+        0x0f, 0x05,         /* syscall */
+    };
+    memcpy(pg + 0x40, c64, sizeof(c64));
+    if (mprotect(pg, 4096, PROT_READ | PROT_EXEC) != 0) _exit(21);
+    if (t_ldt_set(1, 0, 0xfffff, T_LDT_32 | T_LDT_CODE | T_LDT_PAGES) != 0) _exit(22);
+    struct {
+        unsigned int off;
+        unsigned short sel;
+    } __attribute__((packed)) far = {0x20000000, 0x0f};
+    __asm__ volatile("ljmpl *%0" : : "m"(far) : "memory");
+    _exit(23);
+}
+static void *t_ldt_clearer(void *arg)
+{
+    (void)arg;
+    usleep(50000);
+    /* Clear entry 1 under the thread running in it: its next return to
+     * user mode (a timer interrupt's iretq) faults on CS, which must be
+     * the process's SIGSEGV, not the kernel's fault. */
+    t_ldt_set(1, 0, 0, T_LDT_RO | T_LDT_NP);
+    return NULL;
+}
+static void test_modify_ldt(void)
+{
+    char why[96];
+    int f = 0;
+    unsigned char buf[256];
+    /* No table yet: read 0 bytes; the default table is 128 zero bytes. */
+    memset(buf, 0xaa, sizeof(buf));
+    if (t_ldt(0, buf, sizeof(buf)) != 0) f |= 1;
+    if (t_ldt(2, buf, sizeof(buf)) != 128 || buf[0] != 0 || buf[127] != 0 || buf[128] != 0xaa)
+        f |= 1;
+    /* Argument checks: EINVAL, EFAULT, ENOSYS. */
+    struct t_user_desc d = {0, 0, 1, T_LDT_32};
+    if (!(t_ldt(1, &d, sizeof(d) - 1) == -1 && errno == EINVAL)) f |= 2;
+    d.entry_number = 8192;
+    if (!(t_ldt(0x11, &d, sizeof(d)) == -1 && errno == EINVAL)) f |= 2;
+    d.entry_number = 0;
+    d.flags = 0; /* a 16-bit segment */
+    if (!(t_ldt(0x11, &d, sizeof(d)) == -1 && errno == EINVAL)) f |= 2;
+    d.flags = 3u << 1; /* contents 3, present */
+    if (!(t_ldt(0x11, &d, sizeof(d)) == -1 && errno == EINVAL)) f |= 2;
+    if (!(t_ldt(0x11, (void *)8, sizeof(d)) == -1 && errno == EFAULT)) f |= 2;
+    if (!(t_ldt(3, buf, sizeof(buf)) == -1 && errno == ENOSYS)) f |= 2;
+    /* Entry 0: a 32-bit data segment based at t_ldt_word, read through
+     * %gs with selector 7 (entry 0, LDT, RPL 3). */
+    unsigned base = (unsigned)(unsigned long)&t_ldt_word;
+    int low = (unsigned long)&t_ldt_word < 0x100000000ul;
+    if (t_ldt_set(0, base, 7, T_LDT_32) != 0) f |= 4;
+    if (t_ldt(0, buf, 16) != 16) f |= 4;
+    unsigned long desc0;
+    memcpy(&desc0, buf, 8);
+    if (desc0 == 0 || buf[8] != 0) f |= 4;
+    if (low && t_ldt_gs_read(7) != t_ldt_word) f |= 8;
+    /* The selector stays across switches. */
+    unsigned short gs = 0;
+    __asm__ volatile("mov %w0, %%gs" : : "r"(7));
+    for (int i = 0; i < 20; i++) sched_yield();
+    usleep(10000);
+    __asm__ volatile("mov %%gs, %w0" : "=r"(gs));
+    __asm__ volatile("mov %w0, %%gs" : : "r"(0));
+    if (gs != 7) f |= 16;
+    /* A fork child has a copy: it reads entry 0 and changes it without
+     * changing the parent's. */
+    pid_t c = fork();
+    if (c == 0) {
+        if (low && t_ldt_gs_read(7) != t_ldt_word) _exit(1);
+        if (t_ldt_set(0, 0, 0, T_LDT_RO | T_LDT_NP) != 0) _exit(2);
+        _exit(0);
+    }
+    int st = t_exit_status(c);
+    if (st != 0) f |= 32 | (st << 8);
+    unsigned char again[8];
+    if (t_ldt(0, again, 8) != 8 || memcmp(again, &desc0, 8) != 0) f |= 32;
+    /* 32-bit code in an LDT segment, through timer interrupts, and back
+     * to 64-bit mode by a far jump. */
+    c = fork();
+    if (c == 0) t_ldt_far_child(0x08000000u);
+    st = t_exit_status(c);
+    if (st != 42) f |= 64 | (st << 16);
+    /* Its segment cleared by another thread while it runs there: SIGSEGV
+     * at the return, and the kernel goes on. */
+    c = fork();
+    if (c == 0) {
+        pthread_t t;
+        if (pthread_create(&t, NULL, t_ldt_clearer, NULL) != 0) _exit(30);
+        t_ldt_far_child(0);
+    }
+    int ws = 0;
+    waitpid(c, &ws, 0);
+    if (!(WIFSIGNALED(ws) && WTERMSIG(ws) == SIGSEGV)) f |= 128;
+    /* exec drops the table: tested by the exec of every later program. */
+    snprintf(why, sizeof(why), "f=%#x ws=%#x", f, ws);
+    report("modify_ldt", f == 0, why);
+}
+#endif
+
 static void test_seccomp_notify(void)
 {
     char why[96];
@@ -14208,6 +14366,9 @@ int main(int argc, char **argv)
     test_acct();
     test_syslog();
     test_reboot();
+#if defined(__x86_64__)
+    test_modify_ldt();
+#endif
     test_mount_no_escape();
     test_pivot_root();
     test_mount_object_cap();

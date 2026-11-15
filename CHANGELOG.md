@@ -138,7 +138,7 @@
 - The syscall coverage reports count the calls that return ENOSYS by a recorded decision
   (modules, kexec, swap, uprobes, NUMA, disk quotas, perf_event_open, bpf) as `declined`, each
   with its reason and the release planned to bring it in (MASTER_TODO item 18), apart from
-  the `missing` ones still to be written: 19 missing on x86_64, 17 on AArch64, 19 on RISC-V.
+  the `missing` ones still to be written: 18 missing on x86_64, 17 on AArch64, 19 on RISC-V.
 - syslog(2) and the kernel log ring (ADR 0027 decision 29): every line the kernel prints is
   kept in syslog's form in a 128 KiB ring; READ (waiting), READ_ALL, READ_CLEAR, CLEAR,
   CONSOLE_OFF, CONSOLE_ON, CONSOLE_LEVEL, SIZE_UNREAD and SIZE_BUFFER; the console follows
@@ -154,6 +154,14 @@
   SIGHUP or SIGINT; on the machine (which also needs the `System` object) restart, halt and
   power off on all three architectures after stopping the other CPUs, and CAD_ON/CAD_OFF.
   Runtime test reboot.
+- modify_ldt(2) on x86_64 (Linux 7.3 `arch/x86/kernel/ldt.c`, ADR 0027 decision 29): read,
+  write (old and new rules), the default table, Linux's descriptors and EINVAL rules, and its
+  unsigned 32-bit result. The GDT now has Linux's layout, with the 32-bit user code segment
+  0x23 (TSS at 0x40, LDT at 0x50); a thread's ds, es, fs and gs survive switches, fork copies
+  the table and exec drops it; SYSCALL from compatibility mode is ENOSYS; a return to a
+  segment another thread cleared is a SIGSEGV, not a kernel fault (Linux's bad_iret); signal
+  handlers enter in 64-bit mode and sigreturn restores the saved code and stack segments.
+  Runtime test modify_ldt.
 - BlockFS does not give a deleted file's inode number to a new file while a node in memory
   still names it (an open file, a working directory, a Landlock rule), as Linux keeps an
   inode until its last reference goes. A rule, FIFO or socket binding on the old file can no

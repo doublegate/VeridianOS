@@ -17,6 +17,7 @@ pub mod entry;
 pub mod gdt;
 pub mod idt;
 pub mod kpti;
+pub mod ldt;
 pub mod mmu;
 pub mod msr;
 pub mod multiboot;
