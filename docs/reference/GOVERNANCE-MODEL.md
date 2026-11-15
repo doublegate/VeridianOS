@@ -489,8 +489,10 @@ The Veridian OS Foundation (planned):
 
 **Copyright**:
 - Contributors retain copyright
-- Licensed to project
-- Apache 2.0 + MIT dual license
+- Licensed to the maintainer under the Contributor Licence Agreement (CLA.md), including the
+  right to relicense, which makes commercial licences possible
+- By component: GPL-3.0-or-later with the user-space exception for the kernel, system servers
+  and Linux runtime; MIT OR Apache-2.0 for everything else (LICENSING.md, ADR 0030)
 
 **Trademark**:
 - "Veridian OS" and logo

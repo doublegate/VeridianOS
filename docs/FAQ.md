@@ -206,7 +206,10 @@ Not yet, but planned for the future. Current support:
 
 ### Can I use it in my project?
 
-Yes! VeridianOS is dual-licensed under MIT and Apache 2.0. Choose whichever license works for your project.
+Yes. Running programs on VeridianOS, and using its libraries, crates and interfaces, is free
+under MIT OR Apache-2.0. Modifying the kernel, the system servers or the Linux runtime and
+shipping the result is under GPL-3.0-or-later (with a user-space exception), and commercial
+licences for those parts are available. See LICENSING.md and COMMERCIAL.md.
 
 ## Comparison Questions
 

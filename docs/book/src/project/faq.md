@@ -196,11 +196,10 @@ Capabilities solve many security problems:
 
 ### Will VeridianOS be free software?
 
-Yes! VeridianOS is dual-licensed under:
-- MIT License
-- Apache License 2.0
-
-This allows maximum compatibility with other projects.
+Yes. The kernel, the system servers and the Linux runtime are GPL-3.0-or-later, with a
+user-space exception so programs running on VeridianOS are not covered; everything else (the
+ABI, libc, crates, tools and documentation) is MIT OR Apache-2.0. Commercial licences for the
+GPL parts are available. See LICENSING.md.
 
 ### What's the long-term vision?
 

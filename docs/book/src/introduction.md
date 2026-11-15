@@ -85,4 +85,4 @@ VeridianOS is an open-source project welcoming contributions from developers wor
 
 ## License
 
-VeridianOS is dual-licensed under MIT and Apache 2.0 licenses. See the LICENSE files for details.
+VeridianOS is licensed by component: the kernel, system servers and Linux runtime under GPL-3.0-or-later with a user-space exception (programs running on VeridianOS are not covered), everything else (the ABI, libc, crates, tools, documentation) under MIT OR Apache-2.0. See LICENSING.md.

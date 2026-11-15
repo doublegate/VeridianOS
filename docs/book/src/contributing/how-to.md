@@ -257,6 +257,6 @@ All contributors are recognized in our [CONTRIBUTORS.md](https://github.com/doub
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the same terms as VeridianOS (MIT/Apache 2.0 dual license).
+Contributions are made under the [Contributor Licence Agreement](../../../../CLA.md), which the CLA check asks you to sign on your first pull request; they are distributed under the licence of the directory they are in ([LICENSING.md](../../../../LICENSING.md)).
 
 Thank you for helping make VeridianOS better!

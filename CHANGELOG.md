@@ -2,6 +2,20 @@
 
 ### Changed
 
+- **Licensing by component** (ADR 0030, `LICENSING.md`), from this change on:
+  - the kernel, the system servers and the Linux runtime are GPL-3.0-or-later (`COPYING`), with
+    the VeridianOS user-space exception: programs that use them only through system calls, IPC
+    protocols or the published user-space libraries are not covered;
+  - everything else, including the ABI, libc, the crates, the tools, the tests and the
+    documentation, stays MIT OR Apache-2.0.
+
+  v0.27.0 and every earlier commit remain MIT OR Apache-2.0. Contributions are made under a
+  Contributor Licence Agreement (`CLA.md`, checked on every pull request by the CLA workflow), so
+  the maintainer can offer commercial licences for the GPL parts (`COMMERCIAL.md`). `REUSE.toml`
+  maps every path to its licence, `LICENSES/` holds the texts, and `reuse lint` runs in CI
+  (REUSE 3.3 compliant). The vendored Linux syscall tables and the patches to other projects keep
+  their own licences.
+
 - The x86_64 conformance expected list (`tests/compat/expected-x86_64.tsv`) comes from a full run
   with the memory and files groups: LTP passes 845 of 1,552 tests (789 before), Open POSIX 1,786
   of 1,965 and libc-test 535 of 560, with no regression; 61 tests improved (the mlock, mseal,

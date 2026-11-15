@@ -1,0 +1,52 @@
+# Contributor Licence Agreement check (ADR 0030, CLA.md). A pull request's
+# authors must have signed the CLA before it can be merged; they sign by
+# posting the comment the check asks for. Signatures are stored in the
+# `cla-signatures` branch of this repository.
+#
+# pull_request_target runs this workflow from the default branch with a token
+# that can write. It is safe here because nothing from the pull request is
+# checked out or run: the action reads only the PR's metadata and comments.
+name: CLA
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, closed, synchronize]
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+  statuses: write
+
+jobs:
+  cla:
+    # Comments count only on pull requests, and only these two exact texts;
+    # the body is compared, never run.
+    if: >-
+      (github.event.issue.pull_request &&
+       (github.event.comment.body == 'recheck' ||
+        github.event.comment.body == 'I have read the VeridianOS CLA Document and I hereby sign the CLA')) ||
+      github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          path-to-signatures: signatures/version1/cla.json
+          path-to-document: https://github.com/doublegate/VeridianOS/blob/main/CLA.md
+          branch: cla-signatures
+          # The maintainer holds the rights already; bots author no
+          # copyrightable contributions.
+          allowlist: doublegate,dependabot[bot],github-actions[bot],renovate[bot],*[bot]
+          custom-pr-sign-comment: I have read the VeridianOS CLA Document and I hereby sign the CLA
+          custom-notsigned-prcomment: >-
+            Thank you for your contribution. Before it can be merged, please read the
+            [VeridianOS Contributor Licence Agreement](https://github.com/doublegate/VeridianOS/blob/main/CLA.md)
+            and sign it by posting the comment below. You sign once; it covers your later
+            contributions. The CLA keeps your copyright with you and lets the project offer
+            its code under both the GPL and commercial licences (ADR 0030).
+          custom-allsigned-prcomment: All contributors have signed the CLA. Thank you.
+          lock-pullrequest-aftermerge: false

@@ -12,6 +12,7 @@ First off, thank you for considering contributing to VeridianOS! It's people lik
 - [Commit Guidelines](#commit-guidelines)
 - [Pull Request Process](#pull-request-process)
 - [Community](#community)
+- [Licensing of contributions](#licensing-of-contributions)
 
 ## Code of Conduct
 
@@ -403,6 +404,26 @@ scripts/boot-test.sh x86_64
 
 Benchmarks run inside the kernel: the shell's `perf` command
 ([docs/PERFORMANCE-REPORT.md](docs/PERFORMANCE-REPORT.md)).
+
+## Licensing of contributions
+
+**Sign the CLA once.** Every contribution is made under the
+[Contributor Licence Agreement](CLA.md). On your first pull request the CLA check asks you to
+sign it by posting a comment. You keep your copyright; the agreement lets the project offer its
+code under the GPL and under commercial licences.
+
+**Your change takes its directory's licence** ([LICENSING.md](LICENSING.md), `REUSE.toml`):
+- GPL-3.0-or-later with the user-space exception for the kernel, the system servers and the
+  Linux runtime;
+- MIT OR Apache-2.0 for everything else.
+
+A new directory needs its entry in `REUSE.toml`; CI's `reuse lint` fails without one. Code may
+move from a permissive directory into a GPL one, never the other way without the maintainer.
+
+**Linux as a specification.** When the Linux sources are your reference, which they usually
+are for the Linux personality, read them as a specification: describe the behaviour (in the
+commit, an ADR, a test, or a comment naming the Linux file and function) and implement from
+that. Do not port Linux functions line by line or copy its code, comments or tables.
 
 ## Questions?
 

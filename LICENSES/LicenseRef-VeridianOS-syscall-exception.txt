@@ -1,0 +1,46 @@
+VeridianOS user-space exception
+
+This is an additional permission under section 7 of the GNU General Public
+License, version 3 ("GPL"), granted by the copyright holders of the VeridianOS
+kernel, its system servers and its Linux runtime (together, "the Program").
+It applies to every file of the Program that is marked
+"GPL-3.0-or-later AND LicenseRef-VeridianOS-syscall-exception".
+
+1. Programs that use the Program's services.
+
+   A program that runs on VeridianOS and uses the Program only through its
+   system call interfaces (the VeridianOS native calls and the Linux system
+   call interface the Program implements), through the inter-process
+   communication protocols the Program's servers offer, or through the
+   user-space headers, libraries and protocol definitions published with
+   VeridianOS for that purpose, is not, by doing so, a work based on the
+   Program. Such a program, whatever its license, is not required by the
+   GPL to be licensed under the GPL or to have its source made available.
+
+   This covers ordinary applications, Linux programs run unmodified, and
+   separate user-space servers, drivers among them, that communicate with
+   the Program only through those interfaces and protocols.
+
+2. What this exception does not cover.
+
+   This exception does not apply to:
+   - modifications of the Program;
+   - code linked into the Program, or loaded into the Program's address
+     space or privilege level to run as part of it;
+   - works that copy any part of the Program other than the user-space
+     headers, libraries and protocol definitions named in section 1.
+
+   Those remain subject to the GPL alone.
+
+3. Removing the exception.
+
+   When you modify the Program, you may extend this exception to your
+   version of it, but you are not obliged to. If you do not wish to, delete
+   this exception statement from your version, as section 7 of the GPL
+   allows.
+
+Note: the user-space headers, libraries and protocol definitions named in
+section 1 are themselves licensed under the MIT license or the Apache
+License, version 2.0, at your option (see LICENSING.md). This exception
+exists so that using the Program through them is plainly outside the GPL,
+whatever the program using them is.
