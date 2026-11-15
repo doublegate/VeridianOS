@@ -28,7 +28,10 @@ FILE='signatures/version1/cla.json'
 DOC_URL='https://github.com/doublegate/VeridianOS/blob/main/CLA.md'
 MARKER='<!-- veridianos-cla-check -->'
 # The maintainer holds the rights already; bots author nothing copyrightable.
-MAINTAINER='doublegate'
+# Accounts are identified by their numeric GitHub ID, which never changes and
+# is never reused: a login can be renamed, and a freed login can be claimed
+# by a different account, which must not inherit a signature.
+MAINTAINER_ID='6858123' # github.com/doublegate
 
 # Commit author fields are whatever the committer typed, so they cannot be
 # trusted for an exemption: anyone can write "x[bot]" or the maintainer's
@@ -41,35 +44,42 @@ MAINTAINER='doublegate'
 #   opener's submission, which the opener's signature covers (CLA "You
 #   submit", clause 1).
 #
-# opener_exempt LOGIN TYPE: whether the opener needs no signature.
+# An account is written "ID:login"; an unlinked author "@unlinked:<name>",
+# or "@bot:<name>" when the name ends in "[bot]".
+
+# opener_exempt ID:LOGIN TYPE: whether the opener needs no signature.
 opener_exempt() {
-    [ "${1,,}" = "$MAINTAINER" ] || { [ "$2" = "Bot" ] && [[ "$1" == *"[bot]" ]]; }
+    local id="${1%%:*}" login="${1#*:}"
+    [ "$id" = "$MAINTAINER_ID" ] || { [ "$2" = "Bot" ] && [[ "$login" == *"[bot]" ]]; }
 }
 
-# The logins who must have signed, one per line. `committers` holds one
-# entry per commit: a login, "@bot:<name>" for an unlinked author named
-# "...[bot]", or "@unlinked:<name>".
+# The entries that must have signed, one per line, from one entry per
+# commit and the opener.
 required_of() {
     local committers="$1" opener="$2" opener_type="$3"
     if opener_exempt "$opener" "$opener_type"; then
-        printf '%s\n' "$committers" | sed -e '/^$/d' -e '/^@bot:/d' | grep -Fixv -- "$MAINTAINER" || true
+        # The opener's own commits, the maintainer's and bots' are exempt.
+        printf '%s\n' "$committers" | sed -e '/^$/d' -e '/^@bot:/d' \
+            | awk -F: -v m="$MAINTAINER_ID" -v o="${opener%%:*}" '$1 != m && $1 != o'
     else
         printf '%s\n' "$opener"
-        printf '%s\n' "$committers" | sed -e '/^$/d' -e 's/^@bot:/@unlinked:/' | grep -Fixv -- "$MAINTAINER" || true
+        printf '%s\n' "$committers" | sed -e '/^$/d' -e 's/^@bot:/@unlinked:/' \
+            | awk -F: -v m="$MAINTAINER_ID" '$1 != m'
     fi
 }
 
-# Lowercase logins; an unlinked author's name is kept as written.
-lower() { LC_ALL=C awk '/^@unlinked:/ { print; next } { print tolower($0) }'; }
-
-# The required logins (from required_of) that have not signed. An
-# "@unlinked:" entry can never match a signature.
+# The required entries (from required_of) whose account has not signed,
+# each once: its login, or "@unlinked:<name>", which can never match.
+# `signed` holds the signed account IDs, one per line.
 unsigned_of() {
-    local committers="$1" signed="$2"
-    # GitHub logins are case-insensitive.
-    LC_ALL=C comm -23 \
-        <(printf '%s\n' "$committers" | sed '/^$/d' | lower | LC_ALL=C sort -u) \
-        <(printf '%s\n' "$signed" | sed -e '/^$/d' -e '/^@unlinked:/d' | lower | LC_ALL=C sort -u) || true
+    local required="$1" signed="$2"
+    printf '%s\n' "$required" | sed '/^$/d' | awk -v signed="$signed" '
+        BEGIN { n = split(signed, ids, "\n"); for (i = 1; i <= n; i++) if (ids[i] != "") ok[ids[i]] = 1 }
+        /^@unlinked:/ { if (!seen[$0]++) print; next }
+        {
+            id = $0; sub(/:.*/, "", id); login = $0; sub(/^[^:]*:/, "", login)
+            if (!(id in ok) && !seen[id]++) print login
+        }'
 }
 
 # A comment body without carriage returns, surrounding whitespace, or the
@@ -89,9 +99,9 @@ is_recheck_comment() {
     [ "$(normalize_comment "$1")" = "recheck" ]
 }
 
-# The signed logins in a signatures document.
+# The signed account IDs in a signatures document.
 signed_of() {
-    printf '%s' "$1" | jq -r '.signedContributors[]?.name // empty'
+    printf '%s' "$1" | jq -r '.signedContributors[]?.id // empty'
 }
 
 # A signatures document with one more signature.
@@ -108,23 +118,26 @@ selftest() {
     local fails=0
     check() { if [ "$2" = "$3" ]; then echo "  ok    $1"; else echo "  FAIL  $1: got [$2] want [$3]"; fails=$((fails + 1)); fi; }
     req() { unsigned_of "$(required_of "$1" "$2" "$3")" "$4"; }
-    check "an unsigned author is listed" "$(req $'alice\nbob' doublegate User 'alice')" "bob"
-    check "the maintainer's own pull request" "$(req $'doublegate\ndoublegate' doublegate User '')" ""
-    check "a bot's pull request" "$(req $'@bot:dependabot[bot]' 'dependabot[bot]' Bot '')" ""
-    check "authors are listed once" "$(req $'bob\nbob\nbob' doublegate User '')" "bob"
+    local me="$MAINTAINER_ID:doublegate" al="11:alice" bo="12:bob" ma="13:mallory"
+    check "an unsigned author is listed" "$(req "$al"$'\n'"$bo" "$me" User 11)" "bob"
+    check "the maintainer's own pull request" "$(req "$me"$'\n'"$me" "$me" User '')" ""
+    check "a bot's pull request" "$(req '@bot:dependabot[bot]' '49699333:dependabot[bot]' Bot '')" ""
+    check "a bot's own linked commits" "$(req '49699333:dependabot[bot]' '49699333:dependabot[bot]' Bot '')" ""
+    check "authors are listed once" "$(req "$bo"$'\n'"$bo"$'\n'"$bo" "$me" User '')" "bob"
     check "an unlinked author can never match" \
-        "$(req '@unlinked:Bob Smith' doublegate User '@unlinked:Bob Smith')" "@unlinked:Bob Smith"
-    check "everyone signed" "$(req $'alice\nbob' doublegate User $'bob\nalice')" ""
-    check "an outside opener must sign" "$(req 'doublegate' mallory User '')" "mallory"
+        "$(req '@unlinked:Bob Smith' "$me" User '')" "@unlinked:Bob Smith"
+    check "everyone signed" "$(req "$al"$'\n'"$bo" "$me" User $'12\n11')" ""
+    check "an outside opener must sign" "$(req "$me" "$ma" User '')" "mallory"
     check "a forged bot author in an outside pull request" \
-        "$(req '@bot:x[bot]' mallory User 'mallory')" "@unlinked:x[bot]"
-    check "the maintainer's e-mail forged by a signed opener" \
-        "$(req 'doublegate' mallory User 'mallory')" ""
+        "$(req '@bot:x[bot]' "$ma" User 13)" "@unlinked:x[bot]"
+    check "the maintainer's e-mail forged by a signed opener" "$(req "$me" "$ma" User 13)" ""
     check "a user account named like a bot is not exempt" \
-        "$(req '@bot:x[bot]' 'evil[bot]' User '')" $'@unlinked:x[bot]\nevil[bot]'
-    check "a bot account without the suffix is not exempt" "$(req '' notabot Bot '')" "notabot"
-    check "logins match whatever their case" "$(req $'Alice\nDoubleGate' DoubleGate User 'alice')" ""
-    check "an outside opener matches whatever its case" "$(req '' Mallory User 'mallory')" ""
+        "$(req '@bot:x[bot]' '14:evil[bot]' User '')" $'evil[bot]\n@unlinked:x[bot]'
+    check "a bot account without the suffix is not exempt" "$(req '' '15:notabot' Bot '')" "notabot"
+    check "a login named like the maintainer is not the maintainer" \
+        "$(req '' '16:doublegate' User '')" "doublegate"
+    check "a renamed account keeps its signature" "$(req '11:alice-renamed' "$me" User 11)" ""
+    check "a reused login does not inherit a signature" "$(req '17:alice' "$me" User 11)" "alice"
     is_sign_comment "$SIGN_TEXT" && r=yes || r=no
     check "the signing text signs" "$r" "yes"
     is_sign_comment $'  '"$SIGN_TEXT"$'\r\n' && r=yes || r=no
@@ -145,10 +158,10 @@ selftest() {
     check "a sentence containing recheck does not" "$r" "no"
     local doc='{"signedContributors":[]}'
     doc="$(add_signature "$doc" 'alice' 7 99 48 123 '2026-11-15T00:00:00Z')"
-    check "a signature is recorded" "$(signed_of "$doc")" "alice"
+    check "a signature is recorded by account ID" "$(signed_of "$doc")" "7"
     check "its fields" "$(printf '%s' "$doc" | jq -c '.signedContributors[0] | [.id,.comment_id,.pullRequestNo,.repoId]')" "[7,99,48,123]"
     doc="$(add_signature "$doc" 'x"; rm -rf /' 8 100 48 123 'now')"
-    check "a hostile login stays data" "$(signed_of "$doc" | tail -1)" 'x"; rm -rf /'
+    check "a hostile login stays data" "$(printf '%s' "$doc" | jq -r '.signedContributors[1].name')" 'x"; rm -rf /'
     if [ "$fails" -eq 0 ]; then echo "all checks passed"; else echo "$fails check(s) failed"; return 1; fi
 }
 
@@ -177,15 +190,15 @@ gh api graphql --paginate \
       repository(owner: $owner, name: $name) {
         pullRequest(number: $number) {
           commits(first: 100, after: $endCursor) {
-            nodes { commit { author { name user { login } } } }
+            nodes { commit { author { name user { login databaseId } } } }
             pageInfo { hasNextPage endCursor }
           }
         }
       }
     }' \
     --jq '.data.repository.pullRequest.commits.nodes[].commit.author
-          | .user.login // (if ((.name // "") | endswith("[bot]")) then "@bot:" + .name
-                            else "@unlinked:" + (.name // "unknown") end)'
+          | if .user then "\(.user.databaseId):\(.user.login)" else (if ((.name // "") | endswith("[bot]")) then "@bot:" + .name
+                            else "@unlinked:" + (.name // "unknown") end) end'
 }
 
 # The authors and the commit they belong to are read as one snapshot: the
@@ -231,7 +244,7 @@ read_signatures
 if [ "$EVENT" = "issue_comment" ] && is_sign_comment "${COMMENT_BODY:-}"; then
     : "${COMMENT_USER:?}" "${COMMENT_USER_ID:?}" "${COMMENT_ID:?}"
     for attempt in 1 2 3; do
-        if signed_of "$sig_doc" | grep -Fixq -- "$COMMENT_USER"; then
+        if signed_of "$sig_doc" | grep -Fxq -- "$COMMENT_USER_ID"; then
             break
         fi
         repo_id="$(gh api "repos/$REPO" --jq .id)"
@@ -253,7 +266,7 @@ if [ "$EVENT" = "issue_comment" ] && is_sign_comment "${COMMENT_BODY:-}"; then
 fi
 
 pr_info="$(gh api "repos/$REPO/pulls/$PR")"
-opener="$(printf '%s' "$pr_info" | jq -r .user.login)"
+opener="$(printf '%s' "$pr_info" | jq -r '"\(.user.id):\(.user.login)"')"
 opener_type="$(printf '%s' "$pr_info" | jq -r .user.type)"
 unsigned="$(unsigned_of "$(required_of "$committers" "$opener" "$opener_type")" "$(signed_of "$sig_doc")")"
 

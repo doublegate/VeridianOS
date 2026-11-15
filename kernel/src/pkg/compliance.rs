@@ -124,6 +124,15 @@ pub fn detect_license(text: &str) -> License {
             return License::GPL3;
         }
         if lower.contains("version 2") || lower.contains("gpl-2") || lower.contains("gplv2") {
+            // The notice GPLv2 recommends ("either version 2 of the License,
+            // or (at your option) any later version") and the SPDX
+            // "-or-later" / "+" forms allow GPL-3.0 too.
+            if lower.contains("any later version")
+                || lower.contains("gpl-2.0-or-later")
+                || lower.contains("gpl-2.0+")
+            {
+                return License::GPL2OrLater;
+            }
             return License::GPL2;
         }
         // Generic GPL reference without version defaults to GPL3
@@ -567,6 +576,28 @@ mod tests {
         assert_eq!(License::from_spdx("MPL-2.0"), License::MPL2);
         assert_eq!(License::from_spdx("Proprietary"), License::Proprietary);
         assert_eq!(License::from_spdx("Weird"), License::Unknown);
+    }
+
+    #[test]
+    fn test_detect_gpl2_or_later() {
+        // The notice GPLv2 recommends, and the SPDX identifier in a header.
+        assert_eq!(
+            detect_license(
+                "This program is free software; you can redistribute it and/or modify it under \
+                 the terms of the GNU General Public License as published by the Free Software \
+                 Foundation; either version 2 of the License, or (at your option) any later \
+                 version."
+            ),
+            License::GPL2OrLater
+        );
+        assert_eq!(
+            detect_license("SPDX-License-Identifier: GPL-2.0-or-later"),
+            License::GPL2OrLater
+        );
+        assert_eq!(
+            detect_license("GNU General Public License, version 2 only"),
+            License::GPL2
+        );
     }
 
     #[test]

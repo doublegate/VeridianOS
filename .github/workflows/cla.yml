@@ -31,12 +31,12 @@ concurrency:
 
 jobs:
   cla:
-    # Comments count only on pull requests. This filter is loose, so a
+    # Comments count only on open pull requests. This filter is loose, so a
     # trailing newline or a pasted "> " does not skip the job silently; the
     # script then accepts only the signing text itself or `recheck`.
     if: >-
       github.event_name == 'pull_request_target' ||
-      (github.event.issue.pull_request &&
+      (github.event.issue.pull_request && github.event.issue.state == 'open' &&
        (contains(github.event.comment.body, 'recheck') ||
         contains(github.event.comment.body, 'I hereby sign the CLA')))
     runs-on: ubuntu-latest
