@@ -1,4 +1,4 @@
-# ADR 0028: Landlock through the authority entry
+# ADR 0029: Landlock through the authority entry
 
 - Status: proposed
 - Date: 2026-11-14

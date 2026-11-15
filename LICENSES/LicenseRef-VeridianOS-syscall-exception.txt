@@ -1,0 +1,117 @@
+VeridianOS user-space exception
+
+Version 1.1
+
+This is an additional permission under section 7 of the GNU General Public
+License, version 3 ("GPL"), granted by the copyright holders of the VeridianOS
+kernel, its system servers and its Linux runtime (together, "the Program").
+It applies to every file of the Program that is marked
+"GPL-3.0-or-later AND LicenseRef-VeridianOS-syscall-exception".
+
+This permission is granted only as section 2 describes, and is to be read
+narrowly: whatever it does not plainly grant, it does not grant.
+
+1. Definitions.
+
+   "Client Interfaces" means, and is limited to:
+   (a) the system calls of VeridianOS, native and Linux, as listed in the
+       system call tables published with VeridianOS;
+   (b) the inter-process communication protocols published with
+       VeridianOS, used in the requesting role only: sending requests to
+       a server of the Program and receiving its replies and
+       notifications;
+   (c) the client libraries and headers listed as such in LICENSING.md
+       (among them the C library, the client side of the runtime and the
+       client stubs generated from the interface definitions).
+
+   "System Component" means a program, or a part of a program, that does
+   any of the following, whatever interfaces it uses to do it:
+   (a) holds or uses, directly or through another program acting for it,
+       a capability to device hardware: device memory or registers, I/O
+       ports, interrupts, DMA mappings, IOMMU domains, or another device
+       capability VeridianOS defines;
+   (b) serves requests made under one of VeridianOS's own inter-process
+       communication protocols (those published with VeridianOS for its
+       servers and drivers, not general network or application protocols
+       such as HTTP or DNS), in the serving role: receiving requests from
+       other programs or from the Program and answering them;
+   (c) provides to other programs, or to the Program, a service that a
+       server of the Program provides or that the Program relies on:
+       storage, file systems, block devices, networking, display, input,
+       audio, power, device management, the Linux runtime, name service,
+       service management, or security policy, among others;
+   (d) holds authority over the system or over other programs, beyond
+       what VeridianOS grants an ordinary application: authority over the
+       System object, over other programs' processes, memory or
+       capabilities, over namespaces or mounts other than its own, or
+       the authority to grant capabilities to other programs;
+   (e) is built with, links, or incorporates any part of the VeridianOS
+       driver and server framework listed in LICENSING.md.
+
+   "Linux Program" means a program written for Linux, that uses only the
+   Linux system call interface of the Program, and that is not written,
+   modified or built for VeridianOS: it uses none of VeridianOS's native
+   calls, capabilities, protocols, libraries or headers.
+
+   "Client Program" means a program that is not a System Component and
+   that uses the Program only through Client Interfaces, or that is a
+   Linux Program.
+
+2. The permission.
+
+   A Client Program is not, by using the Program through Client
+   Interfaces, a work based on the Program. Whatever its licence, the GPL
+   does not require it to be licensed under the GPL or to have its source
+   made available.
+
+   This covers ordinary applications, including daemons that serve their
+   own protocols to their own clients (a database or a web server, say),
+   and Linux Programs whatever they do. A Linux Program run unmodified is
+   a Client Program even if it acts as a service, as Linux daemons do.
+
+3. What this permission does not cover.
+
+   It gives no permission, and makes no statement either way, about:
+   - modifications of the Program themselves (whether a modified version
+     of the Program keeps this permission for the programs using it is
+     for its modifier to decide, as section 5 says);
+   - code linked into the Program, or loaded into its address space or
+     privilege level to run as part of it;
+   - works that copy any part of the Program other than the client
+     libraries, headers and protocol definitions named in section 1;
+   - System Components. A System Component is outside this permission
+     whether or not it also uses Client Interfaces, and whether or not it
+     copies any part of the Program. Where it is built with, links or
+     incorporates the driver and server framework, it is a work based on
+     that framework, which is licensed under the GPL without this
+     permission.
+
+   These remain subject to the GPL and to copyright law alone.
+
+4. No avoiding it by arrangement.
+
+   A System Component does not become a Client Program by being divided
+   into parts, by placing a shim, proxy, adapter or another program
+   between it and the Program, by presenting it as a Linux Program when
+   it is written, modified or built for VeridianOS, or by any similar
+   arrangement. Programs designed to act
+   together as a System Component are assessed together as one program.
+   A program that relays requests to or from a System Component, or acts
+   for one, is part of that System Component.
+
+5. Removing the permission.
+
+   When you modify the Program, you may extend this permission to your
+   version of it, so that Client Programs using your version are covered
+   as they are for the Program, but you are not obliged to. Either way,
+   your modifications themselves are licensed under the GPL. If you do not wish to, delete
+   this permission statement from your version, as section 7 of the GPL
+   allows.
+
+Note: the client libraries, headers and protocol definitions named in
+section 1 are themselves licensed under the MIT license or the Apache
+License, version 2.0, at your option (see LICENSING.md). This permission
+exists so that applications and Linux Programs using the Program through
+them are plainly outside the GPL. Drivers, system servers and other System
+Components that want the same certainty can be licensed under the GPL or
+under a commercial licence from the copyright holders (COMMERCIAL.md).

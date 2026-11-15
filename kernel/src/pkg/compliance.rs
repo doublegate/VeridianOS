@@ -27,8 +27,11 @@ pub enum License {
     MIT,
     /// Apache License 2.0
     Apache2,
-    /// GNU General Public License v2.0
+    /// GNU General Public License v2.0 only
     GPL2,
+    /// GNU General Public License v2.0 or any later version, which can be
+    /// used under GPL-3.0 (GPLv2 section 9)
+    GPL2OrLater,
     /// GNU General Public License v3.0
     GPL3,
     /// GNU Lesser General Public License v2.1
@@ -55,6 +58,7 @@ impl License {
             Self::MIT => "MIT",
             Self::Apache2 => "Apache-2.0",
             Self::GPL2 => "GPL-2.0",
+            Self::GPL2OrLater => "GPL-2.0-or-later",
             Self::GPL3 => "GPL-3.0",
             Self::LGPL21 => "LGPL-2.1",
             Self::BSD2 => "BSD-2-Clause",
@@ -66,14 +70,19 @@ impl License {
         }
     }
 
-    /// Parse a license from an SPDX-style identifier string.
+    /// Parse a license from an SPDX-style identifier string. GPL-2.0's
+    /// "-or-later" form is its own variant, because it combines with GPL-3.0
+    /// and "-only" does not; for GPL-3.0 and LGPL-2.1 the "-or-later" (and
+    /// deprecated "+") forms map to the same variant, since no licence this
+    /// type knows tells them apart.
     pub fn from_spdx(s: &str) -> Self {
         match s.trim() {
             "MIT" => Self::MIT,
             "Apache-2.0" | "Apache2" => Self::Apache2,
             "GPL-2.0" | "GPL-2.0-only" | "GPL2" => Self::GPL2,
-            "GPL-3.0" | "GPL-3.0-only" | "GPL3" => Self::GPL3,
-            "LGPL-2.1" | "LGPL-2.1-only" => Self::LGPL21,
+            "GPL-2.0-or-later" | "GPL-2.0+" => Self::GPL2OrLater,
+            "GPL-3.0" | "GPL-3.0-only" | "GPL-3.0-or-later" | "GPL-3.0+" | "GPL3" => Self::GPL3,
+            "LGPL-2.1" | "LGPL-2.1-only" | "LGPL-2.1-or-later" | "LGPL-2.1+" => Self::LGPL21,
             "BSD-2-Clause" | "BSD2" => Self::BSD2,
             "BSD-3-Clause" | "BSD3" => Self::BSD3,
             "ISC" => Self::ISC,
@@ -85,7 +94,10 @@ impl License {
 
     /// Return whether this license is copyleft (restricts derivative works).
     pub fn is_copyleft(self) -> bool {
-        matches!(self, Self::GPL2 | Self::GPL3 | Self::LGPL21 | Self::MPL2)
+        matches!(
+            self,
+            Self::GPL2 | Self::GPL2OrLater | Self::GPL3 | Self::LGPL21 | Self::MPL2
+        )
     }
 
     /// Return whether this license is permissive.
@@ -106,25 +118,51 @@ pub fn detect_license(text: &str) -> License {
     // Normalize to lowercase for case-insensitive matching
     let lower = text.to_lowercase();
 
-    // Check for GPL variants first (more specific before less specific)
+    // LGPL before GPL: "lgpl" contains "gpl", and "lesser general public
+    // license" contains "general public license".
+    if (lower.contains("lesser general public license") || lower.contains("lgpl"))
+        && (lower.contains("2.1") || lower.contains("lgpl-2.1"))
+    {
+        return License::LGPL21;
+    }
+
+    // Check for GPL variants (more specific before less specific)
     if lower.contains("gnu general public license") || lower.contains("gpl") {
         if lower.contains("version 3") || lower.contains("gpl-3") || lower.contains("gplv3") {
             return License::GPL3;
         }
         if lower.contains("version 2") || lower.contains("gpl-2") || lower.contains("gplv2") {
+            // The notice GPLv2 recommends ("either version 2 of the License,
+            // or (at your option) any later version") and the SPDX
+            // "-or-later" / "+" forms allow GPL-3.0 too. The licence text
+            // itself says "any later version" in section 9 and shows that
+            // notice in its "How to Apply These Terms" appendix, so the
+            // notice counts only before the appendix and only in its own
+            // wording.
+            // Wrapped lines and comment marks ("*", "//", "#") are
+            // collapsed first, as source headers carry the notice.
+            let before = lower
+                .split("how to apply these terms")
+                .next()
+                .unwrap_or(&lower);
+            let notice: Vec<&str> = before
+                .split_whitespace()
+                .filter(|w| !matches!(*w, "*" | "//" | "#" | "/*" | "*/" | ";" | "--"))
+                .collect();
+            if notice
+                .join(" ")
+                .contains("(at your option) any later version")
+                || lower.contains("gpl-2.0-or-later")
+                || lower.contains("gpl-2.0+")
+            {
+                return License::GPL2OrLater;
+            }
             return License::GPL2;
         }
         // Generic GPL reference without version defaults to GPL3
         if lower.contains("general public license") {
             return License::GPL3;
         }
-    }
-
-    // Check for LGPL
-    if (lower.contains("lesser general public license") || lower.contains("lgpl"))
-        && (lower.contains("2.1") || lower.contains("lgpl-2.1"))
-    {
-        return License::LGPL21;
     }
 
     // Check for Apache
@@ -209,9 +247,12 @@ impl LicenseCompatibility {
     ///
     /// Rules:
     /// - Proprietary is incompatible with GPL2, GPL3, and LGPL21.
-    /// - GPL3 is incompatible with GPL2 (GPL2-only cannot upgrade to GPL3).
-    /// - Permissive licenses (MIT, BSD, ISC, Apache2) are compatible with
-    ///   everything except Proprietary.
+    /// - GPL3 is incompatible with GPL2 (GPL2-only cannot upgrade to GPL3);
+    ///   GPL2OrLater combines with both.
+    /// - Apache2 is incompatible with GPL2 (GPL-2.0-only), and compatible with
+    ///   GPL2OrLater and GPL3.
+    /// - Permissive licenses (MIT, BSD, ISC, Apache2) are otherwise compatible
+    ///   with everything except Proprietary.
     /// - Unknown licenses are treated as compatible (best-effort).
     pub fn is_compatible(a: &License, b: &License) -> bool {
         // Unknown is treated as compatible (best-effort)
@@ -221,15 +262,30 @@ impl LicenseCompatibility {
 
         // Proprietary is incompatible with copyleft
         if *a == License::Proprietary {
-            return !matches!(b, License::GPL2 | License::GPL3 | License::LGPL21);
+            return !matches!(
+                b,
+                License::GPL2 | License::GPL2OrLater | License::GPL3 | License::LGPL21
+            );
         }
         if *b == License::Proprietary {
-            return !matches!(a, License::GPL2 | License::GPL3 | License::LGPL21);
+            return !matches!(
+                a,
+                License::GPL2 | License::GPL2OrLater | License::GPL3 | License::LGPL21
+            );
         }
 
         // GPL3 is incompatible with GPL2-only
         if (*a == License::GPL3 && *b == License::GPL2)
             || (*a == License::GPL2 && *b == License::GPL3)
+        {
+            return false;
+        }
+
+        // GPL-2.0-only forbids further restrictions, and Apache-2.0's patent
+        // termination and indemnity terms are such restrictions (FSF licence
+        // list). GPL-3.0, and so GPL-2.0-or-later, accepts them.
+        if (*a == License::GPL2 && *b == License::Apache2)
+            || (*a == License::Apache2 && *b == License::GPL2)
         {
             return false;
         }
@@ -548,6 +604,131 @@ mod tests {
         assert_eq!(License::from_spdx("MPL-2.0"), License::MPL2);
         assert_eq!(License::from_spdx("Proprietary"), License::Proprietary);
         assert_eq!(License::from_spdx("Weird"), License::Unknown);
+    }
+
+    #[test]
+    fn test_detect_gpl2_or_later() {
+        // The notice GPLv2 recommends, and the SPDX identifier in a header.
+        assert_eq!(
+            detect_license(
+                "This program is free software; you can redistribute it and/or modify it under \
+                 the terms of the GNU General Public License as published by the Free Software \
+                 Foundation; either version 2 of the License, or (at your option) any later \
+                 version."
+            ),
+            License::GPL2OrLater
+        );
+        assert_eq!(
+            detect_license("SPDX-License-Identifier: GPL-2.0-or-later"),
+            License::GPL2OrLater
+        );
+        assert_eq!(
+            detect_license("GNU General Public License, version 2 only"),
+            License::GPL2
+        );
+    }
+
+    #[test]
+    fn test_detect_wrapped_gpl2_or_later_notice() {
+        // The notice as source headers carry it: wrapped, behind comment marks.
+        let header = " * This program is free software; you can redistribute it and/or\n * modify \
+                      it under the terms of the GNU General Public License\n * as published by \
+                      the Free Software Foundation; either version 2\n * of the License, or (at \
+                      your option)\n * any later version.\n";
+        assert_eq!(detect_license(header), License::GPL2OrLater);
+        let slashes = "// either version 2 of the GNU General Public License, or (at\n// your \
+                       option) any later version.";
+        assert_eq!(detect_license(slashes), License::GPL2OrLater);
+    }
+
+    #[test]
+    fn test_gpl2_only_and_apache2_are_incompatible() {
+        // Apache-2.0's patent and indemnity terms are further restrictions
+        // GPL-2.0 forbids; GPL-3.0 accepts them, so "or later" combines.
+        assert!(!LicenseCompatibility::is_compatible(
+            &License::GPL2,
+            &License::Apache2
+        ));
+        assert!(!LicenseCompatibility::is_compatible(
+            &License::Apache2,
+            &License::GPL2
+        ));
+        assert!(LicenseCompatibility::is_compatible(
+            &License::GPL2OrLater,
+            &License::Apache2
+        ));
+        assert!(LicenseCompatibility::is_compatible(
+            &License::GPL3,
+            &License::Apache2
+        ));
+    }
+
+    #[test]
+    fn test_detect_full_gpl2_text_is_gpl2_only() {
+        // The licence text itself says "any later version" in section 9 and
+        // shows the "or (at your option) any later version" notice in its
+        // appendix; neither makes a work GPL-2.0-or-later.
+        let text = include_str!("../../../LICENSES/GPL-2.0-only.txt");
+        assert_eq!(detect_license(text), License::GPL2);
+        assert_eq!(
+            detect_license("SPDX-License-Identifier: GPL-2.0-only"),
+            License::GPL2
+        );
+    }
+
+    #[test]
+    fn test_detect_lgpl_before_gpl() {
+        // "lgpl" contains "gpl", and "lesser general public license"
+        // contains "general public license".
+        assert_eq!(
+            detect_license("SPDX-License-Identifier: LGPL-2.1-or-later"),
+            License::LGPL21
+        );
+        assert_eq!(
+            detect_license("GNU Lesser General Public License, version 2.1"),
+            License::LGPL21
+        );
+    }
+
+    #[test]
+    fn test_gpl2_or_later_is_distinct_from_gpl2_only() {
+        // GPLv2 section 9: "or any later version" lets the work be used under
+        // GPL-3.0, so it combines with GPL-3.0 code; GPL-2.0-only does not.
+        assert_eq!(License::GPL2OrLater.as_str(), "GPL-2.0-or-later");
+        assert!(License::GPL2OrLater.is_copyleft());
+        assert!(!License::GPL2OrLater.is_permissive());
+        assert!(LicenseCompatibility::is_compatible(
+            &License::GPL2OrLater,
+            &License::GPL3
+        ));
+        assert!(LicenseCompatibility::is_compatible(
+            &License::GPL3,
+            &License::GPL2OrLater
+        ));
+        assert!(LicenseCompatibility::is_compatible(
+            &License::GPL2OrLater,
+            &License::GPL2
+        ));
+        assert!(!LicenseCompatibility::is_compatible(
+            &License::GPL2OrLater,
+            &License::Proprietary
+        ));
+        assert!(!LicenseCompatibility::is_compatible(
+            &License::Proprietary,
+            &License::GPL2OrLater
+        ));
+    }
+
+    #[test]
+    fn test_license_from_spdx_or_later() {
+        // The kernel's own identifier (kernel/Cargo.toml, ADR 0028), and the
+        // deprecated "+" forms that SPDX replaced with "-or-later".
+        assert_eq!(License::from_spdx("GPL-3.0-or-later"), License::GPL3);
+        assert_eq!(License::from_spdx("GPL-3.0+"), License::GPL3);
+        assert_eq!(License::from_spdx("GPL-2.0-or-later"), License::GPL2OrLater);
+        assert_eq!(License::from_spdx("GPL-2.0+"), License::GPL2OrLater);
+        assert_eq!(License::from_spdx("LGPL-2.1-or-later"), License::LGPL21);
+        assert_eq!(License::from_spdx("LGPL-2.1+"), License::LGPL21);
     }
 
     #[test]

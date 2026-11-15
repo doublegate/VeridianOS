@@ -461,7 +461,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
        - [x] Keyrings core (ADR 0027 decision 28): add_key, request_key and keyctl through the
          shared `veridian-keys` crate; user, logon and keyring keys, the special and persistent
          keyrings, `/proc/keys`, `/proc/key-users`, `/proc/sys/kernel/keys`.
-       - [x] Landlock, ABI 11 (ADR 0028): the three calls, every filesystem, network and scope
+       - [x] Landlock, ABI 11 (ADR 0029): the three calls, every filesystem, network and scope
          check, through `cap::authority::holds_path` and `holds_net` and the shared
          `veridian-landlock` crate.
        - [ ] modify_ldt (x86_64): Linux's GDT layout, a per-mm LDT, selectors kept per thread,
@@ -513,7 +513,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
         (hook_unix_stream_connect, hook_unix_may_send): `security::landlock::may_reach` between
         the caller's domain and the domain recorded on the socket (`UnixSocket::landlock`),
         EPERM. The runtime test `landlock` has a tripwire that fails if abstract sockets work
-        without it (ADR 0028).
+        without it (ADR 0029).
       - [ ] With controlling terminals (TIOCSCTTY, TIOCNOTTY, the session's terminal; the pty
         and n_tty work): vhangup hangs the caller's controlling terminal up (tty_vhangup_self:
         its descriptors read end of file and write EIO, SIGHUP and SIGCONT to the session),
@@ -531,6 +531,14 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       The "at most 20 missing" target counts the calls still to be written; the `declined` ones
       (ENOSYS by decision, listed with reasons in the coverage reports) are counted apart, on the
       condition that each has a plan (item 18) (maintainer, 2026-11-14).
+      - [x] Licensing by component (ADR 0028, maintainer 2026-11-15, moved ahead of v0.28.0):
+        GPL-3.0-or-later with the user-space exception for the kernel, system servers and Linux
+        runtime, GPL-3.0-or-later for the driver and server framework, MIT OR Apache-2.0 for the
+        rest except vendored third-party files; the CLA and its workflow; `REUSE.toml` and
+        `reuse lint` in CI; `COMMERCIAL.md`.
+      - [ ] Before the tag: a licensing lawyer reviews the exception, the CLA and
+        `COMMERCIAL.md`; the release notes state the change (v0.27.0 and earlier stay MIT OR
+        Apache-2.0).
   18. [ ] (v0.29 onward) The declined calls, each brought in where it fits (maintainer, 2026-11-14:
       every declined call needs a plan to be written and integrated in a later release):
       - [ ] (v0.29) mbind, get_mempolicy, set_mempolicy, set_mempolicy_home_node, migrate_pages,

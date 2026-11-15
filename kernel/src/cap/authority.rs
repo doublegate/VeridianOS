@@ -527,7 +527,7 @@ pub fn sys_capability_drop(kind: usize, id: usize, rights: usize) -> crate::sysc
     drop_rights(&space, kind, id, rights).ok_or(crate::syscall::SyscallError::InvalidArgument)
 }
 
-/// The authority entry for the filesystem (ADR 0028): whether `domain`
+/// The authority entry for the filesystem (ADR 0029): whether `domain`
 /// holds the Landlock rights `access` on the object whose ancestry is
 /// `path`. EACCES if not, as Linux. The VFS and the system calls ask it
 /// where Linux's hooks are; v0.29's directory capabilities answer here too.
@@ -543,7 +543,7 @@ pub fn holds_path(
         .map_err(crate::security::landlock::to_kernel)
 }
 
-/// The authority entry for the network (ADR 0028): whether `domain` holds
+/// The authority entry for the network (ADR 0029): whether `domain` holds
 /// `access` on `port`. EACCES if not.
 #[cfg(feature = "alloc")]
 pub fn holds_net(

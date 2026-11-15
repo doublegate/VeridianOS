@@ -31,10 +31,11 @@ jobs:
     #  - pull_request: only from a branch in THIS repo. A FORK PR must never schedule
     #    work on the self-hosted host. This `if:` alone cannot ensure that: for a
     #    pull_request event GitHub runs the PR's own copy of this file, so a fork can
-    #    edit the condition away. The gate for forks is the repository setting that
-    #    requires approval for ALL external contributors (approval_policy =
-    #    all_external_contributors, .github/AGY-REVIEWER.md); GitHub's default covers
-    #    only first-time contributors.
+    #    edit the condition away, or add a workflow of its own aimed at the `agy` label.
+    #    The gate for forks is the repository setting that requires approval for ALL
+    #    external contributors (approval_policy = all_external_contributors, see
+    #    .github/AGY-REVIEWER.md); GitHub's default covers only first-time contributors.
+    #    (Adopted from VeridianOS, whose copy corrected this.)
     #  - issue_comment: only `/agy-review`, and the association test below is a CHEAP
     #    PRE-FILTER, not the permission gate. `author_association` answers "what is this
     #    person's relationship to the repo", not "may they run code on my workstation":
@@ -68,10 +69,10 @@ jobs:
     # for a large one handed over as a file. The cap must still exceed the
     # script's own worst case -- lock wait + every retry at its maximum timeout +
     # backoff -- or the job is killed mid-retry and posts nothing. With the
-    # settings below that is 300 + 2 x 900 + 15 = 2115 s, under 45 minutes with
+    # settings below that is 1200 + 2 x 900 + 15 = 3015 s, under 55 minutes with
     # room for checkout and the diff fetch; the selftest checks this sum against
     # this value.
-    timeout-minutes: 45
+    timeout-minutes: 55
     steps:
       # Check out the DEFAULT BRANCH, never the PR head. This job runs the checked-out
       # `scripts/agy-review.sh` on a self-hosted runner with a token in the environment,
@@ -132,14 +133,19 @@ jobs:
           # Two attempts, not three: a retry is for a transient backend error; a third
           # attempt at the same budget only repeats a timeout.
           AGY_RETRIES: "2"
-          AGY_LOCK_WAIT: "300"             # wait for another review's lock (default 600)
+          # Wait for another review's lock (script default 600). The lock is shared
+          # by every repository's reviewer on this machine, and one review can take
+          # up to 15 minutes, so 300 s failed whenever another repository's review
+          # was running (PR #48: two queued ahead of it). 1200 s covers one review
+          # in progress and most of a second.
+          AGY_LOCK_WAIT: "1200"
           # AGY_DIFF_MODE: auto            # auto|inline|file — how the diff reaches agy. `auto`
           #                                # (default) inlines a small diff and hands a large one to
           #                                # agy as a file, so PR size never truncates the review.
           # MAX_DIFF_BYTES: "5000000"      # sanity cap on a pathological diff (5 MB). Do NOT lower
           #                                # this to bound the review: it truncates the diff BEFORE the
           #                                # file handoff, so a low value defeats the large-PR path.
-          # MAX_PROMPT_BYTES: "125000"     # inline/file threshold + hard backstop on the argv prompt
+          # MAX_PROMPT_BYTES: "120000"     # inline/file threshold + hard backstop on the argv prompt
           # STYLE_GUIDE: .github/agy-review.md   # style guide, loaded if present
         run: |
           # The workflow and the scripts come from DIFFERENT REFS: for a `pull_request`

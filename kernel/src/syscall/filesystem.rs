@@ -1102,7 +1102,8 @@ pub fn sys_fallocate(fd: usize, mode: usize, offset: usize, len: usize) -> Sysca
     #[cfg(feature = "alloc")]
     {
         let flags = crate::fs::attr::of(&*file.node);
-        if mode as u32 & !1 != 0 && flags & crate::fs::attr::FS_APPEND_FL != 0
+        if mode as u32 & !crate::fs::falloc::KEEP_SIZE != 0
+            && flags & crate::fs::attr::FS_APPEND_FL != 0
             || flags & crate::fs::attr::FS_IMMUTABLE_FL != 0
         {
             return Err(SyscallError::OperationNotPermitted);
@@ -1161,7 +1162,7 @@ pub fn sys_rmdir(path: usize) -> SyscallResult {
 
 /// What the private mount and umount calls check: CAP_SYS_ADMIN and the
 /// mount namespace's object capability with MODIFY, as mount(2) does, and
-/// no Landlock filesystem domain (ADR 0028).
+/// no Landlock filesystem domain (ADR 0029).
 fn may_change_mounts() -> bool {
     #[cfg(feature = "alloc")]
     if crate::security::landlock::may_change_mounts().is_err() {
@@ -3277,6 +3278,12 @@ fn access_path(path: &str, mode: usize, flags: usize) -> SyscallResult {
         );
     if writes && mount.as_ref().is_some_and(|m| m.sb_readonly()) {
         return Err(SyscallError::ReadOnlyFilesystem);
+    }
+    // Nobody gets write access to an immutable node: EPERM, before the
+    // mode bits (inode_permission; PR #45 review).
+    #[cfg(feature = "alloc")]
+    if mode & 2 != 0 {
+        crate::fs::attr::may_write(&*node).map_err(super::map_kernel_error)?;
     }
     if !crate::fs::permission(&caller, &meta, mode as u32) {
         return Err(SyscallError::PermissionDenied);

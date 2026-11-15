@@ -1,4 +1,4 @@
-//! Landlock (ADR 0028): the kernel's side of `veridian-landlock`.
+//! Landlock (ADR 0029): the kernel's side of `veridian-landlock`.
 //!
 //! The crate holds the rulesets, the stacked domains and the access
 //! arithmetic. Here are what only the kernel has: the domain each thread is

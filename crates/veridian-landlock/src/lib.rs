@@ -1,7 +1,7 @@
 //! Landlock as Linux 7.3 defines it (`security/landlock/`, ABI 11): rulesets,
 //! the stacked domains made from them, and the access checks.
 //!
-//! The kernel (ADR 0028) and the user-space Linux runtime (Track M, linuxd)
+//! The kernel (ADR 0029) and the user-space Linux runtime (Track M, linuxd)
 //! share this crate, so a ruleset means the same thing on both sides of the
 //! move; v0.29's directory and network capabilities reuse its arithmetic.
 //! It is `no_std` (with `alloc`) and has no `unsafe`.

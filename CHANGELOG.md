@@ -2,6 +2,24 @@
 
 ### Changed
 
+- **Licensing by component** (ADR 0028, `LICENSING.md`), from this change on:
+  - the kernel, the system servers and the Linux runtime (the planned `crates/personality-linux`
+    included) are GPL-3.0-or-later (`COPYING`), with
+    the VeridianOS user-space exception: programs that use them only through system calls, IPC
+    protocols or the published user-space libraries are not covered;
+  - the driver and server framework (the server and driver libraries, the driver SDK, the ring
+    helpers, the server side of the interface definitions) is GPL-3.0-or-later without the
+    exception, so drivers and services built on it are GPL or take a commercial licence;
+  - everything else, including the ABI, libc and the client libraries, the other crates, the
+    tools, the tests and the documentation, stays MIT OR Apache-2.0.
+
+  v0.27.0 and every earlier commit remain MIT OR Apache-2.0. Contributions are made under a
+  Contributor Licence Agreement (`CLA.md`, checked on every pull request by the CLA workflow), so
+  the maintainer can offer commercial licences for the GPL parts (`COMMERCIAL.md`). `REUSE.toml`
+  maps every path to its licence, `LICENSES/` holds the texts, and `reuse lint` runs in CI
+  (REUSE 3.3 compliant). The vendored Linux syscall tables and the patches to other projects keep
+  their own licences.
+
 - The x86_64 conformance expected list (`tests/compat/expected-x86_64.tsv`) comes from a full run
   with the memory and files groups: LTP passes 845 of 1,552 tests (789 before), Open POSIX 1,786
   of 1,965 and libc-test 535 of 560, with no regression; 61 tests improved (the mlock, mseal,
@@ -110,7 +128,7 @@
   ID_VALID, SET_FLAGS and ADDFD ioctls, POLLHUP once no thread uses the filter. Filters are
   installed under the thread map (TSYNC also under the credential guard) and freed without
   recursion. Runtime tests seccomp and seccomp_notify.
-- Landlock (v0.28 item 5 system tier, ADR 0028): landlock_create_ruleset, landlock_add_rule and
+- Landlock (v0.28 item 5 system tier, ADR 0029): landlock_create_ruleset, landlock_add_rule and
   landlock_restrict_self as Linux 7.3, ABI 11 with errata 1 to 4, through the new shared
   `veridian-landlock` crate and one authority entry (`cap::authority::holds_path` and
   `holds_net`). Up to 16 stacked layers, kept across fork, clone and exec; TSYNC and
@@ -253,8 +271,8 @@
   Immutable stops every write, through an already-open descriptor too, and a write through a
   shared mapping is SIGBUS, and a refused write or truncate leaves the set-ID bits and file
   capabilities; append-only allows only appending writes through an O_APPEND descriptor
-  (RWF_NOAPPEND on one is EPERM). Both refuse unlink, rename, link, chmod, chown, set times and
-  xattr changes; noatime keeps reads from changing the access time (tmpfs, ramfs); nodump and
+  (RWF_NOAPPEND on one is EPERM). Both refuse unlink, rename, link, chmod, chown, set times,
+  xattr changes and a hole punched through a mapping (MADV_REMOVE); noatime keeps reads from changing the access time (tmpfs, ramfs); nodump and
   noatime pass to new files.
   cachestat reports the pages of a range that are cached and dirty: tmpfs and memfd pages, and
   BlockFS's block cache and mapping pages. Runtime test files_sched.
