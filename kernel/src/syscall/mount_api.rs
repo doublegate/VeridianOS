@@ -138,6 +138,27 @@ fn current_mnt_owner() -> Result<Arc<crate::process::userns::UserNs>, SyscallErr
     Ok(thread.namespaces().mnt.owner.clone())
 }
 
+/// [`may_mount`] for a change made through a filesystem context: MODIFY
+/// over the namespace the context was made in (`ns`), which is the caller's
+/// unless it has entered another since (PR #47 review).
+fn may_mount_in(ns: Option<&Arc<crate::process::ns::MntNs>>) -> Result<(), SyscallError> {
+    let Some(ns) = ns else {
+        return may_mount();
+    };
+    let mnt = crate::process::ns::NsRef::Mnt(ns.clone());
+    if !Caller::current().capable(CAP_SYS_ADMIN)
+        || !crate::cap::authority::current_holds_namespace(&mnt, crate::cap::Rights::MODIFY)
+    {
+        return Err(SyscallError::OperationNotPermitted);
+    }
+    Ok(())
+}
+
+/// The calling thread's mount namespace, recorded in a context it makes.
+fn caller_mnt_ns() -> Option<Arc<crate::process::ns::MntNs>> {
+    crate::process::current_thread().map(|t| t.namespaces().mnt.clone())
+}
+
 fn may_mount() -> Result<(), SyscallError> {
     if !Caller::current().capable(CAP_SYS_ADMIN)
         || !crate::cap::authority::current_may_change_mounts()
@@ -248,12 +269,15 @@ fn lookup_at(
         let path = file.path.clone().unwrap_or_default();
         // A detached tree's file, once the tree is attached, is where the
         // tree went.
+        // Its node as the mount shows it now (an idmap set since; PR #47
+        // review).
+        let node = super::filesystem::fd_node(&file);
         if path.starts_with(mount::DETACHED) {
             if let Ok((_, now)) = view.locate(&path, false) {
-                return Ok((file.node.clone(), now));
+                return Ok((node, now));
             }
         }
-        return Ok((file.node.clone(), path));
+        return Ok((node, path));
     }
     let abs = resolve_at_path(dirfd, &path)?;
     view.locate(&abs, follow).map_err(super::map_kernel_error)
@@ -288,10 +312,11 @@ pub fn sys_fsopen(fsname: usize, flags: usize) -> SyscallResult {
         return Err(SyscallError::NoDevice);
     }
     let caller = Caller::current();
-    let ctx = FsContext::new(
+    let mut ctx = FsContext::new(
         Purpose::New { ty: name },
         (caller.creds.fsuid, caller.creds.fsgid),
     );
+    ctx.ns = caller_mnt_ns();
     let file = File::new(Arc::new(FsContextNode::new(ctx)), OpenFlags::read_write());
     install(file, flags & FSOPEN_CLOEXEC != 0)
 }
@@ -383,9 +408,8 @@ fn create(ctx: &mut FsContext) -> SyscallResult {
     if ctx.phase != Phase::CreateParams {
         return Err(SyscallError::Busy);
     }
-    if !Caller::current().capable(CAP_SYS_ADMIN) {
-        return Err(SyscallError::OperationNotPermitted);
-    }
+    // CAP_SYS_ADMIN and MODIFY, as fsopen took (PR #47 review).
+    may_mount_in(ctx.ns.as_ref())?;
     match mount::new_filesystem(ctx.fs_type(), &ctx.options, ctx.owner) {
         Ok(fs) => {
             ctx.fs = Some(fs);
@@ -415,7 +439,7 @@ fn reconfigure(ctx: &mut FsContext) -> SyscallResult {
     // As every change to a mount: CAP_SYS_ADMIN, as Linux's
     // vfs_cmd_reconfigure checks, and MODIFY on the mount namespace, which
     // a caller may have dropped since fspick (PR #47 review).
-    if let Err(e) = may_mount() {
+    if let Err(e) = may_mount_in(ctx.ns.as_ref()) {
         ctx.phase = Phase::Failed;
         return Err(e);
     }
@@ -425,10 +449,9 @@ fn reconfigure(ctx: &mut FsContext) -> SyscallResult {
         Target::At { tree, mount, .. } => tree
             .point_of(mount)
             .map(|point| (tree.clone(), point, mount.clone())),
-        Target::Detached(id) => mount::detached_place(*id).and_then(|(tree, at)| {
-            let point = at.unwrap_or_else(|| String::from("/"));
-            let mount = tree.mount_at(&point)?;
-            Some((tree, point, mount))
+        Target::Detached { id, mount } => mount::detached_place(*id).and_then(|(tree, _)| {
+            let point = tree.point_of(mount)?;
+            Some((tree, point, mount.clone()))
         }),
     };
     let Some((tree, point, mount)) = place else {
@@ -436,7 +459,7 @@ fn reconfigure(ctx: &mut FsContext) -> SyscallResult {
         return Err(SyscallError::InvalidArgument);
     };
     let writers = || super::mount::writing_under(&point, &tree);
-    if let Err(e) = tree.reconfigure_mount(&mount, mount.flags(), ctx.sb_readonly, writers) {
+    if let Err(e) = tree.reconfigure_mount(&mount, None, ctx.sb_readonly, writers) {
         ctx.phase = Phase::Failed;
         return Err(mount_error(e));
     }
@@ -552,7 +575,8 @@ pub fn sys_fsmount(fs_fd: usize, flags: usize, attr_flags: usize) -> SyscallResu
         )
     } else {
         let id = mount::register_detached(&tree);
-        (Target::Detached(id), Some(id))
+        let mount = tree.mount_at("/").ok_or(SyscallError::InvalidArgument)?;
+        (Target::Detached { id, mount }, Some(id))
     };
     let ty = String::from(ctx.fs_type());
     ctx.purpose = Purpose::Reconfigure { ty, target };
@@ -593,7 +617,10 @@ pub fn sys_fspick(dfd: usize, path: usize, flags: usize) -> SyscallResult {
     let mount = tree.mount_at(&at).ok_or(SyscallError::InvalidArgument)?;
     let ty = String::from(mount::linux_fs_type(mount.fs().name()));
     let target = match id {
-        Some(id) if at == "/" => Target::Detached(id),
+        Some(id) if at == "/" => Target::Detached {
+            id,
+            mount: mount.clone(),
+        },
         _ => Target::At {
             tree,
             point: at,
@@ -601,10 +628,11 @@ pub fn sys_fspick(dfd: usize, path: usize, flags: usize) -> SyscallResult {
         },
     };
     let caller = Caller::current();
-    let ctx = FsContext::new(
+    let mut ctx = FsContext::new(
         Purpose::Reconfigure { ty, target },
         (caller.creds.fsuid, caller.creds.fsgid),
     );
+    ctx.ns = caller_mnt_ns();
     let file = File::new(Arc::new(FsContextNode::new(ctx)), OpenFlags::read_write());
     install(file, flags & FSPICK_CLOEXEC != 0)
 }
@@ -682,6 +710,8 @@ pub fn sys_move_mount(
                     mount::transferred(&from_tree, &to_tree, &to_at);
                 })
                 .map_err(mount_error)?;
+            // Its descriptors keep the tree its mounts are in now.
+            from_tree.hold(to_tree.clone());
         }
     }
     Ok(0)
@@ -1443,11 +1473,13 @@ fn list_ids(
     reverse: bool,
     nr: usize,
 ) -> Vec<u64> {
-    let parent_of = |id: u64| {
-        full.iter()
-            .find(|(_, i, _)| *i == id)
-            .map(|(p, _, up)| (p.as_str(), *up))
-    };
+    // Indexed once, so each step up is a lookup, not a search (PR #47
+    // review).
+    let index: alloc::collections::BTreeMap<u64, (&str, u64)> = full
+        .iter()
+        .map(|(p, id, up)| (*id, (p.as_str(), *up)))
+        .collect();
+    let parent_of = |id: u64| index.get(&id).copied();
     if parent_of(origin).is_none() {
         return Vec::new();
     }

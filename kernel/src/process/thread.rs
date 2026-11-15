@@ -75,15 +75,19 @@ impl core::fmt::Debug for DetachedPins {
 #[cfg(feature = "alloc")]
 impl ThreadFs {
     /// Hold the detached trees the working directory and root are in now,
-    /// and only those: called after either changes.
+    /// and only those: called after either changes. The pins' lock is held
+    /// while both are read and the pins replaced, so with CLONE_FS a call
+    /// that read older directories cannot overwrite a later call's pins:
+    /// each call publishes what is current when it holds the lock (PR #47
+    /// review). Lock order: pins, then cwd or root, never the other way.
     pub fn repin(&self) {
+        let mut pins = self.pins.0.lock();
         let paths = [self.cwd.lock().clone(), self.root.lock().clone()];
-        let pins = paths
+        *pins = paths
             .iter()
             .filter_map(|p| crate::fs::mount::parse_detached(p))
             .filter_map(|(id, _)| crate::fs::mount::detached_place(id).map(|(tree, _)| tree))
             .collect();
-        *self.pins.0.lock() = pins;
     }
 
     /// Create a new root filesystem state with cwd="/" and umask=0o022.
@@ -136,12 +140,16 @@ impl ThreadFs {
     /// Creates a new independent `ThreadFs` with the same cwd and umask
     /// values. Subsequent changes in either thread are isolated.
     pub fn clone_copy(src: &Arc<Self>) -> Arc<Self> {
+        // The directories and the pins for them as one snapshot ([`repin`]'s
+        // lock order).
+        let pins = src.pins.0.lock();
+        let (cwd, root) = (src.cwd.lock().clone(), src.root.lock().clone());
         Arc::new(Self {
-            cwd: Mutex::new(src.cwd.lock().clone()),
-            root: Mutex::new(src.root.lock().clone()),
+            cwd: Mutex::new(cwd),
+            root: Mutex::new(root),
             umask: AtomicU32::new(src.umask.load(Ordering::Acquire)),
             users: AtomicUsize::new(0),
-            pins: DetachedPins(Mutex::new(src.pins.0.lock().clone())),
+            pins: DetachedPins(Mutex::new(pins.clone())),
         })
     }
 }

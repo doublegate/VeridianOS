@@ -2182,10 +2182,10 @@ impl Vfs {
                 ctx.creds.clone(),
                 ctx.resolve,
             )?;
-            if Arc::ptr_eq(&tree, &ctx.mounts) {
-                return Ok((node, canon));
-            }
-            // Another namespace's tree: still named by the id.
+            // Named by the id still, in whichever tree it is now, as the
+            // stored root is: cwd and the paths the caller keeps are relative
+            // to that root, so mixing the forms would double them (PR #47
+            // review).
             if !path_is_under(&canon, &point) {
                 return Err(gone());
             }

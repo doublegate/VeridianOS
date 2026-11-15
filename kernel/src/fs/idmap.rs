@@ -142,7 +142,7 @@ impl IdmappedNode {
         };
         let root = match (v.len(), v.get(3)) {
             (24, Some(0x03)) => u32::from_le_bytes([v[20], v[21], v[22], v[23]]),
-            (20, Some(0x02)) => 0,
+            (20, Some(0x02)) | (12, Some(0x01)) => 0,
             _ => return Ok(()),
         };
         let mapped = to(root).ok_or(KernelError::InvalidArgument {
@@ -150,7 +150,9 @@ impl IdmappedNode {
             value: "a root the mount's idmap does not map",
         })?;
         let effective = v[0] & 0x01;
-        let mut new = Vec::from(&v[..20]);
+        // A v1 value has only the low words; the high ones are 0.
+        let mut new = Vec::from(&v[..v.len().min(20)]);
+        new.resize(20, 0);
         new[0..4].copy_from_slice(&(0x0300_0000u32 | u32::from(effective)).to_le_bytes());
         new.extend_from_slice(&mapped.to_le_bytes());
         set.set(xattr::XATTR_NAME_CAPS, &new, 0)
@@ -574,6 +576,12 @@ mod tests {
         assert_eq!(caps(&f), Some(v3(100000)));
         let off = MntIdmap::of(&ns(b"1 100001 999\n"));
         assert_eq!(caps(&view(real.clone(), &off)), Some(v3(NO_ID)));
+        // A stored v1 value (12 bytes, root 0 too; Linux reads it but no
+        // longer writes it) is shifted the same way, as a v3 whose high
+        // words are 0 (PR #47 review).
+        let v1 = [0x01, 0x00, 0x00, 0x01, 1, 0, 0, 0, 0, 0, 0, 0];
+        store(&v1);
+        assert_eq!(caps(&f), Some(v3(100000)));
         // A v2 written through a view is a v3 with root 0 shifted back
         // (cap_convert_nscap keeps v2 only on a mount with no idmap); EINVAL
         // when the map does not reach 0.

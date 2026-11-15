@@ -423,12 +423,9 @@ What remains:
   idmapped mounts are offered on tmpfs, ramfs and BlockFS only (Linux has more filesystems with
   FS_ALLOW_IDMAP), every superblock's own user namespace is the initial one, and a file
   capability's root ID is mapped but no POSIX ACLs exist to map; a
-  detached tree's files are named by the tree's
-  id instead of a path (`fs::mount::DETACHED`), so making one of its mounts read-only is not
-  EBUSY while a file in it is open for writing; a descriptor of an attached tree follows it
-  through move_mount and MS_MOVE, but not through pivot_root; a working directory inside a
-  detached tree does not keep the tree (an open file in it does, as on Linux), so once its last
-  file is closed relative lookups from that directory are ENOENT. The VFS
+  detached tree's files are named by the tree's id instead of a path (`fs::mount::DETACHED`),
+  and a descriptor of an attached tree follows it through move_mount and MS_MOVE, but not
+  through pivot_root. The VFS
   finds open files by path, so a descriptor opened in another mount namespace is looked up by
   its path in the caller's (for fstat's mount id, fchdir and the like) once the two trees
   differ, and sync(2) flushes the filesystems of the initial namespace only. The mount flags are

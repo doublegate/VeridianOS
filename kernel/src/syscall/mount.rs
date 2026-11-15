@@ -298,6 +298,12 @@ fn move_fs_refs(tree: &Arc<mount::Mounts>, root: &str, new: &str, old: &str) {
             // failfs is in no mount: a failfs root or working directory
             // stays; under a failfs root the working directory is a whole
             // path already (PR #44 review).
+            // A root in a detached tree is no path of this namespace: the
+            // pivot leaves it, and the working directory seen from it, as
+            // they are (PR #47 review).
+            if mount::is_detached_path(&had_root) {
+                continue;
+            }
             if had_root == crate::fs::FAILFS_ROOT {
                 if had_cwd != crate::fs::FAILFS_ROOT {
                     let cwd = crate::fs::normalize_path(&had_cwd, "/");

@@ -698,6 +698,10 @@ pub struct Mounts {
     /// check the other's change makes false, such as two maps installed on
     /// a mount without REPLACE (PR #47 review). Lookups never take it.
     attrs: Mutex<()>,
+    /// Trees this one keeps alive: once its mounts went into another tree
+    /// (it was attached), that tree, so a descriptor or directory still
+    /// naming this one keeps the place its files are now (PR #47 review).
+    holds: Mutex<Vec<Arc<Mounts>>>,
 }
 
 impl core::fmt::Debug for Mounts {
@@ -723,6 +727,7 @@ impl Mounts {
             table: RwLock::new(Arc::new(table)),
             pool,
             attrs: Mutex::new(()),
+            holds: Mutex::new(Vec::new()),
         }
     }
 
@@ -1161,6 +1166,13 @@ impl Mounts {
         Ok(Self::with_table(table, self.pool.clone()))
     }
 
+    /// Keep `tree` alive as long as this one ([`Mounts::holds`]): called on
+    /// a detached tree emptied into `tree`. No cycle can form, as an emptied
+    /// tree has no root and so nothing can be attached into it.
+    pub fn hold(&self, tree: Arc<Mounts>) {
+        self.holds.lock().push(tree);
+    }
+
     /// Whether this tree has a root mount: a detached tree loses it when
     /// it is attached ([`Mounts::attach_tree`]).
     pub fn has_root(&self) -> bool {
@@ -1175,7 +1187,10 @@ impl Mounts {
     /// Whether anything is mounted under the mount point `point`
     /// (Linux's __has_children for the mount there).
     pub fn has_submounts(&self, point: &str) -> bool {
-        !self.snapshot().under(point).is_empty()
+        let t = self.snapshot();
+        // An old root parked at or under it is a child mount in Linux (PR
+        // #47 review).
+        !t.under(point).is_empty() || t.parked.keys().any(|p| path_is_under(p, point))
     }
 
     /// The mount point serving canonical `path`.
@@ -1210,17 +1225,31 @@ impl Mounts {
         static ATTACH: Mutex<()> = Mutex::new(());
         let _serial = ATTACH.lock();
         tree.update(|d| {
-            let root = d.root.clone().ok_or(MountError::Invalid)?;
-            if to_is_dir != (root.root.node_type() == NodeType::Directory) {
+            d.root.as_ref().ok_or(MountError::Invalid)?;
+            // The whole stack at its root, bottom first: the tree's root
+            // mount and what is mounted on it (PR #47 review).
+            let mut stack = d.stack("/").into_iter();
+            let bottom = stack.next().ok_or(MountError::Invalid)?;
+            if to_is_dir != (bottom.root.node_type() == NodeType::Directory) {
                 return Err(MountError::Invalid);
             }
             self.update(|t| {
-                t.attach(to, to_is_dir, root)?;
+                t.attach(to, to_is_dir, bottom)?;
+                for m in stack {
+                    t.push(to, m);
+                }
                 for path in d.mounts.keys() {
                     let at = rebase(path, "/", to);
                     for m in d.stack(path) {
                         t.push(&at, m);
                     }
+                }
+                // Old roots parked in it go too, locks and all.
+                for (path, trees) in &d.parked {
+                    t.parked
+                        .entry(rebase(path, "/", to))
+                        .or_default()
+                        .extend(trees.iter().cloned());
                 }
                 after();
                 Ok(())
@@ -1277,6 +1306,17 @@ impl Mounts {
             for path in table.under(point) {
                 for m in table.stack(&path) {
                     targets.push((path.clone(), m));
+                }
+            }
+            // Old roots parked at or under it are child mounts in Linux,
+            // which the recursive walk reaches too (PR #47 review).
+            for (path, trees) in &table.parked {
+                if path_is_under(path, point) {
+                    for tree in trees {
+                        for m in tree.every_mount() {
+                            targets.push((path.clone(), m));
+                        }
+                    }
                 }
             }
         }
@@ -1455,7 +1495,7 @@ impl Mounts {
         writers: impl FnOnce() -> bool,
     ) -> Result<(), MountError> {
         let mount = self.mount_at(point).ok_or(MountError::Invalid)?;
-        self.reconfigure_mount(&mount, mnt, sb_readonly, writers)
+        self.reconfigure_mount(&mount, Some(mnt), sb_readonly, writers)
     }
 
     /// Where `mount` is in this tree now: the place of its stack, "/" for
@@ -1471,14 +1511,19 @@ impl Mounts {
 
     /// [`Mounts::reconfigure`] of `mount` itself, wherever it is (fspick's
     /// context holds the mount it picked, as Linux's holds its superblock).
+    /// `mnt` None keeps the mount's flags as they are when the change is
+    /// made, read under the attribute lock, so a concurrent mount_setattr
+    /// is not undone (fsconfig's reconfigure changes only the superblock;
+    /// PR #47 review).
     pub fn reconfigure_mount(
         &self,
         mount: &Arc<Mount>,
-        mnt: u32,
+        mnt: Option<u32>,
         sb_readonly: Option<bool>,
         writers: impl FnOnce() -> bool,
     ) -> Result<(), MountError> {
         let _attrs = self.attrs.lock();
+        let mnt = mnt.unwrap_or_else(|| mount.flags());
         // A locked flag stays (do_reconfigure_mnt, do_remount): EPERM.
         if !mount.keeps_locked_flags(mnt) {
             return Err(MountError::Perm);
@@ -1727,6 +1772,19 @@ impl MountTable {
                 parent = tree.root.as_ref().map_or(parent, |m| m.ids.id);
             }
         }
+    }
+
+    /// Every mount in this tree: the stacks at "/" and at each mount point,
+    /// and those of the trees parked in it.
+    fn every_mount(&self) -> Vec<Arc<Mount>> {
+        let mut out = self.stack("/");
+        for path in self.mounts.keys() {
+            out.extend(self.stack(path));
+        }
+        for tree in self.parked.values().flatten() {
+            out.extend(tree.every_mount());
+        }
+        out
     }
 
     /// How many parked levels this tree is: 1, and 1 more for the deepest
@@ -2511,10 +2569,16 @@ mod tests {
         t.attach_tree(&rw, "/c", true).unwrap();
         mark_attached(rid, t, "/c");
         let canon = |path: &str, cwd: &str| vfs.lookup(&jailed, path, cwd, true).map(|(_, c)| c);
-        assert_eq!(canon("/x", "/"), Ok(String::from("/c/in/x")));
-        assert_eq!(canon("x", "/"), Ok(String::from("/c/in/x")));
-        assert_eq!(canon("/", "/"), Ok(String::from("/c/in")));
-        assert_eq!(canon("/../..", "/"), Ok(String::from("/c/in")));
+        // Still named as the root is, so a working directory taken from
+        // the answer stays relative to it.
+        assert_eq!(canon("/x", "/"), Ok(detached_path(rid, "/in/x")));
+        assert_eq!(canon("x", "/"), Ok(detached_path(rid, "/in/x")));
+        assert_eq!(canon("/", "/"), Ok(detached_path(rid, "/in")));
+        assert_eq!(canon("/../..", "/"), Ok(detached_path(rid, "/in")));
+        assert_eq!(
+            crate::fs::root_relative(&canon("/", "/").unwrap(), &jailed.root),
+            "/"
+        );
 
         // Tree `inner` attached in `outer`, then `outer` into the namespace:
         // `inner`'s paths follow.
@@ -3029,6 +3093,106 @@ mod tests {
         );
     }
 
+    /// Attaching a detached tree moves all of it, as Linux's move_mount
+    /// moves a mount with every child: what is stacked on its root, and the
+    /// old roots parked in it, locks and all; a parked root also counts as
+    /// a submount (PR #47 review).
+    #[test]
+    fn attaching_a_tree_moves_its_stack_and_parked_roots() {
+        let vfs = Vfs::new();
+        vfs.mount_root(Arc::new(RamFs::new())).unwrap();
+        let root = vfs.root_fs().unwrap().root();
+        root.mkdir("b", crate::fs::Permissions::default()).unwrap();
+        root.mkdir("d", crate::fs::Permissions::default()).unwrap();
+        vfs.mount("/c".into(), tmpfs()).unwrap();
+        vfs.mount("/c/new".into(), tmpfs()).unwrap();
+        let t = vfs.mounts();
+        t.pivot_root("/c", "/c/new", "/c/new").unwrap();
+        // Only the parked old root is on /c.
+        assert!(t.has_submounts("/c"));
+        let copy = t.copy(false, true);
+        let count = |m: &Mounts| m.render_mountinfo("/").lines().count();
+        let clone = copy
+            .detached_clone("/c", vfs.resolve_path("/c").unwrap(), true)
+            .unwrap();
+        assert_eq!(count(&clone), 2);
+        let before = count(&copy);
+        copy.attach_tree(&clone, "/b", true).unwrap();
+        assert_eq!(count(&copy), before + 2);
+        let detach = Umount {
+            detach: true,
+            ..Umount::default()
+        };
+        assert_eq!(
+            copy.umount("/b", detach, "/", false),
+            Err(MountError::Invalid)
+        );
+
+        // A tree with another stacked on its root: both go.
+        let lower = t.detached_new(tmpfs(), "lower".into(), 0, false);
+        let upper = t.detached_new(tmpfs(), "upper".into(), 0, false);
+        lower.attach_tree(&upper, "/", true).unwrap();
+        t.attach_tree(&lower, "/d", true).unwrap();
+        let stack = t.snapshot().stack("/d");
+        let sources: Vec<&str> = stack.iter().map(|m| m.source.as_str()).collect();
+        assert_eq!(sources, ["lower", "upper"]);
+    }
+
+    /// A recursive mount_setattr reaches old roots parked under the place,
+    /// and their locks hold it back as any locked mount's (PR #47 review).
+    #[test]
+    fn recursive_setattr_reaches_parked_roots() {
+        let vfs = Vfs::new();
+        vfs.mount_root(Arc::new(RamFs::new())).unwrap();
+        vfs.mount("/c".into(), tmpfs()).unwrap();
+        vfs.mount("/c/new".into(), tmpfs()).unwrap();
+        let t = vfs.mounts();
+        let old = t.mount_at("/c").unwrap();
+        t.pivot_root("/c", "/c/new", "/c/new").unwrap();
+        t.setattr("/", flags::NOSUID, 0, None, true, |_| false)
+            .unwrap();
+        assert!(old.has(flags::NOSUID));
+        // In a locked copy the parked root's flags are locked (NOSUID now).
+        let copy = t.copy(false, true);
+        assert_eq!(
+            copy.setattr("/", 0, flags::NOSUID, None, true, |_| false),
+            Err(MountError::Perm)
+        );
+    }
+
+    /// A detached tree attached into another keeps that one alive: its
+    /// descriptors still name it, and through the registry the place its
+    /// files are now (PR #47 review).
+    #[test]
+    fn an_attached_tree_keeps_the_tree_it_went_into() {
+        let vfs = work_tree();
+        let t = vfs.mounts();
+        let outer = Arc::new(t.detached_new(tmpfs(), "outer".into(), 0, false));
+        let oid = register_detached(&outer);
+        vfs.lookup(&vfs.kernel_context(), &detached_path(oid, "/"), "/", true)
+            .unwrap()
+            .0
+            .mkdir("m", crate::fs::Permissions::default())
+            .unwrap();
+        let inner = Arc::new(t.detached_new(tmpfs(), "inner".into(), 0, false));
+        let iid = register_detached(&inner);
+        outer
+            .attach_tree_then(&inner, "/m", true, || {
+                mark_attached(iid, &outer, "/m");
+                transferred(&inner, &outer, "/m");
+            })
+            .unwrap();
+        inner.hold(outer.clone());
+        drop(outer);
+        assert!(detached_place(oid).is_some());
+        assert_eq!(
+            detached_place(iid).map(|(_, p)| p),
+            Some(Some(String::from("/m")))
+        );
+        drop(inner);
+        assert!(detached_place(oid).is_none());
+    }
+
     /// A mount stacked on the namespace root: Linux's root mount, which
     /// lock_mnt_tree leaves unlocked, is the bottom one; the one on top is
     /// a child and locked, so the copy cannot uncover the root.
@@ -3063,7 +3227,7 @@ mod tests {
         t.attach_new("/b", true, tmpfs(), "other".into(), flags::RELATIME, false)
             .unwrap();
         assert_eq!(t.point_of(&picked).as_deref(), Some("/c"));
-        t.reconfigure_mount(&picked, picked.flags(), Some(true), || false)
+        t.reconfigure_mount(&picked, None, Some(true), || false)
             .unwrap();
         assert!(t.mount_at("/c").unwrap().sb_readonly());
         assert!(!t.mount_at("/b").unwrap().sb_readonly());

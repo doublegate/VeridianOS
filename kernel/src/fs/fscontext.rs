@@ -62,9 +62,12 @@ pub enum Target {
         point: String,
         mount: Arc<super::mount::Mount>,
     },
-    /// The root of the detached tree with this id, wherever it is now
-    /// (`mount::detached_place`).
-    Detached(u64),
+    /// `mount`, the root of the detached tree with this id, wherever that
+    /// tree is now (`mount::detached_place`).
+    Detached {
+        id: u64,
+        mount: Arc<super::mount::Mount>,
+    },
 }
 
 /// A parameter's value, as fsconfig passes it.
@@ -92,6 +95,10 @@ pub struct FsContext {
     pub fs: Option<Arc<dyn Filesystem>>,
     /// Who opened the context: a new filesystem's root is theirs.
     pub owner: (u32, u32),
+    /// The mount namespace the context was made in (fsopen, fspick). Its
+    /// changes need MODIFY over that namespace, whichever namespace the
+    /// caller is in when it makes them (PR #47 review).
+    pub ns: Option<Arc<crate::process::ns::MntNs>>,
     log: VecDeque<String>,
 }
 
@@ -110,6 +117,7 @@ impl FsContext {
             sb_readonly: None,
             fs: None,
             owner,
+            ns: None,
             log: VecDeque::new(),
         }
     }
