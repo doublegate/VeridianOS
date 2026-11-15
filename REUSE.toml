@@ -38,6 +38,21 @@ precedence = "closest"
 SPDX-FileCopyrightText = "2025-2026 DoubleGate and the VeridianOS contributors"
 SPDX-License-Identifier = "GPL-3.0-or-later AND LicenseRef-VeridianOS-syscall-exception"
 
+# The driver and server framework: under the GPL without the exception, so
+# a driver or system server built on it is GPL too, or takes a commercial
+# licence (ADR 0028 decision 1a). Client-side libraries stay permissive.
+[[annotations]]
+path = [
+    "crates/server-framework/**",
+    "crates/veridian-driver/**",
+    "crates/veridian-ring/**",
+    "crates/*-server/**",
+    "userland/server-framework/**",
+]
+precedence = "closest"
+SPDX-FileCopyrightText = "2025-2026 DoubleGate and the VeridianOS contributors"
+SPDX-License-Identifier = "GPL-3.0-or-later"
+
 # Linux's system call tables, vendored unchanged (their own header names the
 # deprecated identifier "GPL-2.0", which is GPL-2.0-only).
 [[annotations]]

@@ -6,8 +6,11 @@
   - the kernel, the system servers and the Linux runtime are GPL-3.0-or-later (`COPYING`), with
     the VeridianOS user-space exception: programs that use them only through system calls, IPC
     protocols or the published user-space libraries are not covered;
-  - everything else, including the ABI, libc, the crates, the tools, the tests and the
-    documentation, stays MIT OR Apache-2.0.
+  - the driver and server framework (the server and driver libraries, the driver SDK, the ring
+    helpers, the server side of the interface definitions) is GPL-3.0-or-later without the
+    exception, so drivers and services built on it are GPL or take a commercial licence;
+  - everything else, including the ABI, libc and the client libraries, the other crates, the
+    tools, the tests and the documentation, stays MIT OR Apache-2.0.
 
   v0.27.0 and every earlier commit remain MIT OR Apache-2.0. Contributions are made under a
   Contributor Licence Agreement (`CLA.md`, checked on every pull request by the CLA workflow), so

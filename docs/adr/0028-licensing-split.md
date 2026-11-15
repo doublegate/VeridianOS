@@ -33,9 +33,15 @@ On `main` the human author of every commit is the maintainer, with AI co-authors
      - Its termination cure.
      - It accepts the Apache-2.0 code the project already has. GPL-2.0 does not.
    - **"Or later"** follows the FSF's recommendation, so a future GPL can apply. The maintainer, who holds the copyright and the CLA rights, can choose differently for later releases.
-   - **The exception** states that a program using the kernel or servers only through system calls, IPC protocols, or the published user-space headers and libraries is not a work based on them. This covers unmodified Linux programs and separate driver servers. Code linked into or loaded into the kernel is not covered, nor are modifications.
+   - **The exception** states that a program using the kernel or servers only as a client (through system calls, as a client of their IPC protocols, or through the published user-space headers and client libraries) is not a work based on them. This covers applications and unmodified Linux programs. Code linked into or loaded into the kernel is not covered, nor are modifications, nor programs built on the driver and server framework (decision 1a).
 
-2. **Everything that others build against, or that is not part of the trusted base, stays MIT OR Apache-2.0:**
+1a. **The driver and server framework is GPL-3.0-or-later without the exception** (maintainer, 2026-11-15, in place of covering separate drivers and servers by the exception). This means the server and driver libraries, the driver SDK, the ring helpers and the server side of the interface definitions: `crates/server-framework/`, `crates/veridian-driver/`, `crates/veridian-ring/`, `crates/*-server/`, `userland/server-framework/`, and the server stubs the IDL compiler generates.
+   - The exception covers only programs that use the system as clients, and says that programs built on the framework are outside it.
+   - So a driver or system service built with the framework is GPL, or takes a commercial licence.
+   - One written entirely without the framework is an independent program. No licence can reach it, as Linux's cannot reach a user-space driver written from scratch.
+   - The client side (`veridian-rt`'s client parts, client stubs, libc) stays permissive.
+
+2. **Everything that others build against as clients, or that is not part of the trusted base, stays MIT OR Apache-2.0:**
    - `abi/` (the generated syscall numbers among it);
    - `userland/libc`, `libm`, `ld-veridian`, `libcurses`, `libwayland`, `rust-std`;
    - `crates/` (`veridian-cbpf`, `veridian-landlock`, `veridian-keys`, and from v0.29 `abi-linux`, `personality-linux`, `veridian-rt` and the IDL);
@@ -66,7 +72,8 @@ On `main` the human author of every commit is the maintainer, with AI co-authors
 
 **What this gives:**
 - A closed, modified VeridianOS kernel can no longer be shipped under the public licence: changes to the GPL parts must be published with the binaries, and devices must allow modified versions to be installed.
-- Applications, Linux programs, driver servers and other projects stay free to use VeridianOS's interfaces and crates under permissive terms, so the system does not frighten off application or hardware vendors.
+- Applications, Linux programs and other projects stay free to use VeridianOS's interfaces and client libraries under permissive terms, so the system does not frighten off application vendors.
+- Hardware vendors who build drivers with the project's framework publish them under the GPL or take a commercial licence. That is stricter for them than Linux's free user-space drivers, which is the point: the commercial licence has something to sell beyond kernel changes.
 - The maintainer can sell licences to vendors who cannot accept the GPL.
 
 **What it costs:**

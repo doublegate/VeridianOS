@@ -311,8 +311,9 @@ Contributions are welcome. Please see the [Contributing Guide](CONTRIBUTING.md) 
 VeridianOS is licensed by component ([LICENSING.md](LICENSING.md), ADR 0028):
 
 - **The kernel, the system servers and the Linux runtime:** GPL-3.0-or-later ([COPYING](COPYING))
-  with the VeridianOS user-space exception: programs using them through system calls, IPC or
-  the published libraries are not covered by the GPL.
+  with the VeridianOS user-space exception: applications and Linux programs using them as
+  clients are not covered by the GPL. The driver and server framework is GPL without the
+  exception, so drivers and services built on it are GPL or take a commercial licence.
 - **Everything else**, including the ABI, libc, the crates, the tools and the documentation:
   MIT ([LICENSE-MIT](LICENSE-MIT)) or Apache-2.0 ([LICENSE-APACHE](LICENSE-APACHE)), at your
   option.

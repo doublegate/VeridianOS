@@ -9,15 +9,20 @@ VeridianOS is licensed by component (ADR 0028), as of the commit that adds this 
 | Component | Licence | Paths |
 |---|---|---|
 | The kernel, the system servers, the Linux runtime | **GPL-3.0-or-later** with the [VeridianOS user-space exception](LICENSES/LicenseRef-VeridianOS-syscall-exception.txt) | `kernel/`, `userland/init/`; as they are created, `servers/`, `drivers/`, `userland/servers/`, `userland/linuxd/`, `userland/vinit/` |
-| Everything programs and other projects build against, and everything outside the trusted base | **MIT OR Apache-2.0**, at your option | everything else, notably `abi/`, `userland/libc`, `libm`, `ld-veridian`, `libcurses`, `libwayland`, `rust-std`, `crates/`, the user programs, the tools, the tests, the build system and the documentation |
+| The driver and server framework: the server and driver libraries, the driver SDK, the ring helpers, the server side of the interface definitions | **GPL-3.0-or-later**, without the exception | `crates/server-framework/`, `crates/veridian-driver/`, `crates/veridian-ring/`, `crates/*-server/`, `userland/server-framework/`, as they are created; server stubs the IDL compiler generates carry this licence |
+| Everything programs and other projects build against as clients, and everything outside the trusted base | **MIT OR Apache-2.0**, at your option | everything else, notably `abi/`, `userland/libc`, `libm`, `ld-veridian`, `libcurses`, `libwayland`, `rust-std`, `crates/`, the user programs, the tools, the tests, the build system and the documentation |
 
-**What the exception means.** A program that uses the kernel or servers only through their system calls (native or Linux), their IPC protocols, or the published user-space headers and libraries is not a work based on them. Its licence is its own. That holds for an ordinary application, an unmodified Linux program, and a separate driver or service process. The GPL does apply in full to:
+**What the exception means.** A program that uses the kernel or servers only as a client, through their system calls (native or Linux), as a client of their IPC protocols, or through the published user-space headers and client libraries, is not a work based on them. Its licence is its own. That holds for an ordinary application and for an unmodified Linux program. The GPL does apply in full to:
 - changes to the kernel or the servers;
-- code linked or loaded into them.
+- code linked or loaded into them;
+- drivers and system servers built on the project's driver and server framework, which is GPL without the exception.
+
+**Drivers and services.** A driver or system service built with VeridianOS's framework is GPL-3.0-or-later, or needs a [commercial licence](COMMERCIAL.md). One written entirely without the framework, against the documented protocols alone, is an independent program, as any program is; no licence can reach it, and the exception does not need to.
 
 **Why the split.**
 - Copyleft on the kernel and servers stops closed, modified versions being shipped. GPL-3.0's terms add a patent licence, and require that devices let their owners install modified versions.
-- The interfaces, the libraries and the crates stay permissive, so applications, vendors and other projects can use them freely.
+- Copyleft on the driver and server framework means closed drivers and services built with the project's work need a commercial licence.
+- The interfaces, the client libraries and the other crates stay permissive, so applications and other projects can use them freely.
 
 **Root files:**
 - `COPYING` is the GPL-3.0 text, for the copyleft parts.

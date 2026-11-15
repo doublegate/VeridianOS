@@ -2,7 +2,8 @@
 
 VeridianOS's kernel, system servers and Linux runtime are licensed under GPL-3.0-or-later with the VeridianOS user-space exception (see [LICENSING.md](LICENSING.md)). The GPL requires anyone who distributes modified versions of them to publish the source of those modifications, and, for devices, to let owners install modified versions.
 
-If those terms do not fit your product, the maintainer offers **commercial licences** for these parts. Some cases where one helps:
+If those terms do not fit your product, the maintainer offers **commercial licences** for these parts. Some cases where one is needed:
+- a closed driver or system service built with VeridianOS's driver and server framework (the server and driver libraries, the driver SDK, the ring helpers, the server side of the interface definitions), which is GPL-3.0-or-later;
 - a device or product built on a modified VeridianOS kernel or servers whose changes cannot be published;
 - a locked-down device that cannot allow modified versions to be installed;
 - combining VeridianOS kernel code with code under terms incompatible with the GPL;
@@ -12,7 +13,7 @@ Commercial licences are agreed case by case.
 
 What does **not** need one:
 - running applications on VeridianOS, including unmodified Linux programs;
-- writing drivers or servers that talk to the kernel only through its system calls and IPC protocols (the user-space exception);
+- running a program that uses VeridianOS only as a client, through its system calls, IPC as a client, or its client libraries (the user-space exception);
 - using the permissively licensed parts (the ABI, libc, crates, tools) under MIT or Apache-2.0.
 
 **Contact:** open an issue titled "Commercial licensing enquiry" at https://github.com/doublegate/VeridianOS/issues (it can be brief; details are then taken off the public tracker), or use the contact details on the maintainer's GitHub profile, https://github.com/doublegate.
