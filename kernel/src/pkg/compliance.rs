@@ -139,11 +139,19 @@ pub fn detect_license(text: &str) -> License {
             // notice in its "How to Apply These Terms" appendix, so the
             // notice counts only before the appendix and only in its own
             // wording.
-            let notice = lower
+            // Wrapped lines and comment marks ("*", "//", "#") are
+            // collapsed first, as source headers carry the notice.
+            let before = lower
                 .split("how to apply these terms")
                 .next()
                 .unwrap_or(&lower);
-            if notice.contains("(at your option) any later version")
+            let notice: Vec<&str> = before
+                .split_whitespace()
+                .filter(|w| !matches!(*w, "*" | "//" | "#" | "/*" | "*/" | ";" | "--"))
+                .collect();
+            if notice
+                .join(" ")
+                .contains("(at your option) any later version")
                 || lower.contains("gpl-2.0-or-later")
                 || lower.contains("gpl-2.0+")
             {
@@ -241,8 +249,10 @@ impl LicenseCompatibility {
     /// - Proprietary is incompatible with GPL2, GPL3, and LGPL21.
     /// - GPL3 is incompatible with GPL2 (GPL2-only cannot upgrade to GPL3);
     ///   GPL2OrLater combines with both.
-    /// - Permissive licenses (MIT, BSD, ISC, Apache2) are compatible with
-    ///   everything except Proprietary.
+    /// - Apache2 is incompatible with GPL2 (GPL-2.0-only), and compatible with
+    ///   GPL2OrLater and GPL3.
+    /// - Permissive licenses (MIT, BSD, ISC, Apache2) are otherwise compatible
+    ///   with everything except Proprietary.
     /// - Unknown licenses are treated as compatible (best-effort).
     pub fn is_compatible(a: &License, b: &License) -> bool {
         // Unknown is treated as compatible (best-effort)
@@ -267,6 +277,15 @@ impl LicenseCompatibility {
         // GPL3 is incompatible with GPL2-only
         if (*a == License::GPL3 && *b == License::GPL2)
             || (*a == License::GPL2 && *b == License::GPL3)
+        {
+            return false;
+        }
+
+        // GPL-2.0-only forbids further restrictions, and Apache-2.0's patent
+        // termination and indemnity terms are such restrictions (FSF licence
+        // list). GPL-3.0, and so GPL-2.0-or-later, accepts them.
+        if (*a == License::GPL2 && *b == License::Apache2)
+            || (*a == License::Apache2 && *b == License::GPL2)
         {
             return false;
         }
@@ -607,6 +626,41 @@ mod tests {
             detect_license("GNU General Public License, version 2 only"),
             License::GPL2
         );
+    }
+
+    #[test]
+    fn test_detect_wrapped_gpl2_or_later_notice() {
+        // The notice as source headers carry it: wrapped, behind comment marks.
+        let header = " * This program is free software; you can redistribute it and/or\n * modify \
+                      it under the terms of the GNU General Public License\n * as published by \
+                      the Free Software Foundation; either version 2\n * of the License, or (at \
+                      your option)\n * any later version.\n";
+        assert_eq!(detect_license(header), License::GPL2OrLater);
+        let slashes = "// either version 2 of the GNU General Public License, or (at\n// your \
+                       option) any later version.";
+        assert_eq!(detect_license(slashes), License::GPL2OrLater);
+    }
+
+    #[test]
+    fn test_gpl2_only_and_apache2_are_incompatible() {
+        // Apache-2.0's patent and indemnity terms are further restrictions
+        // GPL-2.0 forbids; GPL-3.0 accepts them, so "or later" combines.
+        assert!(!LicenseCompatibility::is_compatible(
+            &License::GPL2,
+            &License::Apache2
+        ));
+        assert!(!LicenseCompatibility::is_compatible(
+            &License::Apache2,
+            &License::GPL2
+        ));
+        assert!(LicenseCompatibility::is_compatible(
+            &License::GPL2OrLater,
+            &License::Apache2
+        ));
+        assert!(LicenseCompatibility::is_compatible(
+            &License::GPL3,
+            &License::Apache2
+        ));
     }
 
     #[test]

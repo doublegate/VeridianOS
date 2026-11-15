@@ -220,7 +220,7 @@ gh api graphql --paginate \
     }' \
     --jq '.data.repository.pullRequest.commits.nodes[].commit.author
           | if .user then "\(.user.databaseId):\(.user.login)" else (if ((.name // "") | endswith("[bot]")) then "@bot:" + .name
-                            else "@unlinked:" + (.name // "unknown") end) end'
+                            else "@unlinked:" + (if (.name // "") != "" then .name else "unknown" end) end) end'
 }
 
 # The authors and the commit they belong to are read as one snapshot: the
@@ -239,9 +239,18 @@ for attempt in 1 2 3; do
     fi
     sleep 5
 done
+# If the head kept moving, no status is published: the run for the latest
+# push publishes it. A signature in this comment is still recorded (against
+# the authors last read), since that later run is not a comment run and
+# would not record it.
+publish=yes
 if [ -z "$head_sha" ]; then
-    echo "CLA: the head kept moving; the run for the latest push checks it"
-    exit 0
+    if [ "$EVENT" = "issue_comment" ] && is_sign_comment "${COMMENT_BODY:-}"; then
+        publish=no
+    else
+        echo "CLA: the head kept moving; the run for the latest push checks it"
+        exit 0
+    fi
 fi
 
 pr_info="$(gh api "repos/$REPO/pulls/$PR")"
@@ -314,6 +323,11 @@ if [ "$EVENT" = "issue_comment" ] && is_sign_comment "${COMMENT_BODY:-}"; then
         sleep 2
         read_signatures
     done
+fi
+
+if [ "$publish" = no ]; then
+    echo "CLA: signature handled; the head kept moving, so the run for the latest push publishes the status"
+    exit 0
 fi
 
 unsigned="$(unsigned_of "$(required_of "$committers" "$opener" "$opener_type")" "$(signed_of "$sig_doc")")"

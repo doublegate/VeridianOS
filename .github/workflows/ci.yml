@@ -677,7 +677,7 @@ jobs:
                   cp -r downloads/veridian-docs/* release/docs/
                   # The licences go with the binaries: the kernel is GPL-3.0-or-later
                   # with the user-space exception, the rest MIT OR Apache-2.0 (ADR 0028).
-                  cp COPYING LICENSE-MIT LICENSE-APACHE LICENSING.md release/
+                  cp COPYING LICENSE-MIT LICENSE-APACHE LICENSING.md COMMERCIAL.md CLA.md release/
                   cp -r LICENSES release/
                   cat > release/VERSION << EOF
                   VERSION=$(cat Cargo.toml | grep '^version' | head -1 | cut -d'"' -f2)
