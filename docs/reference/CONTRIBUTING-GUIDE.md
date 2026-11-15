@@ -699,7 +699,7 @@ If you need help:
 
 ## License
 
-By contributing to Veridian OS, you agree that your contributions will be licensed under the same license as the project (Apache 2.0 / MIT dual license).
+Contributions are made under the Contributor Licence Agreement (`CLA.md`) and distributed under the licence of the directory they are in (`LICENSING.md`).
 
 ## Thank You!
 

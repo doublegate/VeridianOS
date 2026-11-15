@@ -3,7 +3,9 @@ name = "veridian-kernel"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
-license.workspace = true
+# GPL-3.0-or-later with the VeridianOS user-space exception (ADR 0028); Cargo's
+# field cannot name the exception, REUSE.toml is authoritative.
+license = "GPL-3.0-or-later"
 repository.workspace = true
 
 [lints]

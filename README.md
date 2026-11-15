@@ -10,8 +10,8 @@
 
 [![CI Status](https://github.com/doublegate/VeridianOS/workflows/CI/badge.svg)](https://github.com/doublegate/VeridianOS/actions)
 [![Coverage](https://codecov.io/gh/doublegate/VeridianOS/branch/main/graph/badge.svg)](https://codecov.io/gh/doublegate/VeridianOS)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE-MIT)
-[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE-APACHE)
+[![Kernel: GPL-3.0-or-later](https://img.shields.io/badge/kernel-GPL--3.0--or--later-blue.svg)](LICENSING.md)
+[![Libraries: MIT OR Apache-2.0](https://img.shields.io/badge/libraries-MIT%20OR%20Apache--2.0-blue.svg)](LICENSING.md)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/WGcgrnuVHt)
 
 </div>
@@ -308,12 +308,20 @@ Contributions are welcome. Please see the [Contributing Guide](CONTRIBUTING.md) 
 
 ## License
 
-VeridianOS is dual-licensed under:
+VeridianOS is licensed by component ([LICENSING.md](LICENSING.md), ADR 0028):
 
-- MIT License ([LICENSE-MIT](LICENSE-MIT))
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- **The kernel, the system servers and the Linux runtime:** GPL-3.0-or-later ([COPYING](COPYING))
+  with the VeridianOS user-space exception: applications and Linux programs using them as
+  clients are not covered by the GPL. The driver and server framework is GPL without the
+  exception, so drivers and services built on it are GPL or take a commercial licence.
+- **Everything else**, including the ABI, libc, the crates, the tools and the documentation:
+  MIT ([LICENSE-MIT](LICENSE-MIT)) or Apache-2.0 ([LICENSE-APACHE](LICENSE-APACHE)), at your
+  option. Vendored third-party files (the Linux system call tables, patches to other projects)
+  keep their own licences.
 
-You may choose either license for your use.
+v0.27.0 and earlier are MIT OR Apache-2.0. Contributions are made under the
+[Contributor Licence Agreement](CLA.md); [commercial licences](COMMERCIAL.md) for the GPL parts
+are available.
 
 ---
 

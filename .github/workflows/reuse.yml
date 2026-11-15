@@ -1,0 +1,23 @@
+# Every file has a licence (ADR 0028): REUSE.toml maps paths to licences and
+# LICENSES/ holds their texts; `reuse lint` fails if any file is not covered,
+# if a licence is used without its text, or if a text is unused.
+name: REUSE
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reuse-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: fsfe/reuse-action@676e2d560c9a403aa252096d99fcab3e1132b0f5 # v6.0.0

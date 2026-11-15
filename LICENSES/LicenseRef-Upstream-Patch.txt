@@ -1,0 +1,23 @@
+Patches to other projects
+
+A file marked "LicenseRef-Upstream-Patch" is a patch to a program that is not
+part of VeridianOS (GCC, binutils, LLVM, BusyBox, musl, Qt, KDE Frameworks,
+Plasma, KWin and their dependencies). The build scripts apply it to that
+program's upstream source.
+
+Each patch is licensed under the license of the upstream file or files it
+changes, as published by that program's authors. The patch itself grants no
+other license, and the VeridianOS licenses do not apply to it.
+
+The upstream licenses, for reference (always check the source the patch
+applies to):
+- GCC, binutils: GPL-3.0-or-later (runtime libraries with the GCC Runtime
+  Library Exception)
+- LLVM: Apache-2.0 WITH LLVM-exception
+- BusyBox: GPL-2.0-only
+- musl: MIT
+- Qt: LGPL-3.0-only or GPL-2.0-or-later or GPL-3.0-only, per module
+- KDE Frameworks, Plasma, KWin: mostly LGPL-2.1-or-later and GPL-2.0-or-later
+  (per file, see each file's SPDX header upstream)
+- X11, Wayland, ICU, curl, D-Bus, GLib, polkit, Linux-PAM and the other
+  libraries: their own licenses, per project

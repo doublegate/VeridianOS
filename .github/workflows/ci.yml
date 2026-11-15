@@ -52,6 +52,11 @@ jobs:
                       ubuntu-cargo-
             - name: Check formatting
               run: cargo fmt --all -- --check
+            # The CLA check runs from the default branch on pull_request_target,
+            # so a regression in its decision logic would only show on main;
+            # its offline selftest runs here on every change.
+            - name: CLA check selftest
+              run: bash .github/scripts/cla-check.sh --selftest
             # Clippy with no allow-list, on the three bare-metal targets as
             # built (x86_64 through its custom target JSON) and on the library
             # with every feature (N-160).
@@ -670,6 +675,10 @@ jobs:
                     fi
                   done
                   cp -r downloads/veridian-docs/* release/docs/
+                  # The licences go with the binaries: the kernel is GPL-3.0-or-later
+                  # with the user-space exception, the rest MIT OR Apache-2.0 (ADR 0028).
+                  cp COPYING LICENSE-MIT LICENSE-APACHE LICENSING.md COMMERCIAL.md CLA.md release/
+                  cp -r LICENSES release/
                   cat > release/VERSION << EOF
                   VERSION=$(cat Cargo.toml | grep '^version' | head -1 | cut -d'"' -f2)
                   GIT_SHA=${{ github.sha }}
@@ -722,8 +731,13 @@ jobs:
                   - [Issue Tracker](https://github.com/doublegate/VeridianOS/issues)
                   - [Documentation](https://doublegate.github.io/VeridianOS/)
                   ## ⚖️ License
-                  VeridianOS is licensed under either of the MIT License or the Apache
-                  License 2.0, at your option.
+                  The kernels in this archive are licensed under GPL-3.0-or-later (COPYING)
+                  with the VeridianOS user-space exception (LICENSES/), which leaves programs
+                  that use VeridianOS as clients outside the GPL. The documentation and the
+                  rest of VeridianOS are licensed under MIT (LICENSE-MIT) or Apache-2.0
+                  (LICENSE-APACHE), at your option. LICENSING.md explains the split; the
+                  source for every binary is at https://github.com/doublegate/VeridianOS at
+                  the Git SHA above. Commercial licences: COMMERCIAL.md in the repository.
                   EOF
                   tar czf veridian-release-${{ github.sha }}.tar.gz -C release .
                   cd release && zip -r ../veridian-release-${{ github.sha }}.zip . && cd ..
