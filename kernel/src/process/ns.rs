@@ -123,7 +123,7 @@ impl NsKind {
     }
 
     /// The initial namespace's id (Linux's `init_ns_id`).
-    const fn init_id(self) -> u64 {
+    pub const fn init_id(self) -> u64 {
         match self {
             NsKind::Ipc => 1,
             NsKind::Uts => 2,
@@ -326,6 +326,18 @@ pub struct MntNs {
     pub ident: NsIdent,
     pub owner: Arc<UserNs>,
     pub mounts: Arc<crate::fs::mount::Mounts>,
+}
+
+impl MntNs {
+    /// A new mount namespace owned by `owner` whose tree is `mounts`
+    /// (fsmount's FSMOUNT_NAMESPACE, open_tree's OPEN_TREE_NAMESPACE).
+    pub fn new(owner: Arc<UserNs>, mounts: Arc<crate::fs::mount::Mounts>) -> Arc<Self> {
+        Arc::new(Self {
+            ident: NsIdent::fresh(NsKind::Mnt),
+            owner,
+            mounts,
+        })
+    }
 }
 
 /// An IPC namespace, which holds its System V objects and POSIX message
@@ -647,7 +659,12 @@ impl Namespaces {
             new.mnt = Arc::new(MntNs {
                 ident: NsIdent::fresh(NsKind::Mnt),
                 owner: owner.clone(),
-                mounts: Arc::new(self.mnt.mounts.copy(flags & CLONE_EMPTY_MNTNS != 0)),
+                // Locked when the new owner is not this namespace's
+                // (copy_mnt_ns: user_ns != ns->user_ns).
+                mounts: Arc::new(self.mnt.mounts.copy(
+                    flags & CLONE_EMPTY_MNTNS != 0,
+                    !Arc::ptr_eq(owner, &self.mnt.owner),
+                )),
             });
         }
         if flags & CLONE_NEWTIME != 0 {

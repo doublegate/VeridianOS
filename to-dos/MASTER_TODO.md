@@ -431,9 +431,11 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
          XSAVE) and AArch64 POE, its own PR.
        - [ ] memfd_secret on a splittable physical map (all three architectures, guards on every
          kernel path to user frames through it), its own PR; ENOSYS until then.
-     - [ ] The new mount API on H3's mount objects: open_tree, open_tree_attr, move_mount, fsopen,
-       fsconfig, fsmount, fspick, mount_setattr, statmount, listmount, listns; decided:
-       quotactl and quotactl_fd.
+     - [x] The new mount API on H3's mount objects: open_tree, open_tree_attr, move_mount, fsopen,
+       fsconfig, fsmount, fspick, mount_setattr, statmount, listmount, listns, with
+       FSMOUNT_NAMESPACE, OPEN_TREE_NAMESPACE, locked mounts and idmapped mounts (ADR 0027
+       decision 24); quotactl and quotactl_fd ENOSYS (with the sockets). MOVE_MOUNT_BENEATH
+       moved to item 6.
      - [ ] Sockets: shutdown, recvmmsg, sendmmsg.
      - [x] Files and scheduling: cachestat, file_getattr, file_setattr, ioprio_get, ioprio_set;
        memfd_secret moved to the memory group's follow-up. fanotify and rseq (with rseq_slice_yield) stay ENOSYS, as decided
@@ -451,13 +453,16 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
      files and mappings keep the `Mount` they were reached through and the mount flags are checked
      on it, not on a path looked up again in the caller's namespace; mounts follow a renamed
      directory in every namespace; a remount read-only sees every writer of the superblock
-     (KNOWN-LIMITATIONS "Namespaces are partial"). Found 2026-11-06:
+     (KNOWN-LIMITATIONS "Namespaces are partial"). Then move_mount's MOVE_MOUNT_BENEATH, deferred
+     to it (2026-11-14): a mount moved beneath keeps its open files and takes its submounts along
+     (LTP move_mount03; draft without those in the session notes). Found 2026-11-06:
      - [ ] With any move of mount, umount2 or pivot_root from `capable` to `ns_capable` (not
        reachable before; ADR 0022 H4 says MNT_LOCKED comes with it): a superblock owner (the
-       mounter's user namespace) whose CAP_SYS_ADMIN a change of its read-only state needs, and
-       Linux's locked mount flags (MNT_LOCK_READONLY, NODEV, NOSUID, NOEXEC, ATIME) set by
-       `Mounts::copy` into a less privileged namespace, so they cannot be cleared there (EPERM)
-       and such a mount cannot be unmounted to uncover what it hides (EINVAL).
+       mounter's user namespace) whose CAP_SYS_ADMIN a change of its read-only state needs. The
+       locks themselves (MNT_LOCKED, MNT_LOCK_*) came with the mount API's namespace flags
+       (ADR 0027 decision 24, 2026-11-14): `Mounts::copy` locks a copy for a less privileged
+       owner, and umount, move, bind, open_tree, pivot_root, mount_setattr and remount honour
+       them already.
      - [ ] `clock_gettime03` is FLAKY on x86_64 (2026-11-06): a retry boots a fresh guest, whose
        uptime under 10 s makes the -10 s offset ERANGE (as on Linux). Have `--retry` wait until
        the guest has been up 10 s, then set it back to PASS.

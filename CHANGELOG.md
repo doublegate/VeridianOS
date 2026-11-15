@@ -24,7 +24,11 @@
   with the memory and files groups: LTP passes 845 of 1,552 tests (789 before), Open POSIX 1,786
   of 1,965 and libc-test 535 of 560, with no regression; 61 tests improved (the mlock, mseal,
   msync, remap_file_pages, System V semaphore and shared memory, xattr and file-attribute tests
-  among them) and 8 changed between failing results.
+  among them) and 8 changed between failing results. With the mount API it passes 849: listmount03,
+  listmount04, statmount08 and rt_sigtimedwait01 now pass, as do Open POSIX's sigpending 1-2/1-3 and
+  timer_getoverrun 2-1..2-3 (1,790); mount_setattr02 now runs and fails (it needs MS_SHARED,
+  refused while there are no peer groups, ADR 0022), move_mount03 is broken instead of skipped
+  (MOVE_MOUNT_BENEATH is EINVAL), and msgstress01 times out.
 - The Linux system call tables are Linux 7.3's (`abi/linux/VERSION`, read by `gen_syscalls.py`
   and `syscall_coverage.py`, which named v7.2 in their code): 7.3 adds fchroot (472).
 - The gate (`scripts/dev/gate.sh`) runs its emulated guests side by side: the AArch64, RISC-V and
@@ -114,6 +118,22 @@
 
 ### Added
 
+- The new mount API (Linux 7.3 `fs/fsopen.c`, `fs/namespace.c`): fsopen, fsconfig, fsmount and
+  fspick make and reconfigure a filesystem through a context descriptor, whose parameters are
+  checked one at a time as Linux checks them and whose refusals read back from it (`e tmpfs:
+  Unknown parameter 'x'`); fsmount and open_tree with OPEN_TREE_CLONE (and AT_RECURSIVE) return
+  a descriptor for a detached tree, usable through `*at` calls, which move_mount attaches and
+  whose last close drops it; move_mount also moves mounts; mount_setattr and open_tree_attr
+  change mount flags and propagation types, all or nothing; statmount, listmount and listns
+  describe mounts and list mounts and namespaces; FSMOUNT_NAMESPACE and OPEN_TREE_NAMESPACE put
+  the new mount, or a copy of the tree at a directory, in a new mount namespace of the caller's
+  user namespace and return its descriptor for setns, with Linux 7.3's rules. Locked mounts
+  (MNT_LOCKED, MNT_LOCK_*): a mount namespace copied for a less privileged owner cannot have its
+  mounts unmounted, moved or left out of a copy, nor their restrictive flags cleared, so what
+  they hide stays hidden. ID-mapped mounts (MOUNT_ATTR_IDMAP) on tmpfs, ramfs and BlockFS:
+  owners read and are stored through a user namespace's maps (EOVERFLOW when one cannot be).
+  Runtime tests mount_api and idmapped_mount. Not yet: MOVE_MOUNT_BENEATH (it waits for open files to keep their mount) and
+  MOVE_MOUNT_SET_GROUP (KNOWN-LIMITATIONS).
 - fchroot (Linux 7.3): chroot to a directory by descriptor, and with `FD_FAILFS_ROOT` to failfs,
   from whose root no absolute path resolves (EOPNOTSUPP) while lookups from real directories go on;
   unprivileged with no_new_privs, unshared filesystem state and no earlier chroot, as on Linux;

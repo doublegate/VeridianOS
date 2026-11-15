@@ -31,9 +31,11 @@ static COUNTS: Mutex<BTreeMap<u64, i32>> = Mutex::new(BTreeMap::new());
 /// while a guard holds the node. Two opens of one BlockFS file get
 /// different node objects with one identity.
 pub fn node_key(node: &Arc<dyn VfsNode>) -> u64 {
+    // An idmapped mount's view counts as the file it shows.
+    let node = super::base_node(node);
     match node.file_identity() {
         Some((fs, ino)) => fs ^ ino.wrapping_mul(0x9E37_79B9_7F4A_7C15),
-        None => Arc::as_ptr(node) as *const () as u64,
+        None => Arc::as_ptr(&node) as *const () as u64,
     }
 }
 

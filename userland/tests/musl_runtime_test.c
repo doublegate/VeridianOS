@@ -5636,6 +5636,8 @@ static void test_namespaces_time(void);
 static void test_namespaces_mnt(void);
 static void test_mount_calls(void);
 static void test_mount_flags(void);
+static void test_mount_api(void);
+static void test_idmapped_mount(void);
 static void test_mount_no_escape(void);
 static void test_pivot_root(void);
 static void test_mount_object_cap(void);
@@ -5712,6 +5714,8 @@ static const struct {
     {"namespaces_mnt", test_namespaces_mnt},
     {"mount_calls", test_mount_calls},
     {"mount_flags", test_mount_flags},
+    {"mount_api", test_mount_api},
+    {"idmapped_mount", test_idmapped_mount},
     {"pivot_root", test_pivot_root},
     {"mount_object_cap", test_mount_object_cap},
     {"mount_modify_drop", test_mount_modify_drop},
@@ -11103,6 +11107,445 @@ static void test_mount_calls(void)
     report("mount_calls", f == 0, why);
 }
 
+#ifndef SYS_open_tree
+#define SYS_open_tree 428
+#endif
+#ifndef SYS_move_mount
+#define SYS_move_mount 429
+#endif
+#ifndef SYS_fsopen
+#define SYS_fsopen 430
+#endif
+#ifndef SYS_fsconfig
+#define SYS_fsconfig 431
+#endif
+#ifndef SYS_fsmount
+#define SYS_fsmount 432
+#endif
+#ifndef SYS_fspick
+#define SYS_fspick 433
+#endif
+#ifndef SYS_mount_setattr
+#define SYS_mount_setattr 442
+#endif
+#ifndef SYS_open_tree_attr
+#define SYS_open_tree_attr 467
+#endif
+#ifndef SYS_statmount
+#define SYS_statmount 457
+#endif
+#ifndef SYS_listmount
+#define SYS_listmount 458
+#endif
+
+/* struct mnt_id_req (VER1) and the start of struct statmount. */
+struct t_mnt_id_req {
+    uint32_t size, mnt_ns_fd;
+    uint64_t mnt_id, param, mnt_ns_id;
+};
+struct t_statmount {
+    uint32_t size, mnt_opts;
+    uint64_t mask;
+    uint32_t sb_dev_major, sb_dev_minor;
+    uint64_t sb_magic;
+    uint32_t sb_flags, fs_type;
+    uint64_t mnt_id, mnt_parent_id;
+    uint32_t mnt_id_old, mnt_parent_id_old;
+    uint64_t mnt_attr, mnt_propagation, mnt_peer_group, mnt_master, propagate_from;
+    uint32_t mnt_root, mnt_point;
+    uint64_t mnt_ns_id;
+    uint32_t fs_subtype, sb_source;
+    uint64_t rest[48];
+    char str[];
+};
+
+#ifndef SYS_listns
+#define SYS_listns 470
+#endif
+
+static unsigned long long t_ns_id(const char *name);
+
+/* listns (Linux 7.3): the caller's mount namespace is listed, by type
+ * too, and a bad request is refused; 0 when all of it holds. */
+static int t_listns_check(void)
+{
+    struct {
+        uint32_t size, spare;
+        uint64_t ns_id;
+        uint32_t ns_type, spare2;
+        uint64_t user_ns_id;
+    } req = {.size = 32};
+    uint64_t ids[512];
+    unsigned long long mnt = t_ns_id("mnt");
+    int g = 0;
+    long n = syscall(SYS_listns, &req, ids, 512, 0), found = 0;
+    for (long i = 0; i < n; i++)
+        found |= ids[i] == mnt;
+    if (n <= 0 || !found) g |= 1;
+    req.ns_type = CLONE_NEWNS;
+    n = syscall(SYS_listns, &req, ids, 512, 0);
+    found = 0;
+    for (long i = 0; i < n; i++)
+        found |= ids[i] == mnt;
+    if (n <= 0 || !found || n > 64) g |= 2;
+    req.ns_type = 1;
+    if (!(syscall(SYS_listns, &req, ids, 512, 0) == -1 && errno == EOPNOTSUPP)) g |= 4;
+    req.ns_type = 0;
+    req.spare = 1;
+    if (!(syscall(SYS_listns, &req, ids, 512, 0) == -1 && errno == EINVAL)) g |= 8;
+    req.spare = 0;
+    if (!(syscall(SYS_listns, &req, ids, 512, 1) == -1 && errno == EINVAL)) g |= 16;
+    return g;
+}
+
+/* statmount and listmount on the mount at `path` (Linux 7.3): it is
+ * listed under the root, and reports its type, place, source and flags;
+ * 0 when all of it holds, else the bits that failed. */
+static int t_statmount_check(const char *path, const char *source)
+{
+    int g = 0;
+    struct statx sx;
+    if (statx(AT_FDCWD, path, 0, STATX_MNT_ID_UNIQUE, &sx) != 0 ||
+        !(sx.stx_mask & STATX_MNT_ID_UNIQUE))
+        return 1;
+    struct t_mnt_id_req req = {.size = sizeof(req), .mnt_id = ~0ULL};
+    uint64_t ids[256];
+    long n = syscall(SYS_listmount, &req, ids, 256, 0), found = 0;
+    for (long i = 0; i < n; i++)
+        found |= ids[i] == sx.stx_mnt_id;
+    if (n <= 0 || !found) g |= 2;
+    /* In order, and after the last one seen nothing repeats. */
+    for (long i = 1; i < n; i++)
+        if (ids[i] <= ids[i - 1]) g |= 4;
+    if (n > 1) {
+        req.param = ids[0];
+        uint64_t rest[256];
+        if (syscall(SYS_listmount, &req, rest, 256, 0) != n - 1 || rest[0] != ids[1]) g |= 4;
+        req.param = 0;
+    }
+    static union {
+        struct t_statmount sm;
+        char raw[4096];
+    } b;
+    req.mnt_id = sx.stx_mnt_id;
+    req.param = 0x2 | 0x1 | 0x20 | 0x10 | 0x200 | 0x8; /* MNT_BASIC SB_BASIC FS_TYPE MNT_POINT SB_SOURCE MNT_ROOT */
+    if (syscall(SYS_statmount, &req, &b, sizeof(b), 0) != 0) return g | 8;
+    if (b.sm.mask != req.param || b.sm.mnt_id != sx.stx_mnt_id) g |= 16;
+    if (strcmp(b.sm.str + b.sm.fs_type, "tmpfs") || strcmp(b.sm.str + b.sm.mnt_point, path) ||
+        strcmp(b.sm.str + b.sm.sb_source, source) || strcmp(b.sm.str + b.sm.mnt_root, "/"))
+        g |= 32;
+    if (b.sm.sb_magic != 0x01021994 || !(b.sm.mnt_attr & 0x4 /* NODEV */) ||
+        b.sm.mnt_propagation != MS_PRIVATE)
+        g |= 64;
+    /* Errors: a bad flag, an id below the unique range, too small a
+     * buffer for the strings. */
+    if (!(syscall(SYS_statmount, &req, &b, sizeof(b), 2) == -1 && errno == EINVAL)) g |= 128;
+    req.mnt_id = 5;
+    if (!(syscall(SYS_statmount, &req, &b, sizeof(b), 0) == -1 && errno == EINVAL)) g |= 128;
+    req.mnt_id = sx.stx_mnt_id;
+    if (!(syscall(SYS_statmount, &req, &b, 512, 0) == -1 && errno == EOVERFLOW)) g |= 256;
+    return g;
+}
+
+/* struct mount_attr (include/uapi/linux/mount.h). */
+struct t_mount_attr {
+    uint64_t attr_set, attr_clr, propagation, userns_fd;
+};
+
+static int t_write_text(const char *path, const char *text);
+
+/* An idmapped mount (mount_setattr's MOUNT_ATTR_IDMAP, Linux's
+ * fs/mnt_idmapping.c): a detached tmpfs mount made idmapped through a user
+ * namespace mapping 0..999 to 100000..100999 shows root's file as owned
+ * by 100000; root's own IDs have no mapping there, so it cannot create
+ * through it (EOVERFLOW); a second mapping is EPERM. */
+static void test_idmapped_mount(void)
+{
+    char why[96];
+    int f = 0, p1[2], p2[2];
+    if (pipe(p1) != 0 || pipe(p2) != 0) {
+        report("idmapped_mount", 0, "pipe");
+        return;
+    }
+    pid_t c = fork();
+    if (c == 0) {
+        char b;
+        close(p1[0]);
+        close(p2[1]);
+        if (unshare(CLONE_NEWUSER) != 0) _exit(1);
+        write(p1[1], "x", 1);
+        read(p2[0], &b, 1);
+        _exit(0);
+    }
+    close(p1[1]);
+    close(p2[0]);
+    char b = 0, path[64];
+    if (read(p1[0], &b, 1) != 1) {
+        /* The child exited before it was ready (unshare failed): nothing
+         * reads p2 any more, and writing it would raise SIGPIPE and end
+         * the runner (PR #47 review). */
+        close(p1[0]);
+        close(p2[1]);
+        t_exit_status(c);
+        report("idmapped_mount", 0, "child not ready (unshare)");
+        return;
+    }
+    snprintf(path, sizeof(path), "/proc/%d/uid_map", (int)c);
+    if (t_write_text(path, "0 100000 1000") != 0) f |= 2;
+    snprintf(path, sizeof(path), "/proc/%d/gid_map", (int)c);
+    if (t_write_text(path, "0 100000 1000") != 0) f |= 2;
+    snprintf(path, sizeof(path), "/proc/%d/ns/user", (int)c);
+    int ufd = open(path, O_RDONLY | O_CLOEXEC);
+    int fd = syscall(SYS_fsopen, "tmpfs", 0), mfd = -1;
+    if (fd >= 0 && syscall(SYS_fsconfig, fd, 6 /* CMD_CREATE */, NULL, NULL, 0) == 0)
+        mfd = syscall(SYS_fsmount, fd, 0, 0);
+    int file = mfd >= 0 ? openat(mfd, "f", O_CREAT | O_WRONLY, 0644) : -1;
+    if (ufd < 0 || mfd < 0 || file < 0) f |= 4;
+    if (file >= 0) close(file);
+    struct t_mount_attr a = {.attr_set = 0x100000 /* MOUNT_ATTR_IDMAP */, .userns_fd = ufd};
+    long r = syscall(SYS_mount_setattr, mfd, "", AT_EMPTY_PATH, &a, sizeof(a));
+    int set_err = r == 0 ? 0 : errno;
+    struct stat st = {0};
+    if (r != 0 || fstatat(mfd, "f", &st, 0) != 0 || st.st_uid != 100000 || st.st_gid != 100000)
+        f |= 8;
+    if (!(openat(mfd, "g", O_CREAT | O_WRONLY, 0644) == -1 && errno == EOVERFLOW)) f |= 16;
+    if (!(syscall(SYS_mount_setattr, mfd, "", AT_EMPTY_PATH, &a, sizeof(a)) == -1 && errno == EPERM))
+        f |= 32;
+    /* The initial user namespace's maps are the filesystem's own: EPERM. */
+    int self_ns = open("/proc/self/ns/user", O_RDONLY | O_CLOEXEC);
+    int mfd2 = -1;
+    int fd2 = syscall(SYS_fsopen, "tmpfs", 0);
+    if (fd2 >= 0 && syscall(SYS_fsconfig, fd2, 6, NULL, NULL, 0) == 0)
+        mfd2 = syscall(SYS_fsmount, fd2, 0, 0);
+    struct t_mount_attr a2 = {.attr_set = 0x100000, .userns_fd = self_ns};
+    if (!(syscall(SYS_mount_setattr, mfd2, "", AT_EMPTY_PATH, &a2, sizeof(a2)) == -1 &&
+          errno == EPERM))
+        f |= 64;
+    write(p2[1], "x", 1);
+    t_exit_status(c);
+    close(p1[0]);
+    close(p2[1]);
+    if (ufd >= 0) close(ufd);
+    if (self_ns >= 0) close(self_ns);
+    if (fd >= 0) close(fd);
+    if (fd2 >= 0) close(fd2);
+    if (mfd >= 0) close(mfd);
+    if (mfd2 >= 0) close(mfd2);
+    snprintf(why, sizeof(why), "f=%#x set=%d uid=%u", f, set_err, (unsigned)st.st_uid);
+    report("idmapped_mount", f == 0, why);
+}
+
+/* The new mount API (Linux 7.3 fs/fsopen.c, fs/namespace.c), in a mount
+ * namespace of its own: a tmpfs made through a context (its parameters
+ * checked one at a time and refusals readable from it), mounted detached
+ * and used through the descriptor, attached with move_mount; a detached
+ * copy from open_tree; mount_setattr and open_tree_attr making mounts
+ * read-only; fspick making the superblock read-only; then the errors. */
+static void test_mount_api(void)
+{
+    char why[160];
+    int f = 0;
+    mkdir("/tmp", 01777);
+    rmdir("/tmp/ma-a");
+    rmdir("/tmp/ma-b");
+    rmdir("/tmp/ma-c");
+    if (mkdir("/tmp/ma-a", 0755) != 0 || mkdir("/tmp/ma-b", 0755) != 0 ||
+        mkdir("/tmp/ma-c", 0755) != 0) {
+        report("mount_api", 0, "setup");
+        return;
+    }
+    pid_t child = fork();
+    if (child == 0) {
+        int g = 0, fd, mfd, tfd, pfd, x;
+        char msg[128];
+        struct stat st;
+        if (unshare(CLONE_NEWNS) != 0) _exit(0x7f);
+        /* The context: parameters, a refusal logged, create. */
+        fd = syscall(SYS_fsopen, "tmpfs", 1 /* FSOPEN_CLOEXEC */);
+        if (fd < 0 || !(fcntl(fd, F_GETFD) & FD_CLOEXEC)) g |= 1;
+        if (syscall(SYS_fsconfig, fd, 1, "size", "1m", 0) != 0 ||
+            syscall(SYS_fsconfig, fd, 1, "source", "mapi", 0) != 0 ||
+            !(syscall(SYS_fsconfig, fd, 0, "bogus", NULL, 0) == -1 && errno == EINVAL))
+            g |= 2;
+        ssize_t n = read(fd, msg, sizeof(msg) - 1);
+        if (n <= 0 || (msg[n] = 0, strcmp(msg, "e tmpfs: Unknown parameter 'bogus'\n") != 0) ||
+            !(read(fd, msg, sizeof(msg)) == -1 && errno == ENODATA))
+            g |= 4;
+        if (syscall(SYS_fsconfig, fd, 6 /* CMD_CREATE */, NULL, NULL, 0) != 0 ||
+            !(syscall(SYS_fsconfig, fd, 6, NULL, NULL, 0) == -1 && errno == EBUSY))
+            g |= 8;
+        /* Mounted detached: usable through the descriptor only. */
+        mfd = syscall(SYS_fsmount, fd, 1 /* FSMOUNT_CLOEXEC */, 0x4 /* NODEV */);
+        if (mfd < 0 || (x = openat(mfd, "f", O_CREAT | O_WRONLY, 0644)) < 0)
+            g |= 16;
+        else
+            close(x);
+        if (fstatat(mfd, "f", &st, 0) != 0 || t_info_has("mapi")) g |= 32;
+        /* Attached, the descriptor still names it. */
+        if (syscall(SYS_move_mount, mfd, "", AT_FDCWD, "/tmp/ma-a", 4 /* F_EMPTY_PATH */) != 0 ||
+            access("/tmp/ma-a/f", F_OK) != 0 ||
+            !t_info_has(" /tmp/ma-a rw,nodev,relatime - tmpfs mapi rw") ||
+            fstatat(mfd, "f", &st, 0) != 0)
+            g |= 64;
+        x = t_listns_check();
+        if (x) {
+            printf("mount-api listns=%#x\n", x);
+            g |= 0x8000;
+        }
+        x = t_statmount_check("/tmp/ma-a", "mapi");
+        if (x) {
+            printf("mount-api statmount=%#x\n", x);
+            g |= 0x4000;
+        }
+        /* Once attached the descriptor names a mount of this namespace,
+         * which moves (and moves back by path). */
+        if (syscall(SYS_move_mount, mfd, "", AT_FDCWD, "/tmp/ma-c", 4) != 0 ||
+            access("/tmp/ma-c/f", F_OK) != 0 || fstatat(mfd, "f", &st, 0) != 0 ||
+            syscall(SYS_move_mount, AT_FDCWD, "/tmp/ma-c", AT_FDCWD, "/tmp/ma-a", 0) != 0 ||
+            access("/tmp/ma-a/f", F_OK) != 0 || t_info_has("/tmp/ma-c"))
+            g |= 128;
+        /* A detached copy, attached elsewhere, then made read-only. */
+        tfd = syscall(SYS_open_tree, AT_FDCWD, "/tmp/ma-a", 1 /* OPEN_TREE_CLONE */);
+        struct t_mount_attr ro = {.attr_set = 1 /* MOUNT_ATTR_RDONLY */};
+        if (tfd < 0 ||
+            syscall(SYS_move_mount, tfd, "", AT_FDCWD, "/tmp/ma-b", 4) != 0 ||
+            access("/tmp/ma-b/f", F_OK) != 0 ||
+            syscall(SYS_mount_setattr, AT_FDCWD, "/tmp/ma-b", 0, &ro, sizeof(ro)) != 0 ||
+            !t_info_has(" /tmp/ma-b ro,nodev,relatime - tmpfs mapi rw") ||
+            !(open("/tmp/ma-b/g", O_CREAT | O_WRONLY, 0644) == -1 && errno == EROFS) ||
+            access("/tmp/ma-a", W_OK) != 0)
+            g |= 256;
+        /* open_tree_attr: a read-only copy in one call. */
+        int afd = syscall(SYS_open_tree_attr, AT_FDCWD, "/tmp/ma-a", 1, &ro, sizeof(ro));
+        /* Still detached, it is read-only through its own descriptor
+         * (judged by its mount, not the caller's root; PR #47 review). */
+        if (afd < 0 ||
+            !(openat(afd, "z", O_CREAT | O_WRONLY, 0644) == -1 && errno == EROFS) ||
+            syscall(SYS_move_mount, afd, "", AT_FDCWD, "/tmp/ma-c", 4) != 0 ||
+            !t_info_has(" /tmp/ma-c ro,nodev,relatime - tmpfs mapi rw"))
+            g |= 512;
+        /* Changing a mount's attributes in place takes mount_setattr's
+         * authority (EPERM unprivileged), clone or not. */
+        pid_t ac = fork();
+        if (ac == 0) {
+            if (setuid(65534) != 0) _exit(2);
+            long r = syscall(SYS_open_tree_attr, AT_FDCWD, "/tmp/ma-a", 0, &ro, sizeof(ro));
+            _exit(r == -1 && errno == EPERM ? 0 : 1);
+        }
+        if (t_exit_status(ac) != 0) g |= 0x10000;
+        /* fspick: the superblock read-only for every mount of it. */
+        pfd = syscall(SYS_fspick, AT_FDCWD, "/tmp/ma-a", 1 /* FSPICK_CLOEXEC */);
+        if (pfd < 0 || syscall(SYS_fsconfig, pfd, 0, "ro", NULL, 0) != 0 ||
+            syscall(SYS_fsconfig, pfd, 7 /* CMD_RECONFIGURE */, NULL, NULL, 0) != 0 ||
+            !t_info_has(" /tmp/ma-a rw,nodev,relatime - tmpfs mapi ro") ||
+            !(open("/tmp/ma-a/h", O_CREAT | O_WRONLY, 0644) == -1 && errno == EROFS))
+            g |= 1024;
+        /* Errors, in Linux's order. */
+        struct t_mount_attr none = {0}, bad = {.propagation = MS_PRIVATE | MS_SLAVE};
+        if (!(syscall(SYS_fsopen, "nosuchfs", 0) == -1 && errno == ENODEV) ||
+            !(syscall(SYS_fsopen, "tmpfs", 2) == -1 && errno == EINVAL) ||
+            !(syscall(SYS_fsconfig, -1, 0, "ro", NULL, 0) == -1 && errno == EINVAL) ||
+            !(syscall(SYS_fsconfig, mfd, 0, "ro", NULL, 0) == -1 && errno == EINVAL) ||
+            !(syscall(SYS_fsconfig, pfd, 99, NULL, NULL, 0) == -1 && errno == EOPNOTSUPP) ||
+            !(syscall(SYS_fsconfig, pfd, 0, "ro", "x", 0) == -1 && errno == EINVAL) ||
+            !(syscall(SYS_fsmount, pfd, 0, 0) == -1 && errno == EBUSY) ||
+            !(syscall(SYS_move_mount, AT_FDCWD, "/tmp/ma-b/f", AT_FDCWD, "/tmp/ma-c", 0) == -1 &&
+              errno == EINVAL) ||
+            !(syscall(SYS_open_tree, AT_FDCWD, "/tmp", 0x8000 /* AT_RECURSIVE */) == -1 &&
+              errno == EINVAL) ||
+            !(syscall(SYS_mount_setattr, AT_FDCWD, "/tmp/ma-b", 0, &none, 8) == -1 &&
+              errno == EINVAL) ||
+            !(syscall(SYS_mount_setattr, AT_FDCWD, "/tmp/ma-b", 0, &none, 5000) == -1 &&
+              errno == E2BIG) ||
+            !(syscall(SYS_mount_setattr, AT_FDCWD, "/tmp/ma-b", 0, &bad, sizeof(bad)) == -1 &&
+              errno == EINVAL) ||
+            !(syscall(SYS_mount_setattr, AT_FDCWD, "/tmp/ma-b/f", 0, &ro, sizeof(ro)) == -1 &&
+              errno == EINVAL) ||
+            syscall(SYS_mount_setattr, AT_FDCWD, "/tmp/ma-b", 0, &none, sizeof(none)) != 0)
+            g |= 2048;
+        /* A detached tree goes with its last file: a duplicate, or any
+         * file opened in it, keeps it, as on Linux. */
+        int d1 = syscall(SYS_open_tree, AT_FDCWD, "/tmp/ma-b", 1);
+        int d2 = d1 >= 0 ? dup(d1) : -1;
+        if (d1 < 0 || d2 < 0 || close(d1) != 0 || fstatat(d2, "f", &st, 0) != 0) g |= 4096;
+        int inner = d2 >= 0 ? openat(d2, ".", O_RDONLY | O_DIRECTORY) : -1;
+        close(d2);
+        if (inner < 0 || fstatat(inner, "f", &st, 0) != 0) g |= 4096;
+        if (inner >= 0) close(inner);
+        /* OPEN_TREE_NAMESPACE and FSMOUNT_NAMESPACE (Linux 7.x): a new
+         * mount namespace whose root is the tree, entered with setns. */
+        mkdir("/tmp/ma-d", 0755);
+        int nsfd = -1, nsfd2 = -1;
+        if (mount("ns", "/tmp/ma-d", "tmpfs", 0, "") != 0 ||
+            close(open("/tmp/ma-d/nsf", O_CREAT | O_WRONLY, 0644)) != 0)
+            g |= 0x10000;
+        nsfd = syscall(SYS_open_tree, AT_FDCWD, "/tmp/ma-d", 2 /* OPEN_TREE_NAMESPACE */ | O_CLOEXEC);
+        if (nsfd < 0 || ioctl(nsfd, 0xb703 /* NS_GET_NSTYPE */) != CLONE_NEWNS ||
+            !(fcntl(nsfd, F_GETFD) & FD_CLOEXEC))
+            g |= 0x20000;
+        if (!(syscall(SYS_open_tree, AT_FDCWD, "/tmp/ma-d/nsf", 2) == -1 && errno == ENOTDIR) ||
+            !(syscall(SYS_open_tree, AT_FDCWD, "/tmp/ma-d", 2 | 1 /* CLONE */) == -1 &&
+              errno == EINVAL))
+            g |= 0x40000;
+        fd = syscall(SYS_fsopen, "tmpfs", 0);
+        if (fd >= 0 && syscall(SYS_fsconfig, fd, 6 /* CMD_CREATE */, NULL, NULL, 0) == 0)
+            nsfd2 = syscall(SYS_fsmount, fd, 2 /* FSMOUNT_NAMESPACE */, 0);
+        if (nsfd2 < 0 || ioctl(nsfd2, 0xb703) != CLONE_NEWNS) g |= 0x80000;
+        if (fd >= 0) close(fd);
+        pid_t in = fork();
+        if (in == 0) {
+            struct statfs sfs;
+            int ok = nsfd >= 0 && setns(nsfd, CLONE_NEWNS) == 0 && access("/nsf", F_OK) == 0;
+            ok = ok && nsfd2 >= 0 && setns(nsfd2, CLONE_NEWNS) == 0 && statfs("/", &sfs) == 0 &&
+                 sfs.f_type == 0x01021994 && access("/nsf", F_OK) != 0;
+            _exit(ok ? 0 : 1);
+        }
+        if (t_exit_status(in) != 0) g |= 0x100000;
+        if (nsfd >= 0) close(nsfd);
+        if (nsfd2 >= 0) close(nsfd2);
+        umount("/tmp/ma-d");
+        /* A namespace copied for a new user namespace is locked
+         * (MNT_LOCKED): its owner may copy "/" only with what is mounted
+         * under it, so nothing hidden shows (EINVAL without AT_RECURSIVE). */
+        pid_t lk = fork();
+        if (lk == 0) {
+            if (unshare(CLONE_NEWUSER | CLONE_NEWNS) != 0) _exit(2);
+            int bad = syscall(SYS_open_tree, AT_FDCWD, "/", 2) == -1 && errno == EINVAL;
+            int all = syscall(SYS_open_tree, AT_FDCWD, "/", 2 | AT_RECURSIVE);
+            _exit(bad && all >= 0 ? 0 : 1);
+        }
+        x = t_exit_status(lk);
+        if (x != 0) g |= 0x200000;
+        /* Without CAP_SYS_ADMIN: EPERM. */
+        pid_t un = fork();
+        if (un == 0) {
+            if (setgid(65534) != 0 || setuid(65534) != 0) _exit(0);
+            _exit(syscall(SYS_fsopen, "tmpfs", 0) == -1 && errno == EPERM &&
+                          syscall(SYS_open_tree, AT_FDCWD, "/tmp", 1) == -1 && errno == EPERM &&
+                          syscall(SYS_open_tree, AT_FDCWD, "/tmp", 2 | AT_RECURSIVE) == -1 &&
+                          errno == EPERM
+                      ? 0
+                      : 1);
+        }
+        if (t_exit_status(un) != 0) g |= 8192;
+        printf("mount-api g=%#x\n", g);
+        fflush(stdout);
+        _exit(g == 0 ? 0 : 1);
+    }
+    int code = t_exit_status(child);
+    if (child < 0) f |= 1;
+    else if (code == 0x7f) f |= 2;
+    else if (code != 0) f |= 4;
+    /* None of it is in this namespace. */
+    if (t_info_has("/tmp/ma-")) f |= 8;
+    rmdir("/tmp/ma-a");
+    rmdir("/tmp/ma-b");
+    rmdir("/tmp/ma-c");
+    snprintf(why, sizeof(why), "f=%#x", f);
+    rmdir("/tmp/ma-d");
+    report("mount_api", f == 0, why);
+}
+
 /* Copy `from` to a new file `to` with mode `mode` (chmod'ed, so the
  * umask does not apply); 0 on success. */
 static int t_copy(const char *from, const char *to, mode_t mode)
@@ -13047,6 +13490,8 @@ int main(int argc, char **argv)
     test_namespaces_mnt();
     test_mount_calls();
     test_mount_flags();
+    test_mount_api();
+    test_idmapped_mount();
     test_mount_no_escape();
     test_pivot_root();
     test_mount_object_cap();

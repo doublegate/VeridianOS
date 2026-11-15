@@ -557,13 +557,19 @@ const NS_GET_ID: u32 = ior(13, 8);
 /// Open an nsfs file for `ns` in the caller's table, read-only and
 /// close-on-exec, as Linux's open_related_ns.
 pub(super) fn open_ns(ns: NsRef) -> SyscallResult {
+    open_ns_with(ns, true)
+}
+
+/// [`open_ns`] with close-on-exec as `cloexec` says (fsmount's and
+/// open_tree's namespace descriptors take it from their flags).
+pub(super) fn open_ns_with(ns: NsRef, cloexec: bool) -> SyscallResult {
     use crate::fs::file::{File, OpenFlags};
     let file = File::new(Arc::new(NsFileNode::new(ns)), OpenFlags::read_only());
     let caller = process::current_process().ok_or(SyscallError::InvalidState)?;
     let fd = caller
         .file_table
         .lock()
-        .open_with_flags(Arc::new(file), true)
+        .open_with_flags(Arc::new(file), cloexec)
         .map_err(super::map_kernel_error)?;
     Ok(fd)
 }
@@ -679,8 +685,197 @@ pub(super) fn nsfs_ioctl(
     })
 }
 
+/// struct ns_id_req's size (NS_ID_REQ_SIZE_VER0).
+const NS_ID_REQ_SIZE_VER0: usize = 32;
+/// listns's user namespace id meaning the caller's.
+const LISTNS_CURRENT_USER: u64 = u64::MAX;
+/// The most ids listns returns in one call.
+const LISTNS_MAX: usize = 1_000_000;
+
+/// One namespace as listns sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NsEntry {
+    id: u64,
+    kind: u64,
+    owner: Option<u64>,
+}
+
+/// The ids listns returns from `all` (sorted by id, deduplicated): of a
+/// type in `types` (0 for every type), owned by `owner` if given, after
+/// `last` (0 for the first call), at most `nr`, the ones `visible` lets
+/// the caller see. ENOENT when `last` is given and nothing comes after it.
+fn listns_ids(
+    all: &[NsEntry],
+    types: u64,
+    owner: Option<u64>,
+    last: u64,
+    nr: usize,
+    visible: impl Fn(&NsEntry) -> bool,
+) -> Result<alloc::vec::Vec<u64>, SyscallError> {
+    if last != 0 && !all.iter().any(|e| e.id > last) {
+        return Err(SyscallError::ResourceNotFound);
+    }
+    Ok(all
+        .iter()
+        .filter(|e| types == 0 || types & e.kind != 0)
+        .filter(|e| owner.is_none() || e.owner == owner)
+        .filter(|e| e.id > last)
+        .filter(|e| visible(e))
+        .map(|e| e.id)
+        .take(nr)
+        .collect())
+}
+
+/// Every namespace in use: those of each thread's set and each process's
+/// user and PID namespace, with the user namespaces above them.
+fn active_namespaces() -> alloc::vec::Vec<NsEntry> {
+    let mut map = alloc::collections::BTreeMap::new();
+    let mut add = |ns: NsRef| {
+        let mut next = Some(ns);
+        while let Some(ns) = next {
+            let ident = ns.ident();
+            let owner = ns.owner();
+            if map
+                .insert(
+                    ident.id,
+                    NsEntry {
+                        id: ident.id,
+                        kind: ident.kind.clone_flag(),
+                        owner: owner.as_ref().map(|o| o.ident.id),
+                    },
+                )
+                .is_some()
+            {
+                break;
+            }
+            next = owner.map(NsRef::User);
+        }
+    };
+    process::table::PROCESS_TABLE.for_each(|p| {
+        add(ns::user_of(p));
+        add(ns::pid_of(p));
+        for thread in p.threads.lock().values() {
+            let set = thread.namespaces();
+            for kind in NsKind::ALL {
+                if kind != NsKind::User {
+                    add(set.get(kind));
+                }
+            }
+            add(NsRef::Time(set.time.clone()));
+        }
+    });
+    map.into_values().collect()
+}
+
+/// listns(req, ns_ids, nr_ns_ids, flags) (Linux 7.3 kernel/nstree.c): the
+/// ids of the namespaces in use, in id order, by type and owner. A caller
+/// in the initial PID namespace with CAP_SYS_ADMIN sees all of them;
+/// another only its own.
+pub fn sys_listns(req: usize, ids: usize, nr: usize, flags: usize) -> SyscallResult {
+    if flags as u32 != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if nr > LISTNS_MAX {
+        return Err(SyscallError::Overflow);
+    }
+    let size = super::userspace::read_user::<u32>(req)? as usize;
+    if size > 4096 {
+        return Err(SyscallError::ArgumentListTooLong);
+    }
+    if size < NS_ID_REQ_SIZE_VER0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let mut buf = alloc::vec![0u8; size];
+    super::userspace::read_user_bytes(req, &mut buf)?;
+    if buf[NS_ID_REQ_SIZE_VER0..].iter().any(|&b| b != 0) {
+        return Err(SyscallError::ArgumentListTooLong);
+    }
+    let u32_at = |i: usize| u32::from_ne_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]);
+    let u64_at = |i: usize| {
+        let mut b = [0u8; 8];
+        b.copy_from_slice(&buf[i..i + 8]);
+        u64::from_ne_bytes(b)
+    };
+    let (spare, last, types, user_ns_id) = (u32_at(4), u64_at(8), u32_at(16) as u64, u64_at(24));
+    if spare != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if types & !ns::CLONE_NS_ALL != 0 {
+        return Err(SyscallError::NotSupported);
+    }
+    let process = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
+    let all = active_namespaces();
+    let owner = match user_ns_id {
+        0 => None,
+        LISTNS_CURRENT_USER => Some(ns::user_of(&process).ident().id),
+        id => {
+            let known = all.iter().any(|e| e.id == id && e.kind == CLONE_NEWUSER);
+            if !known {
+                return Err(SyscallError::InvalidArgument);
+            }
+            Some(id)
+        }
+    };
+    let see_all = ns::pid_of(&process).ident().id == NsKind::Pid.init_id()
+        && Caller::current().capable(CAP_SYS_ADMIN);
+    let set = thread.namespaces();
+    let mut own: alloc::vec::Vec<u64> = NsKind::ALL
+        .into_iter()
+        .filter(|k| *k != NsKind::User)
+        .map(|k| set.get(k).ident().id)
+        .collect();
+    own.push(set.time.ident.id);
+    own.push(ns::user_of(&process).ident().id);
+    own.push(ns::pid_of(&process).ident().id);
+    let out = listns_ids(&all, types, owner, last, nr, |e| {
+        see_all || own.contains(&e.id)
+    })?;
+    if !out.is_empty() {
+        super::userspace::write_user_slice(ids, &out)?;
+    }
+    Ok(out.len())
+}
+
 #[cfg(test)]
 mod tests {
+    /// listns's filters: by type, by owner, after the last id, at most
+    /// `nr`, only what the caller may see; ENOENT past the end.
+    #[test]
+    fn listns_filters_by_type_owner_and_position() {
+        use super::{listns_ids, NsEntry};
+        let e = |id, kind, owner| NsEntry { id, kind, owner };
+        let all = [
+            e(1, 0x0800_0000, Some(3)),
+            e(3, 0x1000_0000, None),
+            e(8, 0x0002_0000, Some(3)),
+            e(20, 0x0002_0000, Some(21)),
+            e(21, 0x1000_0000, Some(3)),
+        ];
+        let any = |_: &NsEntry| true;
+        assert_eq!(
+            listns_ids(&all, 0, None, 0, 10, any),
+            Ok(alloc::vec![1, 3, 8, 20, 21])
+        );
+        assert_eq!(
+            listns_ids(&all, 0x0002_0000, None, 0, 10, any),
+            Ok(alloc::vec![8, 20])
+        );
+        assert_eq!(
+            listns_ids(&all, 0, Some(3), 0, 10, any),
+            Ok(alloc::vec![1, 8, 21])
+        );
+        assert_eq!(listns_ids(&all, 0, None, 3, 2, any), Ok(alloc::vec![8, 20]));
+        assert_eq!(
+            listns_ids(&all, 0, None, 21, 10, any),
+            Err(super::SyscallError::ResourceNotFound)
+        );
+        assert_eq!(
+            listns_ids(&all, 0, None, 0, 10, |e| e.id < 5),
+            Ok(alloc::vec![1, 3])
+        );
+    }
+
     use super::*;
 
     #[test]

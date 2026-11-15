@@ -408,7 +408,24 @@ What remains:
   copy parked trees; at most 16 parked roots stack (`MAX_PARKED_DEPTH`; the next pivot_root(".",
   ".") is ENOSPC), where Linux keeps one flat list bounded only by fs.mount-max, which is not
   implemented. mount(2), umount2 and pivot_root check CAP_SYS_ADMIN and, since ADR 0024 step 2,
-  MODIFY on the mount namespace or a user namespace above it. The VFS
+  MODIFY on the mount namespace or a user namespace above it, as do the new mount API's calls
+  (fsopen, fsconfig, fsmount, fspick, move_mount, open_tree, open_tree_attr, mount_setattr).
+  Their filesystems are mount(2)'s; FSCONFIG_CMD_RECONFIGURE applies `ro` and `rw` only (as a
+  remount); FSCONFIG_SET_BINARY, SET_PATH and SET_FD are taken by no filesystem here (EINVAL);
+  move_mount's MOVE_MOUNT_BENEATH and MOVE_MOUNT_SET_GROUP are EINVAL (there are no peer groups
+  to join, and mounting beneath waits for open files to keep the mount they were reached
+  through); FSMOUNT_NAMESPACE and OPEN_TREE_NAMESPACE make a namespace whose root is the tree
+  itself, where Linux puts it on an empty nullfs mount, so listmount and statmount there show one
+  mount fewer (there is no nullfs; as on Linux, fsopen("nullfs") is ENODEV); locked mounts
+  (MNT_LOCKED) are kept, but a locked mount's lazy unmount with its parent drops it rather than
+  leaving it connected as Linux's UMOUNT_CONNECTED does, and mount_too_revealing treats any
+  locked submount as hiding something (Linux allows one over a permanently empty directory);
+  idmapped mounts are offered on tmpfs, ramfs and BlockFS only (Linux has more filesystems with
+  FS_ALLOW_IDMAP), every superblock's own user namespace is the initial one, and a file
+  capability's root ID is mapped but no POSIX ACLs exist to map; a
+  detached tree's files are named by the tree's id instead of a path (`fs::mount::DETACHED`),
+  and a descriptor of an attached tree follows it through move_mount and MS_MOVE, but not
+  through pivot_root. The VFS
   finds open files by path, so a descriptor opened in another mount namespace is looked up by
   its path in the caller's (for fstat's mount id, fchdir and the like) once the two trees
   differ, and sync(2) flushes the filesystems of the initial namespace only. The mount flags are

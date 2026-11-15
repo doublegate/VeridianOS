@@ -236,6 +236,63 @@ The reference for every behaviour below is the Linux 7.3 source (kernel.org tarb
     path-string model as a sentinel root no user path can hold (`fs::FAILFS_ROOT`). Not yet:
     `/proc/self/root` and `/proc/self/cwd`, which do not exist.
 
+### The new mount API (Linux 7.3 `fs/fsopen.c`, `fs/namespace.c`)
+
+24. fsopen, fsconfig, fsmount, fspick, move_mount, open_tree, open_tree_attr, mount_setattr,
+    statmount, listmount and listns have Linux's semantics and checks, each needing MODIFY on
+    the mount namespace (or a user namespace above it) as mount does (ADR 0024):
+    - **Detached trees** (fsmount, open_tree with OPEN_TREE_CLONE) are anonymous mount
+      namespaces: each its own mount table, reached through a path marker its descriptor holds,
+      and kept alive, as on Linux, by every open file inside it, not only the descriptor that
+      made it. move_mount attaches one; a tree attached under itself is ELOOP.
+    - **The context descriptor** checks each fsconfig parameter as the filesystem would and
+      keeps the last eight refusals, read back as Linux formats them (`e tmpfs: Unknown
+      parameter 'x'`; ENODATA when none, EMSGSIZE for a short buffer).
+    - **mount_setattr** changes the read-only, nosuid, nodev, noexec, atime and propagation
+      flags, recursively with AT_RECURSIVE. statmount (by mount ID or descriptor) and listmount
+      read the caller's namespace; listns lists the namespaces it can see.
+    - **FSMOUNT_NAMESPACE and OPEN_TREE_NAMESPACE** (Linux 7.x create_new_namespace): the new
+      mount, or a copy of the mount at a directory (with its submounts under AT_RECURSIVE),
+      becomes the root of a new mount namespace owned by the caller's user namespace, returned
+      as an nsfs descriptor for setns. They need CAP_SYS_ADMIN in the caller's user namespace
+      and the object capability unshare(CLONE_NEWNS) needs (ADR 0024), as on Linux 7.3,
+      including its fix for leaving out covering mounts: a caller whose user namespace does not
+      own the namespace the copy is made from may leave nothing mounted below out (EINVAL), and
+      its copy includes unbindable mounts and is locked. A new proc mount through
+      FSMOUNT_NAMESPACE in a namespace not owned by the initial user namespace needs a proc mount
+      there that shows all of proc (mount_too_revealing, EPERM).
+    - **Locked mounts (MNT_LOCKED and MNT_LOCK_*; the maintainer asked for the long-term design,
+      2026-11-14):** a mount namespace copied for an owner other than the one it is copied from
+      (unshare or clone with a new user namespace, a foreign OPEN_TREE_NAMESPACE copy) is
+      locked, as lock_mnt_tree: every mount's atime type and its set read-only, nodev, nosuid
+      and noexec flags cannot be cleared (EPERM, mount_setattr and remount), and every mount but
+      the copy's root cannot be unmounted, moved or left out of a copy or bind (EINVAL), nor be
+      the new root of pivot_root, which moves the old root's lock to the new one. Copies keep
+      the flag locks; a recursive copy keeps the mount locks too. This is the native form of
+      handing a mount tree to a less trusted owner: masks and restrictive flags travel with it
+      and only the authority that made them can remove them, which the sandbox and capability
+      mode of Track S rely on, and which Linux mode's ns_capable mount calls (queue item 6)
+      need. A first version of the namespace flags without locks (9da3f830) required mount's
+      privilege instead; that is gone. Linux puts the tree on an empty nullfs root, which every namespace has there;
+      here the tree is the root, so such a namespace lists one mount fewer. nullfs itself is not
+      a filesystem type a caller can open, on Linux either (ENODEV).
+    - **Idmapped mounts** (MOUNT_ATTR_IDMAP with a user namespace's nsfs descriptor, Linux's
+      `fs/mnt_idmapping.c`): owners stored as `k` read through the mount as the namespace's map
+      takes `k` (make_vfsuid), and owners given through it are stored as the map takes them
+      back (from_vfsuid; EOVERFLOW without one, also for a creator whose IDs it cannot store,
+      may_create). Checked as Linux: a detached mount only, of tmpfs, ramfs or BlockFS (the
+      maintainer's choice, 2026-11-11), not the initial user namespace's maps (EPERM),
+      CAP_SYS_ADMIN over the namespace (EPERM), not over maps a mount already shows unless it
+      is open_tree_attr's fresh copy (EPERM; clearing likewise only there); copies keep the
+      maps; statmount reports MOUNT_ATTR_IDMAP and the maps. The design differs from Linux's,
+      which passes the map into every VFS call: the mount's root is a translating view of its
+      node (`fs::idmap::IdmappedNode`), so everything reached through it is seen mapped and the
+      checks above it need not know. That is the shape a file server's per-mount handle takes
+      once filesystems leave the kernel (Track M); a host test keeps the view forwarding every
+      VfsNode method, so a new one cannot silently fall back to a default there.
+    - **Not yet** (KNOWN-LIMITATIONS): MOVE_MOUNT_BENEATH, until open files keep the mount they
+      were reached through.
+
 ## Consequences
 
 - LTP's ipc tests (shmget*, shmat*, shmctl*, semget*, semop*, semctl*, msgget*, msgsnd*,

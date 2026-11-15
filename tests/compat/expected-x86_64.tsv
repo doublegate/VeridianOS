@@ -671,8 +671,8 @@ ltp-syscalls	linkat02	BROK	linkat02    1  TBROK  :  tst_device.c:450: Failed to 
 ltp-syscalls	listen01	FAIL	listen01    3  TFAIL  :  listen01.c:102: UDP listen ; returned -1 (expected -1), errno 22 (expected 95)
 ltp-syscalls	listmount01	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	listmount02	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	listmount03	CONF	listmount.h:24: TCONF: syscall(458) __NR_listmount not supported on your arch
-ltp-syscalls	listmount04	CONF	listmount04.c:171: TCONF: syscall(458) __NR_listmount not supported on your arch
+ltp-syscalls	listmount03	PASS	
+ltp-syscalls	listmount04	PASS	
 ltp-syscalls	listxattr01	PASS	
 ltp-syscalls	listxattr02	PASS	
 ltp-syscalls	listxattr03	PASS	
@@ -795,10 +795,10 @@ ltp-syscalls	mount06	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	mount07	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	mount08	BROK	mount08.c:36: TBROK: openat(-100<!>, '/proc/728/fd/3', 10400000, 0): ENOENT (2)
 ltp-syscalls	mount_setattr01	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	mount_setattr02	CONF	../../../../include/lapi/fsmount.h:120: TCONF: syscall(442) __NR_mount_setattr not supported on your arch
+ltp-syscalls	mount_setattr02	FAIL	exit 5; mount_setattr02.c:101: TFAIL: mount_setattr(-1, tmpdir, 0, &attr, sizeof(attr)) failed: EINVAL (22)
 ltp-syscalls	move_mount01	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	move_mount02	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	move_mount03	CONF	../../../../include/lapi/fsmount.h:104: TCONF: syscall(428) __NR_open_tree not supported on your arch
+ltp-syscalls	move_mount03	BROK	move_mount03.c:108: TBROK: umount(LTP_DIR_B) failed: EINVAL (22)
 ltp-syscalls	move_pages01	CONF	move_pages01    1  TCONF  :  move_pages_support.c:411: test requires libnuma development packages with LIBNUMA_API_VERSION >= 2
 ltp-syscalls	move_pages02	CONF	move_pages02    1  TCONF  :  move_pages_support.c:411: test requires libnuma development packages with LIBNUMA_API_VERSION >= 2
 ltp-syscalls	move_pages03	CONF	move_pages03    1  TCONF  :  move_pages_support.c:411: test requires libnuma development packages with LIBNUMA_API_VERSION >= 2
@@ -856,7 +856,7 @@ ltp-syscalls	msgsnd01	PASS
 ltp-syscalls	msgsnd02	PASS	
 ltp-syscalls	msgsnd05	BROK	msgsnd05.c:83: TBROK: msgget(1627460692, 780) failed: ENOSYS (38)
 ltp-syscalls	msgsnd06	BROK	msgsnd06.c:39: TBROK: msgget(1627460692, 780) failed: ENOSYS (38)
-ltp-syscalls	msgstress01	BROK	msgstress01.c:256: TBROK: Failed to open FILE '/proc/sys/kernel/msgmni' for reading: ENOENT (2)
+ltp-syscalls	msgstress01	TIMEOUT	tst_pid.c:84: TINFO: Cannot read session user limits from '/sys/fs/cgroup/user.slice/user-0.slice/pids.max'
 ltp-syscalls	msync01	PASS	
 ltp-syscalls	msync02	FAIL	msync02     1  TFAIL  :  msync02.c:97: msync failed: TEST_ERRNO=ENOSYS(38): Function not implemented
 ltp-syscalls	msync03	PASS	
@@ -1103,7 +1103,7 @@ ltp-syscalls	rt_sigprocmask02	FAIL	rt_sigprocmask02    1  TFAIL  :  rt_sigprocma
 ltp-syscalls	rt_sigqueueinfo01	FAIL	rt_sigqueueinfo01.c:70: TFAIL: rt_sigqueueinfo() failed: ESRCH (3)
 ltp-syscalls	rt_sigqueueinfo02	PASS	
 ltp-syscalls	rt_sigsuspend01	BROK	tst_test.c:1973: TBROK: Test killed by SIGSEGV!
-ltp-syscalls	rt_sigtimedwait01	TIMEOUT	tse_sigwait.c:331: TPASS: Child exited with expected code
+ltp-syscalls	rt_sigtimedwait01	PASS	
 ltp-syscalls	rt_tgsigqueueinfo01	PASS	
 ltp-syscalls	sbrk01	FAIL	sbrk01.c:27: TFAIL: sbrk(8192) returned 0xffffffffffffffff failed: ENOMEM (12)
 ltp-syscalls	sbrk02	PASS	
@@ -1389,7 +1389,7 @@ ltp-syscalls	statmount04	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	statmount05	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	statmount06	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	statmount07	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	statmount08	CONF	statmount.h:25: TCONF: syscall(457) __NR_statmount not supported on your arch
+ltp-syscalls	statmount08	PASS	
 ltp-syscalls	statmount09	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	statvfs01	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	statvfs02	PASS	
@@ -3365,8 +3365,8 @@ open-posix	conformance/interfaces/sigpause/2-1	PASS
 open-posix	conformance/interfaces/sigpause/3-1	PASS	
 open-posix	conformance/interfaces/sigpause/4-1	PASS	
 open-posix	conformance/interfaces/sigpending/1-1	PASS	
-open-posix	conformance/interfaces/sigpending/1-2	FAIL	exit 255; Not all pending signals found
-open-posix	conformance/interfaces/sigpending/1-3	FAIL	exit 255; Error with send signals
+open-posix	conformance/interfaces/sigpending/1-2	PASS	
+open-posix	conformance/interfaces/sigpending/1-3	PASS	
 open-posix	conformance/interfaces/sigpending/2-1	PASS	
 open-posix	conformance/interfaces/sigprocmask/4-1	PASS	
 open-posix	conformance/interfaces/sigprocmask/5-1	PASS	
@@ -3463,9 +3463,9 @@ open-posix	conformance/interfaces/timer_delete/4-1	PASS
 open-posix	conformance/interfaces/timer_delete/speculative/5-1	PASS	
 open-posix	conformance/interfaces/timer_delete/speculative/5-2	PASS	
 open-posix	conformance/interfaces/timer_getoverrun/1-1	PASS	
-open-posix	conformance/interfaces/timer_getoverrun/2-1	FAIL	FAIL:  0 overruns sent; expected 2
-open-posix	conformance/interfaces/timer_getoverrun/2-2	FAIL	FAIL:  0 overruns sent; expected 75
-open-posix	conformance/interfaces/timer_getoverrun/2-3	FAIL	FAIL:  0 overruns sent; expected 499999999
+open-posix	conformance/interfaces/timer_getoverrun/2-1	PASS	
+open-posix	conformance/interfaces/timer_getoverrun/2-2	PASS	
+open-posix	conformance/interfaces/timer_getoverrun/2-3	PASS	
 open-posix	conformance/interfaces/timer_getoverrun/4-1	PASS	
 open-posix	conformance/interfaces/timer_getoverrun/5-1	PASS	
 open-posix	conformance/interfaces/timer_getoverrun/speculative/6-1	PASS	

@@ -21,6 +21,9 @@ pub mod fat32;
 pub mod fifo;
 pub mod file;
 pub mod flock;
+#[cfg(feature = "alloc")]
+pub mod fscontext;
+pub mod idmap;
 pub mod inotify;
 #[cfg(feature = "alloc")]
 pub mod memfd;
@@ -966,6 +969,13 @@ pub trait VfsNode: Send + Sync {
     /// directory 2 and one per subdirectory, 0 once it is removed. The
     /// default, for a node outside a tree that counts them, is 1, or 2 for
     /// a directory.
+    /// The node this one is a view of (an idmapped mount's,
+    /// [`idmap::IdmappedNode`]); None for a real node. Links, renames and
+    /// identity use the real node ([`base_node`]).
+    fn view_of(&self) -> Option<Arc<dyn VfsNode>> {
+        None
+    }
+
     fn link_count(&self) -> u32 {
         if self.node_type() == NodeType::Directory {
             2
@@ -1018,8 +1028,15 @@ pub const fn make_dev(major: u32, minor: u32) -> u32 {
 /// the filesystem has one (BlockFS), otherwise the node's address, which
 /// stays unique while the table holds the node.
 pub(crate) fn inode_key(node: &Arc<dyn VfsNode>) -> (u64, u64) {
+    let node = base_node(node);
     node.file_identity()
-        .unwrap_or((0, Arc::as_ptr(node) as *const () as u64))
+        .unwrap_or((0, Arc::as_ptr(&node) as *const () as u64))
+}
+
+/// The real node behind `node`: itself, or what an idmapped mount's view
+/// shows ([`VfsNode::view_of`]).
+pub fn base_node(node: &Arc<dyn VfsNode>) -> Arc<dyn VfsNode> {
+    node.view_of().unwrap_or_else(|| node.clone())
 }
 
 /// A special inode found by number (BlockFS's `file_identity`) lost its
@@ -1107,6 +1124,17 @@ pub const PSEUDO_MOUNT: MountIds = MountIds {
 /// components lexically. `..` at the root stays at the root. The result
 /// always starts with `/` and never ends with one (except `/` itself).
 pub(crate) fn normalize_path(path: &str, cwd: &str) -> String {
+    // A path in a detached tree stays one, and so does a relative path
+    // from a working directory in one (PR #47 review).
+    if let Some((id, rest)) = mount::parse_detached(path) {
+        return mount::detached_path(id, &normalize_path(rest, "/"));
+    }
+    if !path.starts_with('/') {
+        if let Some((id, rest)) = mount::parse_detached(cwd) {
+            let rest = if rest.is_empty() { "/" } else { rest };
+            return mount::detached_path(id, &normalize_path(path, rest));
+        }
+    }
     // A whole-tree path (failfs) stays one.
     if let Some(rest) = path.strip_prefix(WHOLE_TREE) {
         let mut out = String::from(WHOLE_TREE);
@@ -1231,6 +1259,49 @@ impl MountTable {
         let mount = self.mount_of(&path);
         let fs = self.fs_at(mount)?;
         Some((String::from(mount), fs))
+    }
+}
+
+/// The tree that serves canonical `path` and the path in it, with the
+/// detached tree's id while the path is in one that is still detached.
+/// A path in a detached tree ([`mount::DETACHED`]) is judged by the mount
+/// it is really on: in that tree, or, once the tree is attached, at its
+/// place in the tree it was attached to. Any other path is `ns`'s. `None`
+/// for a detached tree that is gone (no file is open in it then: each
+/// holds its tree). Mount flags, ids and filesystems must come from here,
+/// not from the caller's namespace, or a read-only, nodev or noexec
+/// detached mount would be judged by the caller's root mount (PR #47
+/// review).
+fn serving_tree(
+    ns: &Arc<mount::Mounts>,
+    path: &str,
+) -> Option<(Arc<mount::Mounts>, String, Option<u64>)> {
+    let Some((id, rest)) = mount::parse_detached(path) else {
+        return Some((ns.clone(), String::from(path), None));
+    };
+    let rest = if rest.is_empty() { "/" } else { rest };
+    let (tree, point) = mount::detached_place(id)?;
+    Some(match point {
+        None => (tree, String::from(rest), Some(id)),
+        Some(p) if p == "/" => (tree, String::from(rest), None),
+        Some(p) if rest == "/" => (tree, p, None),
+        Some(p) => (tree, alloc::format!("{p}{rest}"), None),
+    })
+}
+
+/// [`MountTable::mount_of`] of `path` through [`serving_tree`], as a path
+/// of the same kind (a detached path for a detached tree).
+fn serving_mount_point(ns: &Arc<mount::Mounts>, path: &str) -> String {
+    match serving_tree(ns, path) {
+        Some((tree, p, id)) => {
+            let point = String::from(tree.snapshot().mount_of(&normalize_path(&p, "/")));
+            match id {
+                Some(id) => mount::detached_path(id, if point == "/" { "" } else { &point }),
+                None => point,
+            }
+        }
+        // Gone: a point no other path shares.
+        None => String::from(path),
     }
 }
 
@@ -1669,7 +1740,12 @@ impl<'a> CallerView<'a> {
             return self;
         }
         if resolve & resolve_flags::SCOPED != 0 {
-            self.ctx.root = if self.ctx.root == "/" || self.ctx.root == FAILFS_ROOT {
+            // A start in a detached tree is a whole path already, never
+            // joined to the caller's root (PR #47 review).
+            self.ctx.root = if self.ctx.root == "/"
+                || self.ctx.root == FAILFS_ROOT
+                || mount::is_detached_path(start)
+            {
                 String::from(start)
             } else if start == "/" {
                 self.ctx.root.clone()
@@ -1745,37 +1821,46 @@ impl<'a> CallerView<'a> {
     /// there): renaming `path` would leave those mounts at the old place,
     /// as mounts are kept by path (PR #35 review).
     pub fn mounts_under(&self, path: &str) -> bool {
-        let path = normalize_path(path, "/");
-        let table = self.ctx.mounts.snapshot();
+        // In the tree the path is really in: a detached path's tree, or the
+        // one it was attached to (PR #47 review).
+        let Some((tree, path, _)) = serving_tree(&self.ctx.mounts, &normalize_path(path, "/"))
+        else {
+            return false;
+        };
+        let path = normalize_path(&path, "/");
+        let table = tree.snapshot();
         let under = |m: &String| m.as_str() != path && path_is_under(m, &path);
         table.mounts.keys().any(under) || table.parked.keys().any(|p| path_is_under(p, &path))
     }
 
-    /// [`Vfs::mount_point_of`] in the caller's mount namespace.
+    /// [`Vfs::mount_point_of`] in the caller's mount namespace (or the
+    /// detached tree a detached path is in, [`serving_tree`]).
     pub fn mount_point_of(&self, path: &str) -> String {
-        String::from(
-            self.ctx
-                .mounts
-                .snapshot()
-                .mount_of(&normalize_path(path, "/")),
-        )
+        serving_mount_point(&self.ctx.mounts, path)
     }
 
-    /// [`Vfs::mount_ids_of`] in the caller's mount namespace.
+    /// [`Vfs::mount_ids_of`] in the caller's mount namespace (or the
+    /// detached tree a detached path is in).
     pub fn mount_ids_of(&self, path: &str) -> (MountIds, bool) {
-        self.ctx.mounts.snapshot().ids_of(path)
+        serving_tree(&self.ctx.mounts, path).map_or((PSEUDO_MOUNT, false), |(tree, p, _)| {
+            tree.snapshot().ids_of(&p)
+        })
     }
 
-    /// The mount serving canonical `path` in the caller's mount namespace,
-    /// whose flags say what may be done there (ADR 0022 H3c); `None`
-    /// before a root is mounted.
+    /// The mount serving canonical `path` in the caller's mount namespace
+    /// (or the detached tree a detached path is in), whose flags say what
+    /// may be done there (ADR 0022 H3c); `None` before a root is mounted.
     pub fn mount_serving(&self, path: &str) -> Option<Arc<mount::Mount>> {
-        self.ctx.mounts.snapshot().serving(path).cloned()
+        let (tree, p, _) = serving_tree(&self.ctx.mounts, path)?;
+        tree.snapshot().serving(&p).cloned()
     }
 
-    /// [`Vfs::filesystem_of`] in the caller's mount namespace.
+    /// [`Vfs::filesystem_of`] in the caller's mount namespace (or the
+    /// detached tree a detached path is in).
     pub fn filesystem_of(&self, path: &str) -> Option<(String, Arc<dyn Filesystem>)> {
-        self.ctx.mounts.snapshot().fs_of(path)
+        let (tree, p, _) = serving_tree(&self.ctx.mounts, path)?;
+        let (_, fs) = tree.snapshot().fs_of(&p)?;
+        Some((serving_mount_point(&self.ctx.mounts, path), fs))
     }
 
     /// [`Vfs::filesystem_with_dev`] in the caller's mount namespace.
@@ -2054,6 +2139,76 @@ impl Vfs {
         cwd: &str,
         follow_last: bool,
     ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
+        // A path in a detached tree, or relative to a directory in one:
+        // the walk starts at that directory, as any relative walk starts at
+        // its own, so the mounts on the way there are no crossings for
+        // RESOLVE_NO_XDEV (PR #47 review).
+        if path.starts_with(mount::DETACHED) {
+            return Self::lookup_detached(ctx, path, "", follow_last);
+        }
+        if !path.starts_with('/') && cwd.starts_with(mount::DETACHED) {
+            return Self::lookup_detached(ctx, cwd, path, follow_last);
+        }
+        // A root in a detached tree (fchroot of a descriptor in one, which
+        // Linux allows): absolute paths, and relative ones from a working
+        // directory under that root, resolve in the tree, confined to the
+        // root as any chroot is.
+        // `path` and `cwd` go to the walk as they are, relative to the
+        // root as for any root, so a relative lookup stays relative (as
+        // RESOLVE_BENEATH needs; PR #47 review).
+        if let Some((id, at)) = mount::parse_detached(&ctx.root) {
+            let gone = || KernelError::FsError(crate::error::FsError::NotFound);
+            let at = if at.is_empty() { "/" } else { at };
+            let (tree, point) = mount::detached_place(id).ok_or_else(gone)?;
+            let Some(point) = point else {
+                let (node, canon) = tree.snapshot().resolve_in(
+                    path,
+                    cwd,
+                    at,
+                    follow_last,
+                    0,
+                    ctx.creds.clone(),
+                    ctx.resolve,
+                )?;
+                return Ok((node, mount::detached_path(id, &canon)));
+            };
+            // Attached since: the root is where the tree went, and still a
+            // root there (PR #47 review).
+            let root = if at == "/" {
+                point.clone()
+            } else if point == "/" {
+                String::from(at)
+            } else {
+                alloc::format!("{point}{at}")
+            };
+            let (node, canon) = tree.snapshot().resolve_in(
+                path,
+                cwd,
+                &root,
+                follow_last,
+                0,
+                ctx.creds.clone(),
+                ctx.resolve,
+            )?;
+            // Named by the id still, in whichever tree it is now, as the
+            // stored root is: cwd and the paths the caller keeps are relative
+            // to that root, so mixing the forms would double them (PR #47
+            // review).
+            if !path_is_under(&canon, &point) {
+                return Err(gone());
+            }
+            let rel = if point == "/" {
+                canon.clone()
+            } else {
+                String::from(&canon[point.len()..])
+            };
+            let rel = if rel.is_empty() {
+                String::from("/")
+            } else {
+                rel
+            };
+            return Ok((node, mount::detached_path(id, &rel)));
+        }
         ctx.mounts.snapshot().resolve_in(
             path,
             cwd,
@@ -2063,6 +2218,106 @@ impl Vfs {
             ctx.creds.clone(),
             ctx.resolve,
         )
+    }
+
+    /// [`Vfs::lookup`] of a [`mount::DETACHED`] path: in the detached tree,
+    /// its root the root, the result a path in it again; or, once the tree
+    /// is attached, at its place in the tree it was attached to (a path in
+    /// the caller's namespace if it is that one). ENOENT once the tree is
+    /// gone.
+    ///
+    /// With `rel` (a relative path) `path` is the directory the walk starts
+    /// at rather than the target.
+    fn lookup_detached(
+        ctx: &PathContext,
+        path: &str,
+        rel: &str,
+        follow_last: bool,
+    ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
+        let gone = || KernelError::FsError(crate::error::FsError::NotFound);
+        let (id, rest) = mount::parse_detached(path).ok_or_else(gone)?;
+        let rest = if rest.is_empty() { "/" } else { rest };
+        let (tree, point) = mount::detached_place(id).ok_or_else(gone)?;
+        // `rel` from directory `start`, or `start` itself, in `root`.
+        let walk_in = |t: &MountTable, start: &str, root: &str| {
+            let (p, cwd) = if rel.is_empty() {
+                (start, "/")
+            } else {
+                (rel, start)
+            };
+            t.resolve_in(p, cwd, root, follow_last, 0, ctx.creds.clone(), ctx.resolve)
+        };
+        let walk = |start: &str| walk_in(&tree.snapshot(), start, "/");
+        match point {
+            None => {
+                let (node, canon) = walk(rest)?;
+                Ok((node, mount::detached_path(id, &canon)))
+            }
+            Some(point) => {
+                let full = if point == "/" {
+                    String::from(rest)
+                } else if rest == "/" {
+                    point.clone()
+                } else {
+                    alloc::format!("{point}{rest}")
+                };
+                // In the caller's namespace the tree is an ordinary part
+                // of it now: walked as a path in it, from the caller's root,
+                // so `..` and absolute symlinks stay inside a chroot, and a
+                // place outside the root is not found (security review).
+                if Arc::ptr_eq(&tree, &ctx.mounts) {
+                    // Under a failfs root a descriptor-anchored walk goes on
+                    // in the whole tree (Linux 7.3), as `WHOLE_TREE` marks.
+                    if ctx.root == FAILFS_ROOT {
+                        let whole = alloc::format!("{WHOLE_TREE}{full}");
+                        if rel.is_empty() {
+                            return ctx.mounts.snapshot().resolve_in(
+                                &whole,
+                                "/",
+                                &ctx.root,
+                                follow_last,
+                                0,
+                                ctx.creds.clone(),
+                                ctx.resolve,
+                            );
+                        }
+                        // A relative walk from a real directory under a
+                        // failfs root goes on in the whole tree.
+                        return walk_in(&ctx.mounts.snapshot(), &full, &ctx.root);
+                    }
+                    if !path_is_under(&point, &ctx.root) {
+                        return Err(gone());
+                    }
+                    // The rest is walked, not joined lexically: `..` in it
+                    // stops at the root as any walk does.
+                    let at = root_relative(&point, &ctx.root);
+                    let inside = if at == "/" {
+                        String::from(rest)
+                    } else if rest == "/" {
+                        at
+                    } else {
+                        alloc::format!("{at}{rest}")
+                    };
+                    return walk_in(&ctx.mounts.snapshot(), &inside, &ctx.root);
+                }
+                let (node, canon) = walk(&full)?;
+                // Another namespace's tree: still named by the id.
+                if !path_is_under(&canon, &point) {
+                    return Err(gone());
+                }
+                let rel = if point == "/" {
+                    canon.clone()
+                } else {
+                    String::from(&canon[point.len()..])
+                };
+                let rel = if rel.is_empty() {
+                    String::from("/")
+                } else {
+                    rel
+                };
+                Ok((node, mount::detached_path(id, &rel)))
+            }
+        }
     }
 
     /// Resolve a path to a VFS node, following symlinks (including the
@@ -2100,15 +2355,16 @@ impl Vfs {
     /// The mount point that serves `path`, a canonical path in the whole
     /// tree.
     pub fn mount_point_of(&self, path: &str) -> String {
-        let path = normalize_path(path, "/");
-        String::from(self.snapshot().mount_of(&path))
+        serving_mount_point(&self.mounts, path)
     }
 
     /// The ids of the mount serving `path`, a canonical path in the whole
     /// tree, and whether `path` is that mount's root (statx's
     /// STATX_ATTR_MOUNT_ROOT).
     pub fn mount_ids_of(&self, path: &str) -> (MountIds, bool) {
-        self.snapshot().ids_of(path)
+        serving_tree(&self.mounts, path).map_or((PSEUDO_MOUNT, false), |(tree, p, _)| {
+            tree.snapshot().ids_of(&p)
+        })
     }
 
     /// The filesystem whose files stat reports with device number `dev`
@@ -2406,17 +2662,17 @@ impl Vfs {
         // A read-only mount makes nothing: EEXIST for a name that exists,
         // else EROFS, before any permission check (Linux's filename_create
         // and lookup_open).
-        let snapshot = ctx.mounts.snapshot();
-        if snapshot
-            .serving(&canonical_parent)
-            .is_some_and(|m| m.is_readonly())
-        {
+        // The mount is the one the parent is really on (a detached tree's
+        // for a detached path, `serving_tree`).
+        let readonly = serving_tree(&ctx.mounts, &canonical_parent).is_some_and(|(tree, p, _)| {
+            tree.snapshot().serving(&p).is_some_and(|m| m.is_readonly())
+        });
+        if readonly {
             if parent.lookup(name).is_ok() {
                 return Err(KernelError::FsError(crate::error::FsError::AlreadyExists));
             }
             return Err(KernelError::FsError(crate::error::FsError::ReadOnly));
         }
-        drop(snapshot);
 
         // MAC check: creating an entry requires Write access
         crate::security::mac::check_file_access(
