@@ -28,15 +28,43 @@ FILE='signatures/version1/cla.json'
 DOC_URL='https://github.com/doublegate/VeridianOS/blob/main/CLA.md'
 MARKER='<!-- veridianos-cla-check -->'
 # The maintainer holds the rights already; bots author nothing copyrightable.
-ALLOW_RE='^(doublegate|.+\[bot\])$'
+MAINTAINER='doublegate'
 
-# The authors of a pull request who must sign: `committers` minus the
-# allowlist minus `signed` (each one login per line). An author without a
-# linked GitHub account is listed as "@unlinked:<name>" and can never match.
+# Commit author fields are whatever the committer typed, so they cannot be
+# trusted for an exemption: anyone can write "x[bot]" or the maintainer's
+# e-mail address. What the API reports reliably is the account that opened
+# the pull request and that account's type. So:
+# - the opener must sign, unless it is the maintainer or a Bot account;
+# - commit authors are exempt as the maintainer or a bot only in a pull
+#   request such an account opened; anywhere else a "[bot]" name without a
+#   linked account is unlinked, and the maintainer's commits count as the
+#   opener's submission, which the opener's signature covers (CLA "You
+#   submit", clause 1).
+#
+# opener_exempt LOGIN TYPE: whether the opener needs no signature.
+opener_exempt() {
+    [ "$1" = "$MAINTAINER" ] || { [ "$2" = "Bot" ] && [[ "$1" == *"[bot]" ]]; }
+}
+
+# The logins who must have signed, one per line. `committers` holds one
+# entry per commit: a login, "@bot:<name>" for an unlinked author named
+# "...[bot]", or "@unlinked:<name>".
+required_of() {
+    local committers="$1" opener="$2" opener_type="$3"
+    if opener_exempt "$opener" "$opener_type"; then
+        printf '%s\n' "$committers" | sed -e '/^$/d' -e '/^@bot:/d' | grep -Fxv -- "$MAINTAINER" || true
+    else
+        printf '%s\n' "$opener"
+        printf '%s\n' "$committers" | sed -e '/^$/d' -e 's/^@bot:/@unlinked:/' | grep -Fxv -- "$MAINTAINER" || true
+    fi
+}
+
+# The required logins (from required_of) that have not signed. An
+# "@unlinked:" entry can never match a signature.
 unsigned_of() {
     local committers="$1" signed="$2"
-    comm -23 \
-        <(printf '%s\n' "$committers" | sed '/^$/d' | grep -Ev "$ALLOW_RE" | LC_ALL=C sort -u) \
+    LC_ALL=C comm -23 \
+        <(printf '%s\n' "$committers" | sed '/^$/d' | LC_ALL=C sort -u) \
         <(printf '%s\n' "$signed" | sed -e '/^$/d' -e '/^@unlinked:/d' | LC_ALL=C sort -u) || true
 }
 
@@ -75,15 +103,22 @@ add_signature() {
 selftest() {
     local fails=0
     check() { if [ "$2" = "$3" ]; then echo "  ok    $1"; else echo "  FAIL  $1: got [$2] want [$3]"; fails=$((fails + 1)); fi; }
-    check "an unsigned author is listed" "$(unsigned_of $'alice\nbob' 'alice')" "bob"
-    check "the maintainer and bots need not sign" \
-        "$(unsigned_of $'doublegate\ndependabot[bot]\ngithub-actions[bot]' '')" ""
-    check "authors are listed once" "$(unsigned_of $'bob\nbob\nbob' '')" "bob"
+    req() { unsigned_of "$(required_of "$1" "$2" "$3")" "$4"; }
+    check "an unsigned author is listed" "$(req $'alice\nbob' doublegate User 'alice')" "bob"
+    check "the maintainer's own pull request" "$(req $'doublegate\ndoublegate' doublegate User '')" ""
+    check "a bot's pull request" "$(req $'@bot:dependabot[bot]' 'dependabot[bot]' Bot '')" ""
+    check "authors are listed once" "$(req $'bob\nbob\nbob' doublegate User '')" "bob"
     check "an unlinked author can never match" \
-        "$(unsigned_of '@unlinked:Bob Smith' '@unlinked:Bob Smith')" "@unlinked:Bob Smith"
-    check "a login that only contains a bot name is not a bot" \
-        "$(unsigned_of 'evil[bot]x' '')" "evil[bot]x"
-    check "everyone signed" "$(unsigned_of $'alice\nbob' $'bob\nalice')" ""
+        "$(req '@unlinked:Bob Smith' doublegate User '@unlinked:Bob Smith')" "@unlinked:Bob Smith"
+    check "everyone signed" "$(req $'alice\nbob' doublegate User $'bob\nalice')" ""
+    check "an outside opener must sign" "$(req 'doublegate' mallory User '')" "mallory"
+    check "a forged bot author in an outside pull request" \
+        "$(req '@bot:x[bot]' mallory User 'mallory')" "@unlinked:x[bot]"
+    check "the maintainer's e-mail forged by a signed opener" \
+        "$(req 'doublegate' mallory User 'mallory')" ""
+    check "a user account named like a bot is not exempt" \
+        "$(req '@bot:x[bot]' 'evil[bot]' User '')" $'@unlinked:x[bot]\nevil[bot]'
+    check "a bot account without the suffix is not exempt" "$(req '' notabot Bot '')" "notabot"
     is_sign_comment "$SIGN_TEXT" && r=yes || r=no
     check "the signing text signs" "$r" "yes"
     is_sign_comment $'  '"$SIGN_TEXT"$'\r\n' && r=yes || r=no
@@ -140,7 +175,7 @@ committers="$(gh api graphql --paginate \
       }
     }' \
     --jq '.data.repository.pullRequest.commits.nodes[].commit.author
-          | .user.login // (if ((.name // "") | endswith("[bot]")) then .name
+          | .user.login // (if ((.name // "") | endswith("[bot]")) then "@bot:" + .name
                             else "@unlinked:" + (.name // "unknown") end)')"
 
 # The signatures, or none yet. Only "not found" counts as empty: any other
@@ -186,8 +221,11 @@ if [ "$EVENT" = "issue_comment" ] && is_sign_comment "${COMMENT_BODY:-}"; then
     done
 fi
 
-unsigned="$(unsigned_of "$committers" "$(signed_of "$sig_doc")")"
-head_sha="$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)"
+pr_info="$(gh api "repos/$REPO/pulls/$PR")"
+head_sha="$(printf '%s' "$pr_info" | jq -r .head.sha)"
+opener="$(printf '%s' "$pr_info" | jq -r .user.login)"
+opener_type="$(printf '%s' "$pr_info" | jq -r .user.type)"
+unsigned="$(unsigned_of "$(required_of "$committers" "$opener" "$opener_type")" "$(signed_of "$sig_doc")")"
 
 if [ -z "$unsigned" ]; then
     state=success
