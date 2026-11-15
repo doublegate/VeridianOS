@@ -128,8 +128,14 @@ fn may_make_mount_ns() -> Result<(), SyscallError> {
 /// the tree on an empty nullfs root; here the tree is the root itself, so
 /// listmount and statmount show one mount fewer (KNOWN-LIMITATIONS).
 fn open_new_namespace(tree: Arc<mount::Mounts>, cloexec: bool) -> SyscallResult {
+    install(new_namespace_file(tree), cloexec)
+}
+
+/// The nsfs file of a new mount namespace whose tree is `tree`, owned by the
+/// caller's user namespace, not yet installed.
+fn new_namespace_file(tree: Arc<mount::Mounts>) -> File {
     let ns = crate::process::ns::MntNs::new(Caller::current().userns.clone(), tree);
-    super::namespaces::open_ns_with(crate::process::ns::NsRef::Mnt(ns), cloexec)
+    super::namespaces::ns_file(crate::process::ns::NsRef::Mnt(ns))
 }
 
 /// The owner of the caller's mount namespace.
@@ -778,6 +784,15 @@ pub fn sys_move_mount(
 /// OPEN_TREE_CLONE for a detached copy of the mount there (and with
 /// AT_RECURSIVE of the mounts under it).
 pub fn sys_open_tree(dfd: usize, path: usize, flags: usize) -> SyscallResult {
+    let file = open_tree_file(dfd, path, flags)?;
+    install(file, flags & O_CLOEXEC != 0)
+}
+
+/// [`sys_open_tree`]'s file, not yet installed: open_tree_attr changes its
+/// mount first and publishes it only then, as Linux's FD_PREPARE and
+/// fd_publish do, so no other thread can see, close or replace the
+/// descriptor while that is under way (PR #49 review).
+fn open_tree_file(dfd: usize, path: usize, flags: usize) -> Result<File, SyscallError> {
     let clone = flags & OPEN_TREE_CLONE != 0;
     if flags
         & !(OPEN_TREE_CLONE
@@ -811,7 +826,6 @@ pub fn sys_open_tree(dfd: usize, path: usize, flags: usize) -> SyscallResult {
         false,
         flags & AT_SYMLINK_NOFOLLOW == 0,
     )?;
-    let cloexec = flags & O_CLOEXEC != 0;
     if new_ns {
         // create_new_namespace: a directory (ENOTDIR); the mount there,
         // with its submounts under AT_RECURSIVE. A caller from another
@@ -835,10 +849,10 @@ pub fn sys_open_tree(dfd: usize, path: usize, flags: usize) -> SyscallResult {
         let copy = tree
             .clone_tree(&at, node.clone(), recursive, foreign)
             .map_err(mount_error)?;
-        return open_new_namespace(Arc::new(copy), cloexec);
+        return Ok(new_namespace_file(Arc::new(copy)));
     }
     if !clone {
-        return install(path_file(node, canonical, None), cloexec);
+        return Ok(path_file(node, canonical, None));
     }
     let (tree, at, _) = tree_and_path(&canonical)?;
     let copy = Arc::new(
@@ -847,10 +861,7 @@ pub fn sys_open_tree(dfd: usize, path: usize, flags: usize) -> SyscallResult {
     );
     let id = mount::register_detached(&copy);
     let held: Arc<dyn core::any::Any + Send + Sync> = copy;
-    install(
-        path_file(node, mount::detached_path(id, "/"), Some(held)),
-        cloexec,
-    )
+    Ok(path_file(node, mount::detached_path(id, "/"), Some(held)))
 }
 
 /// struct mount_attr: the first version's size, and the most read.
@@ -1074,10 +1085,13 @@ pub fn sys_open_tree_attr(
     if uattr == 0 && usize_ != 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    let fd = sys_open_tree(dfd, path, flags)?;
+    let file = open_tree_file(dfd, path, flags)?;
+    let cloexec = flags & O_CLOEXEC != 0;
     if uattr == 0 {
-        return Ok(fd);
+        return install(file, cloexec);
     }
+    // The mount changed first, the descriptor published after: a failure
+    // drops the file, never a descriptor another thread may hold.
     let result = (|| {
         if usize_ > PAGE_SIZE {
             return Err(SyscallError::ArgumentListTooLong);
@@ -1096,19 +1110,12 @@ pub fn sys_open_tree_attr(
         let Some(kattr) = read_mount_attr(uattr, usize_, replace)? else {
             return Ok(0);
         };
-        let file = file_of(fd)?;
-        let canonical = file.path.clone().unwrap_or_default();
+        // A namespace's nsfs file names no mount (Linux: EINVAL).
+        let canonical = file.path.clone().ok_or(SyscallError::InvalidArgument)?;
         setattr_at(&canonical, kattr, flags & AT_RECURSIVE != 0, replace)
     })();
-    match result {
-        Ok(_) => Ok(fd),
-        Err(e) => {
-            if let Some(proc) = process::current_process() {
-                let _ = proc.file_table.lock().close(fd);
-            }
-            Err(e)
-        }
-    }
+    result?;
+    install(file, cloexec)
 }
 
 /// statmount's flag: the request names a descriptor's mount.
