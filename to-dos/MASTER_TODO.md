@@ -486,7 +486,8 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
   17. [ ] Release v0.28.0, after item 8 (the tag and GitHub release need the maintainer's confirmation).
       - [x] Licensing by component (ADR 0028, maintainer 2026-11-15, moved ahead of v0.28.0):
         GPL-3.0-or-later with the user-space exception for the kernel, system servers and Linux
-        runtime, MIT OR Apache-2.0 for the rest; the CLA and its workflow; `REUSE.toml` and
+        runtime, GPL-3.0-or-later for the driver and server framework, MIT OR Apache-2.0 for the
+        rest except vendored third-party files; the CLA and its workflow; `REUSE.toml` and
         `reuse lint` in CI; `COMMERCIAL.md`.
       - [ ] Before the tag: a licensing lawyer reviews the exception, the CLA and
         `COMMERCIAL.md`; the release notes state the change (v0.27.0 and earlier stay MIT OR

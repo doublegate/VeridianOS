@@ -415,7 +415,9 @@ code under the GPL and under commercial licences.
 **Your change takes its directory's licence** ([LICENSING.md](LICENSING.md), `REUSE.toml`):
 - GPL-3.0-or-later with the user-space exception for the kernel, the system servers and the
   Linux runtime;
-- MIT OR Apache-2.0 for everything else.
+- GPL-3.0-or-later without the exception for the driver and server framework;
+- MIT OR Apache-2.0 for the rest, except vendored third-party files, which keep their own
+  licences (LICENSING.md lists them).
 
 A new directory needs its entry in `REUSE.toml`; CI's `reuse lint` fails without one. Code may
 move from a permissive directory into a GPL one, never the other way without the maintainer.

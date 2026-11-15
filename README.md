@@ -316,7 +316,8 @@ VeridianOS is licensed by component ([LICENSING.md](LICENSING.md), ADR 0028):
   exception, so drivers and services built on it are GPL or take a commercial licence.
 - **Everything else**, including the ABI, libc, the crates, the tools and the documentation:
   MIT ([LICENSE-MIT](LICENSE-MIT)) or Apache-2.0 ([LICENSE-APACHE](LICENSE-APACHE)), at your
-  option.
+  option. Vendored third-party files (the Linux system call tables, patches to other projects)
+  keep their own licences.
 
 v0.27.0 and earlier are MIT OR Apache-2.0. Contributions are made under the
 [Contributor Licence Agreement](CLA.md); [commercial licences](COMMERCIAL.md) for the GPL parts

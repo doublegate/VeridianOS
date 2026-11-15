@@ -68,14 +68,14 @@ On `main` the human author of every commit is the maintainer, with AI co-authors
    - Every contributor signs `CLA.md` once, through the CLA workflow (`.github/workflows/cla.yml`, logic in `.github/scripts/cla-check.sh`), which checks every commit author of a pull request and records signatures in the repository's `cla-signatures` branch. CLA.md is governed by Delaware law.
    - It grants the maintainer a broad, irrevocable licence to the contribution, including the right to relicense it under any terms, commercial ones included. It also grants a patent licence.
    - Contributors keep their copyright, so it is a licence, not an assignment (as the Harmony agreements allow).
-   - Changes to the Linux Driver Container are GPL-2.0 and are not covered by the relicensing grant, since they derive from Linux.
+   - Contributions to the Linux Driver Container are GPL-2.0; the parts of them that derive from Linux are not covered by the relicensing grant (CLA section 7).
 
 6. **Commercial licences** for the GPL parts are offered by the maintainer (`COMMERCIAL.md`), as Genode Labs offers them. They are agreed case by case. The public licences are unaffected.
 
 ## Consequences
 
 **What this gives:**
-- A closed, modified VeridianOS kernel can no longer be shipped under the public licence: changes to the GPL parts must be published with the binaries, and devices must allow modified versions to be installed.
+- A closed, modified VeridianOS kernel can no longer be shipped under the public licence: whoever distributes binaries of the GPL parts must provide their corresponding source to the recipients, with the binaries or by one of the other means GPL section 6 allows, and a User Product (a consumer device) that ships them must come with the installation information needed to run modified versions.
 - Applications, Linux programs and other projects stay free to use VeridianOS's interfaces and client libraries under permissive terms, so the system does not frighten off application vendors.
 - Hardware vendors who build drivers with the project's framework publish them under the GPL or take a commercial licence. That is stricter for them than Linux's free user-space drivers, which is the point: the commercial licence has something to sell beyond kernel changes.
 - The maintainer can sell licences to vendors who cannot accept the GPL.

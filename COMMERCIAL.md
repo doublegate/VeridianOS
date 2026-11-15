@@ -1,6 +1,6 @@
 # Commercial licensing
 
-VeridianOS's kernel, system servers and Linux runtime are licensed under GPL-3.0-or-later with the VeridianOS user-space exception (see [LICENSING.md](LICENSING.md)). The GPL requires anyone who distributes modified versions of them to publish the source of those modifications, and, for devices, to let owners install modified versions.
+VeridianOS's kernel, system servers and Linux runtime are licensed under GPL-3.0-or-later with the VeridianOS user-space exception (see [LICENSING.md](LICENSING.md)). The GPL requires anyone who distributes them, modified or not, to provide the corresponding source to the recipients (with the binaries or by another means GPL section 6 allows), and, for consumer devices (User Products), to provide the installation information owners need to run modified versions.
 
 If those terms do not fit your product, the maintainer offers **commercial licences** for these parts. Some cases where one is needed:
 - a closed driver or system service built with VeridianOS's driver and server framework (the server and driver libraries, the driver SDK, the ring helpers, the server side of the interface definitions), which is GPL-3.0-or-later;

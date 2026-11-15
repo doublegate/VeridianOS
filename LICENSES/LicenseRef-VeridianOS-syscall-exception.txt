@@ -72,7 +72,9 @@ narrowly: whatever it does not plainly grant, it does not grant.
 3. What this permission does not cover.
 
    It gives no permission, and makes no statement either way, about:
-   - modifications of the Program;
+   - modifications of the Program themselves (whether a modified version
+     of the Program keeps this permission for the programs using it is
+     for its modifier to decide, as section 5 says);
    - code linked into the Program, or loaded into its address space or
      privilege level to run as part of it;
    - works that copy any part of the Program other than the client
@@ -100,7 +102,9 @@ narrowly: whatever it does not plainly grant, it does not grant.
 5. Removing the permission.
 
    When you modify the Program, you may extend this permission to your
-   version of it, but you are not obliged to. If you do not wish to, delete
+   version of it, so that Client Programs using your version are covered
+   as they are for the Program, but you are not obliged to. Either way,
+   your modifications themselves are licensed under the GPL. If you do not wish to, delete
    this permission statement from your version, as section 7 of the GPL
    allows.
 

@@ -257,6 +257,6 @@ All contributors are recognized in our [CONTRIBUTORS.md](https://github.com/doub
 
 ## License
 
-Contributions are made under the [Contributor Licence Agreement](../../../../CLA.md), which the CLA check asks you to sign on your first pull request; they are distributed under the licence of the directory they are in ([LICENSING.md](../../../../LICENSING.md)).
+Contributions are made under the [Contributor Licence Agreement](https://github.com/doublegate/VeridianOS/blob/main/CLA.md), which the CLA check asks you to sign on your first pull request; they are distributed under the licence of the directory they are in ([LICENSING.md](https://github.com/doublegate/VeridianOS/blob/main/LICENSING.md)).
 
 Thank you for helping make VeridianOS better!

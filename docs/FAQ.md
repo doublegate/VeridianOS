@@ -206,10 +206,14 @@ Not yet, but planned for the future. Current support:
 
 ### Can I use it in my project?
 
-Yes. Running programs on VeridianOS, and using its libraries, crates and interfaces, is free
-under MIT OR Apache-2.0. Modifying the kernel, the system servers or the Linux runtime and
-shipping the result is under GPL-3.0-or-later (with a user-space exception), and commercial
-licences for those parts are available. See LICENSING.md and COMMERCIAL.md.
+Yes. A program running on VeridianOS keeps its own licence, proprietary or free, when it uses
+VeridianOS only as a client (through system calls, IPC as a client and the client libraries) and
+copies none of the kernel's or servers' code: that is the user-space exception. Separately, the
+client libraries, the ABI and the crates are themselves MIT OR Apache-2.0. Drivers and system
+services are not covered by the exception, and the driver and server framework is
+GPL-3.0-or-later. Modifying the kernel, the system servers or the Linux runtime and shipping the
+result is under GPL-3.0-or-later. Commercial licences for the GPL parts are available. See
+LICENSING.md and COMMERCIAL.md.
 
 ## Comparison Questions
 
