@@ -419,7 +419,8 @@ code under the GPL and under commercial licences.
 - MIT OR Apache-2.0 for the rest, except vendored third-party files, which keep their own
   licences (LICENSING.md lists them).
 
-A new directory needs its entry in `REUSE.toml`; CI's `reuse lint` fails without one. Code may
+A new directory in a GPL tier needs its entry in `REUSE.toml`: without one, the catch-all entry
+marks it MIT OR Apache-2.0, and `reuse lint` cannot tell that this is wrong. Code may
 move from a permissive directory into a GPL one, never the other way without the maintainer.
 
 **Linux as a specification.** When the Linux sources are your reference, which they usually

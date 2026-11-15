@@ -3,7 +3,9 @@
 # `reuse lint` (CI, `.github/workflows/reuse.yml`) checks that every file is
 # covered. A file's own SPDX header, where it has one, is used instead of the
 # annotation that matches it (precedence "closest"), except where an
-# annotation says "override".
+# annotation says "override". The GPL tiers say "override": a file's licence
+# there is its directory's, so a file moved in from a permissive directory
+# with its old MIT OR Apache-2.0 header still comes under the GPL.
 #
 # Later annotations take precedence over earlier ones for the same file:
 # the permissive default comes first, the copyleft parts and the third-party
@@ -37,7 +39,7 @@ path = [
     # into linuxd later (ADR 0028 decision 1).
     "crates/personality-linux/**",
 ]
-precedence = "closest"
+precedence = "override"
 SPDX-FileCopyrightText = "2025-2026 DoubleGate and the VeridianOS contributors"
 SPDX-License-Identifier = "GPL-3.0-or-later AND LicenseRef-VeridianOS-syscall-exception"
 
@@ -52,7 +54,7 @@ path = [
     "crates/*-server/**",
     "userland/server-framework/**",
 ]
-precedence = "closest"
+precedence = "override"
 SPDX-FileCopyrightText = "2025-2026 DoubleGate and the VeridianOS contributors"
 SPDX-License-Identifier = "GPL-3.0-or-later"
 
@@ -74,3 +76,16 @@ path = [
 precedence = "override"
 SPDX-FileCopyrightText = "The authors of the patched programs, and the VeridianOS contributors"
 SPDX-License-Identifier = "LicenseRef-Upstream-Patch"
+
+# The licence texts of the fonts mdBook bundles with the published book.
+[[annotations]]
+path = "docs/book/book/fonts/SOURCE-CODE-PRO-LICENSE.txt"
+precedence = "override"
+SPDX-FileCopyrightText = "2010, 2012 Adobe Systems Incorporated"
+SPDX-License-Identifier = "OFL-1.1"
+
+[[annotations]]
+path = "docs/book/book/fonts/OPEN-SANS-LICENSE.txt"
+precedence = "override"
+SPDX-FileCopyrightText = "Google Inc. and the Open Sans authors"
+SPDX-License-Identifier = "Apache-2.0"

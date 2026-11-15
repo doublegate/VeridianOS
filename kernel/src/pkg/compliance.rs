@@ -66,14 +66,16 @@ impl License {
         }
     }
 
-    /// Parse a license from an SPDX-style identifier string.
+    /// Parse a license from an SPDX-style identifier string. The "-or-later"
+    /// (and deprecated "+") forms map to the same version: this type tells
+    /// licence families apart for compatibility checks, not version ranges.
     pub fn from_spdx(s: &str) -> Self {
         match s.trim() {
             "MIT" => Self::MIT,
             "Apache-2.0" | "Apache2" => Self::Apache2,
-            "GPL-2.0" | "GPL-2.0-only" | "GPL2" => Self::GPL2,
-            "GPL-3.0" | "GPL-3.0-only" | "GPL3" => Self::GPL3,
-            "LGPL-2.1" | "LGPL-2.1-only" => Self::LGPL21,
+            "GPL-2.0" | "GPL-2.0-only" | "GPL-2.0-or-later" | "GPL-2.0+" | "GPL2" => Self::GPL2,
+            "GPL-3.0" | "GPL-3.0-only" | "GPL-3.0-or-later" | "GPL-3.0+" | "GPL3" => Self::GPL3,
+            "LGPL-2.1" | "LGPL-2.1-only" | "LGPL-2.1-or-later" | "LGPL-2.1+" => Self::LGPL21,
             "BSD-2-Clause" | "BSD2" => Self::BSD2,
             "BSD-3-Clause" | "BSD3" => Self::BSD3,
             "ISC" => Self::ISC,
@@ -548,6 +550,18 @@ mod tests {
         assert_eq!(License::from_spdx("MPL-2.0"), License::MPL2);
         assert_eq!(License::from_spdx("Proprietary"), License::Proprietary);
         assert_eq!(License::from_spdx("Weird"), License::Unknown);
+    }
+
+    #[test]
+    fn test_license_from_spdx_or_later() {
+        // The kernel's own identifier (kernel/Cargo.toml, ADR 0028), and the
+        // deprecated "+" forms that SPDX replaced with "-or-later".
+        assert_eq!(License::from_spdx("GPL-3.0-or-later"), License::GPL3);
+        assert_eq!(License::from_spdx("GPL-3.0+"), License::GPL3);
+        assert_eq!(License::from_spdx("GPL-2.0-or-later"), License::GPL2);
+        assert_eq!(License::from_spdx("GPL-2.0+"), License::GPL2);
+        assert_eq!(License::from_spdx("LGPL-2.1-or-later"), License::LGPL21);
+        assert_eq!(License::from_spdx("LGPL-2.1+"), License::LGPL21);
     }
 
     #[test]

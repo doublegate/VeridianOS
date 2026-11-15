@@ -31,12 +31,14 @@ concurrency:
 
 jobs:
   cla:
-    # Comments count only on pull requests, and only these two exact texts.
+    # Comments count only on pull requests. This filter is loose, so a
+    # trailing newline or a pasted "> " does not skip the job silently; the
+    # script then accepts only the signing text itself or `recheck`.
     if: >-
       github.event_name == 'pull_request_target' ||
       (github.event.issue.pull_request &&
-       (github.event.comment.body == 'recheck' ||
-        github.event.comment.body == 'I have read the VeridianOS CLA Document and I hereby sign the CLA'))
+       (contains(github.event.comment.body, 'recheck') ||
+        contains(github.event.comment.body, 'I hereby sign the CLA')))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

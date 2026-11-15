@@ -40,11 +40,21 @@ unsigned_of() {
         <(printf '%s\n' "$signed" | sed -e '/^$/d' -e '/^@unlinked:/d' | LC_ALL=C sort -u) || true
 }
 
-# Whether a comment body is the signing text (surrounding whitespace ignored).
+# A comment body without carriage returns, surrounding whitespace, or the
+# "> " of a quotation copied from the check's own comment.
+normalize_comment() {
+    printf '%s' "$1" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+        | sed -e '1s/^>[[:space:]]*//' | sed -e '/^[[:space:]]*$/d'
+}
+
+# Whether a comment body is the signing text.
 is_sign_comment() {
-    local body
-    body="$(printf '%s' "$1" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-    [ "$body" = "$SIGN_TEXT" ]
+    [ "$(normalize_comment "$1")" = "$SIGN_TEXT" ]
+}
+
+# Whether a comment body asks for a new check.
+is_recheck_comment() {
+    [ "$(normalize_comment "$1")" = "recheck" ]
 }
 
 # The signed logins in a signatures document.
@@ -82,6 +92,14 @@ selftest() {
     check "anything more does not sign" "$r" "no"
     is_sign_comment "recheck" && r=yes || r=no
     check "recheck does not sign" "$r" "no"
+    is_sign_comment "> $SIGN_TEXT"$'\n' && r=yes || r=no
+    check "a pasted quotation signs" "$r" "yes"
+    is_sign_comment "I do not sign. $SIGN_TEXT" && r=yes || r=no
+    check "text before the signing text does not sign" "$r" "no"
+    is_recheck_comment $'recheck\r\n' && r=yes || r=no
+    check "recheck with a newline rechecks" "$r" "yes"
+    is_recheck_comment "please do not recheck" && r=yes || r=no
+    check "a sentence containing recheck does not" "$r" "no"
     local doc='{"signedContributors":[]}'
     doc="$(add_signature "$doc" 'alice' 7 99 48 123 '2026-11-15T00:00:00Z')"
     check "a signature is recorded" "$(signed_of "$doc")" "alice"
@@ -97,6 +115,12 @@ if [ "${1:-}" = "--selftest" ]; then
 fi
 
 : "${GH_TOKEN:?}" "${REPO:?}" "${PR:?}" "${EVENT:?}"
+# The workflow's filter is loose; a comment that is neither text does nothing.
+if [ "$EVENT" = "issue_comment" ] && ! is_sign_comment "${COMMENT_BODY:-}" \
+    && ! is_recheck_comment "${COMMENT_BODY:-}"; then
+    echo "CLA: comment ignored (neither the signing text nor recheck)"
+    exit 0
+fi
 case "$PR" in '' | *[!0-9]*) echo "PR is not a number" >&2; exit 1 ;; esac
 owner="${REPO%%/*}"
 name="${REPO#*/}"

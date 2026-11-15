@@ -42,7 +42,7 @@ We are not obliged to use or merge any Contribution. Unless you agree otherwise 
 
 ## 7. The Linux Driver Container
 
-Contributions to the Linux Driver Container (ADR 0030: the `drivers-linux/` directory or its separate repository), which derives from the Linux kernel, are made under GPL-2.0-only, as Linux's licence requires. The relicensing right in section 2 does not extend to the parts of such a Contribution that derive from Linux.
+Contributions to the Linux Driver Container, which is the program in the `drivers-linux/` directory of the Project or in a separate repository of the Project that runs device drivers taken from the Linux kernel, and which derives from the Linux kernel, are made under GPL-2.0-only, as Linux's licence requires. The relicensing right in section 2 does not extend to the parts of such a Contribution that derive from Linux.
 
 ## 8. General
 
