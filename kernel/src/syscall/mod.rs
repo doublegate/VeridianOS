@@ -3473,7 +3473,7 @@ const SOCKADDR_UN_LEN: usize = 110;
 ///
 /// Abstract names, when they come, need Landlock's
 /// LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET checked on connect and send in the
-/// same change (`security::landlock::may_reach`, ADR 0028; MASTER_TODO
+/// same change (`security::landlock::may_reach`, ADR 0029; MASTER_TODO
 /// item 10), or a sandboxed program reaches sockets outside it.
 fn parse_sockaddr_un(raw: &[u8]) -> Result<alloc::string::String, SyscallError> {
     if raw.len() <= 2 || raw.len() > SOCKADDR_UN_LEN {

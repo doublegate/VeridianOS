@@ -857,7 +857,7 @@ Page protections now follow `prot` (fixed in v0.27, N-132 to N-137). What remain
   - Key descriptions and keyring names must be UTF-8 (EINVAL otherwise); Linux takes any bytes.
   - Credentials are per process here, so a set*id call moves the calling thread's thread
     keyring only, not its siblings'.
-- Landlock (ADR 0028) is complete for what exists, with these gaps:
+- Landlock (ADR 0029) is complete for what exists, with these gaps:
   - LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET has nothing to refuse until abstract UNIX sockets
     arrive (Track C item 5, v0.29); the check is part of that task (MASTER_TODO item 10), and
     the runtime test `landlock` fails if abstract sockets work without it.

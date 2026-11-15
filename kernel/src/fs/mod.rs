@@ -190,9 +190,10 @@ fn truncate_removing_privs_as(
     if node.node_type() != NodeType::File {
         return node.truncate(size);
     }
-    // An immutable file refuses the truncate before anything changes
-    // (may_setattr's ATTR_TOUCH check in notify_change).
-    attr::may_write(node)?;
+    // An immutable or append-only file refuses the truncate before
+    // anything changes (may_setattr's ATTR_TOUCH check in notify_change,
+    // do_sys_ftruncate's IS_APPEND; callers check too).
+    attr::may_change(node)?;
     kill_file_caps(node)?;
     node.truncate(size)?;
     drop_set_id(node, caller)
@@ -1578,7 +1579,7 @@ impl MountTable {
         Ok(node)
     }
 
-    /// Landlock's view of the canonical path `canon` (ADR 0028): the keys of
+    /// Landlock's view of the canonical path `canon` (ADR 0029): the keys of
     /// the object, then of every directory above it up to the real root. At
     /// a mount point the mount's root comes first, then the roots of the
     /// mounts it covers and the directory under them all, as Linux's walk up
@@ -1716,12 +1717,12 @@ pub struct PathContext {
     pub resolve: u32,
     /// The mount tree the walk uses: the caller's mount namespace's.
     pub mounts: Arc<mount::Mounts>,
-    /// The caller's Landlock domain (ADR 0028); `None` checks nothing.
+    /// The caller's Landlock domain (ADR 0029); `None` checks nothing.
     #[cfg(feature = "alloc")]
     pub landlock: Option<Arc<crate::security::landlock::KDomain>>,
 }
 
-/// The Landlock rights (ADR 0028) the VFS's own operations need, so that
+/// The Landlock rights (ADR 0029) the VFS's own operations need, so that
 /// the no-`alloc` build, which has no Landlock, still names them.
 pub mod landlock_rights {
     use super::NodeType;
@@ -2039,7 +2040,7 @@ impl<'a> CallerView<'a> {
         self.vfs.lookup(&self.ctx, path, &self.ctx.cwd, follow)
     }
 
-    /// The caller's Landlock domain (ADR 0028), `None` when it is not
+    /// The caller's Landlock domain (ADR 0029), `None` when it is not
     /// restricted.
     #[cfg(feature = "alloc")]
     pub fn landlock(&self) -> Option<&Arc<crate::security::landlock::KDomain>> {
@@ -2057,7 +2058,7 @@ impl<'a> CallerView<'a> {
         ancestry_in(&self.ctx.mounts, path, node)
     }
 
-    /// The authority entry (ADR 0028): whether the caller holds the
+    /// The authority entry (ADR 0029): whether the caller holds the
     /// Landlock rights `access` on the object at canonical `path` (`node`
     /// itself when the caller has it). EACCES if not; nothing to check for
     /// an unrestricted caller.
@@ -2847,7 +2848,7 @@ impl Vfs {
             ctx.pid,
         )?;
         // Landlock's hook_path_mknod, hook_path_mkdir and hook_path_symlink
-        // (ADR 0028), on the parent directory: after a name that exists is
+        // (ADR 0029), on the parent directory: after a name that exists is
         // found (EEXIST, filename_create) and before the permission check
         // (may_create).
         #[cfg(feature = "alloc")]

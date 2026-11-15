@@ -2843,6 +2843,13 @@ impl VirtualAddressSpace {
                     operation: "MADV_REMOVE on a mapping that may not be written",
                 });
             }
+            // A hole punched in an immutable or append-only file is EPERM
+            // (madvise_remove's vfs_fallocate; PR #45 review), even through
+            // a mapping made before the flag.
+            #[cfg(feature = "alloc")]
+            if let Some(b) = &m.backing {
+                crate::fs::attr::may_change(&*b.node)?;
+            }
         }
         let mut files = Vec::new();
         for (_, m) in mappings.range(..VirtualAddress(end)).rev() {
@@ -3493,6 +3500,24 @@ impl VirtualAddressSpace {
             .translate_page(VirtualAddress(page))
             .map_err(|_| bad)?;
         let shared = super::frame_refs::is_shared(frame);
+        // A writable shared file page write-protected for an immutable
+        // change that has ended (or for another file's) is writable again,
+        // as a user fault finds it (immutable_fault); the kernel writes the
+        // frame directly, so the entry is left for that fault (PR #45
+        // review: process_vm_writev and the like failed there).
+        #[cfg(feature = "alloc")]
+        let flags = match &mapping.backing {
+            Some(b)
+                if mapping.mapping_type == MappingType::Shared
+                    && mapping.flags.contains(PageFlags::WRITABLE)
+                    && !flags.contains(PageFlags::WRITABLE)
+                    && crate::fs::attr::of(&*b.node) & crate::fs::attr::FS_IMMUTABLE_FL == 0
+                    && !crate::fs::attr::changing() =>
+            {
+                flags | PageFlags::WRITABLE
+            }
+            _ => flags,
+        };
         match private_write_policy(
             mapping.mapping_type,
             mapping.may_write,

@@ -456,7 +456,7 @@ pub struct Thread {
     /// seccomp's mode and filters (`process::seccomp`): per thread, shared
     /// with the threads and processes it creates, kept across exec.
     pub seccomp: super::seccomp::ThreadSeccomp,
-    /// The Landlock domain (ADR 0028): per thread like seccomp, shared with
+    /// The Landlock domain (ADR 0029): per thread like seccomp, shared with
     /// the threads and processes it creates, kept across exec.
     #[cfg(feature = "alloc")]
     pub landlock: crate::security::landlock::ThreadLandlock,

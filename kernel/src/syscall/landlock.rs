@@ -1,5 +1,5 @@
 //! landlock_create_ruleset, landlock_add_rule and landlock_restrict_self,
-//! as Linux 7.3's `security/landlock/syscalls.c` (ABI 11; ADR 0028). The
+//! as Linux 7.3's `security/landlock/syscalls.c` (ABI 11; ADR 0029). The
 //! rules and checks are `veridian-landlock`'s; the kernel's side is
 //! `security::landlock`.
 

@@ -1,7 +1,7 @@
 //! lsm_list_modules, lsm_get_self_attr and lsm_set_self_attr, as Linux 7.3
 //! (`security/lsm_syscalls.c`, `security/security.c`). The security
 //! modules a program can name are the capability module and Landlock
-//! (ADR 0028); neither has process attributes, so getting or setting one
+//! (ADR 0029); neither has process attributes, so getting or setting one
 //! is EOPNOTSUPP once the arguments pass Linux's checks.
 
 use super::{userspace, SyscallError, SyscallResult};
