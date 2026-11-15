@@ -459,4 +459,149 @@ mod tests {
         let twice = view(f.clone(), &map);
         assert!(twice.view_of().unwrap().view_of().is_none());
     }
+
+    /// A mount over a namespace whose user and group maps differ: owners
+    /// and groups read and are stored each through its own map, and one
+    /// the map has no ID for is EOVERFLOW for chown and for the owner
+    /// check (chown_ok), changing nothing.
+    #[test]
+    fn users_and_groups_map_apart() {
+        use crate::fs::{ramfs::RamFs, Filesystem};
+        let fs = RamFs::new();
+        let real = fs
+            .root()
+            .create("f", Permissions::from_mode(0o644))
+            .unwrap();
+        real.chown(Some(5), Some(6)).unwrap();
+        let map = MntIdmap::of(&crate::process::userns::test_child(
+            b"0 100000 1000\n",
+            b"0 200000 1000\n",
+        ));
+        assert_eq!(map.seen_gid(6), 200006);
+        assert_eq!(map.stored_gid(200009), Some(9));
+        assert_eq!(map.stored_gid(100009), None);
+        assert_eq!(map.extents(true), alloc::vec![(0, 200000, 1000)]);
+        let f = view(real.clone(), &map);
+        let m = f.metadata().unwrap();
+        assert_eq!((m.uid, m.gid), (100005, 200006));
+        f.chown(None, Some(200042)).unwrap();
+        assert_eq!(real.metadata().unwrap().gid, 42);
+        let overflow = Err(KernelError::FsError(FsError::Overflow));
+        assert_eq!(f.chown(Some(100001), Some(100001)), overflow);
+        assert_eq!(f.check_owner(None, Some(7)), overflow);
+        let m = real.metadata().unwrap();
+        assert_eq!((m.uid, m.gid), (5, 42), "a refused chown changes nothing");
+        // An owner the map does not reach reads as no ID at all.
+        real.chown(Some(5000), None).unwrap();
+        assert_eq!(f.metadata().unwrap().uid, NO_ID);
+    }
+
+    /// A v3 file capability's root id reads through the map and is stored
+    /// back through it; a root the map does not reach cannot be written
+    /// (EOVERFLOW); other values, a v2 capability among them, pass as they
+    /// are.
+    #[test]
+    fn file_capability_roots_map() {
+        use crate::fs::{ramfs::RamFs, Filesystem};
+        let fs = RamFs::new();
+        let real = fs
+            .root()
+            .create("f", Permissions::from_mode(0o755))
+            .unwrap();
+        let v3 = |root: u32| {
+            let mut v = alloc::vec![0u8; 24];
+            v[0..4].copy_from_slice(&0x0300_0000u32.to_le_bytes());
+            v[20..24].copy_from_slice(&root.to_le_bytes());
+            v
+        };
+        real.update_xattrs(&mut |set| set.set(xattr::XATTR_NAME_CAPS, &v3(3), 0))
+            .unwrap();
+        let map = MntIdmap::of(&ns(b"0 100000 1000\n"));
+        let f = view(real.clone(), &map);
+        let seen = f.xattrs().unwrap();
+        assert_eq!(seen.get(xattr::XATTR_NAME_CAPS), Some(&v3(100003)[..]));
+        // Written through the view: stored unmapped.
+        f.update_xattrs(&mut |set| set.set(xattr::XATTR_NAME_CAPS, &v3(100009), 0))
+            .unwrap();
+        assert_eq!(
+            real.xattrs().unwrap().get(xattr::XATTR_NAME_CAPS),
+            Some(&v3(9)[..])
+        );
+        assert_eq!(
+            f.update_xattrs(&mut |set| set.set(xattr::XATTR_NAME_CAPS, &v3(7), 0)),
+            Err(KernelError::FsError(FsError::Overflow))
+        );
+        // A v2 capability (20 bytes, no root id) and other names pass.
+        let v2 = [
+            0x00, 0x00, 0x00, 0x02, 1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        f.update_xattrs(&mut |set| {
+            set.set(xattr::XATTR_NAME_CAPS, &v2, 0)?;
+            set.set("user.note", b"x", 0)
+        })
+        .unwrap();
+        let stored = real.xattrs().unwrap();
+        assert_eq!(stored.get(xattr::XATTR_NAME_CAPS), Some(&v2[..]));
+        assert_eq!(stored.get("user.note"), Some(&b"x"[..]));
+    }
+
+    /// Everything reached or made through a view is a view (mapped owners)
+    /// of the real node; rename and link through views act on the real
+    /// nodes; data, modes, times and removals pass through.
+    #[test]
+    fn a_view_tree_is_the_real_tree() {
+        use crate::fs::{ramfs::RamFs, Filesystem};
+        let fs = RamFs::new();
+        let map = MntIdmap::of(&ns(b"0 100000 1000\n"));
+        let root = view(fs.root(), &map);
+        let p = Permissions::from_mode(0o755);
+        let d = root.mkdir("d", p).unwrap();
+        let s = root.symlink("s", "d").unwrap();
+        let n = root.mknod("n", NodeType::Pipe, p, 0).unwrap();
+        let f = d.create("f", Permissions::from_mode(0o644)).unwrap();
+        for node in [&d, &s, &n, &f] {
+            assert!(node.view_of().is_some(), "a view");
+            assert_eq!(node.metadata().unwrap().uid, map.seen_uid(0));
+        }
+        assert_eq!(s.readlink().unwrap(), "d");
+        assert_eq!(root.lookup("d").unwrap().node_type(), NodeType::Directory);
+        // Data written through the view is the real file's.
+        assert_eq!(f.write(0, b"abc").unwrap(), 3);
+        let real_f = fs.root().lookup("d").unwrap().lookup("f").unwrap();
+        let mut buf = [0u8; 3];
+        assert_eq!(real_f.read(0, &mut buf).unwrap(), 3);
+        assert_eq!(&buf, b"abc");
+        f.truncate(1).unwrap();
+        assert_eq!(real_f.metadata().unwrap().size, 1);
+        f.chmod(Permissions::from_mode(0o600)).unwrap();
+        assert!(!real_f.metadata().unwrap().permissions.other_read);
+        f.set_times(Some(11), Some(22)).unwrap();
+        let m = real_f.metadata().unwrap();
+        assert_eq!((m.accessed, m.modified), (11, 22));
+        // Rename into a view directory, and a hard link of a view, land on
+        // the real tree (no view is ever stored in a filesystem).
+        root.mkdir("e", p).unwrap();
+        let e = root.lookup("e").unwrap();
+        d.rename("f", &e, "g").unwrap();
+        let moved = fs.root().lookup("e").unwrap().lookup("g").unwrap();
+        assert_eq!(
+            super::super::inode_key(&moved),
+            super::super::inode_key(&real_f)
+        );
+        let g = e.lookup("g").unwrap();
+        root.link("h", g.clone()).unwrap();
+        let linked = fs.root().lookup("h").unwrap();
+        assert!(linked.view_of().is_none(), "the link names the real node");
+        assert_eq!(linked.link_count(), 2);
+        let names: Vec<String> = root
+            .readdir()
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert!(names.iter().any(|n| n == "h") && names.iter().any(|n| n == "e"));
+        root.unlink("h").unwrap();
+        assert!(fs.root().lookup("h").is_err());
+        assert_eq!(g.link_count(), 1);
+    }
 }
