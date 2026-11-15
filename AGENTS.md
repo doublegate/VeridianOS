@@ -86,8 +86,8 @@ qemu-system-x86_64 -enable-kvm \
 ./build-kernel.sh aarch64 dev
 qemu-system-aarch64 -M virt -cpu cortex-a72 -m 256M \
     -kernel target/aarch64-unknown-none-softfloat/debug/veridian-kernel \
-    -serial stdio -display none
-# Add -device ramfb for graphical display | Add -s -S for GDB
+    -device ramfb -serial stdio -display none
+# ramfb is needed for the full test count (fbcon_initialized) | Add -s -S for GDB
 ```
 
 #### RISC-V 64 (OpenSBI + kernel)
@@ -96,8 +96,8 @@ qemu-system-aarch64 -M virt -cpu cortex-a72 -m 256M \
 ./build-kernel.sh riscv64 dev
 qemu-system-riscv64 -M virt -m 256M -bios default \
     -kernel target/riscv64imac-unknown-none-elf/debug/veridian-kernel \
-    -serial stdio -display none
-# Add -device ramfb for graphical display | Add -s -S for GDB
+    -device ramfb -serial stdio -display none
+# ramfb is needed for the full test count (fbcon_initialized) | Add -s -S for GDB
 ```
 
 #### QEMU Quick Reference
@@ -108,7 +108,7 @@ qemu-system-riscv64 -M virt -m 256M -bios default \
 | AArch64 | Direct `-kernel` | None | `target/aarch64-unknown-none-softfloat/debug/veridian-kernel` | N/A (TCG) |
 | RISC-V | `-kernel` + `-bios default` | OpenSBI | `target/riscv64imac-unknown-none-elf/debug/veridian-kernel` | N/A (TCG) |
 
-**Expected**: All 3 archs boot Stage 6 BOOTOK with every test passed. Default build (one CPU): x86_64 43/43, AArch64 64/64, RISC-V 57/57; `-smp 4`: 47/47, 68/68, 61/61 (AArch64 and RISC-V boot with `-device ramfb`); `scripts/dev/gate.sh --boot --rootfs --smp` runs both, plus the BusyBox and runtime suites on all three, on one and four CPUs (AArch64 and RISC-V roots from `scripts/build-musl-rootfs.sh`). Skips are tests needing more than one CPU. x86_64 shows Ring 3 entry.
+**Expected**: All 3 archs boot Stage 6 BOOTOK with every test passed. Default build (one CPU): x86_64 43/43, AArch64 64/64, RISC-V 57/57; `-smp 4`: 47/47, 68/68, 61/61 (AArch64 and RISC-V with `-device ramfb`, as above); `scripts/dev/gate.sh --boot --rootfs --smp` runs both, plus the BusyBox and runtime suites on all three, on one and four CPUs (AArch64 and RISC-V roots from `scripts/build-musl-rootfs.sh`). Skips: on one CPU the 4 tests that need more CPUs (x86_64 `(4 skipped)`), and on AArch64 and RISC-V also `keyboard_driver_ready`, which has no PS/2 keyboard there (`(5 skipped)` on one CPU, `(1 skipped)` on four). x86_64 shows Ring 3 entry.
 
 #### QEMU 10.2 Pitfalls
 - **DO NOT** use `timeout` -- causes "drive exists" errors. Use background+kill: `cmd </dev/null > log 2>&1 &; PID=$!; sleep N; kill $PID`
@@ -138,7 +138,7 @@ cargo clippy --target riscv64imac-unknown-none-elf -p veridian-kernel $BS -- -D 
 cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu
 
 # In-kernel boot tests: boot each arch in QEMU (commands above) and check for
-# "[INIT] Results: N/N passed" (plus "(S skipped)" on AArch64/RISC-V) followed by BOOTOK.
+# "[INIT] Results: N/N passed" (plus "(S skipped)" where tests skip, see above) followed by BOOTOK.
 ```
 
 ### Development Tools
@@ -146,7 +146,7 @@ cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-lin
 ```bash
 rustup toolchain install nightly-2025-11-15   # matches rust-toolchain.toml; plain `cargo` fetches it automatically
 rustup component add rust-src llvm-tools-preview
-cargo install bootimage cargo-xbuild cargo-watch cargo-expand cargo-audit cargo-nextest
+scripts/install-deps.sh   # cargo-audit, cargo-llvm-cov, cargo-outdated, mdbook and just
 ```
 
 ## Development Patterns
@@ -185,7 +185,7 @@ became an `UnsafeCell` wrapper (`IstStack`, `arch/x86_64/gdt.rs`) in v0.26.0; ne
 | `kernel/src/arch/` | Architecture-specific (aarch64/safe_iter.rs, x86_64/rtc.rs) |
 | `kernel/src/mm/` | Memory management (hybrid bitmap+buddy, VMM, VAS) |
 | `kernel/src/ipc/` | IPC (endpoint queues, registry; capabilities name registered endpoints) |
-| `kernel/src/sched/` | Dispatcher (ADR 0006) with EEVDF/RT/deadline policy classes (ADR 0007); one CPU runs tasks until D5 |
+| `kernel/src/sched/` | Dispatcher (ADR 0006) with EEVDF/RT/deadline policy classes (ADR 0007); every CPU dispatches its own run queue with placement and balancing (D5, ADR 0012) |
 | `kernel/src/cap/` | Capability system (inheritance, revocation, cache) |
 | `kernel/src/perf/` | Counters, benchmarks, tracepoints (10 events) |
 | `kernel/src/test_framework.rs` | No-std test infrastructure |
