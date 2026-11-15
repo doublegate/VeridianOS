@@ -58,9 +58,12 @@ opener_exempt() {
 required_of() {
     local committers="$1" opener="$2" opener_type="$3"
     if opener_exempt "$opener" "$opener_type"; then
-        # The opener's own commits, the maintainer's and bots' are exempt.
+        # The opener's own commits, the maintainer's and bots' are exempt. A
+        # linked account whose login ends in "[bot]" is a Bot account: user
+        # logins cannot contain brackets.
         printf '%s\n' "$committers" | sed -e '/^$/d' -e '/^@bot:/d' \
-            | awk -F: -v m="$MAINTAINER_ID" -v o="${opener%%:*}" '$1 != m && $1 != o'
+            | awk -F: -v m="$MAINTAINER_ID" -v o="${opener%%:*}" \
+                '$1 != m && $1 != o && !($1 ~ /^[0-9]+$/ && $0 ~ /\[bot\]$/)'
     else
         printf '%s\n' "$opener"
         printf '%s\n' "$committers" | sed -e '/^$/d' -e 's/^@bot:/@unlinked:/' \
@@ -80,6 +83,15 @@ unsigned_of() {
             id = $0; sub(/:.*/, "", id); login = $0; sub(/^[^:]*:/, "", login)
             if (!(id in ok) && !seen[id]++) print login
         }'
+}
+
+# is_party ID COMMITTERS OPENER: whether account ID opened the pull request
+# or authored one of its commits, the only accounts whose signature it
+# records.
+is_party() {
+    local id="$1" committers="$2" opener="$3"
+    [ "$id" = "${opener%%:*}" ] && return 0
+    printf '%s\n' "$committers" | awk -F: -v id="$id" '$1 == id { found = 1 } END { exit !found }'
 }
 
 # A comment body without carriage returns, surrounding whitespace, or the
@@ -138,6 +150,16 @@ selftest() {
         "$(req '' '16:doublegate' User '')" "doublegate"
     check "a renamed account keeps its signature" "$(req '11:alice-renamed' "$me" User 11)" ""
     check "a reused login does not inherit a signature" "$(req '17:alice' "$me" User 11)" "alice"
+    check "a linked bot commit in the maintainer's pull request" \
+        "$(req $'49699333:dependabot[bot]\n'"$al" "$me" User 11)" ""
+    check "a linked bot commit in an outside pull request still counts" \
+        "$(req '49699333:dependabot[bot]' "$ma" User 13)" "dependabot[bot]"
+    is_party 13 "$al" "$ma" && r=yes || r=no
+    check "the opener may sign" "$r" "yes"
+    is_party 11 "$al"$'\n'"$bo" "$ma" && r=yes || r=no
+    check "a commit author may sign" "$r" "yes"
+    is_party 99 "$al" "$ma" && r=yes || r=no
+    check "a bystander's signature is not recorded" "$r" "no"
     is_sign_comment "$SIGN_TEXT" && r=yes || r=no
     check "the signing text signs" "$r" "yes"
     is_sign_comment $'  '"$SIGN_TEXT"$'\r\n' && r=yes || r=no
@@ -222,6 +244,10 @@ if [ -z "$head_sha" ]; then
     exit 0
 fi
 
+pr_info="$(gh api "repos/$REPO/pulls/$PR")"
+opener="$(printf '%s' "$pr_info" | jq -r '"\(.user.id):\(.user.login)"')"
+opener_type="$(printf '%s' "$pr_info" | jq -r .user.type)"
+
 # The signatures, or none yet. Only "not found" counts as empty: any other
 # failure stops the check (fail closed).
 read_signatures() {
@@ -239,10 +265,35 @@ read_signatures() {
 }
 read_signatures
 
+# The signatures branch, created with an empty record if it is missing. A
+# new branch holds no signatures, so recreating a deleted one can only make
+# the check stricter, never let anyone through.
+ensure_branch() {
+    local out blob tree commit
+    if out="$(gh api "repos/$REPO/branches/$BRANCH" 2>&1)"; then
+        return 0
+    elif ! printf '%s' "$out" | grep -q 'Not Found\|HTTP 404'; then
+        echo "cannot read the $BRANCH branch: $out" >&2
+        exit 1
+    fi
+    blob="$(gh api -X POST "repos/$REPO/git/blobs" -f content='{"signedContributors":[]}' -f encoding=utf-8 --jq .sha)"
+    tree="$(jq -n --arg p "$FILE" --arg b "$blob" '{tree: [{path: $p, mode: "100644", type: "blob", sha: $b}]}' \
+        | gh api -X POST "repos/$REPO/git/trees" --input - --jq .sha)"
+    commit="$(gh api -X POST "repos/$REPO/git/commits" -f message='chore(cla): start the CLA signatures record' -f tree="$tree" --jq .sha)"
+    gh api -X POST "repos/$REPO/git/refs" -f ref="refs/heads/$BRANCH" -f sha="$commit" >/dev/null
+    read_signatures
+}
+
 # A signature in this comment: recorded once, with a retry if another run
 # changed the file in between (the workflow also serializes runs).
 if [ "$EVENT" = "issue_comment" ] && is_sign_comment "${COMMENT_BODY:-}"; then
     : "${COMMENT_USER:?}" "${COMMENT_USER_ID:?}" "${COMMENT_ID:?}"
+    case "$COMMENT_USER_ID" in '' | *[!0-9]*) echo "COMMENT_USER_ID is not a number" >&2; exit 1 ;; esac
+    if ! is_party "$COMMENT_USER_ID" "$committers" "$opener"; then
+        echo "CLA: @$COMMENT_USER neither opened this pull request nor authored a commit in it; nothing recorded"
+        exit 0
+    fi
+    [ -z "$sig_sha" ] && ensure_branch
     for attempt in 1 2 3; do
         if signed_of "$sig_doc" | grep -Fxq -- "$COMMENT_USER_ID"; then
             break
@@ -265,9 +316,6 @@ if [ "$EVENT" = "issue_comment" ] && is_sign_comment "${COMMENT_BODY:-}"; then
     done
 fi
 
-pr_info="$(gh api "repos/$REPO/pulls/$PR")"
-opener="$(printf '%s' "$pr_info" | jq -r '"\(.user.id):\(.user.login)"')"
-opener_type="$(printf '%s' "$pr_info" | jq -r .user.type)"
 unsigned="$(unsigned_of "$(required_of "$committers" "$opener" "$opener_type")" "$(signed_of "$sig_doc")")"
 
 if [ -z "$unsigned" ]; then
@@ -295,5 +343,8 @@ elif [ -n "$unsigned" ]; then
     gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$body" >/dev/null
 fi
 
+# The `CLA` status above is the result. The job itself succeeds either way:
+# a failing job would leave this push's Actions check red even after the
+# contributor signs, since the signing comment's run updates the status but
+# cannot rerun this job. Errors before this point still fail the job.
 echo "CLA: $state${unsigned:+ (unsigned: $(printf '%s' "$unsigned" | tr '\n' ' '))}"
-[ "$state" = success ]

@@ -118,7 +118,15 @@ pub fn detect_license(text: &str) -> License {
     // Normalize to lowercase for case-insensitive matching
     let lower = text.to_lowercase();
 
-    // Check for GPL variants first (more specific before less specific)
+    // LGPL before GPL: "lgpl" contains "gpl", and "lesser general public
+    // license" contains "general public license".
+    if (lower.contains("lesser general public license") || lower.contains("lgpl"))
+        && (lower.contains("2.1") || lower.contains("lgpl-2.1"))
+    {
+        return License::LGPL21;
+    }
+
+    // Check for GPL variants (more specific before less specific)
     if lower.contains("gnu general public license") || lower.contains("gpl") {
         if lower.contains("version 3") || lower.contains("gpl-3") || lower.contains("gplv3") {
             return License::GPL3;
@@ -126,8 +134,16 @@ pub fn detect_license(text: &str) -> License {
         if lower.contains("version 2") || lower.contains("gpl-2") || lower.contains("gplv2") {
             // The notice GPLv2 recommends ("either version 2 of the License,
             // or (at your option) any later version") and the SPDX
-            // "-or-later" / "+" forms allow GPL-3.0 too.
-            if lower.contains("any later version")
+            // "-or-later" / "+" forms allow GPL-3.0 too. The licence text
+            // itself says "any later version" in section 9 and shows that
+            // notice in its "How to Apply These Terms" appendix, so the
+            // notice counts only before the appendix and only in its own
+            // wording.
+            let notice = lower
+                .split("how to apply these terms")
+                .next()
+                .unwrap_or(&lower);
+            if notice.contains("(at your option) any later version")
                 || lower.contains("gpl-2.0-or-later")
                 || lower.contains("gpl-2.0+")
             {
@@ -139,13 +155,6 @@ pub fn detect_license(text: &str) -> License {
         if lower.contains("general public license") {
             return License::GPL3;
         }
-    }
-
-    // Check for LGPL
-    if (lower.contains("lesser general public license") || lower.contains("lgpl"))
-        && (lower.contains("2.1") || lower.contains("lgpl-2.1"))
-    {
-        return License::LGPL21;
     }
 
     // Check for Apache
@@ -597,6 +606,33 @@ mod tests {
         assert_eq!(
             detect_license("GNU General Public License, version 2 only"),
             License::GPL2
+        );
+    }
+
+    #[test]
+    fn test_detect_full_gpl2_text_is_gpl2_only() {
+        // The licence text itself says "any later version" in section 9 and
+        // shows the "or (at your option) any later version" notice in its
+        // appendix; neither makes a work GPL-2.0-or-later.
+        let text = include_str!("../../../LICENSES/GPL-2.0-only.txt");
+        assert_eq!(detect_license(text), License::GPL2);
+        assert_eq!(
+            detect_license("SPDX-License-Identifier: GPL-2.0-only"),
+            License::GPL2
+        );
+    }
+
+    #[test]
+    fn test_detect_lgpl_before_gpl() {
+        // "lgpl" contains "gpl", and "lesser general public license"
+        // contains "general public license".
+        assert_eq!(
+            detect_license("SPDX-License-Identifier: LGPL-2.1-or-later"),
+            License::LGPL21
+        );
+        assert_eq!(
+            detect_license("GNU Lesser General Public License, version 2.1"),
+            License::LGPL21
         );
     }
 
