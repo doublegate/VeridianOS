@@ -266,16 +266,20 @@ fn lookup_at(
             return view.locate(".", true).map_err(super::map_kernel_error);
         }
         let file = file_of(dirfd)?;
-        let path = file.path.clone().unwrap_or_default();
-        // A detached tree's file, once the tree is attached, is where the
-        // tree went.
+        // A descriptor with no path (a pipe, socket, eventfd, context) names
+        // no place in a mount: nothing here takes one, and handing on an
+        // empty path would let open_tree mint an O_PATH descriptor whose
+        // reopen skips the pathless refusal (PR #47 review).
+        let path = file.path.clone().ok_or(SyscallError::InvalidArgument)?;
         // Its node as the mount shows it now (an idmap set since; PR #47
         // review).
         let node = super::filesystem::fd_node(&file);
+        // A detached tree's file is where its tree is now; one that can no
+        // longer be reached (its tree gone, or attached outside the
+        // caller's root) is an error, not its old place (PR #47 review).
         if path.starts_with(mount::DETACHED) {
-            if let Ok((_, now)) = view.locate(&path, false) {
-                return Ok((node, now));
-            }
+            let (_, now) = view.locate(&path, false).map_err(super::map_kernel_error)?;
+            return Ok((node, now));
         }
         return Ok((node, path));
     }
@@ -289,9 +293,27 @@ fn tree_and_path(
     canonical: &str,
 ) -> Result<(Arc<mount::Mounts>, String, Option<u64>), SyscallError> {
     if let Some((id, rest)) = mount::parse_detached(canonical) {
-        let tree = mount::detached_tree(id).ok_or(SyscallError::ResourceNotFound)?;
         let rest = if rest.is_empty() { "/" } else { rest };
-        return Ok((tree, String::from(rest), Some(id)));
+        // Still detached: its own tree. Attached since (into another
+        // detached tree, whose paths keep this id): the tree it is in now,
+        // at its place there (PR #47 review).
+        return match mount::detached_place(id).ok_or(SyscallError::ResourceNotFound)? {
+            (tree, None) => Ok((tree, String::from(rest), Some(id))),
+            (tree, Some(point)) => {
+                let at = match (point.as_str(), rest) {
+                    ("/", r) => String::from(r),
+                    (p, "/") => String::from(p),
+                    (p, r) => alloc::format!("{p}{r}"),
+                };
+                // Only into another detached tree, or into the caller's own
+                // namespace: never a way into another namespace's mounts.
+                match mount::detached_id_of(&tree) {
+                    Some(outer) => Ok((tree, at, Some(outer))),
+                    None if Arc::ptr_eq(&tree, vfs()?.mount_tree()) => Ok((tree, at, None)),
+                    None => Err(SyscallError::ResourceNotFound),
+                }
+            }
+        };
     }
     Ok((vfs()?.mount_tree().clone(), String::from(canonical), None))
 }
@@ -449,11 +471,24 @@ fn reconfigure(ctx: &mut FsContext) -> SyscallResult {
         Target::At { tree, mount, .. } => tree
             .point_of(mount)
             .map(|point| (tree.clone(), point, mount.clone())),
-        Target::Detached { id, mount } => mount::detached_place(*id).and_then(|(tree, _)| {
+        Target::Detached { id, mount, .. } => mount::detached_place(*id).and_then(|(tree, _)| {
             let point = tree.point_of(mount)?;
             Some((tree, point, mount.clone()))
         }),
     };
+    // The mount must still be the context's namespace's, or in no namespace
+    // (a detached tree): authority over one namespace never changes a mount
+    // another namespace now holds (PR #47 review).
+    if let Some((tree, ..)) = &place {
+        let own = ctx
+            .ns
+            .as_ref()
+            .is_some_and(|ns| Arc::ptr_eq(&ns.mounts, tree));
+        if !own && mount::detached_id_of(tree).is_none() {
+            ctx.phase = Phase::Failed;
+            return Err(SyscallError::OperationNotPermitted);
+        }
+    }
     let Some((tree, point, mount)) = place else {
         ctx.phase = Phase::Failed;
         return Err(SyscallError::InvalidArgument);
@@ -564,6 +599,11 @@ pub fn sys_fsmount(fs_fd: usize, flags: usize, attr_flags: usize) -> SyscallResu
     tree.lock_root(revealing_locks);
     // The context goes on to reconfigure what it mounted (vfs_clean_context):
     // the new namespace's root, or the detached tree's.
+    // A new namespace is made here, so the context goes on with it as its
+    // namespace: reconfiguring that mount is a change to that namespace
+    // (PR #47 review).
+    let new_ns_ref = new_ns
+        .then(|| crate::process::ns::MntNs::new(Caller::current().userns.clone(), tree.clone()));
     let (target, id) = if new_ns {
         (
             Target::At {
@@ -576,16 +616,32 @@ pub fn sys_fsmount(fs_fd: usize, flags: usize, attr_flags: usize) -> SyscallResu
     } else {
         let id = mount::register_detached(&tree);
         let mount = tree.mount_at("/").ok_or(SyscallError::InvalidArgument)?;
-        (Target::Detached { id, mount }, Some(id))
+        (
+            Target::Detached {
+                id,
+                mount,
+                tree: tree.clone(),
+            },
+            Some(id),
+        )
     };
     let ty = String::from(ctx.fs_type());
     ctx.purpose = Purpose::Reconfigure { ty, target };
     ctx.phase = Phase::ReconfParams;
     ctx.options.clear();
     ctx.sb_readonly = None;
+    if let Some(ns) = &new_ns_ref {
+        ctx.ns = Some(ns.clone());
+    }
     drop(ctx);
+    if let Some(ns) = new_ns_ref {
+        return super::namespaces::open_ns_with(
+            crate::process::ns::NsRef::Mnt(ns),
+            flags & FSMOUNT_CLOEXEC != 0,
+        );
+    }
     let Some(id) = id else {
-        return open_new_namespace(tree, flags & FSMOUNT_CLOEXEC != 0);
+        return Err(SyscallError::InvalidState);
     };
     let held: Arc<dyn core::any::Any + Send + Sync> = tree;
     install(
@@ -620,6 +676,7 @@ pub fn sys_fspick(dfd: usize, path: usize, flags: usize) -> SyscallResult {
         Some(id) if at == "/" => Target::Detached {
             id,
             mount: mount.clone(),
+            tree: tree.clone(),
         },
         _ => Target::At {
             tree,

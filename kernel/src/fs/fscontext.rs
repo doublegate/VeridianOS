@@ -64,9 +64,13 @@ pub enum Target {
     },
     /// `mount`, the root of the detached tree with this id, wherever that
     /// tree is now (`mount::detached_place`).
+    /// `tree`, the detached tree itself, is held so a context outlives
+    /// the descriptor fsmount returned, as Linux's context holds what it
+    /// mounted (PR #47 review).
     Detached {
         id: u64,
         mount: Arc<super::mount::Mount>,
+        tree: Arc<Mounts>,
     },
 }
 

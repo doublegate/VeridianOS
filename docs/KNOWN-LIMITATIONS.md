@@ -425,7 +425,9 @@ What remains:
   capability's root ID is mapped but no POSIX ACLs exist to map; a
   detached tree's files are named by the tree's id instead of a path (`fs::mount::DETACHED`),
   and a descriptor of an attached tree follows it through move_mount and MS_MOVE, but not
-  through pivot_root. The VFS
+  through pivot_root; the mount calls refuse a descriptor with no path (a pipe, socket or
+  eventfd) with EINVAL, where Linux, which keeps such files in internal pseudo-filesystem
+  mounts, lets open_tree take one. The VFS
   finds open files by path, so a descriptor opened in another mount namespace is looked up by
   its path in the caller's (for fstat's mount id, fchdir and the like) once the two trees
   differ, and sync(2) flushes the filesystems of the initial namespace only. The mount flags are

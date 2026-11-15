@@ -141,6 +141,41 @@ pub fn detached_place(id: u64) -> Option<(Arc<Mounts>, Option<String>)> {
     }
 }
 
+/// [`detached_place`] together with the table of the tree it names, as
+/// one observation: the registry is changed only while that tree's table
+/// is write-locked, so reading the place again under the table's read lock
+/// tells whether they match, and a mismatch (a move in between) is read
+/// again (PR #47 review). Lock order as the writers': table, then registry.
+pub(super) fn coherent_place(
+    id: u64,
+) -> Option<(Arc<Mounts>, Option<String>, Arc<super::MountTable>)> {
+    for _ in 0..8 {
+        let (tree, point) = detached_place(id)?;
+        let table = tree.table.read();
+        match detached_place(id) {
+            Some((again, at)) if Arc::ptr_eq(&again, &tree) && at == point => {
+                let snapshot = table.clone();
+                drop(table);
+                return Some((tree, point, snapshot));
+            }
+            None => return None,
+            _ => {}
+        }
+    }
+    // Moved on every try: take the latest, as a lookup racing a move may.
+    let (tree, point) = detached_place(id)?;
+    let snapshot = tree.snapshot();
+    Some((tree, point, snapshot))
+}
+
+/// The id `tree` is registered under while it is still a detached tree.
+pub fn detached_id_of(tree: &Arc<Mounts>) -> Option<u64> {
+    TREES.lock().iter().find_map(|(id, place)| match place {
+        Place::Detached(t) if core::ptr::eq(t.as_ptr(), Arc::as_ptr(tree)) => Some(*id),
+        _ => None,
+    })
+}
+
 /// The detached tree `id`, if it is still detached.
 pub fn detached_tree(id: u64) -> Option<Arc<Mounts>> {
     match detached_place(id)? {
@@ -1503,6 +1538,12 @@ impl Mounts {
             // place, which no path reaches any more.
             if to != root {
                 points_moved(self, |p| pivot_mount(p, &root, new, &to));
+            } else {
+                // pivot_root(".", "."): the new root's tree moves up to the
+                // root, the old one is parked (PR #47 review).
+                points_moved(self, |p| {
+                    (p != new && path_is_under(p, new)).then(|| rebase(p, new, &root))
+                });
             }
             Ok(())
         })
@@ -2647,6 +2688,22 @@ mod tests {
         })
         .unwrap();
         t.pivot_root("/c", "/c/new", "/c/new/old").unwrap();
+        assert_eq!(
+            detached_place(id).map(|(_, p)| p),
+            Some(Some(String::from("/c/sub")))
+        );
+
+        // pivot_root(".", "."), the parked form: the new root's tree moves
+        // up all the same.
+        let vfs = pivot_tree();
+        let t = vfs.mounts();
+        let tree = Arc::new(t.detached_new(tmpfs(), "att".into(), 0, false));
+        let id = register_detached(&tree);
+        t.attach_tree_then(&tree, "/c/new/sub", true, || {
+            mark_attached(id, t, "/c/new/sub")
+        })
+        .unwrap();
+        t.pivot_root("/c", "/c/new", "/c/new").unwrap();
         assert_eq!(
             detached_place(id).map(|(_, p)| p),
             Some(Some(String::from("/c/sub")))
