@@ -275,7 +275,8 @@ pub struct Subject {
     pub ns_uid: u32,
     /// The owner of the caller's user namespace (owns its registers).
     pub ns_owner: u32,
-    /// CAP_SYS_ADMIN in the caller's namespace.
+    /// CAP_SYS_ADMIN in the initial user namespace (`capable`): CHOWN's
+    /// and SETPERM's override of ownership.
     pub sys_admin: bool,
     /// CAP_SETUID in the caller's namespace.
     pub setuid: bool,

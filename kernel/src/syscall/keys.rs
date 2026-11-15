@@ -44,7 +44,11 @@ fn subject_of(c: &Caller) -> Subject {
         ns: c.userns.ident.id,
         ns_uid: c.userns.uid_up(cr.ruid).unwrap_or(65534),
         ns_owner: c.userns.owner,
-        sys_admin: c.ns_capable(&c.userns, linux_caps::CAP_SYS_ADMIN),
+        // CHOWN and SETPERM's override is capable(CAP_SYS_ADMIN): the
+        // initial namespace's, so a namespace's root cannot take keys it
+        // does not own (commit security review).
+        sys_admin: c.capable(linux_caps::CAP_SYS_ADMIN),
+        // GET_PERSISTENT's is ns_capable in the caller's namespace.
         setuid: c.ns_capable(&c.userns, linux_caps::CAP_SETUID),
         now: now(),
     }
