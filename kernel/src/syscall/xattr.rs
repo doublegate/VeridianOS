@@ -120,7 +120,7 @@ fn target_in(
             .path
             .as_deref()
             .map(|path| crate::fs::root_relative(path, &root));
-        return Ok((file.node.clone(), at));
+        return Ok((super::filesystem::fd_node(&file), at));
     }
     let abs = resolve_at_path(dfd, &path)?;
     let (node, canonical) = vfs

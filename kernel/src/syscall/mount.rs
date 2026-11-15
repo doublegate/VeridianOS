@@ -192,8 +192,10 @@ pub fn sys_mount(
             .ok_or(SyscallError::InvalidArgument)?;
         let (from_node, from) = view.locate(&from, true).map_err(super::map_kernel_error)?;
         let from_is_dir = from_node.node_type() == NodeType::Directory;
-        tree.move_mount(&from, from_is_dir, &point, point_is_dir)
-            .inspect(|()| mount::moved_in(&tree, &from, &point))
+        // The registry follows inside the move (PR #47 review).
+        tree.move_mount_then(&from, from_is_dir, &point, point_is_dir, || {
+            mount::moved_in(&tree, &from, &point)
+        })
     } else {
         let ty = fstype.ok_or(SyscallError::InvalidArgument)?;
         let owner = (caller.creds.fsuid, caller.creds.fsgid);
@@ -305,6 +307,12 @@ fn move_fs_refs(tree: &Arc<mount::Mounts>, root: &str, new: &str, old: &str) {
             // failfs is in no mount: a failfs root or working directory
             // stays; under a failfs root the working directory is a whole
             // path already (PR #44 review).
+            // A root in a detached tree is no path of this namespace: the
+            // pivot leaves it, and the working directory seen from it, as
+            // they are (PR #47 review).
+            if mount::is_detached_path(&had_root) {
+                continue;
+            }
             if had_root == crate::fs::FAILFS_ROOT {
                 if had_cwd != crate::fs::FAILFS_ROOT {
                     let cwd = crate::fs::normalize_path(&had_cwd, "/");
@@ -312,7 +320,10 @@ fn move_fs_refs(tree: &Arc<mount::Mounts>, root: &str, new: &str, old: &str) {
                 }
                 continue;
             }
-            if had_cwd == crate::fs::FAILFS_ROOT {
+            // A failfs working directory stays, and so does one in a
+            // detached tree: neither is a path in this namespace to move
+            // (PR #47 review).
+            if had_cwd == crate::fs::FAILFS_ROOT || mount::is_detached_path(&had_cwd) {
                 *fs.root.lock() = mount::pivot_ref(&had_root, root, new, old);
                 continue;
             }
@@ -366,6 +377,30 @@ fn in_use(point: &str, tree: &Arc<mount::Mounts>) -> bool {
 /// [`in_use`], or with `writers` [`writing_under`].
 fn scan(point: &str, tree: &Arc<mount::Mounts>, writers: bool) -> bool {
     let under = |path: &str| crate::fs::path_is_under(path, point);
+    // A path in a detached tree (a file opened, or a directory entered,
+    // through fsmount's or open_tree's descriptor) counts wherever its
+    // holder lives: the tree it is in now and its place there decide, not
+    // the holder's namespace, so a read-only change to a detached mount
+    // sees the writers through it (PR #47 review).
+    let in_tree = |path: &str| {
+        let Some((id, rest)) = mount::parse_detached(path) else {
+            return false;
+        };
+        let Some((t, at)) = mount::detached_place(id) else {
+            return false;
+        };
+        if !Arc::ptr_eq(&t, tree) {
+            return false;
+        }
+        let rest = if rest.is_empty() { "/" } else { rest };
+        let place = match at.as_deref() {
+            None | Some("/") => String::from(rest),
+            Some(at) if rest == "/" => String::from(at),
+            Some(at) => alloc::format!("{at}{rest}"),
+        };
+        under(&place)
+    };
+    let detached = mount::is_detached_path;
     let mut busy = false;
     process::table::PROCESS_TABLE.for_each(|p| {
         if busy {
@@ -373,40 +408,51 @@ fn scan(point: &str, tree: &Arc<mount::Mounts>, writers: bool) -> bool {
         }
         let mut member = false;
         for thread in p.threads.lock().values() {
-            if !Arc::ptr_eq(&thread.namespaces().mnt.mounts, tree) {
-                continue;
-            }
-            member = true;
+            let in_ns = Arc::ptr_eq(&thread.namespaces().mnt.mounts, tree);
+            member |= in_ns;
             if writers {
-                break;
+                continue;
             }
             let fs = thread.fs();
             let root = fs.root.lock().clone();
             let cwd = fs.cwd.lock().clone();
+            if (detached(&root) && in_tree(&root)) || (detached(&cwd) && in_tree(&cwd)) {
+                busy = true;
+                return;
+            }
+            if !in_ns {
+                continue;
+            }
             // failfs is under no mount point; under a failfs root the
             // working directory is a whole path (PR #44 review).
             let failfs = crate::fs::FAILFS_ROOT;
-            let cwd = if cwd == failfs {
+            let cwd = if cwd == failfs || detached(&cwd) {
                 None
             } else if root == failfs {
                 Some(crate::fs::normalize_path(&cwd, "/"))
             } else {
                 Some(join(&root, &crate::fs::normalize_path(&cwd, "/")))
             };
-            if (root != failfs && under(&root)) || cwd.is_some_and(|c| under(&c)) {
+            if (root != failfs && !detached(&root) && under(&root))
+                || cwd.is_some_and(|c| under(&c))
+            {
                 busy = true;
                 return;
             }
         }
-        if member {
-            let table = p.file_table.lock();
-            let paths = if writers {
-                table.writable_paths()
+        let table = p.file_table.lock();
+        let paths = if writers {
+            table.writable_paths()
+        } else {
+            table.open_paths()
+        };
+        busy = paths.iter().any(|f| {
+            if detached(f) {
+                in_tree(f)
             } else {
-                table.open_paths()
-            };
-            busy = paths.iter().any(|f| under(f));
-        }
+                member && under(f)
+            }
+        });
     });
     busy
 }

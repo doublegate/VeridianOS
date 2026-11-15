@@ -51,10 +51,45 @@ pub struct ThreadFs {
     /// directories and umask (CLONE_FS), so exec grants no set-ID
     /// privilege (LSM_UNSAFE_SHARE).
     pub users: AtomicUsize,
+    /// The detached mount trees the working directory or root are in
+    /// (`fs::mount::DETACHED` paths), held so the tree lives while it is
+    /// one of them, as Linux's fs->pwd and fs->root hold their mount: the
+    /// registry holds a tree only weakly, and closing its last descriptor
+    /// would otherwise leave the directory naming nothing (PR #47 review).
+    /// [`ThreadFs::repin`] keeps it in step.
+    pub pins: DetachedPins,
+}
+
+/// The trees [`ThreadFs::pins`] holds.
+#[cfg(feature = "alloc")]
+#[derive(Default)]
+pub struct DetachedPins(Mutex<alloc::vec::Vec<Arc<crate::fs::mount::Mounts>>>);
+
+#[cfg(feature = "alloc")]
+impl core::fmt::Debug for DetachedPins {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "DetachedPins({})", self.0.lock().len())
+    }
 }
 
 #[cfg(feature = "alloc")]
 impl ThreadFs {
+    /// Hold the detached trees the working directory and root are in now,
+    /// and only those: called after either changes. The pins' lock is held
+    /// while both are read and the pins replaced, so with CLONE_FS a call
+    /// that read older directories cannot overwrite a later call's pins:
+    /// each call publishes what is current when it holds the lock (PR #47
+    /// review). Lock order: pins, then cwd or root, never the other way.
+    pub fn repin(&self) {
+        let mut pins = self.pins.0.lock();
+        let paths = [self.cwd.lock().clone(), self.root.lock().clone()];
+        *pins = paths
+            .iter()
+            .filter_map(|p| crate::fs::mount::parse_detached(p))
+            .filter_map(|(id, _)| crate::fs::mount::detached_place(id).map(|(tree, _)| tree))
+            .collect();
+    }
+
     /// Create a new root filesystem state with cwd="/" and umask=0o022.
     ///
     /// Used for the initial thread of a new process.
@@ -64,18 +99,22 @@ impl ThreadFs {
             root: Mutex::new(alloc::string::String::from("/")),
             umask: AtomicU32::new(0o022),
             users: AtomicUsize::new(0),
+            pins: DetachedPins::default(),
         })
     }
 
     /// Filesystem state starting in `cwd` under `root`, umask 0o022: a new
     /// process's first thread starts in its creator's directories.
     pub fn with_cwd(cwd: alloc::string::String, root: alloc::string::String) -> Arc<Self> {
-        Arc::new(Self {
+        let fs = Arc::new(Self {
             cwd: Mutex::new(cwd),
             root: Mutex::new(root),
             umask: AtomicU32::new(0o022),
             users: AtomicUsize::new(0),
-        })
+            pins: DetachedPins::default(),
+        });
+        fs.repin();
+        fs
     }
 
     /// Share the filesystem state (CLONE_FS semantics).
@@ -93,6 +132,7 @@ impl ThreadFs {
     pub fn move_to_root(&self) {
         *self.root.lock() = alloc::string::String::from("/");
         *self.cwd.lock() = alloc::string::String::from("/");
+        self.repin();
     }
 
     /// Copy the filesystem state (non-CLONE_FS semantics).
@@ -100,11 +140,16 @@ impl ThreadFs {
     /// Creates a new independent `ThreadFs` with the same cwd and umask
     /// values. Subsequent changes in either thread are isolated.
     pub fn clone_copy(src: &Arc<Self>) -> Arc<Self> {
+        // The directories and the pins for them as one snapshot ([`repin`]'s
+        // lock order).
+        let pins = src.pins.0.lock();
+        let (cwd, root) = (src.cwd.lock().clone(), src.root.lock().clone());
         Arc::new(Self {
-            cwd: Mutex::new(src.cwd.lock().clone()),
-            root: Mutex::new(src.root.lock().clone()),
+            cwd: Mutex::new(cwd),
+            root: Mutex::new(root),
             umask: AtomicU32::new(src.umask.load(Ordering::Acquire)),
             users: AtomicUsize::new(0),
+            pins: DetachedPins(Mutex::new(pins.clone())),
         })
     }
 }
@@ -1174,5 +1219,36 @@ impl ThreadBuilder {
         );
 
         Ok(thread)
+    }
+}
+
+#[cfg(all(test, feature = "alloc"))]
+mod pin_tests {
+    use super::*;
+    use crate::fs::mount;
+
+    /// A working directory or root in a detached tree keeps the tree, so
+    /// lookups from it go on after its last descriptor is closed; moving
+    /// both elsewhere lets it go (PR #47 review).
+    #[test]
+    fn a_detached_directory_keeps_its_tree() {
+        let vfs = crate::fs::Vfs::new();
+        vfs.mount_root(Arc::new(crate::fs::ramfs::RamFs::new()))
+            .unwrap();
+        let tree = Arc::new(vfs.mounts().detached_new(
+            Arc::new(crate::fs::tmpfs::TmpFs::new(1 << 20)),
+            "pin".into(),
+            0,
+            false,
+        ));
+        let id = mount::register_detached(&tree);
+        let fs = ThreadFs::with_cwd(mount::detached_path(id, "/"), "/".into());
+        drop(tree);
+        assert!(mount::detached_place(id).is_some());
+        let copy = ThreadFs::clone_copy(&fs);
+        fs.move_to_root();
+        assert!(mount::detached_place(id).is_some(), "the copy holds it");
+        copy.move_to_root();
+        assert!(mount::detached_place(id).is_none());
     }
 }
