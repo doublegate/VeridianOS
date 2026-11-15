@@ -17,7 +17,19 @@ VeridianOS is licensed by component (ADR 0028), as of the commit that adds this 
 - code linked or loaded into them;
 - drivers and system servers built on the project's driver and server framework, which is GPL without the exception.
 
-**Drivers and services.** A driver or system service built with VeridianOS's framework is GPL-3.0-or-later, or needs a [commercial licence](COMMERCIAL.md). One written entirely without the framework, against the documented protocols alone, is an independent program, as any program is; no licence can reach it, and the exception does not need to.
+**Drivers and services.** The exception defines its terms objectively, so that whether a program is covered does not turn on what "client" means:
+- **A System Component** is outside the exception whatever interfaces it uses. That is a program that does any of:
+  - holds a device capability (registers, I/O ports, interrupts, DMA, IOMMU);
+  - answers requests under a VeridianOS protocol in the serving role;
+  - provides a service the system's own servers provide (storage, network, display, input, audio, the Linux runtime and so on);
+  - holds authority over the system or other programs beyond an application's (the System object, other programs' processes or capabilities, others' namespaces, granting capabilities);
+  - is built with the framework.
+- Dividing a component into parts, or putting a proxy in front of it, does not change that.
+- **Linux programs** written for Linux and run unmodified are always covered, whatever they do: that is what the Linux personality is for.
+
+A System Component built with the project's driver and server framework is a work based on that framework, which is GPL-3.0-or-later. Shipping it closed needs a [commercial licence](COMMERCIAL.md).
+
+One written entirely without the framework, copying nothing from VeridianOS, gets no permission from the exception, and no statement that it is or is not a derivative work. Whether the GPL reaches a program that copies none of VeridianOS's code is a question for copyright law, which no licence text can settle. A vendor shipping such a component closed relies on their own legal judgement rather than on VeridianOS's permission; the safe routes are the GPL or a commercial licence.
 
 **Why the split.**
 - Copyleft on the kernel and servers stops closed, modified versions being shipped. GPL-3.0's terms add a patent licence, and require that devices let their owners install modified versions.

@@ -37,7 +37,10 @@ On `main` the human author of every commit is the maintainer, with AI co-authors
    - **The exception** states that a program using the kernel or servers only as a client (through system calls, as a client of their IPC protocols, or through the published user-space headers and client libraries) is not a work based on them. This covers applications and unmodified Linux programs. Code linked into or loaded into the kernel is not covered, nor are modifications, nor programs built on the driver and server framework (decision 1a).
 
 1a. **The driver and server framework is GPL-3.0-or-later without the exception** (maintainer, 2026-11-15, in place of covering separate drivers and servers by the exception). This means the server and driver libraries, the driver SDK, the ring helpers and the server side of the interface definitions: `crates/server-framework/`, `crates/veridian-driver/`, `crates/veridian-ring/`, `crates/*-server/`, `userland/server-framework/`, and the server stubs the IDL compiler generates.
-   - The exception covers only programs that use the system as clients, and says that programs built on the framework are outside it.
+   - The exception (version 1.1) covers only Client Programs, and defines its terms by tests that do not depend on what "client" means: Client Interfaces, System Components and Linux Programs, with a clause against avoiding it by arrangement (splitting, proxies, disguised Linux programs).
+     - A System Component (holding a device capability, serving a VeridianOS protocol, providing a system service, holding authority over the system or other programs, or built on the framework) gets no permission and no statement either way.
+     - An ordinary daemon serving its own protocol to its own clients (a database, a web server) is an application and covered.
+     - A Linux program written for Linux and run unmodified is always a Client Program.
    - So a driver or system service built with the framework is GPL, or takes a commercial licence.
    - One written entirely without the framework is an independent program. No licence can reach it, as Linux's cannot reach a user-space driver written from scratch.
    - The client side (`veridian-rt`'s client parts, client stubs, libc) stays permissive.
