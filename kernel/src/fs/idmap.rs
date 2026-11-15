@@ -127,8 +127,12 @@ impl IdmappedNode {
         Ok((uid, gid))
     }
 
-    /// A v3 `security.capability`'s root id as `to` maps it (rootid at
-    /// byte 20); other values unchanged. EOVERFLOW when it does not map.
+    /// The `security.capability` value with its root as `to` maps it, as
+    /// Linux shifts a file capability's root through a mount's idmap: a
+    /// v3's root id (byte 20), and a v2's implicit root 0, which becomes a
+    /// v3 with the mapped root (the effective flag kept). Other values are
+    /// left alone. EINVAL when `to` does not map the root (cap_convert_nscap
+    /// on a root from_vfsuid cannot store).
     fn map_caps(
         set: &mut xattr::XattrSet,
         to: impl Fn(u32) -> Option<u32>,
@@ -136,13 +140,21 @@ impl IdmappedNode {
         let Some(v) = set.get(xattr::XATTR_NAME_CAPS) else {
             return Ok(());
         };
-        if v.len() != 24 || v[3] != 0x03 {
-            return Ok(());
-        }
-        let root = u32::from_le_bytes([v[20], v[21], v[22], v[23]]);
-        let mapped = to(root).ok_or_else(overflow)?;
-        let mut new = Vec::from(v);
-        new[20..24].copy_from_slice(&mapped.to_le_bytes());
+        let root = match (v.len(), v.get(3)) {
+            (24, Some(0x03)) => u32::from_le_bytes([v[20], v[21], v[22], v[23]]),
+            (20, Some(0x02)) | (12, Some(0x01)) => 0,
+            _ => return Ok(()),
+        };
+        let mapped = to(root).ok_or(KernelError::InvalidArgument {
+            name: "security.capability",
+            value: "a root the mount's idmap does not map",
+        })?;
+        let effective = v[0] & 0x01;
+        // A v1 value has only the low words; the high ones are 0.
+        let mut new = Vec::from(&v[..v.len().min(20)]);
+        new.resize(20, 0);
+        new[0..4].copy_from_slice(&(0x0300_0000u32 | u32::from(effective)).to_le_bytes());
+        new.extend_from_slice(&mapped.to_le_bytes());
         set.set(xattr::XATTR_NAME_CAPS, &new, 0)
     }
 }
@@ -354,8 +366,19 @@ impl VfsNode for IdmappedNode {
     ) -> Result<(), KernelError> {
         let map = self.map.clone();
         self.inner.update_xattrs(&mut |set| {
+            let stored = set.get(xattr::XATTR_NAME_CAPS).map(Vec::from);
             Self::map_caps(set, |k| Some(map.seen_uid(k)))?;
+            let shown = set.get(xattr::XATTR_NAME_CAPS).map(Vec::from);
             f(set)?;
+            // A capability the update did not touch is put back as it was
+            // stored: a root the view cannot map back must not fail a change
+            // to another xattr (PR #47 review).
+            if set.get(xattr::XATTR_NAME_CAPS) == shown.as_deref() {
+                if let Some(stored) = stored {
+                    return set.set(xattr::XATTR_NAME_CAPS, &stored, 0);
+                }
+                return Ok(());
+            }
             Self::map_caps(set, |u| map.stored_uid(u))
         })
     }
@@ -458,5 +481,185 @@ mod tests {
         // A view of a view is one view of the real node.
         let twice = view(f.clone(), &map);
         assert!(twice.view_of().unwrap().view_of().is_none());
+    }
+
+    /// A mount over a namespace whose user and group maps differ: owners
+    /// and groups read and are stored each through its own map, and one
+    /// the map has no ID for is EOVERFLOW for chown and for the owner
+    /// check (chown_ok), changing nothing.
+    #[test]
+    fn users_and_groups_map_apart() {
+        use crate::fs::{ramfs::RamFs, Filesystem};
+        let fs = RamFs::new();
+        let real = fs
+            .root()
+            .create("f", Permissions::from_mode(0o644))
+            .unwrap();
+        real.chown(Some(5), Some(6)).unwrap();
+        let map = MntIdmap::of(&crate::process::userns::test_child(
+            b"0 100000 1000\n",
+            b"0 200000 1000\n",
+        ));
+        assert_eq!(map.seen_gid(6), 200006);
+        assert_eq!(map.stored_gid(200009), Some(9));
+        assert_eq!(map.stored_gid(100009), None);
+        assert_eq!(map.extents(true), alloc::vec![(0, 200000, 1000)]);
+        let f = view(real.clone(), &map);
+        let m = f.metadata().unwrap();
+        assert_eq!((m.uid, m.gid), (100005, 200006));
+        f.chown(None, Some(200042)).unwrap();
+        assert_eq!(real.metadata().unwrap().gid, 42);
+        let overflow = Err(KernelError::FsError(FsError::Overflow));
+        assert_eq!(f.chown(Some(100001), Some(100001)), overflow);
+        assert_eq!(f.check_owner(None, Some(7)), overflow);
+        let m = real.metadata().unwrap();
+        assert_eq!((m.uid, m.gid), (5, 42), "a refused chown changes nothing");
+        // An owner the map does not reach reads as no ID at all.
+        real.chown(Some(5000), None).unwrap();
+        assert_eq!(f.metadata().unwrap().uid, NO_ID);
+    }
+
+    /// A file capability's root reads through the map and is stored back
+    /// through it, as Linux's cap_inode_getsecurity and cap_convert_nscap
+    /// shift it through the mount's idmap: a v3's root id, and a v2's
+    /// implicit root 0, which reads as a v3 with the shifted root. A root
+    /// the map does not reach is EINVAL to write. An update that leaves the
+    /// capability alone keeps it byte for byte, however it reads (PR #47
+    /// review).
+    #[test]
+    fn file_capability_roots_map() {
+        use crate::fs::{ramfs::RamFs, Filesystem};
+        let fs = RamFs::new();
+        let real = fs
+            .root()
+            .create("f", Permissions::from_mode(0o755))
+            .unwrap();
+        let v3 = |root: u32| {
+            let mut v = alloc::vec![0u8; 24];
+            v[0..4].copy_from_slice(&0x0300_0001u32.to_le_bytes());
+            v[4] = 1;
+            v[20..24].copy_from_slice(&root.to_le_bytes());
+            v
+        };
+        let v2 = [
+            0x01, 0x00, 0x00, 0x02, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        let caps = |n: &Arc<dyn VfsNode>| {
+            n.xattrs()
+                .unwrap()
+                .get(xattr::XATTR_NAME_CAPS)
+                .map(Vec::from)
+        };
+        let store = |v: &[u8]| {
+            real.update_xattrs(&mut |set| set.set(xattr::XATTR_NAME_CAPS, v, 0))
+                .unwrap()
+        };
+        let einval = |r: Result<(), KernelError>| {
+            assert!(
+                matches!(r, Err(KernelError::InvalidArgument { .. })),
+                "{r:?}"
+            )
+        };
+        store(&v3(3));
+        let map = MntIdmap::of(&ns(b"0 100000 1000\n"));
+        let f = view(real.clone(), &map);
+        assert_eq!(caps(&f), Some(v3(100003)));
+        // Written through the view: stored unmapped; off the map, EINVAL.
+        f.update_xattrs(&mut |set| set.set(xattr::XATTR_NAME_CAPS, &v3(100009), 0))
+            .unwrap();
+        assert_eq!(caps(&real), Some(v3(9)));
+        einval(f.update_xattrs(&mut |set| set.set(xattr::XATTR_NAME_CAPS, &v3(7), 0)));
+        // A v2 capability's root is the filesystem's 0: through the view it
+        // is a v3 with the shifted root, the effective flag kept; with 0
+        // off the map, no root at all.
+        store(&v2);
+        assert_eq!(caps(&f), Some(v3(100000)));
+        let off = MntIdmap::of(&ns(b"1 100001 999\n"));
+        assert_eq!(caps(&view(real.clone(), &off)), Some(v3(NO_ID)));
+        // A stored v1 value (12 bytes, root 0 too; Linux reads it but no
+        // longer writes it) is shifted the same way, as a v3 whose high
+        // words are 0 (PR #47 review).
+        let v1 = [0x01, 0x00, 0x00, 0x01, 1, 0, 0, 0, 0, 0, 0, 0];
+        store(&v1);
+        assert_eq!(caps(&f), Some(v3(100000)));
+        // A v2 written through a view is a v3 with root 0 shifted back
+        // (cap_convert_nscap keeps v2 only on a mount with no idmap); EINVAL
+        // when the map does not reach 0.
+        let same = MntIdmap::of(&ns(b"0 0 1000\n"));
+        view(real.clone(), &same)
+            .update_xattrs(&mut |set| set.set(xattr::XATTR_NAME_CAPS, &v2, 0))
+            .unwrap();
+        assert_eq!(caps(&real), Some(v3(0)));
+        einval(f.update_xattrs(&mut |set| set.set(xattr::XATTR_NAME_CAPS, &v2, 0)));
+        // Another xattr changed next to a capability whose root the view
+        // does not reach: the capability stays as it is.
+        store(&v3(5000));
+        f.update_xattrs(&mut |set| set.set("user.note", b"x", 0))
+            .unwrap();
+        assert_eq!(caps(&real), Some(v3(5000)));
+        assert_eq!(real.xattrs().unwrap().get("user.note"), Some(&b"x"[..]));
+        f.update_xattrs(&mut |set| set.remove("user.note").map(|_| ()))
+            .unwrap();
+        assert_eq!(caps(&real), Some(v3(5000)));
+    }
+
+    /// Everything reached or made through a view is a view (mapped owners)
+    /// of the real node; rename and link through views act on the real
+    /// nodes; data, modes, times and removals pass through.
+    #[test]
+    fn a_view_tree_is_the_real_tree() {
+        use crate::fs::{ramfs::RamFs, Filesystem};
+        let fs = RamFs::new();
+        let map = MntIdmap::of(&ns(b"0 100000 1000\n"));
+        let root = view(fs.root(), &map);
+        let p = Permissions::from_mode(0o755);
+        let d = root.mkdir("d", p).unwrap();
+        let s = root.symlink("s", "d").unwrap();
+        let n = root.mknod("n", NodeType::Pipe, p, 0).unwrap();
+        let f = d.create("f", Permissions::from_mode(0o644)).unwrap();
+        for node in [&d, &s, &n, &f] {
+            assert!(node.view_of().is_some(), "a view");
+            assert_eq!(node.metadata().unwrap().uid, map.seen_uid(0));
+        }
+        assert_eq!(s.readlink().unwrap(), "d");
+        assert_eq!(root.lookup("d").unwrap().node_type(), NodeType::Directory);
+        // Data written through the view is the real file's.
+        assert_eq!(f.write(0, b"abc").unwrap(), 3);
+        let real_f = fs.root().lookup("d").unwrap().lookup("f").unwrap();
+        let mut buf = [0u8; 3];
+        assert_eq!(real_f.read(0, &mut buf).unwrap(), 3);
+        assert_eq!(&buf, b"abc");
+        f.truncate(1).unwrap();
+        assert_eq!(real_f.metadata().unwrap().size, 1);
+        f.chmod(Permissions::from_mode(0o600)).unwrap();
+        assert!(!real_f.metadata().unwrap().permissions.other_read);
+        f.set_times(Some(11), Some(22)).unwrap();
+        let m = real_f.metadata().unwrap();
+        assert_eq!((m.accessed, m.modified), (11, 22));
+        // Rename into a view directory, and a hard link of a view, land on
+        // the real tree (no view is ever stored in a filesystem).
+        root.mkdir("e", p).unwrap();
+        let e = root.lookup("e").unwrap();
+        d.rename("f", &e, "g").unwrap();
+        let moved = fs.root().lookup("e").unwrap().lookup("g").unwrap();
+        assert_eq!(
+            super::super::inode_key(&moved),
+            super::super::inode_key(&real_f)
+        );
+        let g = e.lookup("g").unwrap();
+        root.link("h", g.clone()).unwrap();
+        let linked = fs.root().lookup("h").unwrap();
+        assert!(linked.view_of().is_none(), "the link names the real node");
+        assert_eq!(linked.link_count(), 2);
+        let names: Vec<String> = root
+            .readdir()
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert!(names.iter().any(|n| n == "h") && names.iter().any(|n| n == "e"));
+        root.unlink("h").unwrap();
+        assert!(fs.root().lookup("h").is_err());
+        assert_eq!(g.link_count(), 1);
     }
 }

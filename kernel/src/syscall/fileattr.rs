@@ -115,7 +115,8 @@ fn freeze_mappings(node: &Arc<dyn VfsNode>) -> Result<(), SyscallError> {
 
 /// The four ioctls on open file `file`; None for any other command.
 pub fn ioctl(file: &crate::fs::file::File, cmd: u32, arg: usize) -> Option<SyscallResult> {
-    let node = &file.node;
+    // As the mount presents it now (an idmap set since it was opened).
+    let node = &super::filesystem::fd_node(file);
     Some(match cmd {
         FS_IOC_GETFLAGS => flags_of(&**node, true)
             .and_then(|f| write_user(arg, f & attr::USER_VISIBLE))
