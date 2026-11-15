@@ -50,8 +50,8 @@ Next-generation microkernel OS in Rust. Capability-based security, user-space dr
 
 # Manual
 cargo build --target targets/x86_64-veridian.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc
-cargo build --target aarch64-unknown-none-softfloat -p veridian-kernel
-cargo build --target riscv64imac-unknown-none-elf -p veridian-kernel
+cargo build --target aarch64-unknown-none-softfloat -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc
+cargo build --target riscv64imac-unknown-none-elf -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc
 ```
 
 **Notes**: x86_64 requires custom target JSON with kernel code model (R_X86_64_32S relocation fix). Kernel linked at 0xFFFFFFFF80100000.
@@ -154,7 +154,7 @@ scripts/install-deps.sh   # cargo-audit, cargo-llvm-cov, cargo-outdated, mdbook 
 ### Build System
 - Bare metal targets: `targets/x86_64-veridian.json`, `aarch64-unknown-none-softfloat`, `riscv64imac-unknown-none-elf`. The AArch64 and RISC-V kernels are soft-float (N-178): no kernel code may use the FP/SIMD registers, which belong to user threads; only the FP save/restore code names them (`.arch_extension fp`, `.option arch, +d`)
 - x86_64 uses `targets/x86_64-veridian.json` (kernel code model) -- CI must use this, not `x86_64-unknown-none`
-- `-Zbuild-std` handled by .cargo/config.toml; Cargo.lock committed
+- Every build passes `-Zbuild-std` itself (build-kernel.sh, the gate, CI): `.cargo/config.toml` holds only per-target rustflags; Cargo.lock committed
 - Feature flags: `alloc` for heap-dependent code, `#[cfg(feature = "alloc")]`
 
 ### Rust 2024 GlobalState Pattern (CURRENT)
