@@ -510,6 +510,32 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
   15. [ ] (v0.29) MFA through PAM.
   16. [ ] (v0.29) IPC redesign (N-79 to N-91); package signing keys (N-55 follow-up).
   17. [ ] Release v0.28.0, after item 8 (the tag and GitHub release need the maintainer's confirmation).
+      The "at most 20 missing" target counts the calls still to be written; the `declined` ones
+      (ENOSYS by decision, listed with reasons in the coverage reports) are counted apart, on the
+      condition that each has a plan (item 18) (maintainer, 2026-11-14).
+  18. [ ] (v0.29 onward) The declined calls, each brought in where it fits (maintainer, 2026-11-14:
+      every declined call needs a plan to be written and integrated in a later release):
+      - [ ] (v0.29) mbind, get_mempolicy, set_mempolicy, set_mempolicy_home_node, migrate_pages,
+        move_pages with Linux's single-node semantics (a NUMA kernel on one node: MPOL_DEFAULT,
+        node 0, the policy kept and reported); real placement once multi-node hardware is
+        supported (Track C 14).
+      - [ ] (v0.30) swapon and swapoff with the page cache and eviction (Track P, P3): swap files
+        and partitions, priorities, `/proc/swaps`.
+      - [ ] (v0.30) quotactl and quotactl_fd with ext4 read-write (Track C 2): user, group and
+        project quotas on ext4, then BlockFS.
+      - [ ] (v0.31) perf_event_open: software events first (Track C 14), then the hardware PMU
+        per architecture (x86 PMU, Arm PMUv3, RISC-V Sscofpmf).
+      - [ ] (v0.31) bpf: an eBPF verifier and interpreter in a no_std crate beside
+        `veridian-cbpf` (the Kani target), running in the user-space runtime (linuxd) where it
+        can, the kernel only where a hook needs it; program types in order: socket filters,
+        tracepoints and kprobes over perf_event_open, cgroup; a JIT last, behind the verifier.
+      - [ ] (v0.31) uprobe and uretprobe with uprobes (breakpoint insertion in user text, the
+        return trampoline), over perf_event_open and bpf.
+      - [ ] (v0.31) kexec_load and kexec_file_load: loading a kernel image and jumping to it,
+        with kexec_file_load verifying its signature against the measured-boot keys (Track S).
+      - [ ] (with Track M, M5) init_module, finit_module, delete_module: a Linux `.ko` cannot
+        run in this kernel; the calls load and unload signed VeridianOS driver servers, the
+        microkernel's equivalent of modules, through the same capability checks.
   - Outside the groups: pin every workflow `uses:` to a commit SHA with Dependabot (one ci: pull
     request); delete merged branches once the maintainer agrees.
 - [ ] **v0.28.0:** first the items carried over from v0.27.0, which was cut early (2026-10-18):

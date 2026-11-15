@@ -135,6 +135,10 @@
 - lsm_list_modules, lsm_get_self_attr and lsm_set_self_attr (Linux 7.3): the modules are the
   capability module and Landlock; neither has process attributes, so after Linux's argument
   checks getting or setting one is EOPNOTSUPP. Runtime test lsm_calls.
+- The syscall coverage reports count the calls that return ENOSYS by a recorded decision
+  (modules, kexec, swap, uprobes, NUMA, disk quotas, perf_event_open, bpf) as `declined`, each
+  with its reason and the release planned to bring it in (MASTER_TODO item 18), apart from
+  the `missing` ones still to be written: 25 missing on x86_64, 21 on AArch64, 23 on RISC-V.
 - BlockFS does not give a deleted file's inode number to a new file while a node in memory
   still names it (an open file, a working directory, a Landlock rule), as Linux keeps an
   inode until its last reference goes. A rule, FIFO or socket binding on the old file can no

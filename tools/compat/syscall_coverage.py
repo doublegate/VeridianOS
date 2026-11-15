@@ -17,6 +17,7 @@ Status values:
     implemented  routed to a kernel implementation (may still be partial)
     stub         answered without doing the work (fake success or ENOSYS)
     missing      returns ENOSYS; Linux implements it
+    declined     returns ENOSYS by a recorded decision (DECLINED: the reason)
     enosys       Linux itself has no implementation (ENOSYS there too)
 """
 
@@ -25,6 +26,33 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
+
+# Calls VeridianOS answers with ENOSYS by a recorded decision for now (the
+# v0.28 item 5 decisions of 2026-11-11, ADR 0027), each with the release
+# that brings it in (MASTER_TODO item 18; the maintainer, 2026-11-14: every
+# declined call needs such a plan). They are counted apart from the missing
+# ones, which have no decision.
+DECLINED = {
+    "perf_event_open": "no performance-counter subsystem yet; planned for v0.31 (MASTER_TODO 18)",
+    "bpf": "no eBPF verifier yet; planned for v0.31 (MASTER_TODO 18)",
+    "init_module": "Linux modules cannot run here; driver servers with Track M (MASTER_TODO 18)",
+    "finit_module": "Linux modules cannot run here; driver servers with Track M (MASTER_TODO 18)",
+    "delete_module": "Linux modules cannot run here; driver servers with Track M (MASTER_TODO 18)",
+    "kexec_load": "no kexec yet; planned for v0.31 (MASTER_TODO 18)",
+    "kexec_file_load": "no kexec yet; planned for v0.31 (MASTER_TODO 18)",
+    "swapon": "no swap yet; planned for v0.30 (MASTER_TODO 18)",
+    "swapoff": "no swap yet; planned for v0.30 (MASTER_TODO 18)",
+    "uprobe": "no uprobes yet; planned for v0.31 (MASTER_TODO 18)",
+    "uretprobe": "no uprobes yet; planned for v0.31 (MASTER_TODO 18)",
+    "mbind": "no NUMA policies yet; single-node semantics planned for v0.29 (MASTER_TODO 18)",
+    "get_mempolicy": "no NUMA policies yet; single-node semantics planned for v0.29 (MASTER_TODO 18)",
+    "set_mempolicy": "no NUMA policies yet; single-node semantics planned for v0.29 (MASTER_TODO 18)",
+    "set_mempolicy_home_node": "no NUMA policies yet; planned for v0.29 (MASTER_TODO 18)",
+    "migrate_pages": "no NUMA policies yet; single-node semantics planned for v0.29 (MASTER_TODO 18)",
+    "move_pages": "no NUMA policies yet; single-node semantics planned for v0.29 (MASTER_TODO 18)",
+    "quotactl": "no disk quotas yet; planned for v0.30 with ext4 (MASTER_TODO 18)",
+    "quotactl_fd": "no disk quotas yet; planned for v0.30 with ext4 (MASTER_TODO 18)",
+}
 
 # Grouping used by the compatibility plan (docs/compat and the roadmap).
 GROUPS = [
@@ -187,8 +215,9 @@ def linux_rows(arch: str) -> list[tuple[int, str, bool]]:
 def report(arch: str) -> str:
     rows = linux_rows(arch)
     implemented, stubbed = veridian_status()
-    counts = {"implemented": 0, "stub": 0, "missing": 0, "enosys": 0}
+    counts = {"implemented": 0, "stub": 0, "missing": 0, "declined": 0, "enosys": 0}
     out = []
+    declined = []
     for number, name, linux_has in rows:
         if name in implemented:
             status = "implemented"
@@ -196,6 +225,9 @@ def report(arch: str) -> str:
             status = "stub"
         elif not linux_has:
             status = "enosys"
+        elif name in DECLINED:
+            status = "declined"
+            declined.append(f"- `{name}`: {DECLINED[name]}.")
         else:
             status = "missing"
         counts[status] += 1
@@ -216,8 +248,9 @@ def report(arch: str) -> str:
         (
             f"Linux {RELEASE} defines {len(rows)} native {arch} syscalls ({table}). VeridianOS: "
             f"{counts['implemented']} implemented (some partially), {counts['stub']} stubbed, "
-            f"{counts['missing']} missing; {counts['enosys']} have no implementation in Linux "
-            "either and correctly return ENOSYS.\n"
+            f"{counts['missing']} missing, {counts['declined']} declined by decision; "
+            f"{counts['enosys']} have no implementation in Linux either and correctly return "
+            "ENOSYS.\n"
         ),
         (
             "`implemented` means routed to a kernel implementation, which may still be partial; "
@@ -228,6 +261,16 @@ def report(arch: str) -> str:
         "|---|---|---|---|",
         *out,
     ]
+    if declined:
+        lines += [
+            "",
+            "## Declined",
+            "",
+            "These return ENOSYS by a recorded decision for now (ADR 0027, the item 5 decisions);",
+            "each comes in with the release named (`to-dos/MASTER_TODO.md` item 18):",
+            "",
+            *declined,
+        ]
     return "\n".join(lines) + "\n"
 
 
