@@ -74,7 +74,7 @@ ADR 0030 (proposed) runs unmodified Linux drivers for GPUs, Wi-Fi, audio and lap
 - It lives in its own directory (`drivers-linux/`) or repository, with its own GPL-2.0 `COPYING` and SPDX headers on every file. Its source is published with every binary.
 - It is never linked into the kernel or any other component, and talks to them only through IPC and the shared-memory rings that every driver server uses.
 - The protocol between them is VeridianOS's own: block, network, input and display messages, documented in their ADRs. It is not Linux's internal structures passed across. Separate programs that exchange "complex internal data structures" may be one program in the GPL's sense, and keeping the protocol generic and documented keeps them two.
-- Code may flow from the MIT OR Apache-2.0 parts into the container (the ring definitions, for example). It never flows from the container into anything else.
+- Code may flow into the container from the MIT OR Apache-2.0 parts only: the protocol and interface definitions, the ring layouts as they define them, and the client libraries. The GPL-3.0 parts, including the ring helpers in `crates/veridian-ring` and the rest of the driver and server framework, cannot be combined with GPL-2.0-only code, so the container implements its side of the rings from those definitions. Code never flows from the container into anything else.
 
 ## Not legal advice
 

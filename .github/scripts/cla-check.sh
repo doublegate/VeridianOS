@@ -43,7 +43,7 @@ MAINTAINER='doublegate'
 #
 # opener_exempt LOGIN TYPE: whether the opener needs no signature.
 opener_exempt() {
-    [ "$1" = "$MAINTAINER" ] || { [ "$2" = "Bot" ] && [[ "$1" == *"[bot]" ]]; }
+    [ "${1,,}" = "$MAINTAINER" ] || { [ "$2" = "Bot" ] && [[ "$1" == *"[bot]" ]]; }
 }
 
 # The logins who must have signed, one per line. `committers` holds one
@@ -52,27 +52,31 @@ opener_exempt() {
 required_of() {
     local committers="$1" opener="$2" opener_type="$3"
     if opener_exempt "$opener" "$opener_type"; then
-        printf '%s\n' "$committers" | sed -e '/^$/d' -e '/^@bot:/d' | grep -Fxv -- "$MAINTAINER" || true
+        printf '%s\n' "$committers" | sed -e '/^$/d' -e '/^@bot:/d' | grep -Fixv -- "$MAINTAINER" || true
     else
         printf '%s\n' "$opener"
-        printf '%s\n' "$committers" | sed -e '/^$/d' -e 's/^@bot:/@unlinked:/' | grep -Fxv -- "$MAINTAINER" || true
+        printf '%s\n' "$committers" | sed -e '/^$/d' -e 's/^@bot:/@unlinked:/' | grep -Fixv -- "$MAINTAINER" || true
     fi
 }
+
+# Lowercase logins; an unlinked author's name is kept as written.
+lower() { LC_ALL=C awk '/^@unlinked:/ { print; next } { print tolower($0) }'; }
 
 # The required logins (from required_of) that have not signed. An
 # "@unlinked:" entry can never match a signature.
 unsigned_of() {
     local committers="$1" signed="$2"
+    # GitHub logins are case-insensitive.
     LC_ALL=C comm -23 \
-        <(printf '%s\n' "$committers" | sed '/^$/d' | LC_ALL=C sort -u) \
-        <(printf '%s\n' "$signed" | sed -e '/^$/d' -e '/^@unlinked:/d' | LC_ALL=C sort -u) || true
+        <(printf '%s\n' "$committers" | sed '/^$/d' | lower | LC_ALL=C sort -u) \
+        <(printf '%s\n' "$signed" | sed -e '/^$/d' -e '/^@unlinked:/d' | lower | LC_ALL=C sort -u) || true
 }
 
 # A comment body without carriage returns, surrounding whitespace, or the
 # "> " of a quotation copied from the check's own comment.
 normalize_comment() {
-    printf '%s' "$1" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
-        | sed -e '1s/^>[[:space:]]*//' | sed -e '/^[[:space:]]*$/d'
+    printf '%s' "$1" | tr -d '\r' | sed -e '/^[[:space:]]*$/d' \
+        | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '1s/^>[[:space:]]*//'
 }
 
 # Whether a comment body is the signing text.
@@ -119,6 +123,8 @@ selftest() {
     check "a user account named like a bot is not exempt" \
         "$(req '@bot:x[bot]' 'evil[bot]' User '')" $'@unlinked:x[bot]\nevil[bot]'
     check "a bot account without the suffix is not exempt" "$(req '' notabot Bot '')" "notabot"
+    check "logins match whatever their case" "$(req $'Alice\nDoubleGate' DoubleGate User 'alice')" ""
+    check "an outside opener matches whatever its case" "$(req '' Mallory User 'mallory')" ""
     is_sign_comment "$SIGN_TEXT" && r=yes || r=no
     check "the signing text signs" "$r" "yes"
     is_sign_comment $'  '"$SIGN_TEXT"$'\r\n' && r=yes || r=no
@@ -131,6 +137,8 @@ selftest() {
     check "a pasted quotation signs" "$r" "yes"
     is_sign_comment "I do not sign. $SIGN_TEXT" && r=yes || r=no
     check "text before the signing text does not sign" "$r" "no"
+    is_sign_comment $'\n\n> '"$SIGN_TEXT" && r=yes || r=no
+    check "a quotation after blank lines signs" "$r" "yes"
     is_recheck_comment $'recheck\r\n' && r=yes || r=no
     check "recheck with a newline rechecks" "$r" "yes"
     is_recheck_comment "please do not recheck" && r=yes || r=no
@@ -161,8 +169,9 @@ owner="${REPO%%/*}"
 name="${REPO#*/}"
 
 # Every commit author, all pages (GraphQL, 100 commits a page).
+list_committers() {
 # shellcheck disable=SC2016 # GraphQL variables, not shell ones
-committers="$(gh api graphql --paginate \
+gh api graphql --paginate \
     -F owner="$owner" -F name="$name" -F number="$PR" \
     -f query='query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
       repository(owner: $owner, name: $name) {
@@ -176,7 +185,29 @@ committers="$(gh api graphql --paginate \
     }' \
     --jq '.data.repository.pullRequest.commits.nodes[].commit.author
           | .user.login // (if ((.name // "") | endswith("[bot]")) then "@bot:" + .name
-                            else "@unlinked:" + (.name // "unknown") end)')"
+                            else "@unlinked:" + (.name // "unknown") end)'
+}
+
+# The authors and the commit they belong to are read as one snapshot: the
+# head is read before and after the authors, and the result is published
+# only for a head that did not move in between. A push during the check
+# starts a new run (synchronize) that checks the new head; if the head keeps
+# moving, this run publishes nothing and leaves the check to that run.
+head_of() { gh api "repos/$REPO/pulls/$PR" --jq .head.sha; }
+head_sha=''
+for attempt in 1 2 3; do
+    before="$(head_of)"
+    committers="$(list_committers)"
+    if [ "$(head_of)" = "$before" ]; then
+        head_sha="$before"
+        break
+    fi
+    sleep 5
+done
+if [ -z "$head_sha" ]; then
+    echo "CLA: the head kept moving; the run for the latest push checks it"
+    exit 0
+fi
 
 # The signatures, or none yet. Only "not found" counts as empty: any other
 # failure stops the check (fail closed).
@@ -200,7 +231,7 @@ read_signatures
 if [ "$EVENT" = "issue_comment" ] && is_sign_comment "${COMMENT_BODY:-}"; then
     : "${COMMENT_USER:?}" "${COMMENT_USER_ID:?}" "${COMMENT_ID:?}"
     for attempt in 1 2 3; do
-        if signed_of "$sig_doc" | grep -Fxq -- "$COMMENT_USER"; then
+        if signed_of "$sig_doc" | grep -Fixq -- "$COMMENT_USER"; then
             break
         fi
         repo_id="$(gh api "repos/$REPO" --jq .id)"
@@ -222,7 +253,6 @@ if [ "$EVENT" = "issue_comment" ] && is_sign_comment "${COMMENT_BODY:-}"; then
 fi
 
 pr_info="$(gh api "repos/$REPO/pulls/$PR")"
-head_sha="$(printf '%s' "$pr_info" | jq -r .head.sha)"
 opener="$(printf '%s' "$pr_info" | jq -r .user.login)"
 opener_type="$(printf '%s' "$pr_info" | jq -r .user.type)"
 unsigned="$(unsigned_of "$(required_of "$committers" "$opener" "$opener_type")" "$(signed_of "$sig_doc")")"
@@ -242,9 +272,10 @@ fi
 gh api -X POST "repos/$REPO/statuses/$head_sha" \
     -f state="$state" -f context='CLA' -f description="$desc" -f target_url="$DOC_URL" >/dev/null
 
-# One comment, kept up to date.
+# One comment, kept up to date. `sed -n 1p` reads to the end, so the
+# paginating gh never gets SIGPIPE (pipefail would turn that into a failure).
 existing="$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
-    --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | contains("<!-- veridianos-cla-check -->"))) | .id' | head -1)"
+    --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | contains("<!-- veridianos-cla-check -->"))) | .id' | sed -n 1p)"
 if [ -n "$existing" ]; then
     gh api -X PATCH "repos/$REPO/issues/comments/$existing" -f body="$body" >/dev/null
 elif [ -n "$unsigned" ]; then

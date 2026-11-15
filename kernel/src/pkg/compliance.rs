@@ -27,8 +27,11 @@ pub enum License {
     MIT,
     /// Apache License 2.0
     Apache2,
-    /// GNU General Public License v2.0
+    /// GNU General Public License v2.0 only
     GPL2,
+    /// GNU General Public License v2.0 or any later version, which can be
+    /// used under GPL-3.0 (GPLv2 section 9)
+    GPL2OrLater,
     /// GNU General Public License v3.0
     GPL3,
     /// GNU Lesser General Public License v2.1
@@ -55,6 +58,7 @@ impl License {
             Self::MIT => "MIT",
             Self::Apache2 => "Apache-2.0",
             Self::GPL2 => "GPL-2.0",
+            Self::GPL2OrLater => "GPL-2.0-or-later",
             Self::GPL3 => "GPL-3.0",
             Self::LGPL21 => "LGPL-2.1",
             Self::BSD2 => "BSD-2-Clause",
@@ -66,14 +70,17 @@ impl License {
         }
     }
 
-    /// Parse a license from an SPDX-style identifier string. The "-or-later"
-    /// (and deprecated "+") forms map to the same version: this type tells
-    /// licence families apart for compatibility checks, not version ranges.
+    /// Parse a license from an SPDX-style identifier string. GPL-2.0's
+    /// "-or-later" form is its own variant, because it combines with GPL-3.0
+    /// and "-only" does not; for GPL-3.0 and LGPL-2.1 the "-or-later" (and
+    /// deprecated "+") forms map to the same variant, since no licence this
+    /// type knows tells them apart.
     pub fn from_spdx(s: &str) -> Self {
         match s.trim() {
             "MIT" => Self::MIT,
             "Apache-2.0" | "Apache2" => Self::Apache2,
-            "GPL-2.0" | "GPL-2.0-only" | "GPL-2.0-or-later" | "GPL-2.0+" | "GPL2" => Self::GPL2,
+            "GPL-2.0" | "GPL-2.0-only" | "GPL2" => Self::GPL2,
+            "GPL-2.0-or-later" | "GPL-2.0+" => Self::GPL2OrLater,
             "GPL-3.0" | "GPL-3.0-only" | "GPL-3.0-or-later" | "GPL-3.0+" | "GPL3" => Self::GPL3,
             "LGPL-2.1" | "LGPL-2.1-only" | "LGPL-2.1-or-later" | "LGPL-2.1+" => Self::LGPL21,
             "BSD-2-Clause" | "BSD2" => Self::BSD2,
@@ -87,7 +94,10 @@ impl License {
 
     /// Return whether this license is copyleft (restricts derivative works).
     pub fn is_copyleft(self) -> bool {
-        matches!(self, Self::GPL2 | Self::GPL3 | Self::LGPL21 | Self::MPL2)
+        matches!(
+            self,
+            Self::GPL2 | Self::GPL2OrLater | Self::GPL3 | Self::LGPL21 | Self::MPL2
+        )
     }
 
     /// Return whether this license is permissive.
@@ -211,7 +221,8 @@ impl LicenseCompatibility {
     ///
     /// Rules:
     /// - Proprietary is incompatible with GPL2, GPL3, and LGPL21.
-    /// - GPL3 is incompatible with GPL2 (GPL2-only cannot upgrade to GPL3).
+    /// - GPL3 is incompatible with GPL2 (GPL2-only cannot upgrade to GPL3);
+    ///   GPL2OrLater combines with both.
     /// - Permissive licenses (MIT, BSD, ISC, Apache2) are compatible with
     ///   everything except Proprietary.
     /// - Unknown licenses are treated as compatible (best-effort).
@@ -223,10 +234,16 @@ impl LicenseCompatibility {
 
         // Proprietary is incompatible with copyleft
         if *a == License::Proprietary {
-            return !matches!(b, License::GPL2 | License::GPL3 | License::LGPL21);
+            return !matches!(
+                b,
+                License::GPL2 | License::GPL2OrLater | License::GPL3 | License::LGPL21
+            );
         }
         if *b == License::Proprietary {
-            return !matches!(a, License::GPL2 | License::GPL3 | License::LGPL21);
+            return !matches!(
+                a,
+                License::GPL2 | License::GPL2OrLater | License::GPL3 | License::LGPL21
+            );
         }
 
         // GPL3 is incompatible with GPL2-only
@@ -553,13 +570,42 @@ mod tests {
     }
 
     #[test]
+    fn test_gpl2_or_later_is_distinct_from_gpl2_only() {
+        // GPLv2 section 9: "or any later version" lets the work be used under
+        // GPL-3.0, so it combines with GPL-3.0 code; GPL-2.0-only does not.
+        assert_eq!(License::GPL2OrLater.as_str(), "GPL-2.0-or-later");
+        assert!(License::GPL2OrLater.is_copyleft());
+        assert!(!License::GPL2OrLater.is_permissive());
+        assert!(LicenseCompatibility::is_compatible(
+            &License::GPL2OrLater,
+            &License::GPL3
+        ));
+        assert!(LicenseCompatibility::is_compatible(
+            &License::GPL3,
+            &License::GPL2OrLater
+        ));
+        assert!(LicenseCompatibility::is_compatible(
+            &License::GPL2OrLater,
+            &License::GPL2
+        ));
+        assert!(!LicenseCompatibility::is_compatible(
+            &License::GPL2OrLater,
+            &License::Proprietary
+        ));
+        assert!(!LicenseCompatibility::is_compatible(
+            &License::Proprietary,
+            &License::GPL2OrLater
+        ));
+    }
+
+    #[test]
     fn test_license_from_spdx_or_later() {
         // The kernel's own identifier (kernel/Cargo.toml, ADR 0028), and the
         // deprecated "+" forms that SPDX replaced with "-or-later".
         assert_eq!(License::from_spdx("GPL-3.0-or-later"), License::GPL3);
         assert_eq!(License::from_spdx("GPL-3.0+"), License::GPL3);
-        assert_eq!(License::from_spdx("GPL-2.0-or-later"), License::GPL2);
-        assert_eq!(License::from_spdx("GPL-2.0+"), License::GPL2);
+        assert_eq!(License::from_spdx("GPL-2.0-or-later"), License::GPL2OrLater);
+        assert_eq!(License::from_spdx("GPL-2.0+"), License::GPL2OrLater);
         assert_eq!(License::from_spdx("LGPL-2.1-or-later"), License::LGPL21);
         assert_eq!(License::from_spdx("LGPL-2.1+"), License::LGPL21);
     }

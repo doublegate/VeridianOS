@@ -196,7 +196,7 @@ Capabilities solve many security problems:
 
 ### Will VeridianOS be free software?
 
-Yes. VeridianOS is licensed by component : the kernel, system servers and Linux runtime are GPL-3.0-or-later with a user-space exception, under which a program that uses them only as a client (through system calls, IPC as a client and the client libraries) and copies none of their code keeps its own licence; drivers and system services are not covered by the exception, and the driver and server framework is GPL-3.0-or-later without it; most of the rest (the ABI, libc, client libraries, crates, tools, documentation) is MIT OR Apache-2.0, and vendored third-party files (the Linux system call tables, patches to other projects) keep their own licences. Commercial licences for the GPL parts are available. See LICENSING.md.
+Yes. VeridianOS is licensed by component: the kernel, system servers and Linux runtime are GPL-3.0-or-later with a user-space exception, under which a program that uses them only as a client (through system calls, IPC as a client and the client libraries) and copies none of their code keeps its own licence; drivers and system services are not covered by the exception, and the driver and server framework is GPL-3.0-or-later without it; most of the rest (the ABI, libc, client libraries, crates, tools, documentation) is MIT OR Apache-2.0, and vendored third-party files (the Linux system call tables, patches to other projects) keep their own licences. Commercial licences for the GPL parts are available. See LICENSING.md.
 
 ### What's the long-term vision?
 

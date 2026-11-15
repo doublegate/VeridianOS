@@ -52,6 +52,11 @@ jobs:
                       ubuntu-cargo-
             - name: Check formatting
               run: cargo fmt --all -- --check
+            # The CLA check runs from the default branch on pull_request_target,
+            # so a regression in its decision logic would only show on main;
+            # its offline selftest runs here on every change.
+            - name: CLA check selftest
+              run: bash .github/scripts/cla-check.sh --selftest
             # Clippy with no allow-list, on the three bare-metal targets as
             # built (x86_64 through its custom target JSON) and on the library
             # with every feature (N-160).
