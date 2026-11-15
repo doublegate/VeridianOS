@@ -1255,6 +1255,49 @@ impl MountTable {
     }
 }
 
+/// The tree that serves canonical `path` and the path in it, with the
+/// detached tree's id while the path is in one that is still detached.
+/// A path in a detached tree ([`mount::DETACHED`]) is judged by the mount
+/// it is really on: in that tree, or, once the tree is attached, at its
+/// place in the tree it was attached to. Any other path is `ns`'s. `None`
+/// for a detached tree that is gone (no file is open in it then: each
+/// holds its tree). Mount flags, ids and filesystems must come from here,
+/// not from the caller's namespace, or a read-only, nodev or noexec
+/// detached mount would be judged by the caller's root mount (PR #47
+/// review).
+fn serving_tree(
+    ns: &Arc<mount::Mounts>,
+    path: &str,
+) -> Option<(Arc<mount::Mounts>, String, Option<u64>)> {
+    let Some((id, rest)) = mount::parse_detached(path) else {
+        return Some((ns.clone(), String::from(path), None));
+    };
+    let rest = if rest.is_empty() { "/" } else { rest };
+    let (tree, point) = mount::detached_place(id)?;
+    Some(match point {
+        None => (tree, String::from(rest), Some(id)),
+        Some(p) if p == "/" => (tree, String::from(rest), None),
+        Some(p) if rest == "/" => (tree, p, None),
+        Some(p) => (tree, alloc::format!("{p}{rest}"), None),
+    })
+}
+
+/// [`MountTable::mount_of`] of `path` through [`serving_tree`], as a path
+/// of the same kind (a detached path for a detached tree).
+fn serving_mount_point(ns: &Arc<mount::Mounts>, path: &str) -> String {
+    match serving_tree(ns, path) {
+        Some((tree, p, id)) => {
+            let point = String::from(tree.snapshot().mount_of(&normalize_path(&p, "/")));
+            match id {
+                Some(id) => mount::detached_path(id, if point == "/" { "" } else { &point }),
+                None => point,
+            }
+        }
+        // Gone: a point no other path shares.
+        None => String::from(path),
+    }
+}
+
 /// The tree of the initial mount namespace: the global VFS's, which the
 /// initial namespace set (`process::ns`) names.
 pub fn initial_mounts() -> Arc<mount::Mounts> {
@@ -1772,31 +1815,34 @@ impl<'a> CallerView<'a> {
         table.mounts.keys().any(under) || table.parked.keys().any(|p| path_is_under(p, &path))
     }
 
-    /// [`Vfs::mount_point_of`] in the caller's mount namespace.
+    /// [`Vfs::mount_point_of`] in the caller's mount namespace (or the
+    /// detached tree a detached path is in, [`serving_tree`]).
     pub fn mount_point_of(&self, path: &str) -> String {
-        String::from(
-            self.ctx
-                .mounts
-                .snapshot()
-                .mount_of(&normalize_path(path, "/")),
-        )
+        serving_mount_point(&self.ctx.mounts, path)
     }
 
-    /// [`Vfs::mount_ids_of`] in the caller's mount namespace.
+    /// [`Vfs::mount_ids_of`] in the caller's mount namespace (or the
+    /// detached tree a detached path is in).
     pub fn mount_ids_of(&self, path: &str) -> (MountIds, bool) {
-        self.ctx.mounts.snapshot().ids_of(path)
+        serving_tree(&self.ctx.mounts, path).map_or((PSEUDO_MOUNT, false), |(tree, p, _)| {
+            tree.snapshot().ids_of(&p)
+        })
     }
 
-    /// The mount serving canonical `path` in the caller's mount namespace,
-    /// whose flags say what may be done there (ADR 0022 H3c); `None`
-    /// before a root is mounted.
+    /// The mount serving canonical `path` in the caller's mount namespace
+    /// (or the detached tree a detached path is in), whose flags say what
+    /// may be done there (ADR 0022 H3c); `None` before a root is mounted.
     pub fn mount_serving(&self, path: &str) -> Option<Arc<mount::Mount>> {
-        self.ctx.mounts.snapshot().serving(path).cloned()
+        let (tree, p, _) = serving_tree(&self.ctx.mounts, path)?;
+        tree.snapshot().serving(&p).cloned()
     }
 
-    /// [`Vfs::filesystem_of`] in the caller's mount namespace.
+    /// [`Vfs::filesystem_of`] in the caller's mount namespace (or the
+    /// detached tree a detached path is in).
     pub fn filesystem_of(&self, path: &str) -> Option<(String, Arc<dyn Filesystem>)> {
-        self.ctx.mounts.snapshot().fs_of(path)
+        let (tree, p, _) = serving_tree(&self.ctx.mounts, path)?;
+        let (_, fs) = tree.snapshot().fs_of(&p)?;
+        Some((serving_mount_point(&self.ctx.mounts, path), fs))
     }
 
     /// [`Vfs::filesystem_with_dev`] in the caller's mount namespace.
@@ -2088,6 +2134,40 @@ impl Vfs {
         if let Some(path) = detached {
             return Self::lookup_detached(ctx, path, follow_last);
         }
+        // A root in a detached tree (fchroot of a descriptor in one, which
+        // Linux allows): absolute paths, and relative ones from a working
+        // directory under that root, resolve in the tree, confined to the
+        // root as any chroot is.
+        if let Some((id, at)) = mount::parse_detached(&ctx.root) {
+            let gone = || KernelError::FsError(crate::error::FsError::NotFound);
+            let in_root = if path.starts_with('/') {
+                String::from(path)
+            } else if cwd == "/" {
+                alloc::format!("/{path}")
+            } else {
+                alloc::format!("{cwd}/{path}")
+            };
+            return match mount::detached_place(id).ok_or_else(gone)? {
+                (tree, None) => {
+                    let root = if at.is_empty() { "/" } else { at };
+                    let (node, canon) = tree.snapshot().resolve_in(
+                        &in_root,
+                        "/",
+                        root,
+                        follow_last,
+                        0,
+                        ctx.creds.clone(),
+                        ctx.resolve,
+                    )?;
+                    Ok((node, mount::detached_path(id, &canon)))
+                }
+                // Attached since: where its files are now.
+                (_, Some(_)) => {
+                    let joined = alloc::format!("{}{}", ctx.root, in_root);
+                    Self::lookup_detached(ctx, &joined, follow_last)
+                }
+            };
+        }
         ctx.mounts.snapshot().resolve_in(
             path,
             cwd,
@@ -2223,15 +2303,16 @@ impl Vfs {
     /// The mount point that serves `path`, a canonical path in the whole
     /// tree.
     pub fn mount_point_of(&self, path: &str) -> String {
-        let path = normalize_path(path, "/");
-        String::from(self.snapshot().mount_of(&path))
+        serving_mount_point(&self.mounts, path)
     }
 
     /// The ids of the mount serving `path`, a canonical path in the whole
     /// tree, and whether `path` is that mount's root (statx's
     /// STATX_ATTR_MOUNT_ROOT).
     pub fn mount_ids_of(&self, path: &str) -> (MountIds, bool) {
-        self.snapshot().ids_of(path)
+        serving_tree(&self.mounts, path).map_or((PSEUDO_MOUNT, false), |(tree, p, _)| {
+            tree.snapshot().ids_of(&p)
+        })
     }
 
     /// The filesystem whose files stat reports with device number `dev`
@@ -2529,17 +2610,17 @@ impl Vfs {
         // A read-only mount makes nothing: EEXIST for a name that exists,
         // else EROFS, before any permission check (Linux's filename_create
         // and lookup_open).
-        let snapshot = ctx.mounts.snapshot();
-        if snapshot
-            .serving(&canonical_parent)
-            .is_some_and(|m| m.is_readonly())
-        {
+        // The mount is the one the parent is really on (a detached tree's
+        // for a detached path, `serving_tree`).
+        let readonly = serving_tree(&ctx.mounts, &canonical_parent).is_some_and(|(tree, p, _)| {
+            tree.snapshot().serving(&p).is_some_and(|m| m.is_readonly())
+        });
+        if readonly {
             if parent.lookup(name).is_ok() {
                 return Err(KernelError::FsError(crate::error::FsError::AlreadyExists));
             }
             return Err(KernelError::FsError(crate::error::FsError::ReadOnly));
         }
-        drop(snapshot);
 
         // MAC check: creating an entry requires Write access
         crate::security::mac::check_file_access(

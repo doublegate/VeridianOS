@@ -11408,9 +11408,22 @@ static void test_mount_api(void)
             g |= 256;
         /* open_tree_attr: a read-only copy in one call. */
         int afd = syscall(SYS_open_tree_attr, AT_FDCWD, "/tmp/ma-a", 1, &ro, sizeof(ro));
-        if (afd < 0 || syscall(SYS_move_mount, afd, "", AT_FDCWD, "/tmp/ma-c", 4) != 0 ||
+        /* Still detached, it is read-only through its own descriptor
+         * (judged by its mount, not the caller's root; PR #47 review). */
+        if (afd < 0 ||
+            !(openat(afd, "z", O_CREAT | O_WRONLY, 0644) == -1 && errno == EROFS) ||
+            syscall(SYS_move_mount, afd, "", AT_FDCWD, "/tmp/ma-c", 4) != 0 ||
             !t_info_has(" /tmp/ma-c ro,nodev,relatime - tmpfs mapi rw"))
             g |= 512;
+        /* Changing a mount's attributes in place takes mount_setattr's
+         * authority (EPERM unprivileged), clone or not. */
+        pid_t ac = fork();
+        if (ac == 0) {
+            if (setuid(65534) != 0) _exit(2);
+            long r = syscall(SYS_open_tree_attr, AT_FDCWD, "/tmp/ma-a", 0, &ro, sizeof(ro));
+            _exit(r == -1 && errno == EPERM ? 0 : 1);
+        }
+        if (t_exit_status(ac) != 0) g |= 0x10000;
         /* fspick: the superblock read-only for every mount of it. */
         pfd = syscall(SYS_fspick, AT_FDCWD, "/tmp/ma-a", 1 /* FSPICK_CLOEXEC */);
         if (pfd < 0 || syscall(SYS_fsconfig, pfd, 0, "ro", NULL, 0) != 0 ||

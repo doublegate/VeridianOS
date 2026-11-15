@@ -341,7 +341,9 @@ pub fn sys_fsconfig(
     let string = match command {
         cmd::SET_STRING => Some(read_user_cstr(value, 255)?),
         cmd::SET_BINARY => {
-            let mut buf = alloc::vec![0u8; aux as usize];
+            // Up to 1 MiB the caller chose: ENOMEM, not an abort, if the
+            // heap cannot hold it.
+            let mut buf = super::userspace::zeroed_buf(aux as usize)?;
             read_user_bytes(value, &mut buf)?;
             None
         }
@@ -664,6 +666,7 @@ pub fn sys_move_mount(
                 .attach_tree(&from_tree, &to_at, to_is_dir)
                 .map_err(mount_error)?;
             mount::mark_attached(id, &to_tree, &to_at);
+            mount::transferred(&from_tree, &to_tree, &to_at);
         }
     }
     Ok(0)
@@ -980,6 +983,11 @@ pub fn sys_open_tree_attr(
         if usize_ < MOUNT_ATTR_SIZE_VER0 {
             return Err(SyscallError::InvalidArgument);
         }
+        // The same authority as mount_setattr, checked here for every
+        // tree: without OPEN_TREE_CLONE the attributes change a mount
+        // already in the caller's namespace, which open_tree itself did
+        // not check (Linux's wants_mount_setattr; PR #47 review).
+        may_mount()?;
         // A fresh copy's maps may be replaced or cleared (open_tree_attr's
         // MOUNT_KATTR_IDMAP_REPLACE with OPEN_TREE_CLONE).
         let replace = flags & OPEN_TREE_CLONE != 0;
@@ -1298,6 +1306,10 @@ fn statmount_bytes(
                 .collect();
             put32(&mut h, num_at, lines.len() as u32);
             string(&mut h, &mut out_mask, flag, str_at, &lines.join("\0"))?;
+            // Raised for an idmapped mount even when none of its extents
+            // can be seen, so that case is told from a mount without one
+            // (statmount_mnt_uidmap).
+            out_mask |= flag;
         }
     }
     if mask & sm::MNT_NS_ID != 0 {
@@ -1312,6 +1324,13 @@ fn statmount_bytes(
     }
     put64(&mut h, 8, out_mask);
     let copysize = bufsize.min(sm::HEADER);
+    // Only the empty string a request with nothing to report reserves can
+    // fail to fit (the others were checked): it is not written past the
+    // caller's buffer (Linux writes that byte at offset 512 even when
+    // `bufsize` is smaller; PR #47 review).
+    if sm::HEADER + strs.len() > bufsize {
+        strs.clear();
+    }
     put32(&mut h, 0, (copysize + strs.len()) as u32);
     Ok((h, strs))
 }
@@ -1384,7 +1403,10 @@ pub fn sys_statmount(req: usize, buf: usize, bufsize: usize, flags: usize) -> Sy
     };
     let (header, strs) = statmount_bytes(&facts, mask, bufsize)?;
     if !strs.is_empty() {
-        super::userspace::write_user_bytes(buf + sm::HEADER, &strs)?;
+        let tail = buf
+            .checked_add(sm::HEADER)
+            .ok_or(SyscallError::InvalidPointer)?;
+        super::userspace::write_user_bytes(tail, &strs)?;
     }
     super::userspace::write_user_bytes(buf, &header[..bufsize.min(sm::HEADER)])?;
     Ok(0)

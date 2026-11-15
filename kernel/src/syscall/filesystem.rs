@@ -972,9 +972,10 @@ pub fn sys_stat(fd: usize, stat_buf: usize) -> SyscallResult {
         .ok_or(SyscallError::BadFileDescriptor)?;
 
     // Get metadata and write to user buffer
-    let metadata = file_desc.node.metadata().map_err(super::map_kernel_error)?;
+    let node = fd_node(&file_desc);
+    let metadata = node.metadata().map_err(super::map_kernel_error)?;
     let (mount, _) = mount_of(file_desc.path.as_deref())?;
-    let stat = fill_stat(&metadata, &*file_desc.node, mount);
+    let stat = fill_stat(&metadata, &*node, mount);
 
     super::userspace::write_user(stat_buf, stat)?;
     Ok(0)
@@ -1618,6 +1619,10 @@ pub fn sys_getcwd(buf: usize, size: usize) -> SyscallResult {
                 alloc::format!("(unreachable){}", crate::fs::FAILFS_NAME)
             } else if root == crate::fs::FAILFS_ROOT {
                 alloc::format!("(unreachable){}", cwd)
+            } else if let Some((_, rest)) = crate::fs::mount::parse_detached(&cwd) {
+                // In a detached tree the root does not reach: Linux's
+                // prepend_path stops at the tree's root.
+                alloc::format!("(unreachable){}", if rest.is_empty() { "/" } else { rest })
             } else {
                 cwd
             }
@@ -1932,9 +1937,13 @@ pub fn sys_fchdir(fd: usize) -> SyscallResult {
         .ok_or(SyscallError::BadFileDescriptor)?;
     let (node, path) = (file.node.clone(), fd_directory_path(&file)?);
     // `path` is relative to the root; enter_directory wants the whole-tree
-    // path it maps back.
+    // path it maps back. A directory in a detached tree outside the root
+    // keeps its own path (`fs::mount::DETACHED`), never joined to the root.
     let root = vfs()?.get_root();
-    let path = if root == "/" || root == crate::fs::FAILFS_ROOT {
+    let path = if root == "/"
+        || root == crate::fs::FAILFS_ROOT
+        || path.starts_with(crate::fs::mount::DETACHED)
+    {
         path
     } else if path == "/" {
         root
@@ -2091,7 +2100,12 @@ pub fn sys_fchroot(fd: usize, flags: usize) -> SyscallResult {
     // descriptor as fchdir checks it.
     let relative = fd_directory_path(&file)?;
     let root = vfs()?.get_root();
-    let new_root = if root == "/" || root == crate::fs::FAILFS_ROOT {
+    // A directory in a detached tree, as Linux allows: the new root is in
+    // that tree, its path its own (`Vfs::lookup` resolves under it).
+    let new_root = if root == "/"
+        || root == crate::fs::FAILFS_ROOT
+        || relative.starts_with(crate::fs::mount::DETACHED)
+    {
         relative
     } else if relative == "/" {
         root
@@ -4109,7 +4123,7 @@ pub fn sys_fchmod(fd: usize, mode: usize) -> SyscallResult {
         .get(fd)
         .ok_or(SyscallError::BadFileDescriptor)?;
     want_write_file(&file)?;
-    chmod_node(&file.node, mode)?;
+    chmod_node(&fd_node(&file), mode)?;
     crate::fs::inotify::on_file(&file, crate::fs::inotify::IN_ATTRIB);
     Ok(0)
 }
@@ -4356,7 +4370,7 @@ fn open_empty_path(dirfd: usize, flags: usize, mode: usize, regular: bool) -> Sy
             .get_path(dirfd as u32 as usize)
             .ok_or(SyscallError::BadFileDescriptor)?;
         let canonical = file.path.clone().ok_or(SyscallError::NoDeviceOrAddress)?;
-        (file.node.clone(), canonical)
+        (fd_node(&file), canonical)
     };
     // The MAC check of an open by name (`Vfs::open_in`), for the access now
     // asked: an O_PATH descriptor was checked for reading only, and must
@@ -4540,7 +4554,7 @@ pub fn sys_fstatat(dirfd: usize, path_ptr: usize, stat_buf: usize, flags: usize)
                 .lock()
                 .get_path(dirfd as u32 as usize)
                 .ok_or(SyscallError::BadFileDescriptor)?;
-            (file.node.clone(), file.path.clone())
+            (fd_node(&file), file.path.clone())
         }
     } else {
         // A trailing slash is followed and needs a directory (resolve_in).
@@ -4598,7 +4612,7 @@ pub fn sys_statx(
                 .lock()
                 .get_path(dfd as usize)
                 .ok_or(SyscallError::BadFileDescriptor)?;
-            (file.node.clone(), file.path.clone())
+            (fd_node(&file), file.path.clone())
         }
         name => {
             if bad_request
@@ -5053,9 +5067,33 @@ pub fn sys_fchown(fd: usize, uid: usize, gid: usize) -> SyscallResult {
         .get(fd)
         .ok_or(SyscallError::BadFileDescriptor)?;
     want_write_file(&file)?;
-    chown_node(&file.node, uid, gid)?;
+    chown_node(&fd_node(&file), uid, gid)?;
     crate::fs::inotify::on_file(&file, crate::fs::inotify::IN_ATTRIB);
     Ok(0)
+}
+
+/// An open file's node as its mount presents it now. A file in a detached
+/// tree is looked up again by its path, so an idmapping set on the tree
+/// after the file was opened (mount_setattr, open_tree_attr on the
+/// descriptor fsmount or open_tree returned) applies to it, as on Linux,
+/// where the mapping belongs to the mount and every open file of it sees
+/// it (PR #47 review). Only the same file counts (the same inode): one
+/// renamed away, its name since taken by another, keeps its own node, as
+/// does any file outside a detached tree.
+fn fd_node(file: &crate::fs::file::File) -> alloc::sync::Arc<dyn crate::fs::VfsNode> {
+    let same = |a: &dyn crate::fs::VfsNode, b: &dyn crate::fs::VfsNode| matches!((a.metadata(), b.metadata()), (Ok(x), Ok(y)) if x.inode == y.inode);
+    if let Some(path) = file.path.as_deref() {
+        if crate::fs::mount::parse_detached(path).is_some() {
+            if let Ok(view) = vfs() {
+                if let Ok((node, _)) = view.locate(path, false) {
+                    if same(&*node, &*file.node) {
+                        return node;
+                    }
+                }
+            }
+        }
+    }
+    file.node.clone()
 }
 
 /// mknod(2): mknodat relative to the working directory.

@@ -161,6 +161,33 @@ pub fn mark_attached(id: u64, tree: &Arc<Mounts>, point: &str) {
     );
 }
 
+/// Detached tree `from`'s mounts were moved into `to` at `at` (move_mount
+/// of its root): every tree attached somewhere in `from` is now at the same
+/// place under `at` in `to`, so a descriptor into it keeps resolving after
+/// `from` is emptied (PR #47 review).
+pub fn transferred(from: &Arc<Mounts>, to: &Arc<Mounts>, at: &str) {
+    for place in TREES.lock().values_mut() {
+        let moved = match place {
+            Place::Attached { tree, point } if core::ptr::eq(tree.as_ptr(), Arc::as_ptr(from)) => {
+                Some(if at == "/" {
+                    point.clone()
+                } else if point == "/" {
+                    String::from(at)
+                } else {
+                    alloc::format!("{at}{point}")
+                })
+            }
+            _ => None,
+        };
+        if let Some(point) = moved {
+            *place = Place::Attached {
+                tree: Arc::downgrade(to),
+                point,
+            };
+        }
+    }
+}
+
 /// Why a change to a tree was refused, as Linux's errno.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MountError {
@@ -899,11 +926,20 @@ impl Mounts {
             if base.flags() & flags::UNBINDABLE != 0 {
                 return Err(MountError::Invalid);
             }
-            // Binding without a locked submount would show what it covers.
+            // Binding without a locked submount would show what it covers,
+            // a locked old root parked under the source included (as
+            // `has_locked_submounts`; PR #47 review).
+            let locked_parked = t.parked.iter().any(|(p, trees)| {
+                path_is_under(p, source)
+                    && trees
+                        .iter()
+                        .any(|tr| tr.root.as_ref().is_some_and(|r| r.is_locked()))
+            });
             if !recursive
-                && t.under(source)
-                    .iter()
-                    .any(|p| t.stack(p).iter().any(|m| m.is_locked()))
+                && (locked_parked
+                    || t.under(source)
+                        .iter()
+                        .any(|p| t.stack(p).iter().any(|m| m.is_locked())))
             {
                 return Err(MountError::Invalid);
             }
@@ -2289,6 +2325,78 @@ mod tests {
         let gone = register_detached(&other);
         drop(other);
         assert!(canon(&detached_path(gone, "/"), "/").is_err());
+    }
+
+    /// A path in a detached tree is judged by the tree's own mount, not by
+    /// the caller's root mount: a read-only detached mount refuses a
+    /// create through it (EROFS), and its ids and mount point are its own
+    /// (PR #47 review). A root in a detached tree confines absolute
+    /// lookups to it. A tree attached inside a detached one follows it
+    /// when that one is attached.
+    #[test]
+    fn detached_paths_take_their_own_mount() {
+        let vfs = work_tree();
+        let t = vfs.mounts();
+        let ctx = vfs.kernel_context();
+        let ro = Arc::new(t.detached_new(tmpfs(), "ro".into(), flags::READONLY, false));
+        let id = register_detached(&ro);
+        let at = detached_path(id, "/d");
+        let view = vfs.as_caller();
+        assert!(view.mount_serving(&at).is_some_and(|m| m.is_readonly()));
+        assert!(view.mount_serving("/").is_some_and(|m| !m.is_readonly()));
+        assert_ne!(vfs.mount_ids_of(&at).0, vfs.mount_ids_of("/").0);
+        assert_eq!(view.mount_point_of(&at), detached_path(id, ""));
+        let p = crate::fs::Permissions::default();
+        assert_eq!(
+            vfs.mkdir_in(&ctx, &at, p, |_| Ok(())).err(),
+            Some(crate::error::KernelError::FsError(
+                crate::error::FsError::ReadOnly
+            ))
+        );
+
+        // A root in a detached tree: "/" is the tree's (or its directory's),
+        // and `..` stays in it.
+        let rw = Arc::new(t.detached_new(tmpfs(), "rw".into(), 0, false));
+        let rid = register_detached(&rw);
+        vfs.lookup(&ctx, &detached_path(rid, "/"), "/", true)
+            .unwrap()
+            .0
+            .mkdir("in", p)
+            .unwrap()
+            .create("x", p)
+            .unwrap();
+        let mut jailed = vfs.kernel_context();
+        jailed.root = detached_path(rid, "/in");
+        let canon = |path: &str, cwd: &str| vfs.lookup(&jailed, path, cwd, true).map(|(_, c)| c);
+        assert_eq!(canon("/x", "/"), Ok(detached_path(rid, "/in/x")));
+        assert_eq!(canon("x", "/"), Ok(detached_path(rid, "/in/x")));
+        assert_eq!(canon("/../../x", "/"), Ok(detached_path(rid, "/in/x")));
+
+        // Tree `inner` attached in `outer`, then `outer` into the namespace:
+        // `inner`'s paths follow.
+        let outer = Arc::new(t.detached_new(tmpfs(), "outer".into(), 0, false));
+        let oid = register_detached(&outer);
+        vfs.lookup(&ctx, &detached_path(oid, "/"), "/", true)
+            .unwrap()
+            .0
+            .mkdir("m", p)
+            .unwrap();
+        let inner = Arc::new(t.detached_new(tmpfs(), "inner".into(), 0, false));
+        let iid = register_detached(&inner);
+        vfs.lookup(&ctx, &detached_path(iid, "/"), "/", true)
+            .unwrap()
+            .0
+            .create("y", p)
+            .unwrap();
+        outer.attach_tree(&inner, "/m", true).unwrap();
+        mark_attached(iid, &outer, "/m");
+        t.attach_tree(&outer, "/b", true).unwrap();
+        mark_attached(oid, t, "/b");
+        transferred(&outer, t, "/b");
+        let found = vfs
+            .lookup(&ctx, &detached_path(iid, "/y"), "/", true)
+            .map(|(_, c)| c);
+        assert_eq!(found, Ok(String::from("/b/m/y")));
     }
 
     /// open_tree(OPEN_TREE_CLONE): the mount rooted at the source, and
