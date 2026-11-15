@@ -1,4 +1,4 @@
-# Contributor Licence Agreement check (ADR 0030, CLA.md). A pull request's
+# Contributor Licence Agreement check (ADR 0028, CLA.md). A pull request's
 # authors must have signed the CLA before it can be merged; they sign by
 # posting the comment the check asks for. Signatures are stored in the
 # `cla-signatures` branch of this repository.
@@ -47,6 +47,6 @@ jobs:
             [VeridianOS Contributor Licence Agreement](https://github.com/doublegate/VeridianOS/blob/main/CLA.md)
             and sign it by posting the comment below. You sign once; it covers your later
             contributions. The CLA keeps your copyright with you and lets the project offer
-            its code under both the GPL and commercial licences (ADR 0030).
+            its code under both the GPL and commercial licences (ADR 0028).
           custom-allsigned-prcomment: All contributors have signed the CLA. Thank you.
           lock-pullrequest-aftermerge: false

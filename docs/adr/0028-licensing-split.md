@@ -1,4 +1,4 @@
-# ADR 0030: licensing by component, and a CLA
+# ADR 0028: licensing by component, and a CLA
 
 - Status: proposed
 - Date: 2026-11-15
@@ -47,7 +47,7 @@ On `main` the human author of every commit is the maintainer, with AI co-authors
    - the vendored Linux syscall tables (`GPL-2.0-only WITH Linux-syscall-note`);
    - the patches to other projects (`LicenseRef-Upstream-Patch`: each under the license of the files it changes).
 
-   The planned Linux Driver Container (ADR 0029) is a separate GPL-2.0 program.
+   The planned Linux Driver Container (ADR 0030) is a separate GPL-2.0 program.
 
 4. **REUSE is the record.** `REUSE.toml` maps every path to its license, the texts are in `LICENSES/`, and `reuse lint` runs in CI and fails on any file without a license.
    - SPDX 2.3 cannot name a custom exception with `WITH`, and the REUSE tool does not yet accept SPDX 3.0's `AdditionRef-`. So the GPL parts are marked `GPL-3.0-or-later AND LicenseRef-VeridianOS-syscall-exception`; the exception's text says it is a section 7 additional permission.

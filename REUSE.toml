@@ -1,5 +1,5 @@
 # Licensing of every file in the repository, by path (REUSE 3.3,
-# https://reuse.software). ADR 0030 decides the split; LICENSING.md explains it.
+# https://reuse.software). ADR 0028 decides the split; LICENSING.md explains it.
 # `reuse lint` (CI, `.github/workflows/reuse.yml`) checks that every file is
 # covered. A file's own SPDX header, where it has one, is used instead of the
 # annotation that matches it (precedence "closest"), except where an

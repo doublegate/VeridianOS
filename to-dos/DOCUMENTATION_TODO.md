@@ -30,7 +30,7 @@
 - [x] CONTRIBUTING.md - Contribution guidelines
 - [x] CHANGELOG.md - Change tracking
 - [x] SECURITY.md - Security policies
-- [x] LICENSE files - licensing by component (ADR 0030, LICENSING.md, REUSE.toml)
+- [x] LICENSE files - licensing by component (ADR 0028, LICENSING.md, REUSE.toml)
 
 #### Phase Documentation
 - [x] Phase 0: Foundation - Complete guide

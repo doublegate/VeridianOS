@@ -308,7 +308,7 @@ Contributions are welcome. Please see the [Contributing Guide](CONTRIBUTING.md) 
 
 ## License
 
-VeridianOS is licensed by component ([LICENSING.md](LICENSING.md), ADR 0030):
+VeridianOS is licensed by component ([LICENSING.md](LICENSING.md), ADR 0028):
 
 - **The kernel, the system servers and the Linux runtime:** GPL-3.0-or-later ([COPYING](COPYING))
   with the VeridianOS user-space exception: programs using them through system calls, IPC or

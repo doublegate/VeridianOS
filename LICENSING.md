@@ -1,6 +1,6 @@
 # Licensing
 
-VeridianOS is licensed by component (ADR 0030), as of the commit that adds this file, ahead of v0.28.0. Earlier commits and releases (through v0.27.0) remain available under MIT OR Apache-2.0, the terms they were published under.
+VeridianOS is licensed by component (ADR 0028), as of the commit that adds this file, ahead of v0.28.0. Earlier commits and releases (through v0.27.0) remain available under MIT OR Apache-2.0, the terms they were published under.
 
 `REUSE.toml` is the authoritative map from every path to its licence, and the licence texts are in `LICENSES/`. `reuse lint` checks both in CI.
 
@@ -53,7 +53,7 @@ The same applies to any other GPL or LGPL system used as a reference: BusyBox, g
 
 ## The Linux Driver Container (planned)
 
-ADR 0029 (proposed) runs unmodified Linux drivers for GPUs, Wi-Fi, audio and laptops in a Linux Driver Container. This is a runtime built from a Linux LTS kernel, running as its own user-space program. Linux is GPL-2.0-only, which GPL-3.0 cannot be combined with, so the container must stay a separate program:
+ADR 0030 (proposed) runs unmodified Linux drivers for GPUs, Wi-Fi, audio and laptops in a Linux Driver Container. This is a runtime built from a Linux LTS kernel, running as its own user-space program. Linux is GPL-2.0-only, which GPL-3.0 cannot be combined with, so the container must stay a separate program:
 - It lives in its own directory (`drivers-linux/`) or repository, with its own GPL-2.0 `COPYING` and SPDX headers on every file. Its source is published with every binary.
 - It is never linked into the kernel or any other component, and talks to them only through IPC and the shared-memory rings that every driver server uses.
 - The protocol between them is VeridianOS's own: block, network, input and display messages, documented in their ADRs. It is not Linux's internal structures passed across. Separate programs that exchange "complex internal data structures" may be one program in the GPL's sense, and keeping the protocol generic and documented keeps them two.

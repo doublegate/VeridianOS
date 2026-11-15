@@ -484,7 +484,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
   15. [ ] (v0.29) MFA through PAM.
   16. [ ] (v0.29) IPC redesign (N-79 to N-91); package signing keys (N-55 follow-up).
   17. [ ] Release v0.28.0, after item 8 (the tag and GitHub release need the maintainer's confirmation).
-      - [x] Licensing by component (ADR 0030, maintainer 2026-11-15, moved ahead of v0.28.0):
+      - [x] Licensing by component (ADR 0028, maintainer 2026-11-15, moved ahead of v0.28.0):
         GPL-3.0-or-later with the user-space exception for the kernel, system servers and Linux
         runtime, MIT OR Apache-2.0 for the rest; the CLA and its workflow; `REUSE.toml` and
         `reuse lint` in CI; `COMMERCIAL.md`.

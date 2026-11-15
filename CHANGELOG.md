@@ -2,7 +2,7 @@
 
 ### Changed
 
-- **Licensing by component** (ADR 0030, `LICENSING.md`), from this change on:
+- **Licensing by component** (ADR 0028, `LICENSING.md`), from this change on:
   - the kernel, the system servers and the Linux runtime are GPL-3.0-or-later (`COPYING`), with
     the VeridianOS user-space exception: programs that use them only through system calls, IPC
     protocols or the published user-space libraries are not covered;

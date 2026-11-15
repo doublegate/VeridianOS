@@ -1,4 +1,4 @@
-# Every file has a licence (ADR 0030): REUSE.toml maps paths to licences and
+# Every file has a licence (ADR 0028): REUSE.toml maps paths to licences and
 # LICENSES/ holds their texts; `reuse lint` fails if any file is not covered,
 # if a licence is used without its text, or if a text is unused.
 name: REUSE
