@@ -105,9 +105,16 @@ pub fn register_detached(tree: &Arc<Mounts>) -> u64 {
     id
 }
 
-/// The path `rel` (absolute in the tree) in detached tree `id`.
+/// The path `rel` (absolute in the tree) in detached tree `id`. The tree's
+/// root is `"\0dt:<id>"`, without a slash, as no other canonical path but
+/// "/" ends in one: so `path_is_under`, `root_relative` and the like treat
+/// it as any directory (PR #47 review).
 pub fn detached_path(id: u64, rel: &str) -> String {
-    alloc::format!("{DETACHED}{id}{rel}")
+    if rel == "/" || rel.is_empty() {
+        alloc::format!("{DETACHED}{id}")
+    } else {
+        alloc::format!("{DETACHED}{id}{rel}")
+    }
 }
 
 /// A [`DETACHED`] path's tree id and the path in the tree ("" for its
@@ -149,6 +156,20 @@ pub fn moved_in(tree: &Arc<Mounts>, from: &str, to: &str) {
         if let Place::Attached { tree: t, point } = place {
             if core::ptr::eq(t.as_ptr(), Arc::as_ptr(tree)) && path_is_under(point, from) {
                 *point = rebase(point, from, to);
+            }
+        }
+    }
+}
+
+/// The attached trees in `tree` whose point `to` maps: moved there (as the
+/// mounts were by pivot_root).
+fn points_moved(tree: &Mounts, to: impl Fn(&str) -> Option<String>) {
+    for place in TREES.lock().values_mut() {
+        if let Place::Attached { tree: t, point } = place {
+            if core::ptr::eq(t.as_ptr(), tree) {
+                if let Some(moved) = to(point) {
+                    *point = moved;
+                }
             }
         }
     }
@@ -1477,6 +1498,12 @@ impl Mounts {
                 }
                 t.move_parked(|path| pivot_mount(path, &root, new, &to));
             }
+            // Detached trees attached in this one move with their mounts,
+            // in the same update (PR #47 review); a parked one keeps its
+            // place, which no path reaches any more.
+            if to != root {
+                points_moved(self, |p| pivot_mount(p, &root, new, &to));
+            }
             Ok(())
         })
     }
@@ -2605,6 +2632,64 @@ mod tests {
             .lookup(&ctx, &detached_path(iid, "/y"), "/", true)
             .map(|(_, c)| c);
         assert_eq!(found, Ok(String::from("/b/m/y")));
+    }
+
+    /// pivot_root moves the attached trees' places with their mounts (PR
+    /// #47 review).
+    #[test]
+    fn pivot_root_moves_attached_trees() {
+        let vfs = pivot_tree();
+        let t = vfs.mounts();
+        let tree = Arc::new(t.detached_new(tmpfs(), "att".into(), 0, false));
+        let id = register_detached(&tree);
+        t.attach_tree_then(&tree, "/c/new/sub", true, || {
+            mark_attached(id, t, "/c/new/sub")
+        })
+        .unwrap();
+        t.pivot_root("/c", "/c/new", "/c/new/old").unwrap();
+        assert_eq!(
+            detached_place(id).map(|(_, p)| p),
+            Some(Some(String::from("/c/sub")))
+        );
+    }
+
+    /// A detached tree's root is named without a trailing slash, so it is
+    /// a directory like any to path_is_under and root_relative; a relative
+    /// lookup from a descriptor inside a submount starts there (no crossing
+    /// for RESOLVE_NO_XDEV); a rename sees mounts under a directory in the
+    /// tree (PR #47 review).
+    #[test]
+    fn detached_paths_behave_as_paths() {
+        let root = detached_path(9, "/");
+        assert_eq!(root, detached_path(9, ""));
+        assert!(path_is_under(&detached_path(9, "/sub"), &root));
+        assert_eq!(
+            crate::fs::root_relative(&detached_path(9, "/sub"), &root),
+            "/sub"
+        );
+        assert_eq!(crate::fs::root_relative(&root, &root), "/");
+
+        let vfs = work_tree();
+        let t = vfs.mounts();
+        let a = vfs.resolve_path("/a").unwrap();
+        let tree = Arc::new(t.detached_clone("/a", a, true).unwrap());
+        let id = register_detached(&tree);
+        let ctx = vfs.kernel_context();
+        let m = detached_path(id, "/sub/m");
+        vfs.lookup(&ctx, &m, "/", true)
+            .unwrap()
+            .0
+            .create("x", crate::fs::Permissions::default())
+            .unwrap();
+        let mut scoped = vfs.kernel_context();
+        scoped.resolve = crate::fs::resolve_flags::NO_XDEV;
+        let found = vfs.lookup(&scoped, "x", &m, true).map(|(_, c)| c);
+        assert_eq!(found, Ok(detached_path(id, "/sub/m/x")));
+        // Leaving the submount is still a crossing.
+        assert!(vfs.lookup(&scoped, "../f", &m, true).is_err());
+        // The tmpfs at /sub/m is under /sub: renaming /sub must see it.
+        assert!(vfs.as_caller().mounts_under(&detached_path(id, "/sub")));
+        assert!(!vfs.as_caller().mounts_under(&detached_path(id, "/sub/m")));
     }
 
     /// open_tree(OPEN_TREE_CLONE): the mount rooted at the source, and

@@ -1740,7 +1740,12 @@ impl<'a> CallerView<'a> {
             return self;
         }
         if resolve & resolve_flags::SCOPED != 0 {
-            self.ctx.root = if self.ctx.root == "/" || self.ctx.root == FAILFS_ROOT {
+            // A start in a detached tree is a whole path already, never
+            // joined to the caller's root (PR #47 review).
+            self.ctx.root = if self.ctx.root == "/"
+                || self.ctx.root == FAILFS_ROOT
+                || mount::is_detached_path(start)
+            {
                 String::from(start)
             } else if start == "/" {
                 self.ctx.root.clone()
@@ -1816,8 +1821,14 @@ impl<'a> CallerView<'a> {
     /// there): renaming `path` would leave those mounts at the old place,
     /// as mounts are kept by path (PR #35 review).
     pub fn mounts_under(&self, path: &str) -> bool {
-        let path = normalize_path(path, "/");
-        let table = self.ctx.mounts.snapshot();
+        // In the tree the path is really in: a detached path's tree, or the
+        // one it was attached to (PR #47 review).
+        let Some((tree, path, _)) = serving_tree(&self.ctx.mounts, &normalize_path(path, "/"))
+        else {
+            return false;
+        };
+        let path = normalize_path(&path, "/");
+        let table = tree.snapshot();
         let under = |m: &String| m.as_str() != path && path_is_under(m, &path);
         table.mounts.keys().any(under) || table.parked.keys().any(|p| path_is_under(p, &path))
     }
@@ -2128,18 +2139,15 @@ impl Vfs {
         cwd: &str,
         follow_last: bool,
     ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
-        // A path in a detached tree, or relative to a directory in one.
-        let joined;
-        let detached = if path.starts_with(mount::DETACHED) {
-            Some(path)
-        } else if !path.starts_with('/') && cwd.starts_with(mount::DETACHED) {
-            joined = alloc::format!("{cwd}/{path}");
-            Some(joined.as_str())
-        } else {
-            None
-        };
-        if let Some(path) = detached {
-            return Self::lookup_detached(ctx, path, follow_last);
+        // A path in a detached tree, or relative to a directory in one:
+        // the walk starts at that directory, as any relative walk starts at
+        // its own, so the mounts on the way there are no crossings for
+        // RESOLVE_NO_XDEV (PR #47 review).
+        if path.starts_with(mount::DETACHED) {
+            return Self::lookup_detached(ctx, path, "", follow_last);
+        }
+        if !path.starts_with('/') && cwd.starts_with(mount::DETACHED) {
+            return Self::lookup_detached(ctx, cwd, path, follow_last);
         }
         // A root in a detached tree (fchroot of a descriptor in one, which
         // Linux allows): absolute paths, and relative ones from a working
@@ -2217,19 +2225,29 @@ impl Vfs {
     /// is attached, at its place in the tree it was attached to (a path in
     /// the caller's namespace if it is that one). ENOENT once the tree is
     /// gone.
+    ///
+    /// With `rel` (a relative path) `path` is the directory the walk starts
+    /// at rather than the target.
     fn lookup_detached(
         ctx: &PathContext,
         path: &str,
+        rel: &str,
         follow_last: bool,
     ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
         let gone = || KernelError::FsError(crate::error::FsError::NotFound);
         let (id, rest) = mount::parse_detached(path).ok_or_else(gone)?;
         let rest = if rest.is_empty() { "/" } else { rest };
         let (tree, point) = mount::detached_place(id).ok_or_else(gone)?;
-        let walk = |p: &str| {
-            tree.snapshot()
-                .resolve_in(p, "/", "/", follow_last, 0, ctx.creds.clone(), ctx.resolve)
+        // `rel` from directory `start`, or `start` itself, in `root`.
+        let walk_in = |t: &MountTable, start: &str, root: &str| {
+            let (p, cwd) = if rel.is_empty() {
+                (start, "/")
+            } else {
+                (rel, start)
+            };
+            t.resolve_in(p, cwd, root, follow_last, 0, ctx.creds.clone(), ctx.resolve)
         };
+        let walk = |start: &str| walk_in(&tree.snapshot(), start, "/");
         match point {
             None => {
                 let (node, canon) = walk(rest)?;
@@ -2238,6 +2256,8 @@ impl Vfs {
             Some(point) => {
                 let full = if point == "/" {
                     String::from(rest)
+                } else if rest == "/" {
+                    point.clone()
                 } else {
                     alloc::format!("{point}{rest}")
                 };
@@ -2249,16 +2269,21 @@ impl Vfs {
                     // Under a failfs root a descriptor-anchored walk goes on
                     // in the whole tree (Linux 7.3), as `WHOLE_TREE` marks.
                     if ctx.root == FAILFS_ROOT {
-                        let whole = alloc::format!("{WHOLE_TREE}{point}{rest}");
-                        return ctx.mounts.snapshot().resolve_in(
-                            &whole,
-                            "/",
-                            &ctx.root,
-                            follow_last,
-                            0,
-                            ctx.creds.clone(),
-                            ctx.resolve,
-                        );
+                        let whole = alloc::format!("{WHOLE_TREE}{full}");
+                        if rel.is_empty() {
+                            return ctx.mounts.snapshot().resolve_in(
+                                &whole,
+                                "/",
+                                &ctx.root,
+                                follow_last,
+                                0,
+                                ctx.creds.clone(),
+                                ctx.resolve,
+                            );
+                        }
+                        // A relative walk from a real directory under a
+                        // failfs root goes on in the whole tree.
+                        return walk_in(&ctx.mounts.snapshot(), &full, &ctx.root);
                     }
                     if !path_is_under(&point, &ctx.root) {
                         return Err(gone());
@@ -2268,18 +2293,12 @@ impl Vfs {
                     let at = root_relative(&point, &ctx.root);
                     let inside = if at == "/" {
                         String::from(rest)
+                    } else if rest == "/" {
+                        at
                     } else {
                         alloc::format!("{at}{rest}")
                     };
-                    return ctx.mounts.snapshot().resolve_in(
-                        &inside,
-                        "/",
-                        &ctx.root,
-                        follow_last,
-                        0,
-                        ctx.creds.clone(),
-                        ctx.resolve,
-                    );
+                    return walk_in(&ctx.mounts.snapshot(), &inside, &ctx.root);
                 }
                 let (node, canon) = walk(&full)?;
                 // Another namespace's tree: still named by the id.

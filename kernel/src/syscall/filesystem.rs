@@ -5094,32 +5094,32 @@ pub fn sys_fchown(fd: usize, uid: usize, gid: usize) -> SyscallResult {
 }
 
 /// An open file's node as its mount presents it now. A file in a detached
-/// tree is looked up again by its path, so an idmapping set on the tree
-/// after the file was opened (mount_setattr, open_tree_attr on the
-/// descriptor fsmount or open_tree returned) applies to it, as on Linux,
-/// where the mapping belongs to the mount and every open file of it sees
-/// it (PR #47 review). Only the same file counts (the same inode): one
-/// renamed away, its name since taken by another, keeps its own node, as
-/// does any file outside a detached tree.
+/// tree is shown through the idmap its mount has now, so an idmapping set
+/// on the tree after the file was opened (mount_setattr, open_tree_attr on
+/// the descriptor fsmount or open_tree returned) applies to it, as on
+/// Linux, where the mapping belongs to the mount and every open file of it
+/// sees it. The file itself is not looked up again: one renamed or
+/// unlinked since, or behind a directory it can no longer search, is still
+/// the file the descriptor opened (PR #47 review). Any other file keeps its
+/// own node.
 pub(super) fn fd_node(file: &crate::fs::file::File) -> alloc::sync::Arc<dyn crate::fs::VfsNode> {
-    // The same file by its identity, not its inode number alone, which
-    // repeats across filesystems (PR #47 review).
-    let same = |a: &alloc::sync::Arc<dyn crate::fs::VfsNode>,
-                b: &alloc::sync::Arc<dyn crate::fs::VfsNode>| {
-        crate::fs::inode_key(a) == crate::fs::inode_key(b)
+    let Some(path) = file.path.as_deref() else {
+        return file.node.clone();
     };
-    if let Some(path) = file.path.as_deref() {
-        if crate::fs::mount::parse_detached(path).is_some() {
-            if let Ok(view) = vfs() {
-                if let Ok((node, _)) = view.locate(path, false) {
-                    if same(&node, &file.node) {
-                        return node;
-                    }
-                }
-            }
-        }
+    if !crate::fs::mount::is_detached_path(path) {
+        return file.node.clone();
     }
-    file.node.clone()
+    let Ok(view) = vfs() else {
+        return file.node.clone();
+    };
+    let Some(mount) = view.mount_serving(path) else {
+        return file.node.clone();
+    };
+    let base = crate::fs::base_node(&file.node);
+    match mount.idmap() {
+        Some(map) => crate::fs::idmap::view(base, &map),
+        None => base,
+    }
 }
 
 /// mknod(2): mknodat relative to the working directory.
