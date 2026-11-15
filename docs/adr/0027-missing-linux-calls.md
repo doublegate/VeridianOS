@@ -406,7 +406,8 @@ The reference for every behaviour below is the Linux 7.3 source (kernel.org tarb
       LDT fault, which then runs again. The ds, es, fs and gs selectors are kept per thread
       and checked against the table, under its lock, before each load, so a switch never
       faults; a return to ring 3 on a segment cleared meanwhile faults on its `iretq`, which
-      is taken as the program's fault (Linux's bad_iret): SIGSEGV. Signals follow Linux's
+      is taken as the program's fault (Linux's bad_iret), with the signal Linux's trap for it
+      delivers: SIGSEGV for a #GP, SIGBUS for a #NP or #SS. Signals follow Linux's
       cs and ss rules (64-bit handlers; sigreturn restores the saved segments).
 
 ## Consequences

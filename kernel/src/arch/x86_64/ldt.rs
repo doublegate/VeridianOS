@@ -202,14 +202,29 @@ impl Ldt {
     }
 }
 
+/// A process's LDT slot: the table, once its first write made one. CLONE_VM
+/// processes share the slot itself, so a table made after the clone is
+/// both processes' (the address space has one LDT; PR #50 review).
+#[cfg(feature = "alloc")]
+pub type LdtSlot = spin::Mutex<Option<Arc<Ldt>>>;
+
 /// Whether `sel` may be loaded into a data segment register now, `ldt`
-/// being the table the CPU has loaded. A GDT selector is one the user
-/// could load (the GDT never changes), so it stays; an LDT one must name
-/// a loadable entry.
+/// being the table the CPU has loaded. In the GDT only null and the user
+/// selectors a ring-3 program can load (`__USER_DS`, `__USER_CS`,
+/// `__USER32_CS`, at RPL 3) qualify: anything else there is a null, kernel
+/// or system descriptor, and loading it in ring 0 at a switch would fault
+/// (a stale firmware selector a boot task recorded, say; PR #50 review).
+/// An LDT selector must name a loadable entry.
 #[cfg(feature = "alloc")]
 pub fn selector_ok(sel: u16, ldt: Option<&Ldt>) -> bool {
     if sel & 4 == 0 {
-        return true;
+        use super::gdt::{USER32_CS, USER_CS, USER_DS};
+        let index = sel & !3;
+        return index == 0
+            || (sel & 3 == 3
+                && [USER_DS, USER_CS, USER32_CS]
+                    .iter()
+                    .any(|u| u & !3 == index));
     }
     match ldt.and_then(|l| l.entry(sel)) {
         Some(d) => loadable_data(d),
@@ -285,6 +300,26 @@ mod hw {
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub use hw::read as read_segments;
+
+/// Null fs before its base is set from a 64-bit value (arch_prctl
+/// ARCH_SET_FS), as Linux's do_arch_prctl_64 loads 0 first: a selector left
+/// in fs would make the next switch-in reload the descriptor's base over
+/// the one just set (PR #50 review).
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub fn clear_fs_selector() {
+    // SAFETY: the null selector is always loadable.
+    unsafe { hw::load_fs(0) }
+}
+
+/// Null gs before its user base is set (ARCH_SET_GS), between two
+/// `swapgs` (Linux's load_gs_index(0)), with interrupts off.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub fn clear_gs_selector() {
+    let irq = crate::arch::disable_interrupts();
+    // SAFETY: interrupts off; the null selector is always loadable.
+    unsafe { hw::load_gs(0) }
+    drop(irq);
+}
 
 /// Load this CPU's LDT register with `ldt` (or none) if it holds another,
 /// writing the table's descriptor into this CPU's GDT slot first.
@@ -376,10 +411,11 @@ pub fn refresh_for_fault(error_code: u64) -> bool {
     stale
 }
 
-/// exec: the new program starts with no LDT and null ds, es, fs and gs
-/// (Linux's start_thread and the new mm). This CPU stops naming the
-/// table before the process's references to it go; another process
-/// sharing it (a CLONE_VM parent) keeps it.
+/// exec: the new program starts with no LDT (the new mm) and null fs and
+/// gs; `enter_usermode` then gives it `__USER_DS` in ds and es, as Linux's
+/// start_thread does. This CPU stops naming the table before the process's
+/// references to it go; another process sharing it (a CLONE_VM parent)
+/// keeps it, with the slot: the exec'd process takes a fresh one.
 #[cfg(all(target_arch = "x86_64", target_os = "none", feature = "alloc"))]
 pub fn exec_reset() {
     let irq = crate::arch::disable_interrupts();
@@ -395,7 +431,7 @@ pub fn exec_reset() {
     super::switch::write_user_gs_base(0);
     drop(irq);
     if let Some(p) = crate::process::current_process() {
-        let old = p.ldt.lock().take();
+        let old = core::mem::replace(&mut *p.ldt.lock(), Arc::new(LdtSlot::default()));
         crate::sched::dispatch::set_process_ldt(p.pid.0, None);
         drop(old);
     }
@@ -444,21 +480,27 @@ fn clear_user(ptr: usize, len: usize) -> Result<(), crate::syscall::SyscallError
 fn read_ldt(ptr: usize, bytecount: usize) -> Result<usize, crate::syscall::SyscallError> {
     use crate::syscall::{userspace, SyscallError};
     let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
-    let Some(table) = process.ldt.lock().clone() else {
+    let slot = process.ldt.lock().clone();
+    let Some(table) = slot.lock().clone() else {
         return Ok(0);
     };
     let count = bytecount.min(LDT_ENTRIES * LDT_ENTRY_SIZE);
     let size = ((table.nr_entries.load(Ordering::Acquire) as usize) * LDT_ENTRY_SIZE).min(count);
+    // Byte for byte, as Linux's copy_to_user of the entries: a count that
+    // ends inside a descriptor gets that descriptor's first bytes, so every
+    // byte reported is written (PR #50 review).
     let mut bytes = Vec::new();
     bytes
-        .try_reserve_exact(size)
+        .try_reserve_exact(size.div_ceil(LDT_ENTRY_SIZE) * LDT_ENTRY_SIZE)
         .map_err(|_| SyscallError::OutOfMemory)?;
-    for i in 0..size / LDT_ENTRY_SIZE {
+    for i in 0..size.div_ceil(LDT_ENTRY_SIZE) {
         bytes.extend_from_slice(&table.entries[i].load(Ordering::Acquire).to_le_bytes());
     }
+    bytes.truncate(size);
     userspace::write_user_bytes(ptr, &bytes)?;
     if size != count {
-        clear_user(ptr + size, count - size)?;
+        let rest = ptr.checked_add(size).ok_or(SyscallError::InvalidPointer)?;
+        clear_user(rest, count - size)?;
     }
     Ok(count)
 }
@@ -482,16 +524,27 @@ fn write_ldt(
     };
     let desc = descriptor_for(&info, oldmode).ok_or(SyscallError::InvalidArgument)?;
     let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    let slot = process.ldt.lock().clone();
     let table = {
-        let mut slot = process.ldt.lock();
-        match slot.as_ref() {
+        let mut held = slot.lock();
+        match held.as_ref() {
             Some(t) => t.clone(),
             None => {
                 let t = Ldt::new().ok_or(SyscallError::OutOfMemory)?;
-                *slot = Some(t.clone());
-                // Every thread of the address space takes it (the running
-                // ones on their next switch or LDT fault).
-                crate::sched::dispatch::set_process_ldt(process.pid.0, Some(t.clone()));
+                *held = Some(t.clone());
+                drop(held);
+                // Every thread of the address space takes it, in every
+                // process sharing the slot (CLONE_VM), the running ones on
+                // their next switch or LDT fault.
+                let mut sharers = Vec::new();
+                crate::process::table::PROCESS_TABLE.for_each(|p| {
+                    if Arc::ptr_eq(&p.ldt.lock(), &slot) {
+                        sharers.push(p.pid.0);
+                    }
+                });
+                for pid in sharers {
+                    crate::sched::dispatch::set_process_ldt(pid, Some(t.clone()));
+                }
                 t
             }
         }
@@ -593,7 +646,17 @@ mod tests {
         assert!(selector_ok((3 << 3) | 7, Some(&t)));
         assert!(!selector_ok((2 << 3) | 7, Some(&t)), "an empty entry");
         assert!(!selector_ok(7, None), "no table");
-        assert!(selector_ok(0x2b, None), "GDT selectors stay");
+        assert!(selector_ok(0x2b, None), "GDT user selectors stay");
+        assert!(selector_ok(0x23, None) && selector_ok(0x33, None));
+        assert!(
+            selector_ok(0, None) && selector_ok(3, None),
+            "null at any RPL"
+        );
+        // A null, kernel or system GDT descriptor, or a user one at RPL 0,
+        // would fault if loaded at a switch (PR #50 review).
+        for sel in [0x08, 0x10, 0x18, 0x28, 0x30, 0x38, 0x40, 0x48, 0x50, 0x58] {
+            assert!(!selector_ok(sel, None), "{sel:#x}");
+        }
         let copy = t.duplicate().unwrap();
         assert_eq!(copy.entry((3 << 3) | 7), Some(data));
         t.write(3, 0);

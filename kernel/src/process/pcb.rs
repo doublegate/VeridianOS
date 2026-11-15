@@ -346,7 +346,7 @@ pub struct Process {
     /// made on its first write. A fork child gets a copy, a CLONE_VM child
     /// the same table, and exec drops it (`arch::x86_64::ldt`).
     #[cfg(all(target_arch = "x86_64", feature = "alloc"))]
-    pub ldt: spin::Mutex<Option<alloc::sync::Arc<crate::arch::x86_64::ldt::Ldt>>>,
+    pub ldt: spin::Mutex<alloc::sync::Arc<crate::arch::x86_64::ldt::LdtSlot>>,
 
     /// Container ID (0 = not containerized). Inherited by forked children
     /// so processes cannot escape their container namespace.
@@ -674,7 +674,7 @@ impl Process {
             uname_linux: crate::utils::uname::UnameMode::new(),
             tls_fs_base: AtomicU64::new(0),
             #[cfg(all(target_arch = "x86_64", feature = "alloc"))]
-            ldt: spin::Mutex::new(None),
+            ldt: spin::Mutex::new(alloc::sync::Arc::new(Default::default())),
             container_id: AtomicU64::new(0),
             clear_child_tid: AtomicU64::new(0),
         }

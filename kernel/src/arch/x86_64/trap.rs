@@ -110,13 +110,16 @@ pub const fn user_ss_ok(ss: u64) -> bool {
     ss == USER_SS || user_ldt_selector(ss)
 }
 
-/// Whether `ss` names a usable 64-bit user stack segment now: present,
-/// DPL 3, read-write data (expand-up or down), checked by the CPU with
-/// `lar` against the GDT and the loaded LDT (Linux's force_valid_ss).
+/// Whether `ss` names a usable 64-bit user stack segment now: RPL 3,
+/// present, DPL 3, read-write data (expand-up or down), checked by the CPU
+/// with `lar` against the GDT and the loaded LDT (Linux's force_valid_ss).
+/// The RPL is checked here, not left to callers: `lar` runs in ring 0, where
+/// a selector at RPL 0 naming a DPL 3 descriptor passes, though `iretq` to
+/// ring 3 refuses it (PR #50 review).
 pub fn valid_user_ss(ss: u64) -> bool {
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     {
-        if ss > 0xffff {
+        if ss > 0xffff || ss & 3 != 3 {
             return false;
         }
         let ar: u32;
@@ -131,7 +134,9 @@ pub fn valid_user_ss(ss: u64) -> bool {
                 "2:",
                 ar = out(reg) ar,
                 sel = in(reg) ss as u32,
-                options(nomem, nostack)
+                // lar reads the descriptor table, which a modify_ldt write
+                // changes: not `nomem`, so it is not moved across one.
+                options(readonly, nostack)
             );
         }
         // P, DPL, S and the type (AR_P | AR_DPL_MASK | AR_S | AR_TYPE_MASK).
@@ -174,8 +179,9 @@ pub const fn is_user_address(addr: u64) -> bool {
 /// RIP); its RIP is replaced with 0 so the process faults in user mode
 /// instead of the return faulting in ring 0. An LDT selector whose entry
 /// is gone faults at the return instead, which `trap_common`'s bad_iret
-/// check turns into a SIGSEGV, as Linux. Returns whether the frame was already
-/// valid.
+/// check turns into the program's fault, as Linux: SIGSEGV for a #GP,
+/// SIGBUS for a #NP or #SS (Linux's traps for those). Returns whether the
+/// frame was already valid.
 pub fn sanitize_user_frame(f: &mut TrapFrame) -> bool {
     let mut ok = true;
     if !user_cs_ok(f.cs) {
@@ -292,8 +298,9 @@ unsafe extern "C" fn trap_common() {
         // entry cleared or never loaded (Linux's bad_iret). That iretq
         // ran after the exit's swapgs and with the user's registers, so
         // the user frame is copied over the fault's own and the fault is
-        // taken as one from ring 3, swapgs included: it becomes a SIGSEGV,
-        // or, for an LDT this CPU had not loaded yet, a retry.
+        // taken as one from ring 3, swapgs included: it becomes the
+        // signal Linux's trap sends (SIGSEGV for #GP, SIGBUS for #NP or
+        // #SS), or, for an LDT this CPU had not loaded yet, a retry.
         "cmp qword ptr [rsp], 11",
         "jb 2f",
         "cmp qword ptr [rsp], 13",

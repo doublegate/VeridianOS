@@ -383,8 +383,14 @@ pub fn start_thread(
         {
             segs = crate::arch::x86_64::ldt::read_segments();
         }
+        // CLONE_SETTLS: fs takes the new base, so its selector is null, or
+        // the first switch-in would load the parent's descriptor base over
+        // it (Linux's copy_thread clears fsindex; PR #50 review).
+        if ctx_tls != 0 {
+            segs.fs = 0;
+        }
     }
-    let ldt = process.ldt.lock().clone();
+    let ldt = process.ldt.lock().lock().clone();
     process
         .dispatched
         .store(true, core::sync::atomic::Ordering::Release);

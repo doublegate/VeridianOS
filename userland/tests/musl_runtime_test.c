@@ -12036,11 +12036,37 @@ static void *t_ldt_clearer(void *arg)
     t_ldt_set(1, 0, 0, T_LDT_RO | T_LDT_NP);
     return NULL;
 }
+/* CLONE_VM before any table exists: the child shares the parent's address
+ * space, so a table the parent makes afterwards is the child's too (PR #50
+ * review). The child waits for the parent's write, then reads through it. */
+static volatile int t_ldt_vm_ready;
+static int t_ldt_vm_child(void *arg)
+{
+    (void)arg;
+    while (!t_ldt_vm_ready) sched_yield();
+    return t_ldt_gs_read(7) == t_ldt_word ? 0 : 3;
+}
+static int t_ldt_clone_vm(void)
+{
+    static unsigned char stack[16384] __attribute__((aligned(16)));
+    if ((unsigned long)&t_ldt_word >= 0x100000000ul) return 0; /* needs a 32-bit base */
+    pid_t c = clone(t_ldt_vm_child, stack + sizeof(stack), CLONE_VM | SIGCHLD, NULL);
+    if (c < 0) return 1;
+    long r = t_ldt_set(0, (unsigned)(unsigned long)&t_ldt_word, 7, T_LDT_32);
+    t_ldt_vm_ready = 1;
+    int st = t_exit_status(c);
+    return r != 0 ? 2 : st;
+}
 static void test_modify_ldt(void)
 {
     char why[96];
     int f = 0;
     unsigned char buf[256];
+    /* In a child with no table yet: CLONE_VM shares the one made later. */
+    pid_t vm = fork();
+    if (vm == 0) _exit(t_ldt_clone_vm());
+    int vst = t_exit_status(vm);
+    if (vst != 0) f |= 256 | (vst << 24);
     /* No table yet: read 0 bytes; the default table is 128 zero bytes. */
     memset(buf, 0xaa, sizeof(buf));
     if (t_ldt(0, buf, sizeof(buf)) != 0) f |= 1;
@@ -12067,6 +12093,10 @@ static void test_modify_ldt(void)
     unsigned long desc0;
     memcpy(&desc0, buf, 8);
     if (desc0 == 0 || buf[8] != 0) f |= 4;
+    /* A count ending inside a descriptor gets its first bytes, and only
+     * those (Linux copies the entries byte for byte; PR #50 review). */
+    memset(buf, 0xaa, sizeof(buf));
+    if (t_ldt(0, buf, 7) != 7 || memcmp(buf, &desc0, 7) != 0 || buf[7] != 0xaa) f |= 4;
     if (low && t_ldt_gs_read(7) != t_ldt_word) f |= 8;
     /* The selector stays across switches. */
     unsigned short gs = 0;
@@ -12076,6 +12106,22 @@ static void test_modify_ldt(void)
     __asm__ volatile("mov %%gs, %w0" : "=r"(gs));
     __asm__ volatile("mov %w0, %%gs" : : "r"(0));
     if (gs != 7) f |= 16;
+    /* ARCH_SET_GS with an LDT selector in gs: the 64-bit base must survive
+     * switches; Linux nulls the selector first (do_arch_prctl_64; PR #50
+     * review). In a child, so the parent's gs stays as musl left it. */
+    pid_t sg = fork();
+    if (sg == 0) {
+        static volatile unsigned long other = 0x99aabbccddeeff00ul;
+        __asm__ volatile("mov %w0, %%gs" : : "r"(7));
+        if (syscall(SYS_arch_prctl, 0x1001 /* ARCH_SET_GS */, &other) != 0) _exit(1);
+        for (int i = 0; i < 20; i++) sched_yield();
+        usleep(10000);
+        unsigned long v;
+        __asm__ volatile("mov %%gs:0, %0" : "=r"(v) : : "memory");
+        _exit(v == other ? 0 : 2);
+    }
+    int sgs = t_exit_status(sg);
+    if (sgs != 0) f |= 512 | (sgs << 28);
     /* A fork child has a copy: it reads entry 0 and changes it without
      * changing the parent's. */
     pid_t c = fork();

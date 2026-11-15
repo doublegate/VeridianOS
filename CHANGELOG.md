@@ -177,7 +177,8 @@
   unsigned 32-bit result. The GDT now has Linux's layout, with the 32-bit user code segment
   0x23 (TSS at 0x40, LDT at 0x50); a thread's ds, es, fs and gs survive switches, fork copies
   the table and exec drops it; SYSCALL from compatibility mode is ENOSYS; a return to a
-  segment another thread cleared is a SIGSEGV, not a kernel fault (Linux's bad_iret); signal
+  segment another thread cleared is the program's fault, not a kernel fault (Linux's bad_iret:
+  SIGSEGV for a #GP, SIGBUS for a #NP or #SS, as its traps deliver them); signal
   handlers enter in 64-bit mode and sigreturn restores the saved code and stack segments.
   Runtime test modify_ldt.
 - BlockFS does not give a deleted file's inode number to a new file while a node in memory

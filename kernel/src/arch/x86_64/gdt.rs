@@ -167,6 +167,14 @@ impl Gdt {
                 PrivilegeLevel::Ring0,
             ));
             core::arch::asm!("lldt {0:x}", in(reg) 0u16, options(nostack, preserves_flags));
+            // fs and gs null too: firmware leaves its own selectors there,
+            // which this layout makes null or system descriptors, and a
+            // task switched out records them (PR #50 review). gs between two
+            // `swapgs`, so the per-CPU base already in GS_BASE stays.
+            core::arch::asm!(
+                "mov fs, {0:x}", "swapgs", "mov gs, {0:x}", "swapgs",
+                in(reg) 0u16, options(nostack, preserves_flags)
+            );
         }
     }
 }
