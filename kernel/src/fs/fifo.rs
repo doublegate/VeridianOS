@@ -339,6 +339,10 @@ impl VfsNode for FifoEnd {
         self.inode.metadata()
     }
 
+    fn named_node(&self) -> Option<Arc<dyn VfsNode>> {
+        Some(self.inode.clone())
+    }
+
     fn file_identity(&self) -> Option<(u64, u64)> {
         self.inode.file_identity()
     }

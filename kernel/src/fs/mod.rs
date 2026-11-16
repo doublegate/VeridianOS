@@ -631,6 +631,13 @@ pub trait VfsNode: Send + Sync {
         None
     }
 
+    /// The node with the name, when this one is what an open made of it:
+    /// an open FIFO's end, an open device's file. `None` (the default) for
+    /// a node that is itself the named one.
+    fn named_node(&self) -> Option<Arc<dyn VfsNode>> {
+        None
+    }
+
     /// Create a symbolic link in this directory.
     ///
     /// Creates a new symlink entry named `name` in this directory node
@@ -2245,9 +2252,6 @@ impl<'a> CallerView<'a> {
             .map_err(l::to_kernel)
     }
 
-    /// The part of `request` an open of `node` at canonical `path` is
-    /// allowed (hook_file_open); all of it for an unrestricted caller.
-    #[cfg(feature = "alloc")]
     /// [`Vfs::landlock_open_rights`] of `node`, a file with no name in
     /// directory `dir` at canonical `dir_path` (O_TMPFILE): its own key,
     /// then the directory's chain, as Linux's walk up from the file's
@@ -2270,6 +2274,9 @@ impl<'a> CallerView<'a> {
         }
     }
 
+    /// The part of `request` an open of `node` at canonical `path` is
+    /// allowed (hook_file_open); all of it for an unrestricted caller.
+    #[cfg(feature = "alloc")]
     pub fn landlock_open_rights(&self, path: &str, node: &Arc<dyn VfsNode>, request: u32) -> u32 {
         match &self.ctx.landlock {
             None => request,

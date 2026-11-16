@@ -11320,10 +11320,13 @@ static void t_sigsys(int sig, siginfo_t *si, void *uc)
     t_sigsys_nr = si->si_syscall;
     t_sigsys_arch = si->si_arch;
 }
+/* Set once the TSYNC install returned: the probe runs only then, however
+ * long the installer was kept from running (PR #49 review). */
+static volatile int t_seccomp_installed;
 static void *t_seccomp_thread(void *arg)
 {
     (void)arg;
-    usleep(100000);
+    while (!t_seccomp_installed) sched_yield();
     long r = syscall(SYS_getppid);
     return (void *)(intptr_t)(r == -1 && errno == EPERM ? 0 : 1);
 }
@@ -11408,6 +11411,7 @@ static void test_seccomp(void)
         if (pthread_create(&t, NULL, t_seccomp_thread, NULL) != 0) _exit(2);
         prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
         long r = t_seccomp_install(0x00050000u | EPERM, 1 /* TSYNC */);
+        t_seccomp_installed = 1;
         pthread_join(t, &res);
         _exit(r == 0 && res == NULL ? 0 : 1);
     }
@@ -11881,8 +11885,14 @@ static void test_acct(void)
     int f = 0;
     if (sizeof(struct t_acct_v3) != 64) f |= 1;
     const char *path = "/tmp/veridian-acct";
-    int fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0600);
-    if (fd < 0) f |= 2;
+    /* O_NOFOLLOW: a symlink planted at the fixed name is not truncated
+     * through, and no accounting is turned on without the file (PR #49
+     * review). */
+    int fd = open(path, O_CREAT | O_WRONLY | O_TRUNC | O_NOFOLLOW, 0600);
+    if (fd < 0) {
+        report("acct", 0, "open");
+        return;
+    }
     close(fd);
     if (syscall(SYS_acct, "/tmp") != -1 || errno != EISDIR) f |= 4;
     if (syscall(SYS_acct, path) != 0) f |= 8;
@@ -11916,11 +11926,16 @@ static void test_acct(void)
     const char *pa = "/tmp/veridian-acct-a", *pb = "/tmp/veridian-acct-b";
     int ok_files = 1;
     for (int i = 0; i < 2; i++) {
-        int t = open(i ? pb : pa, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+        int t = open(i ? pb : pa, O_CREAT | O_WRONLY | O_TRUNC | O_NOFOLLOW, 0600);
         if (t < 0) ok_files = 0;
         else close(t);
     }
-    if (!ok_files || syscall(SYS_acct, pa) != 0) f |= 256;
+    if (!ok_files) {
+        snprintf(why, sizeof(why), "f=%#x open", f | 256);
+        report("acct", 0, why);
+        return;
+    }
+    if (syscall(SYS_acct, pa) != 0) f |= 256;
     c = fork();
     if (c == 0) {
         if (unshare(0x20000000 /* CLONE_NEWPID */) != 0) _exit(2);
@@ -12028,7 +12043,14 @@ static int reboot_in_pidns(unsigned cmd, int sig)
                 syscall(SYS_reboot, T_REBOOT_MAGIC1, T_REBOOT_MAGIC2, cmd, 0);
                 _exit(4);
             }
-            for (;;) pause();
+            /* A working reboot kills this init before the child is reaped;
+             * a child that exits (a check failed, the reboot returned)
+             * ends it with a status the outer wait reports, instead of a
+             * pause forever (PR #49 review). */
+            int cs = 0;
+            while (waitpid(c, &cs, 0) == -1 && errno == EINTR)
+                ;
+            _exit(7);
         }
         int st = 0;
         if (waitpid(init, &st, 0) != init) _exit(5);
@@ -12333,6 +12355,8 @@ static void test_seccomp_notify(void)
     pid_t g = fork();
     if (g == 0) {
         char c;
+        close(p1[0]);
+        close(p2[1]);
         prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
         /* WAIT_KILLABLE_RECV needs NEW_LISTENER. */
         if (!(t_seccomp_install(0x7fc00000u, 1u << 5) == -1 && errno == EINVAL)) _exit(2);
@@ -12347,35 +12371,70 @@ static void test_seccomp_notify(void)
         if (syscall(SYS_getppid) != me) _exit(8);
         _exit(0);
     }
+    /* Each side keeps only its own ends, so a child that dies early makes
+     * the reads below see EOF instead of blocking (PR #49 review). */
+    close(p1[1]);
+    close(p2[0]);
     int l = -1, gl = -1, pfd = sys_pidfd_open(g, 0);
     if (pfd < 0 || read(p1[0], &gl, sizeof(gl)) != sizeof(gl) || (l = sys_pidfd_getfd(pfd, gl, 0)) < 0) {
         f |= 1;
         kill(g, SIGKILL);
+    } else if (write(p2[1], "g", 1) != 1) {
+        f |= 1;
+        kill(g, SIGKILL);
     }
-    if (write(p2[1], "g", 1) != 1) f |= 1;
     struct t_notif n;
     if (!(f & 1)) {
+        /* Each step runs only after the one before worked; the first that
+         * fails ends the exchange, and the tracee is killed rather than
+         * left waiting for an answer (PR #49 review). */
+        int ok = 1;
         /* A receive buffer that is not zeroed: EINVAL. */
         memset(&n, 0xff, sizeof(n));
         if (!(ioctl(l, T_NOTIF_RECV, &n) == -1 && errno == EINVAL)) f |= 2;
         /* An answer with a value. */
-        if (!t_notif_recv(l, g, &n)) f |= 4;
-        if (ioctl(l, T_NOTIF_ID_VALID, &n.id) != 0) f |= 4;
+        if (!t_notif_recv(l, g, &n) || ioctl(l, T_NOTIF_ID_VALID, &n.id) != 0) {
+            f |= 4;
+            ok = 0;
+        }
         struct t_notif_resp r = {n.id, 4242, 0, 0};
-        if (ioctl(l, T_NOTIF_SEND, &r) != 0) f |= 4;
+        if (ok && ioctl(l, T_NOTIF_SEND, &r) != 0) {
+            f |= 4;
+            ok = 0;
+        }
         /* A descriptor, which is also the call's result. */
-        int q[2];
+        int q[2] = {-1, -1};
         char x = 0;
-        if (pipe(q) != 0 || !t_notif_recv(l, g, &n)) f |= 8;
-        struct t_notif_addfd a = {n.id, 1u << 1 /* SEND */, (uint32_t)q[1], 0, 0};
-        if (ioctl(l, T_NOTIF_ADDFD, &a) < 0) f |= 8;
-        if (read(q[0], &x, 1) != 1 || x != 'x') f |= 8;
-        close(q[0]);
-        close(q[1]);
+        if (ok && (pipe(q) != 0 || !t_notif_recv(l, g, &n))) {
+            f |= 8;
+            ok = 0;
+        }
+        if (ok) {
+            struct t_notif_addfd a = {n.id, 1u << 1 /* SEND */, (uint32_t)q[1], 0, 0};
+            if (ioctl(l, T_NOTIF_ADDFD, &a) < 0) {
+                f |= 8;
+                ok = 0;
+            }
+        }
+        /* The tracee writes through the descriptor; this end closed first,
+         * so a tracee that never writes gives EOF, not a hang. */
+        if (q[1] >= 0) close(q[1]);
+        if (ok && (read(q[0], &x, 1) != 1 || x != 'x')) {
+            f |= 8;
+            ok = 0;
+        }
+        if (q[0] >= 0) close(q[0]);
         /* CONTINUE: the call runs. */
-        if (!t_notif_recv(l, g, &n)) f |= 16;
+        if (ok && !t_notif_recv(l, g, &n)) {
+            f |= 16;
+            ok = 0;
+        }
         struct t_notif_resp cont = {n.id, 0, 0, 1};
-        if (ioctl(l, T_NOTIF_SEND, &cont) != 0) f |= 16;
+        if (ok && ioctl(l, T_NOTIF_SEND, &cont) != 0) {
+            f |= 16;
+            ok = 0;
+        }
+        if (!ok) kill(g, SIGKILL);
     }
     if (t_exit_status(g) != 0) f |= 32;
     if (!(f & 1)) {
@@ -12398,8 +12457,6 @@ static void test_seccomp_notify(void)
     }
     if (t_exit_status(c) != 0) f |= 128;
     close(p1[0]);
-    close(p1[1]);
-    close(p2[0]);
     close(p2[1]);
     snprintf(why, sizeof(why), "f=%#x", f);
     report("seccomp_notify", f == 0, why);

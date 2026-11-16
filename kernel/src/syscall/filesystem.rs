@@ -493,6 +493,7 @@ fn open_file_in(
     };
 
     let mut file = crate::fs::file::File::new_with_path(node, open_flags, canonical);
+    file.tmpfile_dir = parent.map(|(_, dir)| dir.clone());
     file.opener = Some(alloc::boxed::Box::new(Caller::current()));
     file.write_access = write_access;
     #[cfg(feature = "alloc")]
@@ -4158,6 +4159,8 @@ pub(crate) fn link_at(
     // Where the old name is (canonical), for the mount check below; `None`
     // for a descriptor without a path.
     let mut old_canonical: Option<alloc::string::String> = None;
+    // The directory a nameless O_TMPFILE file was made in.
+    let mut old_tmp_dir: Option<alloc::sync::Arc<dyn crate::fs::VfsNode>> = None;
     let target = if old.is_empty() {
         if olddirfd as u32 as i32 == AT_FDCWD as u32 as i32 {
             // "." from the working directory, as open_empty_path does, so
@@ -4185,6 +4188,7 @@ pub(crate) fn link_at(
                 return Err(SyscallError::ResourceNotFound);
             }
             old_canonical = file.path.clone();
+            old_tmp_dir = file.tmpfile_dir.clone();
             file.node.clone()
         }
     } else {
@@ -4210,6 +4214,14 @@ pub(crate) fn link_at(
         return Err(SyscallError::CrossDevice);
     }
     // Landlock's hook_path_link, after the mount check as in do_linkat.
+    // Renames wait from the check of where the file is until the link is
+    // made, so the directory checked is still the file's when it gets its
+    // new name (PR #49 review).
+    #[cfg(feature = "alloc")]
+    let _rename = vfs
+        .landlock()
+        .is_some()
+        .then(|| crate::fs::RENAME_LOCK.lock());
     #[cfg(feature = "alloc")]
     if vfs.landlock().is_some() {
         // The directory the file is in, which its recorded path names
@@ -4228,10 +4240,21 @@ pub(crate) fn link_at(
         if !still_there {
             return Err(SyscallError::PermissionDenied);
         }
-        let old_dir = old_canonical
-            .as_deref()
-            .and_then(|p| vfs.canonical_parent(p))
-            .ok_or(SyscallError::PermissionDenied)?;
+        let old_dir = match (&old_tmp_dir, nameless_tmpfile) {
+            // The directory it was made in, under the path's directory
+            // part: moved since, the walk does not reach it and only its
+            // own key counts.
+            (Some(dir), true) => {
+                let path = old_canonical.as_deref().unwrap_or("/");
+                let dir_path = path.rsplit_once('/').map_or("/", |(d, _)| d);
+                let dir_path = if dir_path.is_empty() { "/" } else { dir_path };
+                (alloc::string::String::from(dir_path), dir.clone())
+            }
+            _ => old_canonical
+                .as_deref()
+                .and_then(|p| vfs.canonical_parent(p))
+                .ok_or(SyscallError::PermissionDenied)?,
+        };
         vfs.landlock_refer(
             &target,
             None,
@@ -5474,7 +5497,7 @@ pub(crate) fn make_socket_file(
 /// anything but a socket file is ECONNREFUSED.
 pub(crate) fn find_socket_file(
     name: &str,
-) -> Result<alloc::sync::Arc<dyn crate::fs::VfsNode>, SyscallError> {
+) -> Result<(alloc::sync::Arc<dyn crate::fs::VfsNode>, u64), SyscallError> {
     let path = resolve_at_path(AT_FDCWD, name)?;
     let view = vfs()?;
     let (file, canonical) = view
@@ -5484,12 +5507,15 @@ pub(crate) fn find_socket_file(
     if file.node_type() != crate::fs::NodeType::Socket {
         return Err(SyscallError::ConnectionRefused);
     }
-    // Landlock's hook_unix_find, once a socket is found bound to the file
-    // (none is ECONNREFUSED, which the connect reports): RESOLVE_UNIX,
-    // which the layers shared with the socket's maker grant.
+    // The socket bound to it, found once: none is ECONNREFUSED. Then
+    // Landlock's hook_unix_find on that socket: RESOLVE_UNIX, which the
+    // layers shared with its maker grant. The caller connects to this
+    // socket by its id (PR #49 review).
     #[cfg(feature = "alloc")]
-    if let Some(d) = view.landlock() {
-        if let Some(server) = crate::net::unix_socket::bound_landlock(&file) {
+    {
+        let (id, server) =
+            crate::net::unix_socket::bound_socket(&file).ok_or(SyscallError::ConnectionRefused)?;
+        if let Some(d) = view.landlock() {
             d.dom
                 .check_path_scoped(
                     &view.landlock_ancestry(&canonical, Some(&file)),
@@ -5498,10 +5524,14 @@ pub(crate) fn find_socket_file(
                 )
                 .map_err(|_| SyscallError::PermissionDenied)?;
         }
+        Ok((file, id))
     }
     #[cfg(not(feature = "alloc"))]
-    let _ = canonical;
-    Ok(file)
+    {
+        let _ = canonical;
+        let id = crate::net::unix_socket::bound_id(&file).ok_or(SyscallError::ConnectionRefused)?;
+        Ok((file, id))
+    }
 }
 
 #[cfg(test)]

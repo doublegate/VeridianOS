@@ -274,6 +274,17 @@ pub struct AddFd<F> {
     pub result: Mutex<Option<i64>>,
 }
 
+/// What taking back an install found ([`Notify::addfd_cancel`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddFdCancel {
+    /// Still queued: removed, never carried out.
+    Removed,
+    /// Carried out meanwhile, with this result.
+    Done(i64),
+    /// Being carried out by the target: its result follows.
+    InFlight,
+}
+
 /// One notification (`struct seccomp_knotif`).
 pub struct Knotif<F> {
     pub id: u64,
@@ -449,16 +460,24 @@ impl<F> Notify<F> {
         Ok(())
     }
 
-    /// Take back an install the supervisor stopped waiting for (a signal):
-    /// its result if it was carried out meanwhile.
-    pub fn addfd_cancel(&mut self, id: u64, req: &Arc<AddFd<F>>) -> Option<i64> {
+    /// Take back an install the supervisor stopped waiting for (a signal).
+    /// Still queued, it is removed; carried out, its result is the answer;
+    /// taken by the target and not yet done, the supervisor must wait for
+    /// it, since the descriptor is being installed (Linux's target installs
+    /// under notify_lock, so its supervisor sees the result; PR #49
+    /// review). Only the target takes a request off the queue, and it
+    /// always reports the result.
+    pub fn addfd_cancel(&mut self, id: u64, req: &Arc<AddFd<F>>) -> AddFdCancel {
         if let Some(n) = self.find(id) {
             if let Some(pos) = n.addfd.iter().position(|r| Arc::ptr_eq(r, req)) {
                 n.addfd.remove(pos);
-                return None;
+                return AddFdCancel::Removed;
             }
         }
-        *req.result.lock()
+        match *req.result.lock() {
+            Some(r) => AddFdCancel::Done(r),
+            None => AddFdCancel::InFlight,
+        }
     }
 
     /// The listener is closed (seccomp_notify_detach): every notification
@@ -808,6 +827,36 @@ mod tests {
         };
         n.addfd_done(id, &got, 4);
         assert!(matches!(n.step(id), TargetStep::Replied(0, 4, 0)));
+    }
+
+    /// Taking back an install: queued, it goes; taken by the target and
+    /// not done, it is in flight (the supervisor waits); done, its result
+    /// (PR #49 review).
+    #[test]
+    fn a_cancelled_install_in_flight_is_waited_for() {
+        let mut n: Notify<u32> = Notify::new(1);
+        let id = n.begin(7, [0; 64]).unwrap();
+        n.recv().unwrap();
+        let req = || {
+            Arc::new(AddFd {
+                file: 5u32,
+                newfd: None,
+                cloexec: false,
+                send: false,
+                result: Mutex::new(None),
+            })
+        };
+        let queued = req();
+        n.addfd(id, queued.clone()).unwrap();
+        assert_eq!(n.addfd_cancel(id, &queued), AddFdCancel::Removed);
+        let taken = req();
+        n.addfd(id, taken.clone()).unwrap();
+        let TargetStep::AddFd(got) = n.step(id) else {
+            panic!("addfd expected");
+        };
+        assert_eq!(n.addfd_cancel(id, &taken), AddFdCancel::InFlight);
+        n.addfd_done(id, &got, 6);
+        assert_eq!(n.addfd_cancel(id, &taken), AddFdCancel::Done(6));
     }
 
     /// A closed listener answers everything outstanding with ENOSYS and

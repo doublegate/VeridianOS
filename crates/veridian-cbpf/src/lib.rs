@@ -357,9 +357,13 @@ pub fn run_seccomp(prog: &SeccompProgram, data: &[u8; SECCOMP_DATA_SIZE as usize
                     AND => a & v,
                     OR => a | v,
                     XOR => a ^ v,
-                    // A shift by X of 32 or more is 0 (eBPF masks it).
-                    LSH => a.checked_shl(v).unwrap_or(0),
-                    RSH => a.checked_shr(v).unwrap_or(0),
+                    // The count is taken mod 32, as Linux runs classic shifts:
+                    // converted to ALU32 shifts, which every backend seccomp
+                    // runs on masks to 5 bits (x86 shl/shr, arm64 lslv/lsrv,
+                    // RISC-V sllw/srlw). A count of K of 32 or more is refused
+                    // by the check; one in X is not (PR #49 review).
+                    LSH => a.wrapping_shl(v),
+                    RSH => a.wrapping_shr(v),
                     _ => return 0,
                 };
             }
@@ -484,5 +488,33 @@ mod tests {
         // args[0]'s low word 5 + 64/4 = 21: odd, JSET 1 taken.
         assert_eq!(run_seccomp(&prog, &data(0, 0, [5, 0, 0, 0, 0, 0])), 7);
         assert_eq!(run_seccomp(&prog, &data(0, 0, [6, 0, 0, 0, 0, 0])), 22);
+    }
+
+    /// A shift by X uses the count mod 32, as Linux's ALU32 shifts: A = 1
+    /// shifted by 31, 32 and 33 (PR #49 review).
+    #[test]
+    fn shifts_by_x_take_the_count_mod_32() {
+        for (op, count, want) in [
+            (LSH, 31, 1u32 << 31),
+            (LSH, 32, 1),
+            (LSH, 33, 2),
+            (RSH, 31, 0),
+            (RSH, 32, 1),
+            (RSH, 33, 0),
+        ] {
+            let prog = check_seccomp(&[
+                Insn::new(LD | W | ABS, 0, 0, 16),
+                Insn::new(MISC | TAX, 0, 0, 0),
+                Insn::new(LD | IMM, 0, 0, 1),
+                Insn::new(ALU | op | X, 0, 0, 0),
+                Insn::new(RET | A, 0, 0, 0),
+            ])
+            .unwrap();
+            assert_eq!(
+                run_seccomp(&prog, &data(0, 0, [count, 0, 0, 0, 0, 0])),
+                want,
+                "{op:#x} by {count}"
+            );
+        }
     }
 }

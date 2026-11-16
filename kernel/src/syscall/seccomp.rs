@@ -349,8 +349,10 @@ pub fn check(nr: usize, args: [u64; 6], ip: u64) -> Outcome {
             if sc::strict_allows(nr) {
                 Outcome::Run
             } else {
-                // SIGKILL, as __secure_computing_strict.
-                let _ = super::process::exit_current(0, 9);
+                // The thread alone, by SIGKILL, as __secure_computing_strict's
+                // do_exit(SIGKILL); the process with its last thread (PR #49
+                // review).
+                kill_by(false, 9);
                 Outcome::Skip(-1)
             }
         }
@@ -533,10 +535,16 @@ fn tgid() -> u64 {
 /// End the thread, or the whole process, by SIGSYS, which no handler sees
 /// (do_exit/do_group_exit(SIGSYS)). The last thread's end is the process's.
 fn kill(process: bool) {
+    kill_by(process, SIGSYS as u32);
+}
+
+/// [`kill`] by signal `sig`: the thread alone (do_exit(sig)) unless
+/// `process` or it is the last one.
+fn kill_by(process: bool, sig: u32) {
     #[cfg(feature = "alloc")]
     if let Some(p) = crate::process::current_process() {
         if process || p.live_threads() <= 1 {
-            p.set_term_signal(SIGSYS as u32);
+            p.set_term_signal(sig);
             if crate::sched::dispatch::current_owner().is_some() {
                 crate::process::exit::exit_dispatched(0, true);
             }
@@ -544,7 +552,7 @@ fn kill(process: bool) {
             crate::process::exit::exit_dispatched(0, false);
         }
     }
-    let _ = super::process::exit_current(0, SIGSYS as u32);
+    let _ = super::process::exit_current(0, sig);
 }
 
 // ── The listener ───────────────────────────────────────────────────────
@@ -735,8 +743,23 @@ fn notif_addfd(f: &Arc<Filter>, notify: &NotifyLock, arg: usize, size: usize) ->
     let done = crate::sched::dispatch::wait_event(&f.wq, None, || req.result.lock().is_some());
     let result = match done {
         Ok(()) => *req.result.lock(),
-        // Interrupted: taken back unless it was carried out meanwhile.
-        Err(_) => notify.lock().addfd_cancel(id, &req),
+        // Interrupted: taken back unless it was carried out meanwhile, or
+        // waited for while the target installs it, whatever signals come
+        // (the lock is not held while waiting: the target needs it to
+        // report the result).
+        Err(_) => {
+            let cancel = notify.lock().addfd_cancel(id, &req);
+            match cancel {
+                sc::AddFdCancel::Removed => None,
+                sc::AddFdCancel::Done(r) => Some(r),
+                sc::AddFdCancel::InFlight => loop {
+                    if let Some(r) = *req.result.lock() {
+                        break Some(r);
+                    }
+                    crate::sched::dispatch::yield_now();
+                },
+            }
+        }
     };
     match result {
         Some(r) if r >= 0 => Ok(r as usize),

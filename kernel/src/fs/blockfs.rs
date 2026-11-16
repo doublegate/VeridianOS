@@ -1085,20 +1085,56 @@ impl BlockFsInner {
     }
 
     fn allocate_inode(&mut self) -> Option<u32> {
-        for (idx, inode) in self.inode_table.iter().enumerate() {
-            if inode.links_count == 0
-                && idx > 0
-                && !self.special_unreported(idx as u32)
-                && !self.holds.is_held(idx as u32)
-            {
-                // Don't allocate root. A cache of the inode's previous file
-                // must not serve the new one.
-                self.superblock.free_inodes -= 1;
-                self.page_cache.invalidate(idx as u64);
-                return Some(idx as u32);
-            }
+        let found = self
+            .inode_table
+            .iter()
+            .enumerate()
+            .position(|(idx, inode)| {
+                inode.links_count == 0
+                    && idx > 0
+                    && !self.special_unreported(idx as u32)
+                    && !self.holds.is_held(idx as u32)
+            })?;
+        // Don't allocate root. A cache of the inode's previous file must
+        // not serve the new one, and blocks a node gave it after its last
+        // unlink go back first (PR #49 review).
+        let _ = self.reclaim_orphan(found as u32);
+        self.superblock.free_inodes -= 1;
+        self.page_cache.invalidate(found as u64);
+        Some(found as u32)
+    }
+
+    /// Whether `inode` has no name but still blocks: an unlinked file a
+    /// node kept writing to, after unlink freed what it had then.
+    fn is_orphan_with_blocks(&self, inode: u32) -> bool {
+        let i = &self.inode_table[inode as usize];
+        i.links_count == 0
+            && inode > 0
+            && !i.is_special()
+            && (i.blocks != 0
+                || i.direct_blocks.iter().any(|&b| b != 0)
+                || i.indirect_block != 0
+                || i.double_indirect_block != 0)
+    }
+
+    /// Free what an unlinked inode still holds, if nothing refers to it
+    /// any more. Its number was counted free at its last unlink.
+    fn reclaim_orphan(&mut self, inode: u32) -> Result<(), KernelError> {
+        if self.is_orphan_with_blocks(inode) && !self.holds.is_held(inode) {
+            self.free_inode_blocks(inode)?;
         }
-        None
+        Ok(())
+    }
+
+    /// Every orphan's blocks back, when the bitmap ran out.
+    fn reclaim_orphans(&mut self) -> bool {
+        let orphans: Vec<u32> = (1..self.inode_table.len() as u32)
+            .filter(|&i| self.is_orphan_with_blocks(i) && !self.holds.is_held(i))
+            .collect();
+        for &i in &orphans {
+            let _ = self.free_inode_blocks(i);
+        }
+        !orphans.is_empty()
     }
 
     /// Allocate a block. Its contents start as zeros and are dirty, so the
@@ -1106,7 +1142,15 @@ impl BlockFsInner {
     /// quarantine are used only when no other block is free, and are then
     /// pinned until sync (ADR 0011).
     fn allocate_block(&mut self) -> Option<u32> {
-        let (block, reused) = match self.block_bitmap.allocate_block() {
+        // Out of free blocks: unlinked files nothing refers to any more may
+        // still hold some, which go back first (to the bitmap in memory, to
+        // quarantine on a disk, as any free; PR #49 review).
+        let free = match self.block_bitmap.allocate_block() {
+            Some(block) => Some(block),
+            None if self.reclaim_orphans() => self.block_bitmap.allocate_block(),
+            None => None,
+        };
+        let (block, reused) = match free {
             Some(block) => (block, false),
             None => (self.quarantine.pop()?, true),
         };
@@ -3495,13 +3539,13 @@ mod tests {
         let old_ino = crate::fs::inode_key(&old).1 as u32;
         root.unlink("p").unwrap();
         // As if another CPU's mutate were between dropping the lock and
-        // reporting the number.
+        // reporting the number. No node holds it, so only the report keeps
+        // it from reuse (PR #49 review: the hold must not hide that).
         fs.inner.write().reporting_special.push(old_ino);
+        drop(old);
         let other = root.mknod("q", NodeType::Pipe, perms, 0).unwrap();
         assert_ne!(crate::fs::inode_key(&other).1 as u32, old_ino);
         fs.inner.write().reporting_special.clear();
-        // Nothing in memory holds the old file any more.
-        drop(old);
         let reused = root.mknod("r", NodeType::Pipe, perms, 0).unwrap();
         assert_eq!(crate::fs::inode_key(&reused).1 as u32, old_ino);
         assert!(fs.inner.read().reporting_special.is_empty());
@@ -3530,6 +3574,39 @@ mod tests {
         drop(again);
         let reused = root.create("h", perms).unwrap();
         assert_eq!(crate::fs::inode_key(&reused).1 as u32, old_ino);
+    }
+
+    /// Blocks a node writes to a file after its last unlink go back once
+    /// nothing holds it: when its number is used again, or when blocks run
+    /// out (PR #49 review).
+    #[test]
+    fn an_unlinked_files_later_blocks_are_reclaimed() {
+        let fs = BlockFs::format(128, 16).unwrap();
+        let root = fs.root();
+        let perms = Permissions::from_mode(0o644);
+        let free = |fs: &BlockFs| fs.inner.read().superblock.free_blocks;
+        let start = free(&fs);
+        let f = root.create("f", perms).unwrap();
+        root.unlink("f").unwrap();
+        f.write(0, &[7u8; 3 * 4096]).unwrap();
+        assert!(free(&fs) < start);
+        drop(f);
+        // Its number again: its blocks first.
+        let g = root.create("g", perms).unwrap();
+        assert_eq!(free(&fs), start);
+        drop(g);
+        root.unlink("g").unwrap();
+        // Out of blocks: the orphans' come back. `big` is made first, so it
+        // does not take the orphan's number (which would reclaim it there).
+        let big = root.create("big", perms).unwrap();
+        let h = root.create("h", perms).unwrap();
+        root.unlink("h").unwrap();
+        h.write(0, &[1u8; 4 * 4096]).unwrap();
+        drop(h);
+        // start - 4 data blocks and an indirect one: one more than is free
+        // while the orphan keeps its four.
+        let data = (start as usize - 4) * BLOCK_SIZE;
+        assert!(big.write(0, &alloc::vec![2u8; data]).is_ok());
     }
 
     /// statfs reports the superblock's counts, and they move as a file

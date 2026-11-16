@@ -225,8 +225,12 @@ fn write_record(acct: &Acct, state: &mut State, p: &Process, exit_code: u32) {
     let node = &acct.file.node;
     let _append = APPEND.lock();
     let _io = acct.file.io_lock.lock();
-    let end = node.metadata().map_or(0, |m| m.size);
-    let _ = node.write(end, &rec);
+    // The end, or no record: never one written at 0 over the oldest (PR
+    // #49 review).
+    let Ok(meta) = node.metadata() else {
+        return;
+    };
+    let _ = node.write(meta.size, &rec);
 }
 
 /// The record's bytes (`struct acct_v3`, native byte order).
