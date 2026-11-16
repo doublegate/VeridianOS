@@ -1694,6 +1694,7 @@ impl MountTable {
                 return veridian_landlock::Ancestry {
                     keys: alloc::vec![Some(inode_key(l))],
                     internal,
+                    partial: true,
                 };
             }
             Some(l) => l.clone(),
@@ -1703,6 +1704,7 @@ impl MountTable {
                 return veridian_landlock::Ancestry {
                     keys: down,
                     internal: false,
+                    partial: true,
                 };
             }
         };
@@ -1714,6 +1716,7 @@ impl MountTable {
         veridian_landlock::Ancestry {
             keys: down,
             internal,
+            partial: false,
         }
     }
 }

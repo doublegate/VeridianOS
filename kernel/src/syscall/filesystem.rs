@@ -4224,6 +4224,15 @@ pub(crate) fn link_at(
         .then(|| crate::fs::RENAME_LOCK.lock());
     #[cfg(feature = "alloc")]
     if vfs.landlock().is_some() {
+        // The new name's directory, found before renames were held off:
+        // still where its path says, or the check below would use another
+        // directory's chain (PR #49 review).
+        let parent_there = vfs
+            .canonical_node(&parent_canonical)
+            .is_some_and(|n| crate::fs::inode_key(&n) == crate::fs::inode_key(&parent));
+        if !parent_there {
+            return Err(SyscallError::PermissionDenied);
+        }
         // The directory the file is in, which its recorded path names
         // only while that path still leads to it: a file moved since (an
         // O_PATH descriptor's, say) is in some other directory this path

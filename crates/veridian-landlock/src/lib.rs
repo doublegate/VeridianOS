@@ -423,6 +423,12 @@ pub struct Ancestry {
     /// one reached through `/proc` (nsfs): always allowed, as
     /// is_nouser_or_private and the MNT_INTERNAL case.
     pub internal: bool,
+    /// Not the whole chain: the walk stopped short of the object or ended
+    /// at another (a rename, a file moved since its path was recorded), so
+    /// the mount root and what is above it may be missing. Enough to grant
+    /// less on a path check; a refer check, which splits the chain at the
+    /// mount root, refuses it (PR #49 review).
+    pub partial: bool,
 }
 
 /// The right to make an object of type `mode` (`S_IFMT` bits), as
@@ -553,6 +559,12 @@ impl Domain {
         if self.layers.iter().all(|l| l.fs == 0) {
             return Ok(());
         }
+        // Either directory's chain incomplete: where the mount root is in it
+        // is not known, so the move cannot be judged. Refused, as anything
+        // this check cannot establish (PR #49 review).
+        if old_dir.partial || new_dir.partial {
+            return Err(Error::Denied);
+        }
         let mut request1 = if exchange {
             new.map_or(0, |n| make_access(n.mode))
         } else {
@@ -582,6 +594,7 @@ impl Domain {
         let mount_root = Ancestry {
             keys: new_dir.keys[below(new_dir).saturating_sub(1)..].to_vec(),
             internal: new_dir.internal,
+            partial: false,
         };
         if self.paths_allowed_refer(
             &mount_root,
@@ -836,6 +849,7 @@ mod tests {
         Ancestry {
             keys: keys.iter().map(|&k| Some((0, k))).collect(),
             internal: false,
+            partial: false,
         }
     }
 
@@ -920,6 +934,7 @@ mod tests {
         let internal = Ancestry {
             keys: Vec::new(),
             internal: true,
+            partial: false,
         };
         assert_eq!(d.open_rights(&internal, want), want);
     }
@@ -989,6 +1004,34 @@ mod tests {
         let other = path(&[30, 1]);
         assert_eq!(
             d.check_refer(file, None, &dst, &other, 0, false, true, false),
+            Err(Error::Denied)
+        );
+    }
+
+    /// A directory whose chain is incomplete (a fallback of one key, its
+    /// mount root unknown) makes a refer check fail, even where its own
+    /// rule would allow the move (PR #49 review).
+    #[test]
+    fn refer_with_a_partial_chain_is_refused() {
+        let h = fs::MAKE_REG | fs::REMOVE_FILE | fs::REFER;
+        let mut r = ruleset(h, 0);
+        r.add_fs_rule((0, 10), true, h, 0).unwrap();
+        r.add_fs_rule((0, 20), true, h, 0).unwrap();
+        let d = Domain::restrict(None, &r, 1).unwrap();
+        let file = Entry {
+            key: Some((0, 11)),
+            mode: 0o100644,
+        };
+        let (src, dst) = (path(&[10, 1]), path(&[20, 1]));
+        assert!(d
+            .check_refer(file, None, &src, &dst, 1, false, true, false)
+            .is_ok());
+        let only_dst = Ancestry {
+            partial: true,
+            ..path(&[20])
+        };
+        assert_eq!(
+            d.check_refer(file, None, &src, &only_dst, 1, false, true, false),
             Err(Error::Denied)
         );
     }
