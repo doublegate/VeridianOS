@@ -94,7 +94,6 @@ phase_download() {
     else
         local tarball="${SOURCES_DIR}/busybox-${BUSYBOX_VERSION}.tar.bz2"
         if [ ! -f "$tarball" ]; then
-            echo "  Downloading ${BUSYBOX_URL}..."
             # A per-process temporary file in the cache, checked before it is
             # moved into place, so a concurrent download (build-musl-rootfs.sh
             # shares the cache) never sees or removes a partial archive.

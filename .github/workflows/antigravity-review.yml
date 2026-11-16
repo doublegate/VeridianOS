@@ -115,7 +115,8 @@ jobs:
           # A large diff goes to agy as a file, and reading it at high effort costs 6-8
           # minutes almost whatever its size (1.15 MB: 465 s; 426 KB timed out three times at
           # 397 s under the old 240 s/MiB scaling). The scaling is now 900 s/MiB (the
-          # script's AGY_TIMEOUT_SECONDS_PER_MIB), so 900 s here is reached from ~650 KB.
+          # script's AGY_TIMEOUT_SECONDS_PER_MIB), so the 1500 s cap is reached from ~1.4 MB
+          # (that scaling applies only when AGY_PRINT_TIMEOUT below is not pinned).
           # Raised from 900 s on 2026-11-16: a 137 KB stacked diff (PR #50) and a
           # large mount-API diff (PR #53) timed out on both 15-minute attempts.
           AGY_PRINT_TIMEOUT_MAX_SECONDS: "1500"  # per-attempt cap (default 1800)
