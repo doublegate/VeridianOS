@@ -37,6 +37,14 @@ BUSYBOX_VERSION="1.36.1"
 BUSYBOX_URL="https://busybox.net/downloads/busybox-${BUSYBOX_VERSION}.tar.bz2"
 # busybox.net's busybox-1.36.1.tar.bz2.sha256.
 BUSYBOX_SHA256="b8cc24c9574d809e7279c3be349795c5d5ceb6fdf19ca709f80cde50e47de314"
+# The same file from Buildroot's source mirror, tried when busybox.net cannot
+# be reached; fetch_verified accepts it only with the checksum above.
+BUSYBOX_URLS=(
+    "${BUSYBOX_URL}"
+    "https://sources.buildroot.net/busybox/busybox-${BUSYBOX_VERSION}.tar.bz2"
+)
+# shellcheck source=../tools/cross/fetch-verified.sh
+source "${ROOT}/tools/cross/fetch-verified.sh"
 
 BUILD_DIR="${ROOT}/target/rootfs-musl-${arch}"
 IMG="${ROOT}/target/rootfs-musl-${arch}.img"
@@ -62,8 +70,7 @@ build_busybox() {
         part="$(mktemp "${tarball}.XXXXXX")"
         # Removed if the run is interrupted too (PR #29 review).
         trap 'rm -f -- "${part:-}"' EXIT
-        curl -fsSL -o "${part}" "${BUSYBOX_URL}" || { rm -f "${part}"; die "download failed"; }
-        echo "${BUSYBOX_SHA256}  ${part}" | sha256sum -c --quiet - || { rm -f "${part}"; die "BusyBox checksum mismatch in the download"; }
+        fetch_verified "${part}" "${BUSYBOX_SHA256}" "${BUSYBOX_URLS[@]}" || die "download failed from every source"
         chmod a+r "${part}"  # mktemp creates it 0600
         mv "${part}" "${tarball}"
         trap - EXIT

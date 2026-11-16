@@ -25,6 +25,14 @@ BUSYBOX_VERSION="1.36.1"
 BUSYBOX_URL="https://busybox.net/downloads/busybox-${BUSYBOX_VERSION}.tar.bz2"
 # busybox.net's busybox-1.36.1.tar.bz2.sha256 (as in build-musl-rootfs.sh).
 BUSYBOX_SHA256="b8cc24c9574d809e7279c3be349795c5d5ceb6fdf19ca709f80cde50e47de314"
+# The same file from Buildroot's source mirror, tried when busybox.net cannot
+# be reached; fetch_verified accepts it only with the checksum above.
+BUSYBOX_URLS=(
+    "${BUSYBOX_URL}"
+    "https://sources.buildroot.net/busybox/busybox-${BUSYBOX_VERSION}.tar.bz2"
+)
+# shellcheck source=../tools/cross/fetch-verified.sh
+source "${PROJECT_ROOT}/tools/cross/fetch-verified.sh"
 
 # Directories. The work tree (source, build, libc objects, logs) is kept out
 # of /tmp, which systemd-tmpfiles ages out after 10 days and a reboot clears,
@@ -95,8 +103,7 @@ phase_download() {
             # Removed if the run is interrupted too, not only on failure
             # (PR #29 review).
             trap 'rm -f -- "${part:-}"' EXIT
-            curl -fsSL -o "$part" "$BUSYBOX_URL" || { rm -f "$part"; echo "  ERROR: download failed"; exit 1; }
-            echo "${BUSYBOX_SHA256}  ${part}" | sha256sum -c --quiet - || { rm -f "$part"; echo "  ERROR: BusyBox checksum mismatch in the download"; exit 1; }
+            fetch_verified "$part" "$BUSYBOX_SHA256" "${BUSYBOX_URLS[@]}" || { echo "  ERROR: download failed from every source"; exit 1; }
             chmod a+r "$part"  # mktemp creates it 0600
             mv "$part" "$tarball"
             trap - EXIT

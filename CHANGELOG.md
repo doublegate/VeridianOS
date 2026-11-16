@@ -823,6 +823,14 @@
 
 ### Fixed
 
+- **BusyBox download falls back to a mirror.** `scripts/build-busybox-rootfs.sh` and
+  `scripts/build-musl-rootfs.sh` fetch through `tools/cross/fetch-verified.sh`: each source gets a
+  30-second connect timeout and three retries, and Buildroot's source mirror is tried when
+  busybox.net cannot be reached. A file is accepted only with the pinned SHA-256, so the mirror
+  can only supply the identical archive. busybox.net was unreachable from a CI runner for over
+  two minutes on 2026-11-16, which failed the x86_64 rootfs job on main with nothing wrong in
+  the tree.
+
 - `semget` no longer walks every semaphore set to check SEMMNS: the namespace keeps the number
   of semaphores in use as sets are made and removed, as Linux's `used_sems` does, and SEM_INFO
   reads the same count. Creating set n cost a walk over n sets, so LTP `semget05`, which makes
