@@ -375,8 +375,10 @@ The reference for every behaviour below is the Linux 7.3 source (kernel.org tarb
       names kernel addresses that KASLR is meant to hide, and Debian's and Ubuntu's kernels
       ship it on. It is a sysctl, so the old behaviour is one write away (CAP_SYS_ADMIN).
       `/proc/kmsg` and `/dev/kmsg` come with the device and proc work (Track C item 3).
-    - **acct** writes version 3 records per PID namespace, as the opener, when a process's
-      last thread exits, with Linux's free-space pause and resume. Memory and fault counts,
+    - **acct** writes version 3 records per PID namespace when a process's last thread
+      exits, into every accounting namespace from its own up (slow_acct_process), with ids as
+      the opener's user namespace sees them, and with Linux's free-space pause and resume. A
+      namespace's accounting ends when its init's exit has emptied it (acct_exit_ns). Memory and fault counts,
       ASU and the terminal are 0 until they are counted.
     - **vhangup** is CAP_SYS_TTY_CONFIG, then the hangup of the caller's controlling
       terminal, which no process has until the terminal work of v0.29 (Linux returns 0 for

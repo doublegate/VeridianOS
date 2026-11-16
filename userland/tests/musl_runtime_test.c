@@ -11852,6 +11852,62 @@ static void test_acct(void)
     if (fd >= 0) close(fd);
     if (!found) f |= 64;
     unlink(path);
+    /* A PID namespace's accounting lasts until the namespace is empty: a
+     * process killed when its init exits is recorded in the namespace's
+     * file (zap_pid_ns_processes, then acct_exit_ns), and in every
+     * accounting namespace above it too (slow_acct_process; PR #49 review).
+     * Outer file A here; the namespace's init turns on file B. */
+    const char *pa = "/tmp/veridian-acct-a", *pb = "/tmp/veridian-acct-b";
+    int ok_files = 1;
+    for (int i = 0; i < 2; i++) {
+        int t = open(i ? pb : pa, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+        if (t < 0) ok_files = 0;
+        else close(t);
+    }
+    if (!ok_files || syscall(SYS_acct, pa) != 0) f |= 256;
+    c = fork();
+    if (c == 0) {
+        if (unshare(0x20000000 /* CLONE_NEWPID */) != 0) _exit(2);
+        pid_t init = fork();
+        if (init == 0) {
+            if (syscall(SYS_acct, pb) != 0) _exit(3);
+            int up[2];
+            if (pipe(up) != 0) _exit(4);
+            pid_t g = fork();
+            if (g == 0) {
+                close(up[0]);
+                (void)!write(up[1], "x", 1);
+                for (;;) pause();
+            }
+            char b;
+            close(up[1]);
+            if (read(up[0], &b, 1) != 1) _exit(6);
+            _exit(5); /* takes g along with SIGKILL */
+        }
+        int ist = 0;
+        if (init < 0 || waitpid(init, &ist, 0) != init) _exit(7);
+        _exit(WIFEXITED(ist) && WEXITSTATUS(ist) == 5 ? 0 : 8);
+    }
+    st = t_exit_status(c);
+    if (st != 0) f |= 512 | (st << 16);
+    if (syscall(SYS_acct, NULL) != 0) f |= 256;
+    /* In B: the killed process (pid 2 there, killed by SIGKILL) and init
+     * (pid 1, status 5). In A: the killed process too. */
+    int in_b_killed = 0, in_b_init = 0, in_a_killed = 0;
+    for (int i = 0; i < 2; i++) {
+        fd = open(i ? pb : pa, O_RDONLY);
+        while (fd >= 0 && read(fd, &r, sizeof(r)) == (ssize_t)sizeof(r)) {
+            if (i && r.ac_pid == 2 && r.ac_exitcode == 9) in_b_killed = 1;
+            if (i && r.ac_pid == 1 && r.ac_exitcode == (5u << 8)) in_b_init = 1;
+            if (!i && r.ac_exitcode == 9) in_a_killed = 1;
+        }
+        if (fd >= 0) close(fd);
+    }
+    if (!in_b_killed) f |= 1024;
+    if (!in_b_init) f |= 2048;
+    if (!in_a_killed) f |= 4096;
+    unlink(pa);
+    unlink(pb);
     /* Without CAP_SYS_PACCT: EPERM. */
     c = fork();
     if (c == 0)

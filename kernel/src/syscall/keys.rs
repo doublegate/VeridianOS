@@ -331,9 +331,11 @@ pub fn sys_keyctl(option: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> 
             let n = a3.min(veridian_keys::CAPABILITIES.len());
             if a2 != 0 && a3 > 0 {
                 userspace::write_user_bytes(a2, &veridian_keys::CAPABILITIES[..n])?;
+                // The rest is cleared, as keyctl_capabilities' clear_user, in
+                // place: never a kernel buffer of a user-chosen size (PR #49
+                // review).
                 if a3 > n {
-                    let zeros = userspace::zeroed_buf(a3 - n)?;
-                    userspace::write_user_bytes(a2 + n, &zeros)?;
+                    userspace::clear_user(a2 + n, a3 - n)?;
                 }
             }
             Ok(veridian_keys::CAPABILITIES.len())
