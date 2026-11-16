@@ -69,10 +69,10 @@ jobs:
     # for a large one handed over as a file. The cap must still exceed the
     # script's own worst case -- lock wait + every retry at its maximum timeout +
     # backoff -- or the job is killed mid-retry and posts nothing. With the
-    # settings below that is 1200 + 2 x 900 + 15 = 3015 s, under 55 minutes with
+    # settings below that is 1800 + 2 x 1500 + 15 = 4815 s, under 90 minutes with
     # room for checkout and the diff fetch; the selftest checks this sum against
     # this value.
-    timeout-minutes: 55
+    timeout-minutes: 90
     steps:
       # Check out the DEFAULT BRANCH, never the PR head. This job runs the checked-out
       # `scripts/agy-review.sh` on a self-hosted runner with a token in the environment,
@@ -116,7 +116,9 @@ jobs:
           # minutes almost whatever its size (1.15 MB: 465 s; 426 KB timed out three times at
           # 397 s under the old 240 s/MiB scaling). The scaling is now 900 s/MiB (the
           # script's AGY_TIMEOUT_SECONDS_PER_MIB), so 900 s here is reached from ~650 KB.
-          AGY_PRINT_TIMEOUT_MAX_SECONDS: "900"  # per-attempt cap (default 1800)
+          # Raised from 900 s on 2026-11-16: a 137 KB stacked diff (PR #50) and a
+          # large mount-API diff (PR #53) timed out on both 15-minute attempts.
+          AGY_PRINT_TIMEOUT_MAX_SECONDS: "1500"  # per-attempt cap (default 1800)
           # Every attempt gets the cap, whatever the diff's size. The scaling
           # starts from a 5-minute base, which a high-effort review of an
           # ordinary diff now exceeds: a 70 KB diff, given 360 s, timed out
@@ -124,7 +126,7 @@ jobs:
           # sooner returns sooner; this only bounds the wait. Set explicitly,
           # the scaling is off, so keep it at or below the cap above, which
           # the selftest's worst case assumes.
-          AGY_PRINT_TIMEOUT: "15m"
+          AGY_PRINT_TIMEOUT: "25m"
           # Also set here, not only as the script's default: a pull_request run takes
           # this file from the PR branch but the script from the default branch, so a
           # repository whose default branch still has the old script would otherwise
@@ -135,10 +137,10 @@ jobs:
           AGY_RETRIES: "2"
           # Wait for another review's lock (script default 600). The lock is shared
           # by every repository's reviewer on this machine, and one review can take
-          # up to 15 minutes, so 300 s failed whenever another repository's review
-          # was running (PR #48: two queued ahead of it). 1200 s covers one review
-          # in progress and most of a second.
-          AGY_LOCK_WAIT: "1200"
+          # up to 25 minutes per attempt, so 300 s failed whenever another
+          # repository's review was running (PR #48: two queued ahead of it).
+          # 1800 s covers one review's attempt in progress and most of a second.
+          AGY_LOCK_WAIT: "1800"
           # AGY_DIFF_MODE: auto            # auto|inline|file — how the diff reaches agy. `auto`
           #                                # (default) inlines a small diff and hands a large one to
           #                                # agy as a file, so PR size never truncates the review.

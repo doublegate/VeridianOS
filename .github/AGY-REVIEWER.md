@@ -268,9 +268,9 @@ runner, so disable fork workflows there or gate them the same way.
 |----------|---------|---------|
 | `AGY_MODEL` | *(agy default)* | e.g. `gemini-3-pro`; run `agy models` to see IDs |
 | `AGY_EFFORT` | `high` | reasoning effort: `low` / `medium` / `high` |
-| `AGY_PRINT_TIMEOUT` | `5m` | max wait for a single `agy --print`, raised for a large diff; set explicitly, it is used as given and not raised. This repository sets `15m`, the per-attempt cap, because a high-effort review of an ordinary diff can take longer than the 5-minute base |
+| `AGY_PRINT_TIMEOUT` | `5m` | max wait for a single `agy --print`, raised for a large diff; set explicitly, it is used as given and not raised. This repository sets `25m`, the per-attempt cap, because a high-effort review of an ordinary diff can take longer than the 5-minute base |
 | `AGY_TIMEOUT_SECONDS_PER_MIB` | `900` | extra seconds per MiB of diff. A diff handed over as a file costs agy 6-8 minutes almost whatever its size, so this is deliberately steep (240 left a 426 KB diff at 397 s, too little) |
-| `AGY_PRINT_TIMEOUT_MAX_SECONDS` | `1800` (workflow: `900`) | ceiling on one attempt after the raise |
+| `AGY_PRINT_TIMEOUT_MAX_SECONDS` | `1800` (workflow: `1500`) | ceiling on one attempt after the raise |
 | `AGY_RETRIES` | `3` (workflow: `2`) | attempts; a retry is for a transient backend error, so more of them at the same budget only repeat a timeout |
 | `AGY_DIFF_MODE` | `auto` | how the diff reaches agy: `inline` (in the `--print` prompt), `file` (written to a file agy reads with its tools), or `auto` (inline if it fits the arg-size budget, else file — so **large PRs are never truncated**) |
 | `MAX_DIFF_BYTES` | `5000000` | sanity cap on a pathological diff (5 MB). Not the arg-size limit — a large diff goes to agy as a file, not an argv value |
