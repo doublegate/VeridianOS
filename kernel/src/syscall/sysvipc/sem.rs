@@ -9,6 +9,7 @@
 //! GETNCNT or GETZCNT for the one operation that blocked it.
 
 use alloc::{
+    boxed::Box,
     collections::BTreeMap,
     sync::{Arc, Weak},
     vec::Vec,
@@ -85,7 +86,9 @@ struct Waiting {
 /// A semaphore array (`struct sem_array`).
 pub struct SemArray {
     perm: Perm,
-    pub sems: Vec<Sem>,
+    /// Fixed at semget: a slice, so the count it gives the namespace's
+    /// SEMMNS total (`units`) cannot change while the set exists.
+    pub sems: Box<[Sem]>,
     pub otime: i64,
     pub ctime: i64,
     /// SEM_UNDO adjustments, by undo list ([`UndoList::id`]).
@@ -658,12 +661,12 @@ pub fn proc_lines(space: &SysvSpace, asker: &Asker) -> alloc::string::String {
 /// `n` semaphores at 0, or ENOMEM if the heap cannot hold them (newary's
 /// kvzalloc fails; a `vec!` would panic, and semmsl is the namespace
 /// root's to raise).
-fn new_sems(n: usize) -> Result<Vec<Sem>, SyscallError> {
+fn new_sems(n: usize) -> Result<Box<[Sem]>, SyscallError> {
     let mut v = Vec::new();
     v.try_reserve_exact(n)
         .map_err(|_| SyscallError::OutOfMemory)?;
     v.resize(n, Sem::default());
-    Ok(v)
+    Ok(v.into_boxed_slice())
 }
 
 #[cfg(test)]
@@ -686,7 +689,7 @@ mod tests {
     fn array(n: usize) -> SemArray {
         SemArray {
             perm: Perm::new(0, 0o600, 1000, 1000),
-            sems: alloc::vec![Sem::default(); n],
+            sems: alloc::vec![Sem::default(); n].into_boxed_slice(),
             otime: 0,
             ctime: 0,
             adj: BTreeMap::new(),
@@ -787,9 +790,20 @@ mod tests {
             Some(SyscallError::NoSpace),
             "5 of 5 semaphores in use"
         );
+        // SEM_INFO reports them (seminfo.semaem: semaphores in use; semusz:
+        // sets).
+        let in_use = |space: &SysvSpace| match control(space, &me, 0, 0, SEM_INFO, CtlArg::None) {
+            Ok((_, CtlOut::Bytes(b))) => {
+                let word = |i: usize| i32::from_ne_bytes(b[i * 4..i * 4 + 4].try_into().unwrap());
+                (word(7), word(9))
+            }
+            _ => panic!("SEM_INFO"),
+        };
+        assert_eq!(in_use(&space), (2, 5));
         // Removing a set gives its semaphores back (freeary).
         assert!(control(&space, &me, a, 0, IPC_RMID, CtlArg::None).is_ok());
         assert_eq!(space.sem.lock().units(), 2);
+        assert_eq!(in_use(&space), (1, 2));
         assert!(get(&space, &me, 0, 3, 0o600).is_ok());
     }
 
