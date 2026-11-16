@@ -100,6 +100,10 @@ impl IpcObject for SemArray {
     fn perm_mut(&mut self) -> &mut Perm {
         &mut self.perm
     }
+    /// A set's size, fixed at semget, counts against SEMMNS.
+    fn units(&self) -> usize {
+        self.sems.len()
+    }
 }
 
 /// How a semop came out.
@@ -319,7 +323,7 @@ pub fn get(
             if nsems == 0 {
                 return Err(SyscallError::InvalidArgument);
             }
-            let used: usize = ids.iter().map(|a| a.sems.len()).sum();
+            let used = ids.units();
             if used + nsems as usize > semmns.max(0) as usize {
                 return Err(SyscallError::NoSpace);
             }
@@ -497,7 +501,7 @@ pub fn control(
     let r = match cmd {
         IPC_INFO | SEM_INFO => {
             let [semmsl, semmns, semopm, semmni] = limits;
-            let used: usize = ids.iter().map(|a| a.sems.len()).sum();
+            let used = ids.units();
             let info = if cmd == SEM_INFO {
                 [
                     SEMMAP,
@@ -769,6 +773,24 @@ mod tests {
         list.apply(9);
         let s = space.sem.lock().get(id).unwrap().sems[0];
         assert_eq!((s.val, s.pid), (0, 9));
+    }
+
+    #[test]
+    fn semmns_counts_the_sets_that_exist() {
+        let space = SysvSpace::new();
+        let me = asker(1000, 1000);
+        space.limits.sem[1].store(5, core::sync::atomic::Ordering::Relaxed);
+        let a = get(&space, &me, 0, 3, 0o600).unwrap() as i32;
+        get(&space, &me, 0, 2, 0o600).unwrap();
+        assert_eq!(
+            get(&space, &me, 0, 1, 0o600).err(),
+            Some(SyscallError::NoSpace),
+            "5 of 5 semaphores in use"
+        );
+        // Removing a set gives its semaphores back (freeary).
+        assert!(control(&space, &me, a, 0, IPC_RMID, CtlArg::None).is_ok());
+        assert_eq!(space.sem.lock().units(), 2);
+        assert!(get(&space, &me, 0, 3, 0o600).is_ok());
     }
 
     #[test]
