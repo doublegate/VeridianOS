@@ -177,7 +177,8 @@
   without a controlling terminal) and iopl and ioperm, whose ports come only from IoPort
   capabilities, of which none is granted yet: turning ports on is EPERM, iopl 3 EPERM.
 - reboot(2) (Linux 7.3 `kernel/reboot.c`, ADR 0027 decision 29): CAP_SYS_BOOT and the magic
-  numbers; inside a PID namespace (which also needs authority over that namespace) the
+  numbers; inside a PID namespace (which also needs MODIFY on that namespace and WRITE over
+  its init) the
   namespace's init is killed and reported killed by SIGHUP or SIGINT; on the machine (which
   also needs the `System` object) restart, halt and power off on all three architectures
   after stopping the other CPUs, and CAD_ON/CAD_OFF. ACPI power-off uses the DSDT's `\_S5`

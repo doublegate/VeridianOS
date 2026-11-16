@@ -87,11 +87,22 @@ pub fn sys_syslog(ty: usize, buf: usize, len: usize) -> SyscallResult {
         return Err(SyscallError::OperationNotPermitted);
     }
     // ADR 0024: the kernel log is the `System` object's, so an action that
-    // needs CAP_SYSLOG needs authority over it too: READ to read it, MODIFY
-    // to clear it or change the console (EPERM). An unprivileged READ_ALL
-    // with dmesg_restrict off needs neither, as on Linux (PR #49 review).
+    // needs CAP_SYSLOG needs authority over it too (EPERM): READ to read it
+    // (READ_ALL, the sizes), MODIFY to clear it or change the console, and
+    // both for READ and READ_CLEAR, which return the text and consume or
+    // clear it. An unprivileged READ_ALL with dmesg_restrict off needs
+    // neither, as on Linux (PR #49 review).
     #[cfg(feature = "alloc")]
     if restricted {
+        use crate::cap::authority::{current_may_change_system, current_may_read_system};
+        let reads_text = matches!(
+            ty,
+            action::READ
+                | action::READ_ALL
+                | action::READ_CLEAR
+                | action::SIZE_UNREAD
+                | action::SIZE_BUFFER
+        );
         let changes = matches!(
             ty,
             action::READ
@@ -101,12 +112,7 @@ pub fn sys_syslog(ty: usize, buf: usize, len: usize) -> SyscallResult {
                 | action::CONSOLE_ON
                 | action::CONSOLE_LEVEL
         );
-        let held = if changes {
-            crate::cap::authority::current_may_change_system()
-        } else {
-            crate::cap::authority::current_may_read_system()
-        };
-        if !held {
+        if (reads_text && !current_may_read_system()) || (changes && !current_may_change_system()) {
             return Err(SyscallError::OperationNotPermitted);
         }
     }
@@ -211,7 +217,8 @@ pub static CTRL_ALT_DEL: core::sync::atomic::AtomicBool = core::sync::atomic::At
 /// (EPERM), then the magic numbers (EINVAL).
 ///
 /// In a PID namespace below the initial one (reboot_pid_ns), which also
-/// needs MODIFY on that namespace (ADR 0024; EPERM), only RESTART,
+/// needs MODIFY on that namespace and WRITE over its init (ADR 0024;
+/// EPERM), only RESTART,
 /// RESTART2, POWER_OFF and HALT are taken (EINVAL otherwise): the
 /// namespace's init is killed and reported killed by SIGHUP (restart) or
 /// SIGINT (halt, power off), and the calling thread exits.
@@ -238,11 +245,20 @@ pub fn sys_reboot(magic1: usize, magic2: usize, cmd: usize, arg: usize) -> Sysca
         // ADR 0024: ending a PID namespace kills its init, which needs
         // authority over that namespace as well as CAP_SYS_BOOT (EPERM; PR
         // #49 review).
+        // And WRITE over that init, as signalling another process needs:
+        // MODIFY and WRITE are separate rights, so holding one is not the
+        // other.
         #[cfg(feature = "alloc")]
         if !crate::cap::authority::current_holds_namespace(
             &crate::process::ns::NsRef::Pid(ns.clone()),
             crate::cap::Rights::MODIFY,
-        ) {
+        ) || ns.reaper().is_some_and(|init| {
+            !crate::cap::authority::current_may_act_on(
+                crate::process::ProcessId(init),
+                &ns,
+                crate::cap::Rights::WRITE,
+            )
+        }) {
             return Err(SyscallError::OperationNotPermitted);
         }
         // The thread exits there without unwinding this frame: nothing it

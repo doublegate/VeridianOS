@@ -11181,6 +11181,11 @@ struct t_statmount {
 #endif
 
 static unsigned long long t_ns_id(const char *name);
+/* Drop rights from the caller's own capabilities (ADR 0024); defined after
+ * <veridian/capability.h>. 1 when one was dropped. */
+static long t_drop_system_read(void);
+static long t_drop_system_modify(void);
+static long t_drop_ns_write(const char *name);
 
 /* listns (Linux 7.3): the caller's mount namespace is listed, by type
  * too, and a bad request is refused; 0 when all of it holds. */
@@ -11860,6 +11865,11 @@ static void test_keyrings(void)
         if (t_keyctl(T_KEYCTL_CAPABILITIES, (long)caps, 4, 0, 0) != 2 || caps[0] != 0xe3 || caps[1] != 0x03 ||
             caps[2] != 0 || caps[3] != 0)
             bits |= 1 << 15;
+        /* A NULL buffer: with a length the copy is tried and is EFAULT, as
+         * copy_to_user; with none the size is still returned (PR #49
+         * review). */
+        if (t_keyctl(T_KEYCTL_CAPABILITIES, 0, 2, 0, 0) != -1 || errno != EFAULT) bits |= 1 << 15;
+        if (t_keyctl(T_KEYCTL_CAPABILITIES, 0, 0, 0, 0) != 2) bits |= 1 << 15;
         /* /proc/keys lists the session keyring. */
         char pk[4096];
         snprintf(want, sizeof(want), "%08lx", ses);
@@ -11980,6 +11990,11 @@ static void test_acct(void)
         else close(t);
     }
     if (!ok_files) {
+        /* The private directory goes too, with whatever was made in it
+         * (PR #49 review). */
+        unlink(pa);
+        unlink(pb);
+        rmdir(dir);
         snprintf(why, sizeof(why), "f=%#x open", f | 256);
         report("acct", 0, why);
         return;
@@ -12061,6 +12076,28 @@ static void test_syslog(void)
         _exit(setuid(65534) == 0 && syscall(SYS_syslog, 3, logbuf, sizeof(logbuf)) == -1 && errno == EPERM ? 0
                                                                                                         : 1);
     if (t_exit_status(c) != 0) f |= 128;
+    /* The `System` object's rights (ADR 0024), each dropped on its own:
+     * without READ nothing of the log is read, READ_CLEAR included; without
+     * MODIFY it is still read but not cleared (READ_CLEAR, CLEAR: EPERM). */
+    c = fork();
+    if (c == 0) {
+        if (t_drop_system_read() != 1) _exit(2);
+        _exit(syscall(SYS_syslog, 3, logbuf, sizeof(logbuf)) == -1 && errno == EPERM &&
+                      syscall(SYS_syslog, 4, logbuf, sizeof(logbuf)) == -1 && errno == EPERM
+                  ? 0
+                  : 1);
+    }
+    if (t_exit_status(c) != 0) f |= 256;
+    c = fork();
+    if (c == 0) {
+        if (t_drop_system_modify() != 1) _exit(2);
+        _exit(syscall(SYS_syslog, 3, logbuf, sizeof(logbuf)) >= 0 &&
+                      syscall(SYS_syslog, 4, logbuf, sizeof(logbuf)) == -1 && errno == EPERM &&
+                      syscall(SYS_syslog, 5, 0, 0) == -1 && errno == EPERM
+                  ? 0
+                  : 1);
+    }
+    if (t_exit_status(c) != 0) f |= 512;
     snprintf(why, sizeof(why), "f=%#x", f);
     report("syslog", f == 0, why);
 }
@@ -12109,6 +12146,38 @@ static int reboot_in_pidns(unsigned cmd, int sig)
     return t_exit_status(a);
 }
 
+/* reboot(RESTART) in a new PID namespace by a process that dropped WRITE
+ * on that namespace and on the user namespace standing for it, keeping
+ * MODIFY and CAP_SYS_BOOT: EPERM, and init lives on to exit by itself
+ * (ADR 0024: killing init takes WRITE over it). 0 when both held. */
+static int reboot_without_write_in_pidns(void)
+{
+    pid_t a = fork();
+    if (a == 0) {
+        if (unshare(CLONE_NEWPID) != 0) _exit(2);
+        pid_t init = fork();
+        if (init == 0) {
+            pid_t c = fork();
+            if (c == 0) {
+                if (t_drop_ns_write("pid") != 1 || t_drop_ns_write("user") != 1) _exit(3);
+                _exit(syscall(SYS_reboot, T_REBOOT_MAGIC1, T_REBOOT_MAGIC2, T_REBOOT_RESTART, 0) == -1 &&
+                              errno == EPERM
+                          ? 0
+                          : 4);
+            }
+            int cs = 0;
+            while (waitpid(c, &cs, 0) == -1 && errno == EINTR)
+                ;
+            _exit(WIFEXITED(cs) ? WEXITSTATUS(cs) : 5);
+        }
+        int st = 0;
+        if (waitpid(init, &st, 0) != init) _exit(6);
+        /* Exited by itself with the child's verdict: not killed. */
+        _exit(WIFEXITED(st) ? WEXITSTATUS(st) : 7);
+    }
+    return t_exit_status(a);
+}
+
 /* reboot(2): the checks, Ctrl-Alt-Del, and reboot inside a PID namespace
  * (the machine itself is not restarted here). */
 static void test_reboot(void)
@@ -12133,6 +12202,8 @@ static void test_reboot(void)
     if (r != 0) f |= 16 | (r << 8);
     r = reboot_in_pidns(T_REBOOT_HALT, SIGINT);
     if (r != 0) f |= 32 | (r << 12);
+    r = reboot_without_write_in_pidns();
+    if (r != 0) f |= 64 | (r << 16);
     snprintf(why, sizeof(why), "f=%#x", f);
     report("reboot", f == 0, why);
 }
@@ -12973,6 +13044,19 @@ static unsigned long long t_ns_id(const char *name)
  * a namespace, named by its NS_GET_ID id. Rights 0 drops the capability
  * whole; otherwise those rights (the token's encoding) go. */
 #include <veridian/capability.h>
+static long t_drop_system_read(void)
+{
+    return veridian_capability_drop(VERIDIAN_CAP_SYSTEM, 0, VERIDIAN_RIGHT_READ);
+}
+static long t_drop_system_modify(void)
+{
+    return veridian_capability_drop(VERIDIAN_CAP_SYSTEM, 0, VERIDIAN_RIGHT_MODIFY);
+}
+static long t_drop_ns_write(const char *name)
+{
+    unsigned long long id = t_ns_id(name);
+    return id ? veridian_capability_drop(VERIDIAN_CAP_NAMESPACE, id, VERIDIAN_RIGHT_WRITE) : -1;
+}
 
 /* failfs from a chroot (ADR 0024): leaving the jail for failfs, whose
  * relative lookups walk the whole tree, needs MODIFY on the mount

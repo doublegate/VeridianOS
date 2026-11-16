@@ -157,9 +157,9 @@ impl FadtPmInfo {
             pm1_evt_len: 0,
             pm1_cnt_len: 0,
             slp_typ_s1: 0,
-            slp_typ_s3: 5, // QEMU default for S3
-            slp_typ_s4: 6, // QEMU default for S4
-            slp_typ_s5: 7, // QEMU default for S5
+            slp_typ_s3: 5, // Intel ICH's S3 (QEMU's is 1: the PIIX4 fallback sets it)
+            slp_typ_s4: 6, // Intel ICH's S4 (QEMU's is 2)
+            slp_typ_s5: 7, // Intel ICH's S5 (QEMU's is 0); the DSDT's \_S5 replaces it
             sci_int: 9,
             smi_cmd: 0,
             acpi_enable: 0,
@@ -395,6 +395,13 @@ pub fn acpi_pm_init() -> KernelResult<()> {
         info.smi_cmd = 0x00B2;
         info.gpe0_blk = 0x0620;
         info.gpe0_blk_len = 8;
+        // QEMU's sleep types, as its DSDT gives them (hw/i386/acpi-build.c:
+        // _S3 1, _S4 its s4_val, 2 by default, _S5 0): these ports are
+        // QEMU's, so the Intel-chipset types would not power it off (PR #49
+        // review).
+        info.slp_typ_s3 = 1;
+        info.slp_typ_s4 = 2;
+        info.slp_typ_s5 = 0;
         println!("[ACPI-PM] Using QEMU/PIIX4 PM defaults");
     }
 
@@ -642,7 +649,16 @@ fn dsdt_s5_type(pa: usize) -> Option<u16> {
 /// for the one object a power-off needs, without an AML interpreter. The
 /// value is ZeroOp, OneOp or a BytePrefix constant, as firmware writes it.
 fn s5_sleep_type(aml: &[u8]) -> Option<u8> {
-    let at = aml.windows(4).position(|w| w == b"_S5_")?;
+    // Every occurrence is tried: an earlier one may be a reference or a
+    // string, not the definition (PR #49 review).
+    aml.windows(4)
+        .enumerate()
+        .filter(|(_, w)| *w == b"_S5_")
+        .find_map(|(at, _)| s5_definition_at(aml, at))
+}
+
+/// [`s5_sleep_type`] for the `_S5_` at byte `at`, if it is the definition.
+fn s5_definition_at(aml: &[u8], at: usize) -> Option<u8> {
     let named = match at {
         0 => false,
         _ if aml[at - 1] == 0x08 => true,
@@ -1395,6 +1411,12 @@ mod tests {
             None
         );
         assert_eq!(s5_sleep_type(b"no sleep states"), None);
+        // A reference before the definition: the definition still counts.
+        let later = [
+            0x70, 0x5F, 0x53, 0x35, 0x5F, 0x60, 0x08, 0x5F, 0x53, 0x35, 0x5F, 0x12, 0x06, 0x04,
+            0x0A, 0x05,
+        ];
+        assert_eq!(s5_sleep_type(&later), Some(5));
     }
 
     #[test]

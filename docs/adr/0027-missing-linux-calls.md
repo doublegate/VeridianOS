@@ -370,8 +370,9 @@ The reference for every behaviour below is the Linux 7.3 source (kernel.org tarb
       ring: a print that finds it busy loses its text there, not on the console. The console
       shows messages below `console_loglevel` (default 7), so CONSOLE_OFF and CONSOLE_LEVEL
       work. Every action that needs CAP_SYSLOG also needs the `System` object (ADR 0024
-      lists the kernel log under it): READ to read the log, MODIFY to consume, clear it or
-      change the console; READ_CLEAR clears only what reached the caller. Only the kernel's
+      lists the kernel log under it): READ to read the log, MODIFY to clear it or change the
+      console, both for READ and READ_CLEAR, which return the text and consume or clear it;
+      READ_CLEAR clears only what reached the caller. Only the kernel's
       own messages go through the ring and the level: what programs
       write to the console (`/dev/console`, the serial console, a tty echo) goes straight to
       it (`print::console_write`), as a tty write on Linux, so no program can put lines in the
@@ -395,8 +396,9 @@ The reference for every behaviour below is the Linux 7.3 source (kernel.org tarb
     - **reboot** checks CAP_SYS_BOOT in the user namespace owning the caller's PID namespace,
       then the magic numbers. Inside a PID namespace below the initial one it is Linux's
       reboot_pid_ns: the namespace's init is killed and reported killed by SIGHUP (restart)
-      or SIGINT (halt, power off); that needs MODIFY on the PID namespace too (ADR 0024), as
-      killing another process's init needs authority over it. On the machine it also needs
+      or SIGINT (halt, power off); that needs MODIFY on the PID namespace and WRITE over its
+      init too (ADR 0024: the two rights are separate, and killing another process takes
+      WRITE over it). On the machine it also needs
       MODIFY on the `System` object. The other CPUs are stopped first (each is sent the reschedule interrupt and
       halts in it); restart is the PCI reset register, then the keyboard controller, then a
       triple fault on x86_64, PSCI SYSTEM_RESET on AArch64 and SBI SRST on RISC-V; power off

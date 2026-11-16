@@ -57,7 +57,22 @@ pub(super) fn sys_net_sendto(
     // most the limit goes, and the count sent is returned, as a short
     // write (PR #23 review: every send() of more than 1 MiB on a TCP or
     // Unix stream failed with EINVAL).
-    let stream = match socket_handle(fd)? {
+    // The socket is looked up once: the length rule, Landlock's check and
+    // the send are all on the one socket, which a dup2 from another thread
+    // between lookups could otherwise swap (PR #49 review).
+    let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    let file = process
+        .file_table
+        .lock()
+        .get(fd)
+        .ok_or(SyscallError::BadFileDescriptor)?;
+    let sock = file
+        .node
+        .as_any()
+        .and_then(|a| a.downcast_ref::<crate::net::socket_fd::SocketNode>())
+        .ok_or(SyscallError::NotASocket)?;
+    let handle = sock.handle();
+    let stream = match handle {
         SocketHandle::Inet(id) => crate::net::socket::with_socket(id, |s| {
             s.socket_type == crate::net::socket::SocketType::Stream
         })
@@ -75,7 +90,7 @@ pub(super) fn sys_net_sendto(
     let data = super::userspace::read_user_vec(buf_ptr, len, super::userspace::MAX_USER_MESSAGE)?;
     let data = &data[..];
 
-    match socket_handle(fd)? {
+    match handle {
         SocketHandle::Inet(id) => {
             let raw = if addr_ptr != 0 {
                 Some(read_sockaddr(addr_ptr, addr_len)?)
@@ -93,9 +108,7 @@ pub(super) fn sys_net_sendto(
         // send() is sendto() with no address; addressed Unix datagrams are
         // not supported.
         SocketHandle::Unix(_) if addr_ptr != 0 => Err(SyscallError::NotImplemented),
-        SocketHandle::Unix(_) => {
-            with_socket_fd(fd, |s| s.send(data, None))?.map_err(super::socket_err)
-        }
+        SocketHandle::Unix(_) => sock.send(data, None).map_err(super::socket_err),
     }
 }
 
