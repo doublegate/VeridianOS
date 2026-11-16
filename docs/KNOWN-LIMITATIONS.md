@@ -402,7 +402,9 @@ What remains:
   memory mappings, and nothing clears the MNT_EXPIRE mark; each devtmpfs mount is a new
   instance. pivot_root moves roots and working directories but not the paths of files already
   open, so they are looked up by their old paths; after `pivot_root(".", ".")` a working
-  directory inside the parked old root resolves in the new root, and a parked tree is EBUSY to
+  directory inside the parked old root resolves in the new root, a descriptor into a detached
+  tree attached inside the parked old root fails with ENOENT (Linux's still works: its
+  descriptors hold their mounts, while the tree here is keyed by path), and a parked tree is EBUSY to
   umount2 without MNT_DETACH only while mounts are under it; mounts left under put_old's place
   in the new root stay visible there (the tree is keyed by path); MS_BIND with MS_REC does not
   copy parked trees; at most 16 parked roots stack (`MAX_PARKED_DEPTH`; the next pivot_root(".",

@@ -324,6 +324,26 @@ fn tree_and_path(
     Ok((vfs()?.mount_tree().clone(), String::from(canonical), None))
 }
 
+/// The target fspick's context holds for `mount`, picked at `at` in `tree`
+/// (registered as `id` while it is a detached tree): in a detached tree,
+/// that tree by its id, root or not, so the context follows it when it is
+/// attached and emptied (PR #53 review); otherwise the mount in `tree`.
+fn pick_target(
+    tree: Arc<mount::Mounts>,
+    at: String,
+    id: Option<u64>,
+    mount: Arc<mount::Mount>,
+) -> Target {
+    match id {
+        Some(id) => Target::Detached { id, mount, tree },
+        None => Target::At {
+            tree,
+            point: at,
+            mount,
+        },
+    }
+}
+
 /// Whether `path` in `tree` is a mount's root (Linux's path_mounted).
 fn is_mount_root(tree: &mount::Mounts, path: &str) -> bool {
     tree.mount_point_of(path) == path
@@ -678,18 +698,7 @@ pub fn sys_fspick(dfd: usize, path: usize, flags: usize) -> SyscallResult {
     }
     let mount = tree.mount_at(&at).ok_or(SyscallError::InvalidArgument)?;
     let ty = String::from(mount::linux_fs_type(mount.fs().name()));
-    let target = match id {
-        Some(id) if at == "/" => Target::Detached {
-            id,
-            mount: mount.clone(),
-            tree: tree.clone(),
-        },
-        _ => Target::At {
-            tree,
-            point: at,
-            mount: mount.clone(),
-        },
-    };
+    let target = pick_target(tree, at, id, mount);
     let caller = Caller::current();
     let mut ctx = FsContext::new(
         Purpose::Reconfigure { ty, target },
