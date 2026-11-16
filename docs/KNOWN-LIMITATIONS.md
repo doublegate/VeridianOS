@@ -404,7 +404,9 @@ What remains:
   open, so they are looked up by their old paths; after `pivot_root(".", ".")` a working
   directory inside the parked old root resolves in the new root, a descriptor into a detached
   tree attached inside the parked old root fails with ENOENT (Linux's still works: its
-  descriptors hold their mounts, while the tree here is keyed by path), and a parked tree is EBUSY to
+  descriptors hold their mounts, while the tree here is keyed by path; all three are fixed by
+  holding places as objects, planned with the v0.29 dentry cache in to-dos/MASTER_TODO.md),
+  and a parked tree is EBUSY to
   umount2 without MNT_DETACH only while mounts are under it; mounts left under put_old's place
   in the new root stay visible there (the tree is keyed by path); MS_BIND with MS_REC does not
   copy parked trees; at most 16 parked roots stack (`MAX_PARKED_DEPTH`; the next pivot_root(".",
