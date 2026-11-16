@@ -44,6 +44,8 @@ build_output.log
 *.img
 *.iso
 images/
+# ...but not the top-level images/, the project's tracked logos and wallpapers
+!/images/
 
 # QEMU
 *.qcow2

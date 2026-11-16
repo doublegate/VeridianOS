@@ -341,7 +341,7 @@ VeridianOS builds upon ideas from many excellent operating systems:
 
 ![Alt](https://repobeats.axiom.co/api/embed/1292141e5c9e3241d1afa584338f1dfdb278a269.svg "Repobeats analytics image")
 
-<img src="images/VeridianOS_Full-Logo.png" alt="VeridianOS Full Banner" width="60%" />
+<img src="images/VeridianOS_Full-Logo.png" alt="VeridianOS Full Banner" width="80%" />
 
 **Building the future of operating systems, one commit at a time.**
 
