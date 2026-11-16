@@ -616,10 +616,17 @@ pub fn exit_dispatched(exit_code: i32, group: bool) -> ! {
             // Its accounting record, before the namespace is torn down, as
             // do_exit's acct_process.
             #[cfg(feature = "alloc")]
-            crate::syscall::acct::process_exited(&process, process.wait_status() as u32);
-            // The init of a PID namespace takes the rest of it along first.
+            let acct_code = process.wait_status() as u32;
+            #[cfg(feature = "alloc")]
+            crate::syscall::acct::process_exited(&process, acct_code);
+            // The init of a PID namespace takes the rest of it along first;
+            // the namespace's accounting ends once they are gone, so their
+            // records go to it (zap_pid_ns_processes, then acct_exit_ns;
+            // PR #49 review).
             if process.is_ns_init() {
                 zap_pid_ns(&process);
+                #[cfg(feature = "alloc")]
+                crate::syscall::acct::ns_exited(&process, acct_code);
             }
             cleanup_process(&process);
             process.set_state(ProcessState::Zombie);

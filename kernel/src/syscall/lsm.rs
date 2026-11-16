@@ -28,9 +28,9 @@ pub fn sys_lsm_list_modules(ids: usize, size: usize, flags: usize) -> SyscallRes
     if usize_ < total {
         return Err(SyscallError::ArgumentListTooLong);
     }
-    for (i, id) in MODULES.iter().enumerate() {
-        userspace::write_user(ids + i * 8, *id)?;
-    }
+    // The whole array, its range checked once (Linux puts each id in turn,
+    // with the same EFAULT).
+    userspace::write_user_slice(ids, &MODULES)?;
     Ok(MODULES.len())
 }
 
@@ -48,7 +48,8 @@ pub fn sys_lsm_get_self_attr(attr: usize, ctx: usize, size: usize, flags: usize)
         let id: u64 = userspace::read_user(ctx)?;
         // The rest of the context is copied too (EFAULT).
         let mut rest = [0u8; LSM_CTX_SIZE - 8];
-        userspace::read_user_bytes(ctx + 8, &mut rest)?;
+        let after_id = ctx.checked_add(8).ok_or(SyscallError::InvalidPointer)?;
+        userspace::read_user_bytes(after_id, &mut rest)?;
         if id == 0 {
             return Err(SyscallError::InvalidArgument);
         }

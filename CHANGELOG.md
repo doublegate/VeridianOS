@@ -162,8 +162,10 @@
   CONSOLE_OFF, CONSOLE_ON, CONSOLE_LEVEL, SIZE_UNREAD and SIZE_BUFFER; the console follows
   `console_loglevel`; `/proc/sys/kernel/printk` and `dmesg_restrict`, which starts at 1.
 - acct(2) (Linux 7.3 `kernel/acct.c`): BSD process accounting with version 3 records, per PID
-  namespace, written as the opener when a process's last thread exits, paused below 2 % free
-  space and resumed above 4 %. CONFIG_BSD_PROCESS_ACCT and _V3 set. Runtime test acct.
+  namespace, written when a process's last thread exits into every namespace from its own up
+  that accounts, with ids as each opener's user namespace sees them; a namespace's accounting
+  ends once its init's exit has emptied it, so the processes that exit kills are recorded
+  there; paused below 2 % free space and resumed above 4 %. CONFIG_BSD_PROCESS_ACCT and _V3 set. Runtime test acct.
 - vhangup (EPERM without CAP_SYS_TTY_CONFIG, else nothing to hang up, as a Linux process
   without a controlling terminal) and iopl and ioperm, whose ports come only from IoPort
   capabilities, of which none is granted yet: turning ports on is EPERM, iopl 3 EPERM.
