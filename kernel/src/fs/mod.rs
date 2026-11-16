@@ -1635,10 +1635,13 @@ impl MountTable {
     /// mounts it covers and the directory under them all, as Linux's walk up
     /// goes through `follow_up`. `last` is the object itself when the caller
     /// holds it. A part that has gone is left out, which can only grant
-    /// less. So is the whole chain when the walk ends at an object other
-    /// than `last` (a rename between the lookup and the check): the
-    /// ancestors are then not `last`'s, and only its own key is kept (PR
-    /// #49 review).
+    /// less. So is the whole chain when the caller holds the object and the
+    /// walk does not end at it: it ended at another (a rename between the
+    /// lookup and the check), or stopped short (the path no longer leads
+    /// anywhere: a file moved or removed since a descriptor recorded it).
+    /// The ancestors are then not `last`'s, and only its own key is kept
+    /// (PR #49 review). A file with no name, O_TMPFILE's, has its
+    /// directory given instead ([`Vfs::landlock_open_rights_under`]).
     #[cfg(feature = "alloc")]
     fn ancestry(
         &self,
@@ -1679,7 +1682,7 @@ impl MountTable {
             };
         }
         let target = match last {
-            Some(l) if complete && inode_key(&node) != inode_key(l) => {
+            Some(l) if !complete || inode_key(&node) != inode_key(l) => {
                 let internal = l.as_any().is_some_and(|a| a.is::<nsfs::NsFileNode>());
                 return veridian_landlock::Ancestry {
                     keys: alloc::vec![Some(inode_key(l))],
@@ -2245,6 +2248,28 @@ impl<'a> CallerView<'a> {
     /// The part of `request` an open of `node` at canonical `path` is
     /// allowed (hook_file_open); all of it for an unrestricted caller.
     #[cfg(feature = "alloc")]
+    /// [`Vfs::landlock_open_rights`] of `node`, a file with no name in
+    /// directory `dir` at canonical `dir_path` (O_TMPFILE): its own key,
+    /// then the directory's chain, as Linux's walk up from the file's
+    /// d_parent.
+    #[cfg(feature = "alloc")]
+    pub fn landlock_open_rights_under(
+        &self,
+        dir_path: &str,
+        dir: &Arc<dyn VfsNode>,
+        node: &Arc<dyn VfsNode>,
+        request: u32,
+    ) -> u32 {
+        match &self.ctx.landlock {
+            None => request,
+            Some(d) => {
+                let mut anc = ancestry_in(&self.ctx.mounts, dir_path, Some(dir));
+                anc.keys.insert(0, Some(inode_key(node)));
+                d.dom.open_rights(&anc, request)
+            }
+        }
+    }
+
     pub fn landlock_open_rights(&self, path: &str, node: &Arc<dyn VfsNode>, request: u32) -> u32 {
         match &self.ctx.landlock {
             None => request,
@@ -3606,6 +3631,10 @@ pub(crate) mod tests {
             keys(t.ancestry(&path, Some(&other))),
             [Some(inode_key(&other))]
         );
+        // A path that no longer leads anywhere (the file moved or removed
+        // since it was recorded): no ancestors either.
+        let gone = [String::from("a"), String::from("gone")];
+        assert_eq!(keys(t.ancestry(&gone, Some(&x))), [Some(inode_key(&x))]);
     }
 
     /// Linux's device-number encoding (`new_encode_dev`): 12 bits of

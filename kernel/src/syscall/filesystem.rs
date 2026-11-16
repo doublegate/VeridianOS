@@ -301,9 +301,26 @@ pub(super) fn open_node(
     regular: bool,
     follow: bool,
 ) -> SyscallResult {
+    open_node_in(node, created, canonical, flags, regular, follow, None)
+}
+
+/// [`open_node`] of a file whose path names no entry, `parent` being the
+/// directory it is in (canonical path and node): an O_TMPFILE file, whose
+/// Landlock rights come from that directory, as Linux's from the file's
+/// d_parent (PR #49 review).
+#[allow(clippy::too_many_arguments)]
+fn open_node_in(
+    node: alloc::sync::Arc<dyn crate::fs::VfsNode>,
+    created: bool,
+    canonical: alloc::string::String,
+    flags: usize,
+    regular: bool,
+    follow: bool,
+    parent: Option<(&str, &alloc::sync::Arc<dyn crate::fs::VfsNode>)>,
+) -> SyscallResult {
     const O_CLOEXEC: usize = 0x8_0000;
     let process = process::current_process().ok_or(SyscallError::InvalidState)?;
-    let file = open_file(node, created, canonical, flags, regular, follow)?;
+    let file = open_file_in(node, created, canonical, flags, regular, follow, parent)?;
     let fd = process
         .file_table
         .lock()
@@ -322,6 +339,22 @@ pub(super) fn open_file(
     regular: bool,
     follow: bool,
 ) -> Result<alloc::sync::Arc<crate::fs::file::File>, SyscallError> {
+    open_file_in(node, created, canonical, flags, regular, follow, None)
+}
+
+/// [`open_file`], with the directory a nameless file is in ([`open_node_in`]).
+#[allow(clippy::too_many_arguments)]
+fn open_file_in(
+    node: alloc::sync::Arc<dyn crate::fs::VfsNode>,
+    created: bool,
+    canonical: alloc::string::String,
+    flags: usize,
+    regular: bool,
+    follow: bool,
+    parent: Option<(&str, &alloc::sync::Arc<dyn crate::fs::VfsNode>)>,
+) -> Result<alloc::sync::Arc<crate::fs::file::File>, SyscallError> {
+    #[cfg(not(feature = "alloc"))]
+    let _ = parent;
     #[cfg(target_arch = "aarch64")]
     const O_DIRECTORY: usize = 0x4000;
     #[cfg(not(target_arch = "aarch64"))]
@@ -421,7 +454,12 @@ pub(super) fn open_file(
                 open |= llfs::WRITE_FILE;
             }
             let optional = llfs::TRUNCATE | if device { llfs::IOCTL_DEV } else { 0 };
-            let allowed = view.landlock_open_rights(&canonical, &node, open | optional);
+            let allowed = match parent {
+                Some((dir_path, dir)) => {
+                    view.landlock_open_rights_under(dir_path, dir, &node, open | optional)
+                }
+                None => view.landlock_open_rights(&canonical, &node, open | optional),
+            };
             if open & !allowed != 0 {
                 return Err(SyscallError::PermissionDenied);
             }
@@ -558,7 +596,15 @@ fn open_tmpfile(
     let path = alloc::format!("{}/#{}", canonical.trim_end_matches('/'), inode);
     // O_DIRECTORY is part of O_TMPFILE, not a request for a directory.
     let flags = flags & !(O_TMPFILE_BIT | O_DIRECTORY_64) as usize;
-    open_node(node, true, path, flags, false, true)
+    open_node_in(
+        node,
+        true,
+        path,
+        flags,
+        false,
+        true,
+        Some((canonical, &dir)),
+    )
 }
 
 /// Open FIFO `inode` (`fs::fifo`): a blocking open of one end sleeps until
@@ -4166,6 +4212,22 @@ pub(crate) fn link_at(
     // Landlock's hook_path_link, after the mount check as in do_linkat.
     #[cfg(feature = "alloc")]
     if vfs.landlock().is_some() {
+        // The directory the file is in, which its recorded path names
+        // only while that path still leads to it: a file moved since (an
+        // O_PATH descriptor's, say) is in some other directory this path
+        // does not tell, so the link is refused rather than checked
+        // against the old one (PR #49 review).
+        // An O_TMPFILE file made to be named has no entry: its path is
+        // `<dir>/#<inode>`, whose directory is the one it was made in.
+        let nameless_tmpfile = target.link_count() == 0 && target.tmpfile_linkable();
+        let still_there = nameless_tmpfile
+            || old_canonical
+                .as_deref()
+                .and_then(|p| vfs.canonical_node(p))
+                .is_some_and(|n| crate::fs::inode_key(&n) == crate::fs::inode_key(&target));
+        if !still_there {
+            return Err(SyscallError::PermissionDenied);
+        }
         let old_dir = old_canonical
             .as_deref()
             .and_then(|p| vfs.canonical_parent(p))

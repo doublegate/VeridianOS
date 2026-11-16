@@ -489,7 +489,7 @@ impl KeyStore {
                 user.nikeys = user.nikeys.saturating_sub(1);
             }
             if *user == KeyUser::default() {
-                self.users.remove(&k.uid);
+                self.users.remove(&k.quota_uid);
             }
             work.extend(k.links());
         }
@@ -2248,8 +2248,11 @@ mod tests {
         let ring = kc.thread.unwrap();
         assert_eq!(ks.k(ring).unwrap().uid, 0);
         ks.release_cred(&kc);
-        assert!(charged(&ks, 1000).is_none_or(|k| k == KeyUser::default()));
-        assert!(charged(&ks, 0).is_none_or(|k| k == KeyUser::default()));
+        // Both entries gone, as Linux's key_user_put frees an unused one:
+        // an empty entry left under one uid while another's was removed is
+        // how the refund went astray (PR #49 review).
+        assert!(charged(&ks, 1000).is_none());
+        assert!(charged(&ks, 0).is_none());
     }
 
     #[test]
