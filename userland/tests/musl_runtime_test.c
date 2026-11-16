@@ -11182,7 +11182,7 @@ struct t_statmount {
 
 static unsigned long long t_ns_id(const char *name);
 /* Drop rights from the caller's own capabilities (ADR 0024); defined after
- * <veridian/capability.h>. 1 when one was dropped. */
+ * <veridian/capability.h>. The number of capabilities narrowed, or -1. */
 static long t_drop_system_read(void);
 static long t_drop_system_modify(void);
 static long t_drop_ns_write(const char *name);
@@ -12159,7 +12159,10 @@ static int reboot_without_write_in_pidns(void)
         if (init == 0) {
             pid_t c = fork();
             if (c == 0) {
-                if (t_drop_ns_write("pid") != 1 || t_drop_ns_write("user") != 1) _exit(3);
+                /* Each drop counts the capabilities it narrowed: none is
+                 * fine (one may hold nothing on the new PID namespace
+                 * itself); what matters is that no WRITE is left. */
+                if (t_drop_ns_write("pid") < 0 || t_drop_ns_write("user") < 0) _exit(3);
                 _exit(syscall(SYS_reboot, T_REBOOT_MAGIC1, T_REBOOT_MAGIC2, T_REBOOT_RESTART, 0) == -1 &&
                               errno == EPERM
                           ? 0
