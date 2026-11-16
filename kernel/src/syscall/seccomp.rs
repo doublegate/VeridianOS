@@ -726,10 +726,11 @@ fn notif_addfd(f: &Arc<Filter>, notify: &NotifyLock, arg: usize, size: usize) ->
         return Err(SyscallError::InvalidArgument);
     }
     let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    // An O_PATH descriptor too, as Linux's fget_raw (PR #49 review).
     let file = process
         .file_table
         .lock()
-        .get(srcfd as usize)
+        .get_path(srcfd as usize)
         .ok_or(SyscallError::BadFileDescriptor)?;
     let req = Arc::new(AddFd {
         file,
