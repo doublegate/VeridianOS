@@ -76,9 +76,9 @@ pub fn halt() -> ! {
 /// halts if that does not take.
 pub fn power_off() -> ! {
     crate::println!("reboot: Power down");
-    prepare_power_off();
+    let prepared = prepare_power_off();
     stop_other_cpus();
-    machine_power_off();
+    machine_power_off(prepared);
     stop_this_cpu()
 }
 
@@ -109,22 +109,33 @@ fn machine_restart() -> ! {
     stop_this_cpu()
 }
 
-/// What powering off needs that takes locks: the ACPI tables, read while
-/// the other CPUs still run.
+/// What powering off needs that takes locks or prints: the ACPI tables and
+/// the S5 register writes, read while the other CPUs still run, since one
+/// of them may be stopped holding the lock (PR #49 review).
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-fn prepare_power_off() {
+fn prepare_power_off() -> Option<crate::arch::x86_64::acpi_pm::S5> {
     use crate::arch::x86_64::acpi_pm;
     if !acpi_pm::is_initialized() {
         let _ = acpi_pm::acpi_pm_init();
     }
+    acpi_pm::prepare_s5()
 }
 
+/// Nothing to prepare: the firmware's power-off call takes no lock.
 #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
-fn prepare_power_off() {}
+struct NothingPrepared;
 
+#[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+fn prepare_power_off() -> NothingPrepared {
+    NothingPrepared
+}
+
+/// Port writes only (the other CPUs are stopped).
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-fn machine_power_off() {
-    let _ = crate::arch::x86_64::acpi_pm::acpi_shutdown_s5();
+fn machine_power_off(s5: Option<crate::arch::x86_64::acpi_pm::S5>) {
+    if let Some(s5) = s5 {
+        s5.enter();
+    }
 }
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
@@ -134,7 +145,7 @@ fn machine_restart() -> ! {
 }
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-fn machine_power_off() {
+fn machine_power_off(_: NothingPrepared) {
     crate::arch::aarch64::psci::system_off(crate::arch::aarch64::smp::conduit());
 }
 
@@ -146,7 +157,7 @@ fn machine_restart() -> ! {
 }
 
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
-fn machine_power_off() {
+fn machine_power_off(_: NothingPrepared) {
     // SBI SRST shutdown, or the legacy shutdown call without SRST.
     crate::arch::riscv::sbi::system_reset(0, 0);
     crate::arch::riscv::sbi::legacy_shutdown();
@@ -158,4 +169,4 @@ fn machine_restart() -> ! {
 }
 
 #[cfg(not(target_os = "none"))]
-fn machine_power_off() {}
+fn machine_power_off(_: NothingPrepared) {}

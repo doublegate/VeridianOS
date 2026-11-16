@@ -185,6 +185,11 @@ pub struct Key {
     pub desc: String,
     /// Owner (a kernel uid).
     pub uid: u32,
+    /// The user charged for it (Linux's `key->user`): set when it is made
+    /// and moved only by chown, so a thread keyring that `fsid_changed`
+    /// gives a new owner is still refunded to the user it was charged to
+    /// (PR #49 review).
+    quota_uid: u32,
     /// Group, `None` for INVALID_GID.
     pub gid: Option<u32>,
     pub perm: u32,
@@ -474,7 +479,7 @@ impl KeyStore {
             let Some(k) = self.keys.remove(&s) else {
                 continue;
             };
-            let user = self.users.entry(k.uid).or_default();
+            let user = self.users.entry(k.quota_uid).or_default();
             if k.flags & flags::IN_QUOTA != 0 {
                 user.qnkeys = user.qnkeys.saturating_sub(1);
                 user.qnbytes = user.qnbytes.saturating_sub(k.quotalen);
@@ -578,6 +583,7 @@ impl KeyStore {
                 ktype,
                 desc: desc.to_string(),
                 uid,
+                quota_uid: uid,
                 gid,
                 perm,
                 flags: f,
@@ -602,7 +608,7 @@ impl KeyStore {
     /// key_payload_reserve: charge the key's owner for `len` bytes of data.
     fn reserve(&mut self, serial: Serial, len: u32) -> KResult<()> {
         let k = self.k(serial)?;
-        let (uid, in_quota, old) = (k.uid, k.flags & flags::IN_QUOTA != 0, k.datalen);
+        let (uid, in_quota, old) = (k.quota_uid, k.flags & flags::IN_QUOTA != 0, k.datalen);
         if in_quota {
             let (_, maxbytes) = self.limits.of(uid);
             let user = self.users.entry(uid).or_default();
@@ -631,7 +637,7 @@ impl KeyStore {
             k.state = state;
             k.flags &= !flags::USER_CONSTRUCT;
             if first {
-                self.users.entry(k.uid).or_default().nikeys += 1;
+                self.users.entry(k.quota_uid).or_default().nikeys += 1;
             }
         }
     }
@@ -758,8 +764,8 @@ impl KeyStore {
         }
         let replace = self.replaces(r, k).is_some();
         if !replace && r.flags & flags::IN_QUOTA != 0 {
-            let (_, maxbytes) = self.limits.of(r.uid);
-            let used = self.users.get(&r.uid).map_or(0, |u| u.qnbytes);
+            let (_, maxbytes) = self.limits.of(r.quota_uid);
+            let used = self.users.get(&r.quota_uid).map_or(0, |u| u.qnbytes);
             if used.checked_add(LINK_BYTES).is_none_or(|b| b > maxbytes) {
                 return Err(EDQUOT);
             }
@@ -1380,8 +1386,8 @@ impl KeyStore {
             _ => None,
         };
         if existing.is_none() && r.flags & flags::IN_QUOTA != 0 {
-            let (_, maxbytes) = self.limits.of(r.uid);
-            let used = self.users.get(&r.uid).map_or(0, |u| u.qnbytes);
+            let (_, maxbytes) = self.limits.of(r.quota_uid);
+            let used = self.users.get(&r.quota_uid).map_or(0, |u| u.qnbytes);
             if used.checked_add(LINK_BYTES).is_none_or(|b| b > maxbytes) {
                 return Err(EDQUOT);
             }
@@ -1683,8 +1689,10 @@ impl KeyStore {
             return Err(EACCES);
         }
         if let Some(new) = uid.filter(|_| uid_change) {
+            // The charge moves from the user it is on (keyctl_chown_key:
+            // key->user), which fsid_changed may have left apart from uid.
             let (old, in_quota, qlen, inst) = (
-                k.uid,
+                k.quota_uid,
                 k.flags & flags::IN_QUOTA != 0,
                 k.quotalen,
                 k.state != 0,
@@ -1718,7 +1726,9 @@ impl KeyStore {
                 n.qnkeys += 1;
                 n.qnbytes += qlen;
             }
-            self.key_mut(s)?.uid = new;
+            let k = self.key_mut(s)?;
+            k.uid = new;
+            k.quota_uid = new;
         }
         if let Some(g) = gid {
             self.key_mut(s)?.gid = Some(g);
@@ -2215,6 +2225,31 @@ mod tests {
             setuid: uid == 0,
             now: 1000,
         }
+    }
+
+    /// A thread keyring stays charged to the user it was made for when an
+    /// fsuid change gives it a new owner, and its release refunds that
+    /// user (key->user, not key->uid; PR #49 review).
+    #[test]
+    fn a_thread_keyring_is_refunded_to_the_user_charged() {
+        let mut ks = KeyStore::new(rand);
+        let mut s = who(1000);
+        s.fsuid = 0;
+        let mut kc = KeyCred::default();
+        ks.add_key(&s, &mut kc, "user", Some("a"), b"x", spec::THREAD)
+            .unwrap();
+        let charged = |ks: &KeyStore, uid| ks.users().find(|(u, _)| *u == uid).map(|(_, k)| k);
+        // The thread keyring is the real uid's (install_thread_keyring_to_cred),
+        // the key in it the fsuid's.
+        assert!(charged(&ks, 1000).is_some_and(|k| k.nkeys == 1));
+        assert!(charged(&ks, 0).is_some_and(|k| k.nkeys == 1));
+        // setresuid: the thread keyring's owner follows the fsuid.
+        ks.fsid_changed(&s, &kc);
+        let ring = kc.thread.unwrap();
+        assert_eq!(ks.k(ring).unwrap().uid, 0);
+        ks.release_cred(&kc);
+        assert!(charged(&ks, 1000).is_none_or(|k| k == KeyUser::default()));
+        assert!(charged(&ks, 0).is_none_or(|k| k == KeyUser::default()));
     }
 
     #[test]

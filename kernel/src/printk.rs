@@ -62,8 +62,15 @@ pub fn console_verbose() {
     CONSOLE_LEVEL.store(15, Ordering::Relaxed);
 }
 
+/// Held across each change of the console level that reads it first
+/// (CONSOLE_OFF, CONSOLE_ON, CONSOLE_LEVEL), so two at once cannot save the
+/// level the other just lowered (PR #49 review; Linux's do_syslog does
+/// these without a lock). Readers take only the atomic.
+static CONSOLE_STATE: spin::Mutex<()> = spin::Mutex::new(());
+
 /// syslog CONSOLE_OFF: the console takes only the minimum level.
 pub fn console_off() {
+    let _state = CONSOLE_STATE.lock();
     if SAVED_CONSOLE_LEVEL.load(Ordering::Relaxed) == 0 {
         SAVED_CONSOLE_LEVEL.store(CONSOLE_LEVEL.load(Ordering::Relaxed), Ordering::Relaxed);
     }
@@ -72,6 +79,7 @@ pub fn console_off() {
 
 /// syslog CONSOLE_ON: the level CONSOLE_OFF saved, if it saved one.
 pub fn console_on() {
+    let _state = CONSOLE_STATE.lock();
     let saved = SAVED_CONSOLE_LEVEL.swap(0, Ordering::Relaxed);
     if saved != 0 {
         CONSOLE_LEVEL.store(saved, Ordering::Relaxed);
@@ -81,6 +89,7 @@ pub fn console_on() {
 /// syslog CONSOLE_LEVEL (1 to 8; the caller checked): set, and nothing
 /// saved any more.
 pub fn console_level(level: u8) {
+    let _state = CONSOLE_STATE.lock();
     set_console_level(level);
     SAVED_CONSOLE_LEVEL.store(0, Ordering::Relaxed);
 }

@@ -732,13 +732,6 @@ fn thread_clone(
     thread.seccomp.copy_from(&current_thread.seccomp);
     #[cfg(feature = "alloc")]
     thread.landlock.copy_from(&current_thread.landlock);
-    // Its keyrings: the process's shared, a thread keyring of its own if
-    // the creator has one (copy_creds with CLONE_THREAD).
-    #[cfg(feature = "alloc")]
-    {
-        let keys = crate::syscall::keys::thread_keys(&current_thread.keys.lock());
-        *thread.keys.lock() = keys;
-    }
     let sets = *current_thread.caps.lock();
     *thread.caps.lock() = sets;
     #[cfg(feature = "alloc")]
@@ -880,10 +873,26 @@ fn thread_clone(
         }
     }
 
+    // Its keyrings: the process's shared, a thread keyring of its own if
+    // the creator has one (copy_creds with CLONE_THREAD). Taken last, once
+    // nothing but the start can fail, which gives them back: a clone that
+    // failed earlier held references and perhaps a new thread keyring
+    // that nothing released (PR #49 review).
+    #[cfg(feature = "alloc")]
+    {
+        let keys = crate::syscall::keys::thread_keys(&current_thread.keys.lock());
+        *thread.keys.lock() = keys;
+    }
+
     // The new thread runs as its own dispatcher task (stage D2), starting
     // from the registers prepared above and a copy of the caller's vector
     // state. (CLONE_CHILD_CLEARTID is honoured by exit_dispatched.)
     if crate::process::start_thread(&proc, &thread, true, req.on(CLONE_SETTLS)).is_err() {
+        #[cfg(feature = "alloc")]
+        {
+            let keys = core::mem::take(&mut *thread.keys.lock());
+            crate::syscall::keys::release_keys(&keys);
+        }
         // The thread never ran: take it out again (with its kernel
         // stack), or it counted as alive and its process could never
         // finish exiting (N-46); and put the TID words back.

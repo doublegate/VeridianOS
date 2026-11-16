@@ -33,13 +33,19 @@ macro_rules! println {
 macro_rules! print {
     ($($arg:tt)*) => ({
         // The log ring keeps every line; the console shows it below
-        // console_loglevel (`printk`).
-        $crate::printk::record(format_args!($($arg)*));
-        if $crate::printk::console_enabled() {
-            $crate::serial::_serial_print(format_args!($($arg)*));
-            $crate::graphics::fbcon::_fbcon_print(format_args!($($arg)*));
+        // console_loglevel (`printk`). The arguments are evaluated once,
+        // and that one value goes to every sink (the `match` keeps its
+        // temporaries for the whole statement; PR #49 review).
+        match format_args!($($arg)*) {
+            args => {
+                $crate::printk::record(args);
+                if $crate::printk::console_enabled() {
+                    $crate::serial::_serial_print(args);
+                    $crate::graphics::fbcon::_fbcon_print(args);
+                }
+                $crate::print_capture::_capture_print(args);
+            }
         }
-        $crate::print_capture::_capture_print(format_args!($($arg)*));
     });
 }
 
@@ -60,12 +66,17 @@ macro_rules! println {
 macro_rules! print {
     ($($arg:tt)*) => ({
         use core::fmt::Write;
-        $crate::printk::record(format_args!($($arg)*));
-        if $crate::printk::console_enabled() {
-            $crate::print::with_console(|| {
-                let mut _w = $crate::arch::aarch64::direct_uart::DirectUartWriter;
-                let _ = _w.write_fmt(format_args!($($arg)*));
-            });
+        // Evaluated once, for both sinks (PR #49 review).
+        match format_args!($($arg)*) {
+            args => {
+                $crate::printk::record(args);
+                if $crate::printk::console_enabled() {
+                    $crate::print::with_console(|| {
+                        let mut _w = $crate::arch::aarch64::direct_uart::DirectUartWriter;
+                        let _ = _w.write_fmt(args);
+                    });
+                }
+            }
         }
     });
 }
@@ -82,9 +93,14 @@ macro_rules! println {
 #[macro_export]
 macro_rules! print {
     ($($arg:tt)*) => ({
-        $crate::printk::record(format_args!($($arg)*));
-        if $crate::printk::console_enabled() {
-            $crate::serial::_serial_print(format_args!($($arg)*));
+        // Evaluated once, for both sinks (PR #49 review).
+        match format_args!($($arg)*) {
+            args => {
+                $crate::printk::record(args);
+                if $crate::printk::console_enabled() {
+                    $crate::serial::_serial_print(args);
+                }
+            }
         }
     });
 }

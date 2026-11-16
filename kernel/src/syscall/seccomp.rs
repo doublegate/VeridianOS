@@ -119,15 +119,26 @@ pub fn prctl_get() -> SyscallResult {
     Ok(thread.seccomp.mode() as usize)
 }
 
+/// The return register after a TRAP, as Linux's syscall_rollback leaves
+/// it: the call number on x86_64, the first argument (seccomp_data's
+/// args[0], bytes 16..24) elsewhere.
+fn rolled_back(nr: usize, sd: &[u8; 64]) -> isize {
+    if cfg!(target_arch = "x86_64") {
+        nr as isize
+    } else {
+        let mut a0 = [0u8; 8];
+        a0.copy_from_slice(&sd[16..24]);
+        u64::from_ne_bytes(a0) as isize
+    }
+}
+
 /// prctl(PR_SET_SECCOMP, mode, filter): strict, or a filter without flags.
+/// Strict mode ignores `filter`, as prctl_set_seccomp sets it to NULL: a
+/// variadic `prctl(PR_SET_SECCOMP, SECCOMP_MODE_STRICT)` passes whatever
+/// the register held (PR #49 review).
 pub fn prctl_set(mode: usize, filter: usize) -> SyscallResult {
     match mode {
-        1 => {
-            if filter != 0 {
-                return Err(SyscallError::InvalidArgument);
-            }
-            set_strict()
-        }
+        1 => set_strict(),
         2 => set_filter(0, filter),
         _ => Err(SyscallError::InvalidArgument),
     }
@@ -392,8 +403,11 @@ fn act(
             if !crate::process::signals::queue_fault(info) {
                 let _ = super::process::exit_current(0, SIGSYS as u32);
             }
-            // The handler sees the registers as they were.
-            Outcome::Skip(nr as isize)
+            // The handler sees the registers as they were (syscall_rollback):
+            // on x86_64 rax is orig_ax, the number; AArch64 and RISC-V put
+            // back x0/a0, the first argument (orig_x0, orig_a0), which the
+            // return register shares (PR #49 review).
+            Outcome::Skip(rolled_back(nr, sd))
         }
         // No tracer can be attached yet (ptrace, Track C item 8): ENOSYS,
         // as Linux without one.

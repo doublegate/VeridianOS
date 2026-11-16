@@ -170,7 +170,9 @@ their check, for a few shared reasons:
   system call groups.
 - **Kernel configuration.** `/boot/config-<release>` (ADR 0023) sets an option only where the
   kernel does what Linux built with it does, so the tests that need an option it leaves unset
-  (network namespaces until an interface can be configured, AIO, io_uring, keys, loop devices, NUMA, swap, seccomp and the rest in `abi/kconfig.map`) are TCONF, as on a
+  (network namespaces until an interface can be configured, AIO, io_uring, loop devices, NUMA,
+  swap and the rest in `abi/kconfig.map`; keys, seccomp and Landlock are set since v0.28) are
+  TCONF, as on a
   Linux kernel built without them.
 - **Missing calls.** mlock, msync, sched_getparam and the other calls the
   coverage tables list as missing (v0.28 item 5, ADR 0027);

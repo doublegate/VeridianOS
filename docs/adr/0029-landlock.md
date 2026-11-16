@@ -53,6 +53,13 @@ Two facts shape the design:
   point contributes three kinds of key: the mount's root, the roots of the mounts it covers,
   and the directory under them all, which Linux's walk up also visits (`follow_up`). The key
   is `fs::inode_key` of the base node, so idmapped views are transparent.
+- The walk is bound to the object the lookup resolved by a final identity comparison: when
+  the caller holds that object and the walk ends at a different one (a rename between the
+  lookup and the check), the ancestors are not the object's, so the check keeps only the
+  object's own key and grants what rules on the object itself allow. Like a part of the path
+  that has gone, this can only grant less. Linux walks the object's own parents (`d_parent`)
+  and so has no such window; a check here can then be refused where Linux's would pass, only
+  under that race.
 - The check then reads that list once from the target up, which is O(depth) with no lookup
   per ancestor. The walk happens only when the caller's domain is not empty, so unrestricted
   processes pay one null test per hook.

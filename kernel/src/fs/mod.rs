@@ -1635,7 +1635,10 @@ impl MountTable {
     /// mounts it covers and the directory under them all, as Linux's walk up
     /// goes through `follow_up`. `last` is the object itself when the caller
     /// holds it. A part that has gone is left out, which can only grant
-    /// less.
+    /// less. So is the whole chain when the walk ends at an object other
+    /// than `last` (a rename between the lookup and the check): the
+    /// ancestors are then not `last`'s, and only its own key is kept (PR
+    /// #49 review).
     #[cfg(feature = "alloc")]
     fn ancestry(
         &self,
@@ -1676,6 +1679,13 @@ impl MountTable {
             };
         }
         let target = match last {
+            Some(l) if complete && inode_key(&node) != inode_key(l) => {
+                let internal = l.as_any().is_some_and(|a| a.is::<nsfs::NsFileNode>());
+                return veridian_landlock::Ancestry {
+                    keys: alloc::vec![Some(inode_key(l))],
+                    internal,
+                };
+            }
             Some(l) => l.clone(),
             None if complete => node,
             None => {
@@ -3568,6 +3578,35 @@ pub fn append_file(path: &str, data: &[u8]) -> Result<usize, KernelError> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// Landlock's walk: the object and every directory above it; when the
+    /// walk reaches an object other than the one the lookup gave (a rename
+    /// in between), no ancestors, only that object's own key (PR #49
+    /// review).
+    #[test]
+    fn landlock_ancestry_is_the_looked_up_objects() {
+        let vfs = Vfs::new();
+        vfs.mount_root(Arc::new(ramfs::RamFs::new())).unwrap();
+        let root = vfs.root_fs().unwrap().root();
+        let a = root.mkdir("a", Permissions::default()).unwrap();
+        let x = a.create("x", Permissions::default()).unwrap();
+        let other = root.create("y", Permissions::default()).unwrap();
+        let path = [String::from("a"), String::from("x")];
+        let t = vfs.mounts().snapshot();
+        let keys = |anc: veridian_landlock::Ancestry| anc.keys;
+        assert_eq!(
+            keys(t.ancestry(&path, Some(&x))),
+            [
+                Some(inode_key(&x)),
+                Some(inode_key(&a)),
+                Some(inode_key(&root))
+            ]
+        );
+        assert_eq!(
+            keys(t.ancestry(&path, Some(&other))),
+            [Some(inode_key(&other))]
+        );
+    }
 
     /// Linux's device-number encoding (`new_encode_dev`): 12 bits of
     /// major, 20 of minor, both round-trip.

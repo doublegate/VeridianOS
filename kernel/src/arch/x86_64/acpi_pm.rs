@@ -1028,6 +1028,34 @@ pub fn acpi_hibernate_s4() -> KernelResult<()> {
 ///
 /// Writes the S5 SLP_TYP value with SLP_EN to PM1a_CNT. The system
 /// should power off; this function does not return on success.
+/// The S5 register writes, read while their lock can still be taken:
+/// reboot's power off reads them before it stops the other CPUs, then
+/// [`S5::enter`] only writes ports (PR #49 review).
+#[derive(Clone, Copy)]
+pub struct S5 {
+    info: FadtPmInfo,
+}
+
+/// The S5 writes, if ACPI PM is set up.
+pub fn prepare_s5() -> Option<S5> {
+    if !PM_INITIALIZED.load(Ordering::Acquire) {
+        return None;
+    }
+    Some(S5 {
+        info: *FADT_PM_INFO.lock(),
+    })
+}
+
+impl S5 {
+    /// Request S5: port writes only, no lock and no output, so it works
+    /// with the other CPUs stopped wherever they were.
+    pub fn enter(&self) {
+        let slp_value = (self.info.slp_typ_s5 << 10) | SLP_EN;
+        write_pm1a_cnt(&self.info, slp_value);
+        write_pm1b_cnt(&self.info, slp_value);
+    }
+}
+
 pub fn acpi_shutdown_s5() -> KernelResult<()> {
     if !PM_INITIALIZED.load(Ordering::Acquire) {
         return Err(KernelError::NotInitialized {
