@@ -2189,6 +2189,29 @@ impl<'a> CallerView<'a> {
         self.ctx.mounts.snapshot().walk_canonical(&parts).ok()
     }
 
+    /// The node at canonical `path` in the caller's tree or in a detached
+    /// tree, for a Landlock check that an object is still where its path
+    /// says. [`Self::canonical_node`] answers `None` for a detached path,
+    /// so a check built on it refused a link into an `open_tree` copy even
+    /// for a domain with no filesystem rule (PR #49 review).
+    #[cfg(feature = "alloc")]
+    pub fn landlock_node_at(&self, path: &str) -> Option<Arc<dyn VfsNode>> {
+        let Some((id, rest)) = mount::parse_detached(path) else {
+            return self.canonical_node(path);
+        };
+        let (tree, point) = mount::detached_place(id)?;
+        let full = match point {
+            Some(p) if p != "/" => alloc::format!("{p}{rest}"),
+            _ => String::from(rest),
+        };
+        let parts: Vec<String> = full
+            .split('/')
+            .filter(|c| !c.is_empty())
+            .map(String::from)
+            .collect();
+        tree.snapshot().walk_canonical(&parts).ok()
+    }
+
     /// The node at canonical `path` (a path in the whole tree, no symlinks
     /// or `..`), and that path, for the directory holding it: what a
     /// Landlock check of a name's parent needs. `None` for the root, a

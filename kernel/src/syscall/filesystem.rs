@@ -4245,12 +4245,18 @@ pub(crate) fn link_at(
         .then(|| crate::fs::RENAME_LOCK.lock());
     #[cfg(feature = "alloc")]
     if vfs.landlock().is_some() {
+        // Only a domain that handles a filesystem right checks a link
+        // (landlock_get_applicable_subject): one with network or scope
+        // layers alone is not held to where the names are now.
+        let fs_checked = vfs.landlock().is_some_and(|d| d.handles_fs());
         // The new name's directory, found before renames were held off:
-        // still where its path says, or the check below would use another
-        // directory's chain (PR #49 review).
-        let parent_there = vfs
-            .canonical_node(&parent_canonical)
-            .is_some_and(|n| crate::fs::inode_key(&n) == crate::fs::inode_key(&parent));
+        // still where its path says, in the caller's tree or a detached
+        // one, or the check below would use another directory's chain (PR
+        // #49 review).
+        let parent_there = !fs_checked
+            || vfs
+                .landlock_node_at(&parent_canonical)
+                .is_some_and(|n| crate::fs::inode_key(&n) == crate::fs::inode_key(&parent));
         if !parent_there {
             return Err(SyscallError::PermissionDenied);
         }
@@ -4262,10 +4268,11 @@ pub(crate) fn link_at(
         // An O_TMPFILE file made to be named has no entry: its path is
         // `<dir>/#<inode>`, whose directory is the one it was made in.
         let nameless_tmpfile = target.link_count() == 0 && target.tmpfile_linkable();
-        let still_there = nameless_tmpfile
+        let still_there = !fs_checked
+            || nameless_tmpfile
             || old_canonical
                 .as_deref()
-                .and_then(|p| vfs.canonical_node(p))
+                .and_then(|p| vfs.landlock_node_at(p))
                 .is_some_and(|n| crate::fs::inode_key(&n) == crate::fs::inode_key(&target));
         if !still_there {
             return Err(SyscallError::PermissionDenied);
