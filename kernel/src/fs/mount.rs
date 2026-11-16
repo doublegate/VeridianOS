@@ -141,6 +141,41 @@ pub fn detached_place(id: u64) -> Option<(Arc<Mounts>, Option<String>)> {
     }
 }
 
+/// [`detached_place`] together with the table of the tree it names, as
+/// one observation: the registry is changed only while that tree's table
+/// is write-locked, so reading the place again under the table's read lock
+/// tells whether they match, and a mismatch (a move in between) is read
+/// again (PR #47 review), as often as it takes: an unchecked pair could
+/// name a mount another took the place of, so there is no fallback, as a
+/// seqlock reader has none (read_seqretry; PR #53 review). Each retry
+/// follows a move that completed. Lock order as the writers': table, then
+/// registry.
+pub(super) fn coherent_place(
+    id: u64,
+) -> Option<(Arc<Mounts>, Option<String>, Arc<super::MountTable>)> {
+    loop {
+        let (tree, point) = detached_place(id)?;
+        let table = tree.table.read();
+        match detached_place(id) {
+            Some((again, at)) if Arc::ptr_eq(&again, &tree) && at == point => {
+                let snapshot = table.clone();
+                drop(table);
+                return Some((tree, point, snapshot));
+            }
+            None => return None,
+            _ => core::hint::spin_loop(),
+        }
+    }
+}
+
+/// The id `tree` is registered under while it is still a detached tree.
+pub fn detached_id_of(tree: &Arc<Mounts>) -> Option<u64> {
+    TREES.lock().iter().find_map(|(id, place)| match place {
+        Place::Detached(t) if core::ptr::eq(t.as_ptr(), Arc::as_ptr(tree)) => Some(*id),
+        _ => None,
+    })
+}
+
 /// The detached tree `id`, if it is still detached.
 pub fn detached_tree(id: u64) -> Option<Arc<Mounts>> {
     match detached_place(id)? {
@@ -173,6 +208,30 @@ fn points_moved(tree: &Mounts, to: impl Fn(&str) -> Option<String>) {
             }
         }
     }
+}
+
+/// pivot_root(".", ".") in `tree`: a tree attached at or under `new` moves
+/// up with it to `root`. One attached elsewhere under `root` was parked
+/// with the old root, which no path names: the new root's files are at its
+/// old place now, so its entry goes and a descriptor into it fails
+/// (ENOENT) rather than reaching them. Linux's descriptors hold their
+/// mounts, so they still work there (docs/KNOWN-LIMITATIONS.md; PR #53
+/// review).
+fn points_parked(tree: &Mounts, root: &str, new: &str) {
+    TREES.lock().retain(|_, place| {
+        let Place::Attached { tree: t, point } = place else {
+            return true;
+        };
+        if !core::ptr::eq(t.as_ptr(), tree) {
+            return true;
+        }
+        if path_is_under(point, new) {
+            *point = rebase(point, new, root);
+            true
+        } else {
+            !path_is_under(point, root)
+        }
+    });
 }
 
 /// Detached tree `id` was attached at `point` in `tree`: its files are
@@ -1503,6 +1562,11 @@ impl Mounts {
             // place, which no path reaches any more.
             if to != root {
                 points_moved(self, |p| pivot_mount(p, &root, new, &to));
+            } else {
+                // pivot_root(".", "."): the new root's tree, the tree at
+                // `new` itself included, moves up to the root (PR #47 and
+                // #53 reviews); the old one is parked.
+                points_parked(self, &root, new);
             }
             Ok(())
         })
@@ -1528,12 +1592,7 @@ impl Mounts {
     /// Where `mount` is in this tree now: the place of its stack, "/" for
     /// the root's; None once it is in none here (unmounted, or parked).
     pub fn point_of(&self, mount: &Arc<Mount>) -> Option<String> {
-        let t = self.snapshot();
-        let here = |p: &str| t.stack(p).iter().any(|m| Arc::ptr_eq(m, mount));
-        if t.root.is_some() && here("/") {
-            return Some(String::from("/"));
-        }
-        t.mounts.keys().find(|p| here(p)).cloned()
+        point_in(&self.snapshot(), mount)
     }
 
     /// [`Mounts::reconfigure`] of `mount` itself, wherever it is (fspick's
@@ -1560,6 +1619,16 @@ impl Mounts {
         if (mount_to_ro || sb_to_ro) && writers() {
             return Err(MountError::Busy);
         }
+        // The mount must still be in this tree as it changes: the read lock,
+        // held across the check and the change, keeps an attach (which
+        // empties a detached tree under its write lock) from moving it to
+        // another tree in between, so what a caller checked about this tree
+        // (whose namespace it is) still holds (PR #53 review). EINVAL, as a
+        // context whose mount is gone.
+        let table = self.table.read();
+        if point_in(&table, mount).is_none() {
+            return Err(MountError::Invalid);
+        }
         if let Some(ro) = sb_readonly {
             mount
                 .sb
@@ -1567,6 +1636,7 @@ impl Mounts {
                 .store(ro || mount.fs().is_readonly(), Ordering::Release);
         }
         mount.set_flags(mnt);
+        drop(table);
         Ok(())
     }
 
@@ -1937,6 +2007,16 @@ fn relative<'a>(path: &'a str, at: &str) -> &'a str {
 
 /// Where a mount at `path` goes when pivot_root moves the tree at `new` to
 /// `root` and the rest of `root`'s to `to`; None outside `root`.
+/// Where `mount` is in table `t`: the place of its stack, "/" for the
+/// root's; None in none (unmounted, or parked).
+fn point_in(t: &MountTable, mount: &Arc<Mount>) -> Option<String> {
+    let here = |p: &str| t.stack(p).iter().any(|m| Arc::ptr_eq(m, mount));
+    if t.root.is_some() && here("/") {
+        return Some(String::from("/"));
+    }
+    t.mounts.keys().find(|p| here(p)).cloned()
+}
+
 fn pivot_mount(path: &str, root: &str, new: &str, to: &str) -> Option<String> {
     if path_is_under(path, new) {
         Some(rebase(path, new, root))
@@ -2651,6 +2731,60 @@ mod tests {
             detached_place(id).map(|(_, p)| p),
             Some(Some(String::from("/c/sub")))
         );
+
+        // pivot_root(".", "."), the parked form: the new root's tree moves
+        // up all the same.
+        let vfs = pivot_tree();
+        let t = vfs.mounts();
+        let tree = Arc::new(t.detached_new(tmpfs(), "att".into(), 0, false));
+        let id = register_detached(&tree);
+        t.attach_tree_then(&tree, "/c/new/sub", true, || {
+            mark_attached(id, t, "/c/new/sub")
+        })
+        .unwrap();
+        t.pivot_root("/c", "/c/new", "/c/new").unwrap();
+        assert_eq!(
+            detached_place(id).map(|(_, p)| p),
+            Some(Some(String::from("/c/sub")))
+        );
+
+        // A tree attached at the new root's place itself moves to the root,
+        // in both forms (PR #53 review); one parked with the old root has
+        // no place a path reaches, so its entry goes.
+        for old in ["/c/new/old", "/c/new"] {
+            let vfs = pivot_tree();
+            let t = vfs.mounts();
+            let at_new = Arc::new(t.detached_new(tmpfs(), "new".into(), 0, false));
+            let nid = register_detached(&at_new);
+            t.attach_tree_then(&at_new, "/c/new", true, || mark_attached(nid, t, "/c/new"))
+                .unwrap();
+            if old == "/c/new/old" {
+                vfs.lookup(&vfs.kernel_context(), "/c/new", "/", true)
+                    .unwrap()
+                    .0
+                    .mkdir("old", crate::fs::Permissions::default())
+                    .unwrap();
+            }
+            let other = Arc::new(t.detached_new(tmpfs(), "other".into(), 0, false));
+            let oid = register_detached(&other);
+            t.attach_tree_then(&other, "/c/other", true, || {
+                mark_attached(oid, t, "/c/other")
+            })
+            .unwrap();
+            t.pivot_root("/c", "/c/new", old).unwrap();
+            assert_eq!(
+                detached_place(nid).map(|(_, p)| p),
+                Some(Some(String::from("/c"))),
+                "pivot_root to {old}"
+            );
+            let other_now = detached_place(oid).map(|(_, p)| p);
+            if old == "/c/new" {
+                assert_eq!(other_now, None, "parked");
+            } else {
+                // The old root went to put_old, now /c/old.
+                assert_eq!(other_now, Some(Some(String::from("/c/old/other"))));
+            }
+        }
     }
 
     /// A detached tree's root is named without a trailing slash, so it is
@@ -3318,6 +3452,53 @@ mod tests {
         assert!(!t.mount_at("/b").unwrap().sb_readonly());
         t.umount("/c", Umount::default(), "/", false).unwrap();
         assert_eq!(t.point_of(&picked), None);
+        // Gone from the tree, it is not changed through it (PR #53 review).
+        assert_eq!(
+            t.reconfigure_mount(&picked, None, Some(false), || false),
+            Err(MountError::Invalid)
+        );
+        assert!(picked.sb_readonly());
+    }
+
+    /// A mount in a detached tree that was attached since is changed where
+    /// it is now, and no longer through the emptied tree; the registry,
+    /// keyed by the outer tree's id, still finds a mount attached inside it
+    /// (fspick of a nested tree's mount; PR #53 review).
+    #[test]
+    fn a_mount_in_an_attached_tree_is_found_through_its_id() {
+        let vfs = work_tree();
+        let t = vfs.mounts();
+        let outer = Arc::new(t.detached_new(tmpfs(), "outer".into(), 0, false));
+        let oid = register_detached(&outer);
+        vfs.lookup(&vfs.kernel_context(), &detached_path(oid, "/"), "/", true)
+            .unwrap()
+            .0
+            .mkdir("m", crate::fs::Permissions::default())
+            .unwrap();
+        let inner = Arc::new(t.detached_new(tmpfs(), "inner".into(), 0, false));
+        let iid = register_detached(&inner);
+        outer
+            .attach_tree_then(&inner, "/m", true, || {
+                mark_attached(iid, &outer, "/m");
+                transferred(&inner, &outer, "/m");
+            })
+            .unwrap();
+        let picked = outer.mount_at("/m").unwrap();
+        t.attach_tree_then(&outer, "/b", true, || {
+            mark_attached(oid, t, "/b");
+            transferred(&outer, t, "/b");
+        })
+        .unwrap();
+        let (now, _) = detached_place(oid).unwrap();
+        assert!(Arc::ptr_eq(&now, t));
+        assert_eq!(now.point_of(&picked).as_deref(), Some("/b/m"));
+        assert_eq!(
+            outer.reconfigure_mount(&picked, None, Some(true), || false),
+            Err(MountError::Invalid)
+        );
+        now.reconfigure_mount(&picked, None, Some(true), || false)
+            .unwrap();
+        assert!(picked.sb_readonly());
     }
 
     fn copy_locked(t: &Mounts) -> Mounts {

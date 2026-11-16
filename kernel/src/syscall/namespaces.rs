@@ -562,9 +562,14 @@ pub(super) fn open_ns(ns: NsRef) -> SyscallResult {
 
 /// [`open_ns`] with close-on-exec as `cloexec` says (fsmount's and
 /// open_tree's namespace descriptors take it from their flags).
-pub(super) fn open_ns_with(ns: NsRef, cloexec: bool) -> SyscallResult {
+/// The nsfs file for `ns`, not yet installed.
+pub(super) fn ns_file(ns: NsRef) -> crate::fs::file::File {
     use crate::fs::file::{File, OpenFlags};
-    let file = File::new(Arc::new(NsFileNode::new(ns)), OpenFlags::read_only());
+    File::new(Arc::new(NsFileNode::new(ns)), OpenFlags::read_only())
+}
+
+pub(super) fn open_ns_with(ns: NsRef, cloexec: bool) -> SyscallResult {
+    let file = ns_file(ns);
     let caller = process::current_process().ok_or(SyscallError::InvalidState)?;
     let fd = caller
         .file_table

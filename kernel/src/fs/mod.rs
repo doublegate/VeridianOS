@@ -2237,7 +2237,8 @@ impl Vfs {
         let gone = || KernelError::FsError(crate::error::FsError::NotFound);
         let (id, rest) = mount::parse_detached(path).ok_or_else(gone)?;
         let rest = if rest.is_empty() { "/" } else { rest };
-        let (tree, point) = mount::detached_place(id).ok_or_else(gone)?;
+        // The place and the table it names, observed together.
+        let (tree, point, table) = mount::coherent_place(id).ok_or_else(gone)?;
         // `rel` from directory `start`, or `start` itself, in `root`.
         let walk_in = |t: &MountTable, start: &str, root: &str| {
             let (p, cwd) = if rel.is_empty() {
@@ -2247,7 +2248,7 @@ impl Vfs {
             };
             t.resolve_in(p, cwd, root, follow_last, 0, ctx.creds.clone(), ctx.resolve)
         };
-        let walk = |start: &str| walk_in(&tree.snapshot(), start, "/");
+        let walk = |start: &str| walk_in(&table, start, "/");
         match point {
             None => {
                 let (node, canon) = walk(rest)?;
@@ -2271,7 +2272,7 @@ impl Vfs {
                     if ctx.root == FAILFS_ROOT {
                         let whole = alloc::format!("{WHOLE_TREE}{full}");
                         if rel.is_empty() {
-                            return ctx.mounts.snapshot().resolve_in(
+                            return table.resolve_in(
                                 &whole,
                                 "/",
                                 &ctx.root,
@@ -2283,7 +2284,7 @@ impl Vfs {
                         }
                         // A relative walk from a real directory under a
                         // failfs root goes on in the whole tree.
-                        return walk_in(&ctx.mounts.snapshot(), &full, &ctx.root);
+                        return walk_in(&table, &full, &ctx.root);
                     }
                     if !path_is_under(&point, &ctx.root) {
                         return Err(gone());
@@ -2298,7 +2299,7 @@ impl Vfs {
                     } else {
                         alloc::format!("{at}{rest}")
                     };
-                    return walk_in(&ctx.mounts.snapshot(), &inside, &ctx.root);
+                    return walk_in(&table, &inside, &ctx.root);
                 }
                 let (node, canon) = walk(&full)?;
                 // Another namespace's tree: still named by the id.

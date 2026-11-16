@@ -563,6 +563,12 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     inode cache with open counts and orphan list (N-117), crash consistency ADR (journal or shadow
     superblock; N-121), page cache and shared mmap (N-125), dentry cache and hashed directories
     (N-130), stable getdents cookies (N-124), atomic O_APPEND (N-126).
+    - [ ] Places held as objects, not paths: open descriptors, working directories and roots,
+      and the detached-tree registry hold (mount, dentry) references from the dentry cache, as
+      Linux's `struct path`. Then a descriptor into a tree parked by `pivot_root(".", ".")`
+      keeps working (ENOENT since PR #53, which was better than reaching the new root's file
+      at the old path), a working directory in the parked old root stays there, and files
+      already open follow a pivot_root (docs/KNOWN-LIMITATIONS.md, mounts).
   - [ ] **v0.29 memory architecture** (also N-267 demand-paging mapping overlap, N-268 empty
     page tables kept): lazy anonymous memory, range-indexed mappings, per-frame
     refcount array, ranged per-mm TLB flushes, per-VMA locks (N-143); page tables without
