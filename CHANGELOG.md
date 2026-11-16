@@ -893,6 +893,11 @@
 
 ### Fixed
 
+- `semget` no longer walks every semaphore set to check SEMMNS: the namespace keeps the number
+  of semaphores in use as sets are made and removed, as Linux's `used_sems` does, and SEM_INFO
+  reads the same count. Creating set n cost a walk over n sets, so LTP `semget05`, which makes
+  sets until SEMMNI (32,000), took 32 of its 60 seconds and timed out whenever the host was
+  busy.
 - No limit on threads per process, as on Linux: the cap of 256 is gone, and thread creation is
   limited only by RLIMIT_NPROC per real user and by `kernel.threads-max` for the whole system
   (new, `/proc/sys/kernel/threads-max`, root-writable within 20..=0x3fffffff; by default as many
