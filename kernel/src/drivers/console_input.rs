@@ -273,9 +273,11 @@ fn raw_step(
     }
 }
 
+/// The tty echo of what was typed: program-facing output, not the kernel
+/// log's (`print::console_write`).
 fn echo_bytes(bytes: &[u8]) {
     for &b in bytes {
-        crate::print!("{}", b as char);
+        crate::print::console_write(format_args!("{}", b as char));
     }
 }
 

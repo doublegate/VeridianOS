@@ -170,22 +170,31 @@ their check, for a few shared reasons:
   system call groups.
 - **Kernel configuration.** `/boot/config-<release>` (ADR 0023) sets an option only where the
   kernel does what Linux built with it does, so the tests that need an option it leaves unset
-  (network namespaces until an interface can be configured, AIO, io_uring, keys, loop devices, NUMA, swap, seccomp and the rest in `abi/kconfig.map`) are TCONF, as on a
+  (network namespaces until an interface can be configured, AIO, io_uring, loop devices, NUMA,
+  swap and the rest in `abi/kconfig.map`; keys, seccomp and Landlock are set since v0.28) are
+  TCONF, as on a
   Linux kernel built without them.
 - **Missing calls.** mlock, msync, sched_getparam and the other calls the
   coverage tables list as missing (v0.28 item 5, ADR 0027);
   most of `/proc/sys` (it has `kernel/pid_max`, `kernel/cap_last_cap`, `kernel/core_pattern`,
-  `kernel/ostype`, `kernel/osrelease`, `kernel/version` and the System V limits), parts of `/proc/<pid>/stat` and `status`; `/proc/<pid>/exe` (only
-  `/proc/self/exe` exists), and `/proc/<pid>/cmdline` holds the process name rather than its
-  arguments.
+  `kernel/ostype`, `kernel/osrelease`, `kernel/version` and the System V limits), parts of
+  `status`; `/proc/<pid>/exe` (only `/proc/self/exe` exists), and `/proc/<pid>/cmdline` holds
+  the process name rather than its arguments.
+- **No `/proc/<pid>/stat`.** The file does not exist, so every test that waits for another
+  process to reach a state (LTP's `TST_PROCESS_STATE_WAIT`, Open POSIX's `include/proc.h`) stops
+  there: 27 LTP tests are TBROK on its ENOENT (among them the futex, epoll_wait, pause,
+  msgsnd/msgrcv and landlock10 tests; the cheap LTP fixes of MASTER_TODO item 5).
+- **Tests that run for a set time.** A test that declares a `.runtime` (keyctl02: 60 s) is given
+  that time plus LTP's own timeout, more than the 60-second limit per test under KVM, so the
+  harness kills it after its last check: keyctl02 reports TPASS and is then a TIMEOUT.
+- **seccomp01 and musl.** Its last case installs a filter that allows clone but not fork, then
+  forks. musl's fork uses SYS_fork where the architecture has one (x86_64), so the child is
+  killed by SIGSYS, as it would be on Linux with musl; the test expects glibc's clone.
 - **Memory exhaustion.** libc-test's `malloc-oom`, `malloc-brk-fail` and `pthread_create-oom`
   run until the time limit on all three architectures after the full LTP and Open POSIX runs in
   the same guest (on RISC-V they stopped the whole guest until the runs of 2026-10-30), but
   reached ENOMEM within 10 to 16 s when libc-test ran on its own (x86_64): how they end depends
   on what ran before.
-- **A new process can be missing from /proc for a moment.** Open POSIX tests that wait for a
-  child's state in `/proc/<pid>/stat` (its `include/proc.h`) read it right after fork and now and
-  then find no such file (`sem_timedwait/9-1`, once in four x86_64 runs; it is marked FLAKY).
 - **Stress tests are slow.** Open POSIX's `shm_open/23-1` (1,000 processes) does not finish within
   the limit; tearing down that many processes takes longer than a minute.
 - **wordexp.** libc-test's `functional/wordexp` runs until the time limit on all three
@@ -602,8 +611,11 @@ filesystem.
 
 ### Filesystem semantics (N-117, N-123, N-124, N-126, N-128 to N-130; sprints D, G, v0.29)
 
-- **Unlinked open files (N-117).** BlockFS frees an inode as soon as it is unlinked, even while a
-  descriptor is still open, so that descriptor can read the next file that reuses the inode.
+- **Unlinked open files (N-117).** BlockFS frees a file's data at its last unlink even while a
+  descriptor still has it open, so a program that writes a file, unlinks it and reads it back
+  through the descriptor gets nothing (Linux keeps the data until the last close). The inode
+  number itself is held while any descriptor has the file, so it is not given to another file
+  meanwhile. Scheduled to be fixed before v0.28.0, in its own change.
 - **Directory listing (N-124).** `getdents64` re-reads the directory and seeks by index, so
   removing entries while listing (`rm -r`) skips entries; listing is O(n^2).
 - **`O_APPEND` (N-126)** is not atomic across separate opens of a file.
@@ -744,6 +756,11 @@ affected. Below the socket layer:
   segments carry checksum 0, `accept` returns a fresh socket instead of the connection, in-window
   sequence numbers are not checked (RFC 5961 injection), and the initial sequence number is a
   global counter (RFC 6528). Whether to adopt smoltcp is decided at the start of sprint F3.
+- **Port 0 (the sockets group, MASTER_TODO item 5).** bind() to port 0 keeps port 0 instead of
+  choosing a free port from `ip_local_port_range`, so getsockname reports 0 and a second port-0
+  bind is EADDRINUSE, and an address counts as taken only once listen() registers it, not at
+  bind() as on Linux. LTP's landlock08 stops on this before its Landlock checks (the EACCES
+  ones pass).
 - **UDP (N-66, N-67):** datagrams are delivered last-in first-out, a port-0 socket captures every
   datagram, checksums are not verified and the IPv6 pseudo-header is missing.
 - **IPv4 and ARP (N-70 to N-72):** an ARP miss sends the packet to the broadcast address, the ARP
@@ -814,9 +831,41 @@ Page protections now follow `prot` (fixed in v0.27, N-132 to N-137). What remain
 - The TLS 1.3 client does not verify certificate signatures or the server's CertificateVerify.
 - MAC labels every file and user process alike; its capability step only logs, once per access,
   which floods the audit ring.
-- `prctl` implements only the name and timer-slack options; everything else, including
-  `PR_SET_NO_NEW_PRIVS` and `PR_SET_SECCOMP`, fails with EINVAL (fixed in v0.27, N-151). The
-  seccomp filter itself is never consulted.
+- `prctl` implemented only the name and timer-slack options (fixed in v0.27, N-151); seccomp
+  works since v0.28 (ADR 0027 decision 27), user notification included; SECCOMP_RET_TRACE
+  is ENOSYS until ptrace can attach a tracer (Track C item 8), as on Linux with none
+  attached.
+- The kernel log has no `/proc/kmsg` or `/dev/kmsg` yet (Track C item 3); syslog(2) reads it.
+  A line printed while another CPU or an interrupt holds the ring is not kept there (it still
+  reaches the console).
+- acct records leave ac_mem, ac_minflt, ac_majflt and ASU at 0 (not counted), and ac_tty at 0
+  (no controlling terminals). `/proc/sys/kernel/acct` is not there; the thresholds are Linux's
+  defaults (4, 2, 30).
+- iopl and ioperm give no ports: ports come from IoPort capabilities (Track M, M2, with the
+  TSS I/O bitmap), and none is granted yet, so LTP's iopl01 and ioperm01, which expect root to
+  get them, fail by that decision.
+- reboot(2)'s CAD_ON and CAD_OFF set Linux's C_A_D flag, but the keyboard does not report
+  Ctrl-Alt-Del yet, so the combination does nothing either way. A CPU spinning with interrupts
+  masked when the machine is stopped is left running for the second the stop waits (there
+  is no NMI stop), as Linux without one.
+- The key retention service (ADR 0027 decision 28) is the core:
+  - There is no usermode helper. request_key behaves as Linux without `/sbin/request-key`
+    (ENOENT and a 60 s negative key), so no instantiation authority exists.
+  - Key descriptions and keyring names must be UTF-8 (EINVAL otherwise); Linux takes any bytes.
+  - Credentials are per process here, so a set*id call moves the calling thread's thread
+    keyring only, not its siblings'.
+- Landlock (ADR 0029) is complete for what exists, with these gaps:
+  - LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET has nothing to refuse until abstract UNIX sockets
+    arrive (Track C item 5, v0.29); the check is part of that task (MASTER_TODO item 10), and
+    the runtime test `landlock` fails if abstract sockets work without it.
+  - Signals sent through SIGIO are not scoped, because no file sends SIGIO yet; the scope is
+    part of the task that adds SIGIO (MASTER_TODO item 10).
+  - The log flags are accepted and log nothing, because there is no audit subsystem.
+  - LTP checks only part of it: landlock08 (network rules) stops on port 0, landlock09
+    (abstract socket scope) on the missing abstract names, and landlock10 (signal scope) on the
+    missing `/proc/<pid>/stat`, each before its Landlock check. The runtime test `landlock`
+    covers the network rules and the signal scope.
+  - The MAC module's check still runs beside Landlock's until the MAC ADR retires it.
 - POSIX shared memory objects have no access control (N-88).
 
 ### Accounts and passwords (N-131, N-153)

@@ -40,9 +40,15 @@ CONFIG_USER_NS y  # H4a creates and maps them, H4b translates ids, H4c checks pr
 CONFIG_PID_NS y  # H5a the namespaces and the main interfaces, H5b the remaining pid crossings
 CONFIG_NET_NS n  # H6 makes the namespaces, each with its own ports and a loopback that is down; unset until an interface can be configured (netlink, SIOCSIFFLAGS)
 CONFIG_CHECKPOINT_RESTORE n  # kcmp only; no PR_SET_MM, map_files or msg_next_id
-CONFIG_SECCOMP n  # no seccomp(2)
-CONFIG_SECCOMP_FILTER n
-CONFIG_BSD_PROCESS_ACCT n  # no acct(2)
+CONFIG_SECCOMP y
+CONFIG_SECCOMP_FILTER y
+CONFIG_SECURITY_LANDLOCK y needs=landlock_create_ruleset,landlock_add_rule,landlock_restrict_self  # ADR 0029, ABI 11
+CONFIG_KEYS y needs=add_key,request_key,keyctl  # ADR 0027 decision 28: the core, user and logon keys
+CONFIG_PERSISTENT_KEYRINGS y needs=keyctl
+CONFIG_BSD_PROCESS_ACCT y needs=acct  # version 3 records, per PID namespace
+CONFIG_BSD_PROCESS_ACCT_V3 y needs=acct
+CONFIG_PRINTK y needs=syslog
+CONFIG_SECURITY_DMESG_RESTRICT y  # ADR 0027 decision 29
 CONFIG_RT_GROUP_SCHED n  # no cgroup hierarchy
 CONFIG_PREEMPT_RT n
 
@@ -87,7 +93,6 @@ CONFIG_MEMORY_FAILURE n
 CONFIG_HWPOISON_INJECT n
 
 ## Keys and crypto
-CONFIG_KEYS n  # no add_key or keyctl
 CONFIG_KEY_DH_OPERATIONS n
 CONFIG_ASYMMETRIC_KEY_TYPE n
 CONFIG_X509_CERTIFICATE_PARSER n

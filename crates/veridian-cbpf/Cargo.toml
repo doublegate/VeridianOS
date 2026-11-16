@@ -1,0 +1,13 @@
+[package]
+name = "veridian-cbpf"
+description = "Classic BPF verifier and interpreter (Linux's), shared by the kernel's seccomp and the user-space Linux runtime"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

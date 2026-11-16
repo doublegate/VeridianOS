@@ -14,6 +14,8 @@ pub mod boot;
 pub mod crypt;
 pub mod fuzzing;
 pub mod kaslr;
+#[cfg(feature = "alloc")]
+pub mod landlock;
 pub mod mac;
 pub mod memory_protection;
 pub mod mldsa;

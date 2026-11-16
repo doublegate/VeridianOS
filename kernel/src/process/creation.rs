@@ -293,6 +293,9 @@ pub struct ExecFile {
     /// refuses it, nosuid ignores its set-ID bits and capabilities (ADR
     /// 0022 H3c).
     pub mnt_flags: u32,
+    /// The file's canonical path in the whole tree, for the Landlock check
+    /// of exec (`None` for a descriptor without one).
+    pub canonical: Option<String>,
 }
 
 #[cfg(feature = "alloc")]
@@ -310,14 +313,47 @@ impl ExecFile {
             filename: String::from(path),
             path_inaccessible: false,
             mnt_flags: mount_flags(&vfs, &canonical),
+            canonical: Some(canonical),
         })
     }
 
     /// EACCES for a file on a noexec mount, before the permission check
-    /// (Linux's may_open, MAY_EXEC on a regular file).
+    /// (Linux's may_open, MAY_EXEC on a regular file); and EACCES unless
+    /// the caller's Landlock domain allows READ_FILE and EXECUTE on it, as
+    /// opening it with FMODE_EXEC asks (hook_file_open).
     pub fn check_mount(&self) -> Result<(), KernelError> {
-        refuse_noexec(self.mnt_flags)
+        refuse_noexec(self.mnt_flags)?;
+        let vfs = crate::fs::get_vfs().as_caller();
+        // Only a domain that handles one of the two rights checks the file
+        // at all, and only then is a file with no path refused: a
+        // network-only domain lets a descriptor-backed program run (PR #49
+        // review).
+        let exec_rights = crate::security::landlock::ll::fs::READ_FILE
+            | crate::security::landlock::ll::fs::EXECUTE;
+        if vfs
+            .landlock()
+            .is_some_and(|d| d.dom.handled().fs & exec_rights != 0)
+        {
+            let path = self
+                .canonical
+                .as_deref()
+                .ok_or(KernelError::PermissionDenied { operation: "exec" })?;
+            landlock_exec(&vfs, path, &self.node)?;
+        }
+        Ok(())
     }
+}
+
+/// Landlock's check of an exec open (hook_file_open with __FMODE_EXEC):
+/// READ_FILE and EXECUTE.
+#[cfg(feature = "alloc")]
+fn landlock_exec(
+    vfs: &crate::fs::CallerView<'_>,
+    canonical: &str,
+    node: &alloc::sync::Arc<dyn crate::fs::VfsNode>,
+) -> Result<(), KernelError> {
+    use crate::security::landlock::ll::fs;
+    vfs.landlock_check(canonical, Some(node), fs::READ_FILE | fs::EXECUTE)
 }
 
 /// The flags of the mount serving canonical `path` in `vfs` (0 where no
@@ -467,6 +503,7 @@ pub(crate) fn read_executable(
     let vfs = crate::fs::get_vfs().as_caller();
     let (node, canonical) = vfs.resolve_path_canonical(path)?;
     refuse_noexec(mount_flags(&vfs, &canonical))?;
+    landlock_exec(&vfs, &canonical, &node)?;
     let read = read_exec_node(&node, caller)?;
     Ok((node, read))
 }
@@ -1001,6 +1038,9 @@ fn exec_image(
         .store(0, core::sync::atomic::Ordering::Release);
     // The command name is the program's file name (N-227).
     *current_thread.comm.lock() = super::thread::comm_from(comm.as_bytes());
+    // The thread and process keyrings go (install_exec_creds).
+    #[cfg(feature = "alloc")]
+    crate::syscall::keys::exec_keys(&mut current_thread.keys.lock());
 
     // The image is replaced: a parent waiting in vfork may run again; the
     // memory it shared with this process is no longer this process's.

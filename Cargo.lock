@@ -379,6 +379,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "veridian-cbpf"
+version = "0.27.0"
+
+[[package]]
 name = "veridian-kernel"
 version = "0.27.0"
 dependencies = [
@@ -395,8 +399,19 @@ dependencies = [
  "riscv",
  "spin",
  "uart_16550",
+ "veridian-cbpf",
+ "veridian-keys",
+ "veridian-landlock",
  "x86_64 0.15.4",
 ]
+
+[[package]]
+name = "veridian-keys"
+version = "0.27.0"
+
+[[package]]
+name = "veridian-landlock"
+version = "0.27.0"
 
 [[package]]
 name = "volatile"

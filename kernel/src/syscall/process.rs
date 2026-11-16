@@ -1089,13 +1089,17 @@ fn change_uids<R>(
     f: impl FnOnce(&mut crate::process::creds::Credentials, bool) -> R,
 ) -> Result<R, SyscallError> {
     let me = crate::process::current_thread().ok_or(SyscallError::InvalidState)?;
-    Ok(proc.change_uids(fs, |c| {
+    let r = proc.change_uids(fs, |c| {
         let may = me
             .caps
             .lock()
             .capable(crate::process::linux_caps::CAP_SETUID);
         f(c, may)
-    }))
+    });
+    // The thread keyring follows the filesystem ids (key_fsuid_changed).
+    #[cfg(feature = "alloc")]
+    super::keys::fsid_changed();
+    Ok(r)
 }
 
 /// A change of the group IDs or the supplementary groups (no capability
@@ -1108,14 +1112,19 @@ fn change_gids<R>(
     f: impl FnOnce(&mut crate::process::creds::Credentials, bool) -> R,
 ) -> Result<R, SyscallError> {
     let me = crate::process::current_thread().ok_or(SyscallError::InvalidState)?;
-    let _threads = proc.threads.lock();
-    Ok(proc.update_credentials(|c| {
+    let threads = proc.threads.lock();
+    let r = proc.update_credentials(|c| {
         let may = me
             .caps
             .lock()
             .capable(crate::process::linux_caps::CAP_SETGID);
         f(c, may)
-    }))
+    });
+    drop(threads);
+    // The thread keyring follows the filesystem ids (key_fsgid_changed).
+    #[cfg(feature = "alloc")]
+    super::keys::fsid_changed();
+    Ok(r)
 }
 
 /// setuid: Linux rules (`Credentials::setuid`); an ID the caller's user
@@ -1645,7 +1654,7 @@ pub fn sys_tkill(tid: usize, signal: usize) -> SyscallResult {
                 .load(core::sync::atomic::Ordering::Acquire)
             {
                 if let Some(thread) = target.get_thread(ThreadId(tid as u64)) {
-                    super::filesystem::kill_one(&caller, pid, 0)?;
+                    super::filesystem::kill_one_to(&caller, pid, Some(tid as u64), 0)?;
                     let info = crate::process::signals::SigInfo::from_sender(
                         sig as usize,
                         crate::process::signals::SI_TKILL,
@@ -1658,7 +1667,7 @@ pub fn sys_tkill(tid: usize, signal: usize) -> SyscallResult {
             }
         }
     }
-    super::filesystem::kill_one(&caller, pid, sig)
+    super::filesystem::kill_one_to(&caller, pid, Some(tid as u64), sig)
 }
 
 /// tgkill(2): like tkill, but the thread must belong to process `tgid`.

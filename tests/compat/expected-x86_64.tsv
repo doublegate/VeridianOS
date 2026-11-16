@@ -3,6 +3,7 @@
 # Refreshed 2026-10-30 from full runs (statfs, uname 7.3.0-veridian); notes refreshed, known: notes kept.
 # Refreshed 2026-11-05 from full runs (the syscall groups; LTP_TIMEOUT_MUL scaled with the limit).
 # Refreshed 2026-11-12 from full runs (the IPC group: System V IPC, POSIX mq, futex2).
+# Refreshed 2026-11-14 from a full run (the system tier: Landlock, keys, lsm, acct, syslog, reboot, vhangup, iopl, ioperm).
 # Statuses and the update procedure: tests/compat/README.md.
 ltp-syscalls	abort01	PASS	
 ltp-syscalls	accept01	FAIL	accept01.c:91: TFAIL: UDP accept expected EOPNOTSUPP: EINVAL (22)
@@ -13,12 +14,12 @@ ltp-syscalls	access01	PASS
 ltp-syscalls	access02	PASS	
 ltp-syscalls	access03	PASS	
 ltp-syscalls	access04	PASS	
-ltp-syscalls	acct01	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
-ltp-syscalls	acct02	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
-ltp-syscalls	add_key01	CONF	../../../../include/lapi/keyctl.h:27: TCONF: syscall(248) __NR_add_key not supported on your arch
-ltp-syscalls	add_key02	CONF	../../../../include/lapi/keyctl.h:27: TCONF: syscall(248) __NR_add_key not supported on your arch
-ltp-syscalls	add_key03	CONF	../../../../include/lapi/keyctl.h:27: TCONF: syscall(248) __NR_add_key not supported on your arch
-ltp-syscalls	add_key04	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
+ltp-syscalls	acct01	PASS	
+ltp-syscalls	acct02	PASS	
+ltp-syscalls	add_key01	PASS	
+ltp-syscalls	add_key02	PASS	
+ltp-syscalls	add_key03	PASS	
+ltp-syscalls	add_key04	PASS	
 ltp-syscalls	add_key05	CONF	tst_cmd.c:270: TCONF: Couldn't find 'useradd' in $PATH
 ltp-syscalls	adjtimex01	PASS	
 ltp-syscalls	adjtimex02	PASS	
@@ -596,9 +597,9 @@ ltp-syscalls	ioctl_pidfd05	FAIL	ioctl_pidfd05.c:46: TFAIL: ioctl(pidfd, PIDFD_GE
 ltp-syscalls	ioctl_pidfd06	FAIL	ioctl_pidfd06.c:45: TFAIL: ioctl(pidfd, PIDFD_GET_INFO, info) expected EREMOTE: ENOTTY (25)
 ltp-syscalls	ioctl_sg01	CONF	ioctl_sg01.c:120: TCONF: Could not find any usable SCSI device
 ltp-syscalls	ioperm01	FAIL	exit 5; ioperm01.c:33: TFAIL: ioperm() failed for port address 1021,  errno=38 : ENOSYS: ENOSYS (38)
-ltp-syscalls	ioperm02	FAIL	ioperm02.c:69: TFAIL: Unexpected results for Invalid I/O address ; returned -1 (expected -1), errno 38 (expected errno 22): ENOSYS (38)
+ltp-syscalls	ioperm02	PASS	
 ltp-syscalls	iopl01	FAIL	exit 5; iopl01.c:34: TFAIL: iopl() failed for level 0, errno=38 : ENOSYS: ENOSYS (38)
-ltp-syscalls	iopl02	FAIL	iopl02.c:42: TFAIL: Invalid privilege level returned -1 expected -1, expected EINVAL got : ENOSYS (38)
+ltp-syscalls	iopl02	PASS	
 ltp-syscalls	ioprio_get01	PASS	
 ltp-syscalls	ioprio_set01	PASS	
 ltp-syscalls	ioprio_set02	PASS	
@@ -606,30 +607,30 @@ ltp-syscalls	ioprio_set03	PASS
 ltp-syscalls	kcmp01	PASS	
 ltp-syscalls	kcmp02	PASS	
 ltp-syscalls	kcmp03	PASS	
-ltp-syscalls	keyctl01	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
-ltp-syscalls	keyctl02	BROK	keyctl02.c:138: TBROK: Failed to open FILE '/proc/sys/kernel/keys/root_maxkeys' for reading: ENOENT (2)
-ltp-syscalls	keyctl03	CONF	../../../../include/lapi/keyctl.h:27: TCONF: syscall(248) __NR_add_key not supported on your arch
-ltp-syscalls	keyctl04	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
-ltp-syscalls	keyctl05	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
-ltp-syscalls	keyctl06	CONF	../../../../include/lapi/keyctl.h:27: TCONF: syscall(248) __NR_add_key not supported on your arch
+ltp-syscalls	keyctl01	PASS	
+ltp-syscalls	keyctl02	TIMEOUT	known: docs/KNOWN-LIMITATIONS.md (tests that run for a set time: TPASS, then the 60 s limit)
+ltp-syscalls	keyctl03	PASS	
+ltp-syscalls	keyctl04	PASS	
+ltp-syscalls	keyctl05	PASS	
+ltp-syscalls	keyctl06	PASS	
 ltp-syscalls	keyctl07	PASS	
-ltp-syscalls	keyctl08	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
+ltp-syscalls	keyctl08	PASS	
 ltp-syscalls	keyctl09	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
-ltp-syscalls	keyctl10	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
-ltp-syscalls	keyctl11	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
-ltp-syscalls	keyctl12	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
-ltp-syscalls	keyctl13	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
-ltp-syscalls	keyctl14	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
-ltp-syscalls	keyctl15	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
-ltp-syscalls	keyctl16	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
-ltp-syscalls	keyctl17	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
-ltp-syscalls	keyctl18	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
-ltp-syscalls	keyctl19	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
-ltp-syscalls	keyctl20	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
-ltp-syscalls	keyctl21	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
-ltp-syscalls	keyctl22	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
+ltp-syscalls	keyctl10	PASS	
+ltp-syscalls	keyctl11	PASS	
+ltp-syscalls	keyctl12	PASS	
+ltp-syscalls	keyctl13	PASS	
+ltp-syscalls	keyctl14	PASS	
+ltp-syscalls	keyctl15	PASS	
+ltp-syscalls	keyctl16	PASS	
+ltp-syscalls	keyctl17	PASS	
+ltp-syscalls	keyctl18	PASS	
+ltp-syscalls	keyctl19	PASS	
+ltp-syscalls	keyctl20	PASS	
+ltp-syscalls	keyctl21	PASS	
+ltp-syscalls	keyctl22	PASS	
 ltp-syscalls	keyctl23	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
-ltp-syscalls	keyctl24	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
+ltp-syscalls	keyctl24	PASS	
 ltp-syscalls	keyctl25	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	keyctl26	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
 ltp-syscalls	keyctl27	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
@@ -645,16 +646,16 @@ ltp-syscalls	kill10	FLAKY	TIMEOUT and PASS in two x86_64 runs (2026-10-22); last
 ltp-syscalls	kill11	PASS	
 ltp-syscalls	kill12	FLAKY	TIMEOUT and PASS in two x86_64 runs (2026-10-22); last here: PASS
 ltp-syscalls	kill13	CONF	tst_test.c:1475: TCONF: Aborting due to unsuitable kernel config, see above!
-ltp-syscalls	landlock01	CONF	landlock_common.h:28: TCONF: syscall(444) __NR_landlock_create_ruleset not supported on your arch
-ltp-syscalls	landlock02	CONF	landlock_common.h:28: TCONF: syscall(444) __NR_landlock_create_ruleset not supported on your arch
-ltp-syscalls	landlock03	CONF	landlock_common.h:28: TCONF: syscall(444) __NR_landlock_create_ruleset not supported on your arch
+ltp-syscalls	landlock01	PASS	
+ltp-syscalls	landlock02	PASS	
+ltp-syscalls	landlock03	PASS	
 ltp-syscalls	landlock04	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	landlock05	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	landlock06	BROK	tst_device.c:450: TBROK: Failed to acquire device
-ltp-syscalls	landlock07	CONF	landlock_common.h:28: TCONF: syscall(444) __NR_landlock_create_ruleset not supported on your arch
-ltp-syscalls	landlock08	CONF	landlock_common.h:28: TCONF: syscall(444) __NR_landlock_create_ruleset not supported on your arch
-ltp-syscalls	landlock09	CONF	landlock_common.h:28: TCONF: syscall(444) __NR_landlock_create_ruleset not supported on your arch
-ltp-syscalls	landlock10	CONF	landlock_common.h:28: TCONF: syscall(444) __NR_landlock_create_ruleset not supported on your arch
+ltp-syscalls	landlock07	PASS	
+ltp-syscalls	landlock08	FAIL	known: docs/KNOWN-LIMITATIONS.md (port 0 not given an ephemeral port; the Landlock EACCES checks pass)
+ltp-syscalls	landlock09	BROK	known: docs/KNOWN-LIMITATIONS.md (no abstract Unix socket names)
+ltp-syscalls	landlock10	BROK	known: docs/KNOWN-LIMITATIONS.md (no /proc/<pid>/stat)
 ltp-syscalls	lchown01	PASS	
 ltp-syscalls	lchown01_16	PASS	
 ltp-syscalls	lchown02	PASS	
@@ -666,7 +667,7 @@ ltp-syscalls	link02	PASS
 ltp-syscalls	link04	PASS	
 ltp-syscalls	link05	FLAKY	PASS locally in 35 to 46 s, TIMEOUT locally at times and on the GitHub runner in both runs of PR #45 (TPASS printed, then removing the 1,000 links outlasts 180 s; 2026-11-14): directory operations are slow (follow-up, Track P); last here: PASS
 ltp-syscalls	link08	PASS	
-ltp-syscalls	linkat01	FAIL	linkat01   16  TFAIL  :  linkat01.c:276: linkat failed unexpectedly; expected 2 - No such file or directory: TEST_ERRNO=ENOTDIR(20): Not a directory
+ltp-syscalls	linkat01	PASS	
 ltp-syscalls	linkat02	BROK	linkat02    1  TBROK  :  tst_device.c:450: Failed to acquire device
 ltp-syscalls	listen01	FAIL	listen01    3  TFAIL  :  listen01.c:102: UDP listen ; returned -1 (expected -1), errno 22 (expected 95)
 ltp-syscalls	listmount01	BROK	tst_device.c:450: TBROK: Failed to acquire device
@@ -691,7 +692,7 @@ ltp-syscalls	lseek11	CONF	lseek11.c:108: TCONF: SEEK_DATA and SEEK_HOLE not impl
 ltp-syscalls	lsm_get_self_attr01	CONF	tst_security.c:40: TCONF: /sys/kernel/security/lsm file is not present
 ltp-syscalls	lsm_get_self_attr02	CONF	tst_security.c:40: TCONF: /sys/kernel/security/lsm file is not present
 ltp-syscalls	lsm_get_self_attr03	CONF	tst_security.c:40: TCONF: /sys/kernel/security/lsm file is not present
-ltp-syscalls	lsm_list_modules01	CONF	../../../../include/lapi/lsm.h:175: TCONF: syscall(461) __NR_lsm_list_modules not supported on your arch
+ltp-syscalls	lsm_list_modules01	PASS	
 ltp-syscalls	lsm_list_modules02	CONF	lsm_list_modules02.c:132: TCONF: /sys/kernel/security/lsm file is not present
 ltp-syscalls	lsm_set_self_attr01	CONF	tst_security.c:40: TCONF: /sys/kernel/security/lsm file is not present
 ltp-syscalls	lstat01	PASS	
@@ -1057,8 +1058,8 @@ ltp-syscalls	readlinkat02	FAIL	readlinkat02.c:54: TFAIL: readlinkat(3, symlink_f
 ltp-syscalls	readv01	PASS	
 ltp-syscalls	readv02	PASS	
 ltp-syscalls	realpath01	FAIL	realpath01.c:33: TFAIL: realpath(".", NULL) succeeded
-ltp-syscalls	reboot01	FAIL	reboot01.c:32: TFAIL: reboot(LINUX_REBOOT_CMD_CAD_ON) failed: ENOSYS (38)
-ltp-syscalls	reboot02	FAIL	reboot02.c:39: TFAIL: INVALID_CMD expected EINVAL: ENOSYS (38)
+ltp-syscalls	reboot01	PASS	
+ltp-syscalls	reboot02	PASS	
 ltp-syscalls	recv01	BROK	recv01      3  TBROK  :  recv01.c:190: client setup1 failed - no message ready in 2 sec
 ltp-syscalls	recvfrom01	BROK	recvfrom01    3  TBROK  :  recvfrom01.c:214: client setup1 failed - no message ready in 2 sec
 ltp-syscalls	recvmmsg01	BROK	tst_test.c:1973: TBROK: Test killed by SIGSEGV!
@@ -1086,12 +1087,12 @@ ltp-syscalls	rename15	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	renameat01	BROK	renameat01    1  TBROK  :  tst_device.c:450: Failed to acquire device
 ltp-syscalls	renameat201	FAIL	renameat201    1  TFAIL  :  renameat201.c:159: renameat2() got unexpected return value: expected: 17 - EEXIST: TEST_ERRNO=EINVAL(22): Invalid argument
 ltp-syscalls	renameat202	FAIL	renameat202    1  TFAIL  :  renameat202.c:128: renameat2() failed unexpectedly: TEST_ERRNO=EINVAL(22): Invalid argument
-ltp-syscalls	request_key01	CONF	../../../../include/lapi/keyctl.h:27: TCONF: syscall(248) __NR_add_key not supported on your arch
-ltp-syscalls	request_key02	CONF	../../../../include/lapi/keyctl.h:27: TCONF: syscall(248) __NR_add_key not supported on your arch
-ltp-syscalls	request_key03	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
-ltp-syscalls	request_key04	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
-ltp-syscalls	request_key05	CONF	request_key05.c:29: TCONF: syscall(249) __NR_request_key not supported on your arch
-ltp-syscalls	request_key06	CONF	../../../../include/lapi/keyctl.h:36: TCONF: syscall(249) __NR_request_key not supported on your arch
+ltp-syscalls	request_key01	PASS	
+ltp-syscalls	request_key02	PASS	
+ltp-syscalls	request_key03	PASS	
+ltp-syscalls	request_key04	PASS	
+ltp-syscalls	request_key05	PASS	
+ltp-syscalls	request_key06	PASS	
 ltp-syscalls	rmdir01	PASS	
 ltp-syscalls	rmdir02	FAIL	rmdir02.c:94: TPASS: rmdir() failed as expected: ENOTEMPTY (39)
 ltp-syscalls	rmdir03	PASS	
@@ -1135,7 +1136,7 @@ ltp-syscalls	sched_setscheduler02	PASS
 ltp-syscalls	sched_setscheduler03	PASS	
 ltp-syscalls	sched_setscheduler04	FAIL	exit 33; sched_setscheduler04.c:55: TFAIL: Policy NOT reset to SCHED_NORMAL
 ltp-syscalls	sched_yield01	PASS	
-ltp-syscalls	seccomp01	CONF	seccomp01.c:239: TCONF: kernel doesn't support SECCOMP_MODE_STRICT. Skipping CONFIG_SECCOMP tests
+ltp-syscalls	seccomp01	FAIL	known: docs/KNOWN-LIMITATIONS.md (musl's fork is SYS_fork, which the test's filter kills)
 ltp-syscalls	select01	PASS	
 ltp-syscalls	select02	FAIL	tst_timer_test.c:314: TFAIL: select() slept for too long
 ltp-syscalls	select03	PASS	
@@ -1418,7 +1419,7 @@ ltp-syscalls	switch01	CONF	tst_test.c:1429: TCONF: This system does not support 
 ltp-syscalls	symlink02	PASS	
 ltp-syscalls	symlink03	PASS	
 ltp-syscalls	symlink04	PASS	
-ltp-syscalls	symlinkat01	FAIL	symlinkat01    9  TFAIL  :  symlinkat01.c:199: symlinkat() Failed, errno=20 : Not a directory
+ltp-syscalls	symlinkat01	PASS	
 ltp-syscalls	sync01	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	sync_file_range01	PASS	
 ltp-syscalls	sync_file_range02	BROK	tst_device.c:450: TBROK: Failed to acquire device
@@ -1437,8 +1438,8 @@ ltp-syscalls	sysfs05	PASS
 ltp-syscalls	sysinfo01	BROK	sysinfo01.c:37: TBROK: Expected 1 conversions got 0 FILE '/proc/meminfo'
 ltp-syscalls	sysinfo02	PASS	
 ltp-syscalls	sysinfo03	PASS	
-ltp-syscalls	syslog11	BROK	tst_sys_conf.c:73: TBROK: Path not found: /proc/sys/kernel/printk: ENOENT (2)
-ltp-syscalls	syslog12	CONF	syslog12.c:70: TCONF: syscall(103) __NR_syslog not supported on your arch
+ltp-syscalls	syslog11	PASS	
+ltp-syscalls	syslog12	PASS	
 ltp-syscalls	tee01	PASS	
 ltp-syscalls	tee02	PASS	
 ltp-syscalls	tgkill01	PASS	
@@ -1511,8 +1512,8 @@ ltp-syscalls	utimensat01	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	utimes01	FAIL	utimes01.c:83: TFAIL: utimes() failed unexpectedly; expected: 14 - EFAULT: EBADF (9)
 ltp-syscalls	vfork01	PASS	
 ltp-syscalls	vfork02	PASS	
-ltp-syscalls	vhangup01	CONF	vhangup01.c:32: TCONF: syscall(153) __NR_vhangup not supported on your arch
-ltp-syscalls	vhangup02	CONF	vhangup02.c:29: TCONF: syscall(153) __NR_vhangup not supported on your arch
+ltp-syscalls	vhangup01	PASS	
+ltp-syscalls	vhangup02	PASS	
 ltp-syscalls	vmsplice01	PASS	
 ltp-syscalls	vmsplice02	PASS	
 ltp-syscalls	vmsplice03	PASS	

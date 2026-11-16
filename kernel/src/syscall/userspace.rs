@@ -470,6 +470,22 @@ pub fn read_user_vec(addr: usize, len: usize, max: usize) -> Result<Vec<u8>, Sys
     Ok(buf)
 }
 
+/// Zero `len` bytes of user memory at `addr` (Linux's clear_user): the
+/// whole range is checked first (EFAULT), then written from a fixed zero
+/// block, so a length from user space never sizes a kernel allocation
+/// (PR #49 review).
+pub fn clear_user(addr: usize, len: usize) -> Result<(), SyscallError> {
+    const ZEROS: [u8; 256] = [0; 256];
+    validate_user_ptr(addr as *const u8, len)?;
+    let mut done = 0;
+    while done < len {
+        let n = (len - done).min(ZEROS.len());
+        write_user_bytes(addr + done, &ZEROS[..n])?;
+        done += n;
+    }
+    Ok(())
+}
+
 /// A zeroed buffer of `len` bytes, or ENOMEM if the heap cannot hold it: a
 /// length that came from user space must not panic the kernel, as a
 /// failed `vec!` would (Linux's kvmalloc fails with ENOMEM).
@@ -1123,5 +1139,22 @@ mod tests {
             zeroed_buf(usize::MAX / 2).map(|v| v.len()),
             Err(SyscallError::OutOfMemory)
         );
+    }
+
+    /// clear_user zeroes in place, across several of its blocks, and
+    /// refuses a range that wraps before writing anything (PR #49 review).
+    #[test]
+    fn clear_user_zeroes_in_place() {
+        let mut buf = alloc::vec![0xaau8; 1000];
+        let at = buf.as_mut_ptr() as usize;
+        clear_user(at + 10, 900).unwrap();
+        assert!(buf[..10].iter().all(|&b| b == 0xaa));
+        assert!(buf[10..910].iter().all(|&b| b == 0));
+        assert!(buf[910..].iter().all(|&b| b == 0xaa));
+        assert_eq!(
+            clear_user(usize::MAX - 10, 100),
+            Err(SyscallError::InvalidPointer)
+        );
+        assert_eq!(clear_user(at, 0), Ok(()));
     }
 }

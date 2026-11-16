@@ -565,6 +565,15 @@ pub fn exit_dispatched(exit_code: i32, group: bool) -> ! {
         crate::syscall::futex_pi_owner_exiting((process.pid.0, thread.tid.0));
         crate::syscall::scheduling::thread_exit(&thread);
         thread.release_fs();
+        // It stops using its seccomp filters (seccomp_filter_release): a
+        // listener sees POLLHUP once no thread can notify it any more.
+        thread.seccomp.release();
+        // Its keys go with it.
+        #[cfg(feature = "alloc")]
+        {
+            let keys = core::mem::take(&mut *thread.keys.lock());
+            crate::syscall::keys::release_keys(&keys);
+        }
         // The thread's CPU time stays with the process.
         process.add_exited_cpu_from(dispatch::take_current_usage);
         let clear_ptr = thread.clear_tid.load(Ordering::Acquire);
@@ -604,9 +613,20 @@ pub fn exit_dispatched(exit_code: i32, group: bool) -> ! {
             })
         };
         if !others_alive {
-            // The init of a PID namespace takes the rest of it along first.
+            // Its accounting record, before the namespace is torn down, as
+            // do_exit's acct_process.
+            #[cfg(feature = "alloc")]
+            let acct_code = process.wait_status() as u32;
+            #[cfg(feature = "alloc")]
+            crate::syscall::acct::process_exited(&process, acct_code);
+            // The init of a PID namespace takes the rest of it along first;
+            // the namespace's accounting ends once they are gone, so their
+            // records go to it (zap_pid_ns_processes, then acct_exit_ns;
+            // PR #49 review).
             if process.is_ns_init() {
                 zap_pid_ns(&process);
+                #[cfg(feature = "alloc")]
+                crate::syscall::acct::ns_exited(&process, acct_code);
             }
             cleanup_process(&process);
             process.set_state(ProcessState::Zombie);
@@ -634,6 +654,12 @@ pub fn exit_dispatched(exit_code: i32, group: bool) -> ! {
 fn zap_pid_ns(init: &Process) {
     let ns = init.pid_ns();
     ns.stop_adding();
+    // reboot(2) inside the namespace: its init is reported killed by the
+    // signal it recorded, as zap_pid_namespace's group_exit_code.
+    match ns.reboot_signal() {
+        0 => {}
+        sig => init.set_term_signal(sig),
+    }
     let others = || {
         let mut left = Vec::new();
         table::PROCESS_TABLE.for_each(|p| {
@@ -794,11 +820,32 @@ fn force_terminate_process(process: &Process, signal: i32) -> Result<(), KernelE
 }
 
 /// Clean up process resources
+/// Give back what thread `thread` holds of the key store and its seccomp
+/// chain, if its exit has not: a thread that never ran (an unstarted or
+/// killed process's, a failed clone's) leaves through cleanup only. Both
+/// are taken, so a second call, or one after the thread's own exit, gives
+/// back nothing (PR #49 review).
+#[cfg(feature = "alloc")]
+fn release_thread_holds(thread: &super::Thread) {
+    let keys = core::mem::take(&mut *thread.keys.lock());
+    crate::syscall::keys::release_keys(&keys);
+    thread.seccomp.release();
+}
+
 pub fn cleanup_process(process: &Process) {
     println!(
         "[PROCESS] Cleaning up resources for process {}",
         process.pid.0
     );
+    // Its threads' keys and filters, taken under the thread map and given
+    // back after it.
+    #[cfg(feature = "alloc")]
+    {
+        let threads: Vec<_> = process.threads.lock().values().cloned().collect();
+        for t in &threads {
+            release_thread_holds(t);
+        }
+    }
 
     // A parent waiting in vfork for this child may resume.
     process.release_vfork_parent();
@@ -1055,6 +1102,9 @@ pub(crate) fn child_reaper(process: &Process) -> Option<alloc::sync::Arc<Process
 /// process table. Nothing may be running in it.
 #[cfg(feature = "alloc")]
 pub(crate) fn discard_unstarted(process: &Process) {
+    // Its threads never ran, so no exit gives their keys back (a failed
+    // fork's copy of the session keyring reference, say): cleanup_process
+    // does (PR #49 review).
     cleanup_process(process);
     super::free_page_tables(process);
     forget_unstarted(process);
@@ -1103,6 +1153,8 @@ pub fn cleanup_thread(process: &Process, tid: ThreadId) -> Result<(), KernelErro
 
         // Make sure thread is marked as dead
         thread.set_state(super::thread::ThreadState::Dead);
+        #[cfg(feature = "alloc")]
+        release_thread_holds(&thread);
 
         // Free user stack pages from the VAS. User stack frames are managed
         // by the VAS (allocated via map_page), so unmap them to free the

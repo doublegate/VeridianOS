@@ -32,9 +32,20 @@ macro_rules! println {
 #[macro_export]
 macro_rules! print {
     ($($arg:tt)*) => ({
-        $crate::serial::_serial_print(format_args!($($arg)*));
-        $crate::graphics::fbcon::_fbcon_print(format_args!($($arg)*));
-        $crate::print_capture::_capture_print(format_args!($($arg)*));
+        // The log ring keeps every line; the console shows it below
+        // console_loglevel (`printk`). The arguments are evaluated once,
+        // and that one value goes to every sink (the `match` keeps its
+        // temporaries for the whole statement; PR #49 review).
+        match format_args!($($arg)*) {
+            args => {
+                $crate::printk::record(args);
+                if $crate::printk::console_enabled() {
+                    $crate::serial::_serial_print(args);
+                    $crate::graphics::fbcon::_fbcon_print(args);
+                }
+                $crate::print_capture::_capture_print(args);
+            }
+        }
     });
 }
 
@@ -55,10 +66,18 @@ macro_rules! println {
 macro_rules! print {
     ($($arg:tt)*) => ({
         use core::fmt::Write;
-        $crate::print::with_console(|| {
-            let mut _w = $crate::arch::aarch64::direct_uart::DirectUartWriter;
-            let _ = _w.write_fmt(format_args!($($arg)*));
-        });
+        // Evaluated once, for both sinks (PR #49 review).
+        match format_args!($($arg)*) {
+            args => {
+                $crate::printk::record(args);
+                if $crate::printk::console_enabled() {
+                    $crate::print::with_console(|| {
+                        let mut _w = $crate::arch::aarch64::direct_uart::DirectUartWriter;
+                        let _ = _w.write_fmt(args);
+                    });
+                }
+            }
+        }
     });
 }
 
@@ -73,7 +92,17 @@ macro_rules! println {
 #[cfg(target_arch = "riscv64")]
 #[macro_export]
 macro_rules! print {
-    ($($arg:tt)*) => ($crate::serial::_serial_print(format_args!($($arg)*)));
+    ($($arg:tt)*) => ({
+        // Evaluated once, for both sinks (PR #49 review).
+        match format_args!($($arg)*) {
+            args => {
+                $crate::printk::record(args);
+                if $crate::printk::console_enabled() {
+                    $crate::serial::_serial_print(args);
+                }
+            }
+        }
+    });
 }
 
 #[cfg(target_arch = "riscv64")]
@@ -103,7 +132,12 @@ macro_rules! kprint {
     // Literal-only: works on all architectures
     ($lit:literal) => {{
         #[cfg(target_arch = "aarch64")]
-        $crate::arch::aarch64::direct_uart::direct_print_str($lit);
+        {
+            $crate::printk::record_str($lit);
+            if $crate::printk::console_enabled() {
+                $crate::arch::aarch64::direct_uart::direct_print_str($lit);
+            }
+        }
         #[cfg(not(target_arch = "aarch64"))]
         $crate::print!($lit);
     }};
@@ -121,14 +155,24 @@ macro_rules! kprintln {
     // No args: just a newline
     () => {{
         #[cfg(target_arch = "aarch64")]
-        $crate::arch::aarch64::direct_uart::direct_print_str("\n");
+        {
+            $crate::printk::record_str("\n");
+            if $crate::printk::console_enabled() {
+                $crate::arch::aarch64::direct_uart::direct_print_str("\n");
+            }
+        }
         #[cfg(not(target_arch = "aarch64"))]
         $crate::println!();
     }};
     // Literal-only: works on all architectures including AArch64
     ($lit:literal) => {{
         #[cfg(target_arch = "aarch64")]
-        $crate::arch::aarch64::direct_uart::direct_print_str(concat!($lit, "\n"));
+        {
+            $crate::printk::record_str(concat!($lit, "\n"));
+            if $crate::printk::console_enabled() {
+                $crate::arch::aarch64::direct_uart::direct_print_str(concat!($lit, "\n"));
+            }
+        }
         #[cfg(not(target_arch = "aarch64"))]
         $crate::println!($lit);
     }};
@@ -206,6 +250,34 @@ const CONSOLE_FREE: usize = usize::MAX;
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 static CONSOLE_OWNER: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(CONSOLE_FREE);
+
+/// A program's output to the console (/dev/console, the serial console
+/// node): straight to the console's sinks, as a tty write on Linux, which
+/// neither enters the kernel log nor obeys console_loglevel. Through
+/// `print!` it was stored in the log ring, where any program could write
+/// lines that look like the kernel's and push the kernel's own out, and
+/// syslog CONSOLE_OFF (dmesg -n 1) silenced every program (PR #49
+/// independent review).
+pub fn console_write(args: core::fmt::Arguments) {
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    {
+        crate::serial::_serial_print(args);
+        crate::graphics::fbcon::_fbcon_print(args);
+        crate::print_capture::_capture_print(args);
+    }
+    #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+    {
+        use core::fmt::Write;
+        with_console(|| {
+            let mut w = crate::arch::aarch64::direct_uart::DirectUartWriter;
+            let _ = w.write_fmt(args);
+        });
+    }
+    #[cfg(all(target_arch = "riscv64", target_os = "none"))]
+    crate::serial::_serial_print(args);
+    #[cfg(not(target_os = "none"))]
+    let _ = args;
+}
 
 /// Run `f`, which writes one message to the console, with no other CPU
 /// writing at the same time and interrupts off, so lines from several CPUs

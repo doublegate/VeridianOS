@@ -78,6 +78,11 @@ impl MemfdNode {
 }
 
 impl VfsNode for MemfdNode {
+    /// For telling a memfd apart (`fs::is_internal_file`).
+    fn as_any(&self) -> Option<&dyn core::any::Any> {
+        Some(self)
+    }
+
     /// A memfd lives on Linux's internal tmpfs mount.
     fn statfs(&self) -> Result<crate::fs::statfs::FsStats, crate::error::KernelError> {
         Ok(crate::fs::statfs::FsStats::simple(

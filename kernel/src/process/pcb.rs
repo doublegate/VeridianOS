@@ -218,6 +218,9 @@ pub struct Process {
 
     /// Creation timestamp
     pub created_at: u64,
+    /// When it was made, in monotonic nanoseconds: acct's elapsed time
+    /// (the group leader's start_time).
+    pub started_ns: u64,
 
     /// User and group IDs and supplementary groups (N-248). A lock
     /// because processes are shared through `Arc` and a set*id call
@@ -625,6 +628,7 @@ impl Process {
             cpu_time: AtomicU64::new(0),
             memory_stats: MemoryStats::default(),
             created_at: crate::arch::timer::get_ticks(),
+            started_ns: crate::timer::monotonic_ns(),
             creds: Mutex::new(super::creds::Credentials::new(0, 0)),
             userns: Mutex::new(super::userns::initial()),
             mm_userns: Mutex::new(super::userns::initial()),

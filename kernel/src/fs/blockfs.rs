@@ -548,11 +548,75 @@ fn disk_owner_ids(
 pub struct BlockFsNode {
     inode_num: u32,
     fs: Arc<RwLock<BlockFsInner>>,
+    holds: Arc<InodeHolds>,
+}
+
+/// How many nodes in memory name each inode number. A number held is
+/// not given to a new file even once its last name is gone: an open file,
+/// a working directory or a Landlock rule's anchor names that file, and
+/// anything keyed by its number (a rule, a FIFO or socket binding, a file
+/// handle) must not come to name another, as Linux keeps an inode until
+/// its last reference goes. Locked on its own, as nodes are made with the
+/// filesystem lock held.
+#[derive(Default)]
+pub struct InodeHolds(spin::Mutex<alloc::collections::BTreeMap<u32, u32>>);
+
+impl InodeHolds {
+    fn hold(&self, inode: u32) {
+        *self.0.lock().entry(inode).or_insert(0) += 1;
+    }
+
+    fn release(&self, inode: u32) {
+        let mut held = self.0.lock();
+        if let Some(n) = held.get_mut(&inode) {
+            *n -= 1;
+            if *n == 0 {
+                held.remove(&inode);
+            }
+        }
+    }
+
+    fn is_held(&self, inode: u32) -> bool {
+        self.0.lock().contains_key(&inode)
+    }
+}
+
+impl Drop for BlockFsNode {
+    fn drop(&mut self) {
+        self.holds.release(self.inode_num);
+    }
 }
 
 impl BlockFsNode {
-    pub fn new(inode_num: u32, fs: Arc<RwLock<BlockFsInner>>) -> Self {
-        Self { inode_num, fs }
+    /// A node for `inode_num`, counted in `holds` (the filesystem's) until
+    /// it is dropped.
+    pub fn new(inode_num: u32, fs: Arc<RwLock<BlockFsInner>>, holds: Arc<InodeHolds>) -> Self {
+        holds.hold(inode_num);
+        Self {
+            inode_num,
+            fs,
+            holds,
+        }
+    }
+
+    /// A new file `make` creates under the filesystem write lock, counted
+    /// in `holds` before the lock is released: an unlink and a create
+    /// between could otherwise give its number to another file, which the
+    /// node would then name (PR #49 review).
+    fn created(
+        &self,
+        make: impl FnOnce(&mut BlockFsInner) -> Result<u32, KernelError>,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        let inode = self.mutate(|fs| {
+            let inode = make(fs)?;
+            self.holds.hold(inode);
+            Ok(inode)
+        })?;
+        Ok(Arc::new(Self {
+            inode_num: inode,
+            fs: self.fs.clone(),
+            holds: self.holds.clone(),
+        }))
     }
 
     /// Run one whole modifying operation under the filesystem write lock,
@@ -667,7 +731,11 @@ impl VfsNode for BlockFsNode {
     fn lookup(&self, name: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
         let fs = self.fs.read();
         let child_inode = fs.lookup_in_dir(self.inode_num, name)?;
-        Ok(Arc::new(BlockFsNode::new(child_inode, self.fs.clone())))
+        Ok(Arc::new(BlockFsNode::new(
+            child_inode,
+            self.fs.clone(),
+            self.holds.clone(),
+        )))
     }
 
     fn create(
@@ -675,13 +743,11 @@ impl VfsNode for BlockFsNode {
         name: &str,
         permissions: Permissions,
     ) -> Result<Arc<dyn VfsNode>, KernelError> {
-        let new_inode = self.mutate(|fs| fs.create_file(self.inode_num, name, permissions))?;
-        Ok(Arc::new(BlockFsNode::new(new_inode, self.fs.clone())))
+        self.created(|fs| fs.create_file(self.inode_num, name, permissions))
     }
 
     fn mkdir(&self, name: &str, permissions: Permissions) -> Result<Arc<dyn VfsNode>, KernelError> {
-        let new_inode = self.mutate(|fs| fs.create_directory(self.inode_num, name, permissions))?;
-        Ok(Arc::new(BlockFsNode::new(new_inode, self.fs.clone())))
+        self.created(|fs| fs.create_directory(self.inode_num, name, permissions))
     }
 
     fn unlink(&self, name: &str) -> Result<(), KernelError> {
@@ -727,8 +793,7 @@ impl VfsNode for BlockFsNode {
     }
 
     fn symlink(&self, name: &str, target: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
-        let new_inode = self.mutate(|fs| fs.create_symlink(self.inode_num, name, target))?;
-        Ok(Arc::new(BlockFsNode::new(new_inode, self.fs.clone())))
+        self.created(|fs| fs.create_symlink(self.inode_num, name, target))
     }
 
     /// Read the target of a symbolic link in BlockFS.
@@ -824,9 +889,7 @@ impl VfsNode for BlockFsNode {
         permissions: Permissions,
         rdev: u32,
     ) -> Result<Arc<dyn VfsNode>, KernelError> {
-        let new_inode =
-            self.mutate(|fs| fs.create_special(self.inode_num, name, kind, permissions, rdev))?;
-        Ok(Arc::new(BlockFsNode::new(new_inode, self.fs.clone())))
+        self.created(|fs| fs.create_special(self.inode_num, name, kind, permissions, rdev))
     }
 
     fn is_special_inode(&self) -> bool {
@@ -925,10 +988,19 @@ pub struct BlockFsInner {
     /// found by that inode number must not be found by the next file to get
     /// it (`fs::special_inode_freed`).
     freed_special: Vec<u32>,
+    /// The inode numbers nodes in memory hold ([`InodeHolds`]).
+    holds: Arc<InodeHolds>,
     /// Those being reported now, with the lock released: not given to a
     /// new file until the FIFO and socket tables have forgotten them, or a
     /// new FIFO or socket could be found as the old one (PR #20 review).
     reporting_special: Vec<u32>,
+    /// Unlinked inodes whose leftover blocks could not all be freed (an
+    /// indirect block unreadable): not reused, and not tried again in this
+    /// mount, where the same read would fail again. A later mount may try
+    /// again safely: truncation clears each pointer before freeing what it
+    /// names, so what such an inode still points to is still allocated (PR
+    /// #49 review).
+    poisoned: alloc::collections::BTreeSet<u32>,
 }
 
 /// The wall clock in seconds since 1970, as the inode times are stored
@@ -977,7 +1049,9 @@ impl BlockFsInner {
             disk_writable: false,
             page_cache: crate::mm::page_cache::PageCacheTable::new(),
             freed_special: Vec::new(),
+            holds: Arc::new(InodeHolds::default()),
             reporting_special: Vec::new(),
+            poisoned: alloc::collections::BTreeSet::new(),
         };
 
         // Create "." and ".." entries in the root directory (both point to inode 0)
@@ -1019,16 +1093,99 @@ impl BlockFsInner {
     }
 
     fn allocate_inode(&mut self) -> Option<u32> {
-        for (idx, inode) in self.inode_table.iter().enumerate() {
-            if inode.links_count == 0 && idx > 0 && !self.special_unreported(idx as u32) {
-                // Don't allocate root. A cache of the inode's previous file
-                // must not serve the new one.
-                self.superblock.free_inodes -= 1;
-                self.page_cache.invalidate(idx as u64);
-                return Some(idx as u32);
+        // Don't allocate root. A cache of the inode's previous file must
+        // not serve the new one, and blocks a node gave it after its last
+        // unlink go back first; one whose blocks cannot all go back is
+        // passed over for good (PR #49 review).
+        for idx in 1..self.inode_table.len() as u32 {
+            let inode = &self.inode_table[idx as usize];
+            if inode.links_count != 0
+                || self.special_unreported(idx)
+                || self.holds.is_held(idx)
+                || self.poisoned.contains(&idx)
+            {
+                continue;
             }
+            if self.reclaim_orphan(idx).is_err() {
+                continue;
+            }
+            self.superblock.free_inodes -= 1;
+            self.page_cache.invalidate(idx as u64);
+            return Some(idx);
         }
         None
+    }
+
+    /// Whether `inode` has no name but still blocks: an unlinked file a
+    /// node kept writing to, after unlink freed what it had then.
+    fn is_orphan_with_blocks(&self, inode: u32) -> bool {
+        let i = &self.inode_table[inode as usize];
+        if i.links_count != 0 || inode == 0 {
+            return false;
+        }
+        // An attribute block counts whatever the type: fsetxattr through a
+        // node kept after the unlink gives one even to a FIFO or socket
+        // (PR #49 independent review).
+        let xattr = self.xattr_block_of(inode).is_ok_and(|b| b != 0);
+        xattr
+            || (!i.is_special()
+                && (i.blocks != 0
+                    || i.direct_blocks.iter().any(|&b| b != 0)
+                    || i.indirect_block != 0
+                    || i.double_indirect_block != 0))
+    }
+
+    /// What an orphan still holds goes back: a special file's attribute
+    /// block alone (its number was reported freed at its unlink, which a
+    /// second `free_inode_blocks` would repeat), anything else's blocks.
+    fn free_orphan(&mut self, inode: u32) -> Result<(), KernelError> {
+        if !self.inode_table[inode as usize].is_special() {
+            return self.free_inode_blocks(inode);
+        }
+        let xattr = self.xattr_block_of(inode)?;
+        self.inode_table[inode as usize].xattr_block = 0;
+        if xattr != 0 {
+            self.free_block(xattr);
+        }
+        Ok(())
+    }
+
+    /// Free what an unlinked inode still holds, if nothing refers to it
+    /// any more. Its number was counted free at its last unlink. A failure
+    /// leaves the inode poisoned: never retried, never reused.
+    fn reclaim_orphan(&mut self, inode: u32) -> Result<(), KernelError> {
+        if self.poisoned.contains(&inode) {
+            return Err(KernelError::InvalidState {
+                expected: "reclaimable inode",
+                actual: "earlier reclamation failed",
+            });
+        }
+        if self.is_orphan_with_blocks(inode) && !self.holds.is_held(inode) {
+            if let Err(e) = self.free_orphan(inode) {
+                // Counted free at its unlink, now never to be reused.
+                self.poisoned.insert(inode);
+                self.superblock.free_inodes = self.superblock.free_inodes.saturating_sub(1);
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
+    /// Every orphan's blocks back, when the bitmap ran out: whether any
+    /// came back. A failed one is poisoned and skipped from then on.
+    fn reclaim_orphans(&mut self) -> bool {
+        let orphans: Vec<u32> = (1..self.inode_table.len() as u32)
+            .filter(|&i| {
+                self.is_orphan_with_blocks(i)
+                    && !self.holds.is_held(i)
+                    && !self.poisoned.contains(&i)
+            })
+            .collect();
+        let mut any = false;
+        for &i in &orphans {
+            any |= self.reclaim_orphan(i).is_ok();
+        }
+        any
     }
 
     /// Allocate a block. Its contents start as zeros and are dirty, so the
@@ -1036,7 +1193,15 @@ impl BlockFsInner {
     /// quarantine are used only when no other block is free, and are then
     /// pinned until sync (ADR 0011).
     fn allocate_block(&mut self) -> Option<u32> {
-        let (block, reused) = match self.block_bitmap.allocate_block() {
+        // Out of free blocks: unlinked files nothing refers to any more may
+        // still hold some, which go back first (to the bitmap in memory, to
+        // quarantine on a disk, as any free; PR #49 review).
+        let free = match self.block_bitmap.allocate_block() {
+            Some(block) => Some(block),
+            None if self.reclaim_orphans() => self.block_bitmap.allocate_block(),
+            None => None,
+        };
+        let (block, reused) = match free {
             Some(block) => (block, false),
             None => (self.quarantine.pop()?, true),
         };
@@ -1546,7 +1711,9 @@ impl BlockFsInner {
             disk_writable: false,
             page_cache: crate::mm::page_cache::PageCacheTable::new(),
             freed_special: Vec::new(),
+            holds: Arc::new(InodeHolds::default()),
             reporting_special: Vec::new(),
+            poisoned: alloc::collections::BTreeSet::new(),
         };
         fs.attach_disk(backend)?;
 
@@ -2256,8 +2423,15 @@ impl BlockFsInner {
             // If links reach 0, free all data blocks and the inode itself
             // (allocate_inode takes any zero-link inode and decrements
             // free_inodes, so not counting it back here underflowed).
+            // Counted free only once its blocks are: one whose free failed
+            // part-way is poisoned and never reused, so counting it would
+            // leave the count one too high, and its later reclaim would take
+            // one off that was never added (PR #49 independent review).
             if self.inode_table[inode as usize].links_count == 0 {
-                self.free_inode_blocks(inode)?;
+                if let Err(e) = self.free_inode_blocks(inode) {
+                    self.poisoned.insert(inode);
+                    return Err(e);
+                }
                 self.superblock.free_inodes += 1;
             }
         }
@@ -2408,9 +2582,16 @@ impl BlockFsInner {
         };
         match request.op {
             Op::Allocate | Op::ZeroRange => {
-                if self.blocks_missing(inode_num, blocks.clone())?
-                    > self.superblock.free_blocks as usize
-                {
+                // Orphans' blocks count as free, as for a write, which gets
+                // them back when the bitmap runs out: reclaimed here before
+                // the range is refused (PR #49 review).
+                let missing = self.blocks_missing(inode_num, blocks.clone())?;
+                let mut fits = missing <= self.superblock.free_blocks as usize;
+                // reclaim_orphans raises free_blocks when it frees any.
+                if !fits && self.reclaim_orphans() {
+                    fits = missing <= self.superblock.free_blocks as usize;
+                }
+                if !fits {
                     return Err(KernelError::FsError(FsError::NoSpace));
                 }
                 for lb in blocks {
@@ -2788,12 +2969,19 @@ impl BlockFsInner {
             return Ok(());
         }
 
+        // Restart-safe: every pointer is cleared before the block it names
+        // is freed, so a failure part-way (an unreadable block) leaves only
+        // pointers to blocks still allocated, and the truncation can run
+        // again, after a remount too. A failure between the two leaks one
+        // block rather than leaving a pointer to a freed one (PR #49
+        // review).
         // If all indirect entries are being freed
         if first_free_block <= DIRECT_BLOCKS {
             // Free every data block referenced by the indirect block
             for idx in 0..PTRS_PER_BLOCK {
                 let blk = self.read_block_ptr(indirect, idx)?;
                 if blk != 0 {
+                    self.write_block_ptr(indirect, idx, 0)?;
                     self.free_block(blk);
                     if self.inode_table[inode_num as usize].blocks > 0 {
                         self.inode_table[inode_num as usize].blocks -= 1;
@@ -2801,8 +2989,8 @@ impl BlockFsInner {
                 }
             }
             // Free the indirect block itself
-            self.free_block(indirect);
             self.inode_table[inode_num as usize].indirect_block = 0;
+            self.free_block(indirect);
             if self.inode_table[inode_num as usize].blocks > 0 {
                 self.inode_table[inode_num as usize].blocks -= 1;
             }
@@ -2814,8 +3002,8 @@ impl BlockFsInner {
                 if idx >= start_idx {
                     let blk = self.read_block_ptr(indirect, idx)?;
                     if blk != 0 {
-                        self.free_block(blk);
                         self.write_block_ptr(indirect, idx, 0)?;
+                        self.free_block(blk);
                         if self.inode_table[inode_num as usize].blocks > 0 {
                             self.inode_table[inode_num as usize].blocks -= 1;
                         }
@@ -2829,8 +3017,8 @@ impl BlockFsInner {
             }
             // If no entries remain, free the indirect block itself
             if !any_remain {
-                self.free_block(indirect);
                 self.inode_table[inode_num as usize].indirect_block = 0;
+                self.free_block(indirect);
                 if self.inode_table[inode_num as usize].blocks > 0 {
                     self.inode_table[inode_num as usize].blocks -= 1;
                 }
@@ -2862,10 +3050,12 @@ impl BlockFsInner {
             for l1_idx in 0..PTRS_PER_BLOCK {
                 let l1_block = self.read_block_ptr(dbl_indirect, l1_idx)?;
                 if l1_block != 0 {
-                    // Free all data blocks in this L1 indirect block
+                    // Free all data blocks in this L1 indirect block,
+                    // clearing each pointer first (restart-safe, above).
                     for l2_idx in 0..PTRS_PER_BLOCK {
                         let data_blk = self.read_block_ptr(l1_block, l2_idx)?;
                         if data_blk != 0 {
+                            self.write_block_ptr(l1_block, l2_idx, 0)?;
                             self.free_block(data_blk);
                             if self.inode_table[inode_num as usize].blocks > 0 {
                                 self.inode_table[inode_num as usize].blocks -= 1;
@@ -2873,6 +3063,7 @@ impl BlockFsInner {
                         }
                     }
                     // Free the L1 indirect block itself
+                    self.write_block_ptr(dbl_indirect, l1_idx, 0)?;
                     self.free_block(l1_block);
                     if self.inode_table[inode_num as usize].blocks > 0 {
                         self.inode_table[inode_num as usize].blocks -= 1;
@@ -2880,8 +3071,8 @@ impl BlockFsInner {
                 }
             }
             // Free the double-indirect block itself
-            self.free_block(dbl_indirect);
             self.inode_table[inode_num as usize].double_indirect_block = 0;
+            self.free_block(dbl_indirect);
             if self.inode_table[inode_num as usize].blocks > 0 {
                 self.inode_table[inode_num as usize].blocks -= 1;
             }
@@ -2911,8 +3102,8 @@ impl BlockFsInner {
                     if l2_idx >= l2_start {
                         let data_blk = self.read_block_ptr(l1_block, l2_idx)?;
                         if data_blk != 0 {
-                            self.free_block(data_blk);
                             self.write_block_ptr(l1_block, l2_idx, 0)?;
+                            self.free_block(data_blk);
                             if self.inode_table[inode_num as usize].blocks > 0 {
                                 self.inode_table[inode_num as usize].blocks -= 1;
                             }
@@ -2927,8 +3118,8 @@ impl BlockFsInner {
 
                 if !any_l2_remain {
                     // Free the now-empty L1 indirect block
-                    self.free_block(l1_block);
                     self.write_block_ptr(dbl_indirect, l1_idx, 0)?;
+                    self.free_block(l1_block);
                     if self.inode_table[inode_num as usize].blocks > 0 {
                         self.inode_table[inode_num as usize].blocks -= 1;
                     }
@@ -2938,8 +3129,8 @@ impl BlockFsInner {
             }
 
             if !any_l1_remain {
-                self.free_block(dbl_indirect);
                 self.inode_table[inode_num as usize].double_indirect_block = 0;
+                self.free_block(dbl_indirect);
                 if self.inode_table[inode_num as usize].blocks > 0 {
                     self.inode_table[inode_num as usize].blocks -= 1;
                 }
@@ -3344,7 +3535,8 @@ impl BlockFs {
 
 impl Filesystem for BlockFs {
     fn root(&self) -> Arc<dyn VfsNode> {
-        Arc::new(BlockFsNode::new(0, self.inner.clone()))
+        let holds = self.inner.read().holds.clone();
+        Arc::new(BlockFsNode::new(0, self.inner.clone(), holds))
     }
 
     fn name(&self) -> &str {
@@ -3355,9 +3547,10 @@ impl Filesystem for BlockFs {
         false
     }
 
-    /// Inode numbers are the on-disk ones. A freed number is given to the
-    /// next new file, and handles carry no generation yet, so a handle to
-    /// a deleted file can open the file that took its number.
+    /// Inode numbers are the on-disk ones. A freed number is given to a
+    /// new file once no node in memory names the old one
+    /// ([`InodeHolds`]); handles carry no generation yet, so a handle to a
+    /// deleted file nothing holds can open the file that took its number.
     fn exportable(&self) -> bool {
         true
     }
@@ -3422,14 +3615,141 @@ mod tests {
         let old_ino = crate::fs::inode_key(&old).1 as u32;
         root.unlink("p").unwrap();
         // As if another CPU's mutate were between dropping the lock and
-        // reporting the number.
+        // reporting the number. No node holds it, so only the report keeps
+        // it from reuse (PR #49 review: the hold must not hide that).
         fs.inner.write().reporting_special.push(old_ino);
+        drop(old);
         let other = root.mknod("q", NodeType::Pipe, perms, 0).unwrap();
         assert_ne!(crate::fs::inode_key(&other).1 as u32, old_ino);
         fs.inner.write().reporting_special.clear();
         let reused = root.mknod("r", NodeType::Pipe, perms, 0).unwrap();
         assert_eq!(crate::fs::inode_key(&reused).1 as u32, old_ino);
         assert!(fs.inner.read().reporting_special.is_empty());
+    }
+
+    /// A deleted file's number is not given to a new file while a node in
+    /// memory still names it (an open file, a working directory, a Landlock
+    /// rule's anchor), as Linux keeps an inode until its last reference
+    /// goes: a rule on the old file must not cover the new one. Once the
+    /// last node goes, the number is free again.
+    #[test]
+    fn a_held_inode_number_is_not_reused() {
+        let fs = BlockFs::format(1024, 64).unwrap();
+        let root = fs.root();
+        let perms = Permissions::from_mode(0o755);
+        let old = root.mkdir("d", perms).unwrap();
+        let old_ino = crate::fs::inode_key(&old).1 as u32;
+        // A second node for the same file, as another lookup makes.
+        let again = root.lookup("d").unwrap();
+        root.unlink("d").unwrap();
+        let other = root.create("f", perms).unwrap();
+        assert_ne!(crate::fs::inode_key(&other).1 as u32, old_ino);
+        drop(old);
+        let still = root.create("g", perms).unwrap();
+        assert_ne!(crate::fs::inode_key(&still).1 as u32, old_ino);
+        drop(again);
+        let reused = root.create("h", perms).unwrap();
+        assert_eq!(crate::fs::inode_key(&reused).1 as u32, old_ino);
+    }
+
+    /// Blocks a node writes to a file after its last unlink go back once
+    /// nothing holds it: when its number is used again, or when blocks run
+    /// out (PR #49 review).
+    #[test]
+    fn an_unlinked_files_later_blocks_are_reclaimed() {
+        let fs = BlockFs::format(128, 16).unwrap();
+        let root = fs.root();
+        let perms = Permissions::from_mode(0o644);
+        let free = |fs: &BlockFs| fs.inner.read().superblock.free_blocks;
+        let start = free(&fs);
+        let f = root.create("f", perms).unwrap();
+        root.unlink("f").unwrap();
+        f.write(0, &[7u8; 3 * 4096]).unwrap();
+        assert!(free(&fs) < start);
+        drop(f);
+        // Its number again: its blocks first.
+        let g = root.create("g", perms).unwrap();
+        assert_eq!(free(&fs), start);
+        drop(g);
+        root.unlink("g").unwrap();
+        // Out of blocks: the orphans' come back. `big` is made first, so it
+        // does not take the orphan's number (which would reclaim it there).
+        let big = root.create("big", perms).unwrap();
+        let h = root.create("h", perms).unwrap();
+        root.unlink("h").unwrap();
+        h.write(0, &[1u8; 4 * 4096]).unwrap();
+        drop(h);
+        // start - 4 data blocks and an indirect one: one more than is free
+        // while the orphan keeps its four.
+        let data = (start as usize - 4) * BLOCK_SIZE;
+        assert!(big.write(0, &alloc::vec![2u8; data]).is_ok());
+    }
+
+    /// fallocate counts an orphan's blocks as free, as a write does: the
+    /// range is refused only if it does not fit once they are reclaimed
+    /// (PR #49 review).
+    #[test]
+    fn fallocate_reclaims_orphans_before_refusing() {
+        let fs = BlockFs::format(128, 16).unwrap();
+        let root = fs.root();
+        let perms = Permissions::from_mode(0o644);
+        let start = fs.inner.read().superblock.free_blocks;
+        let big = root.create("big", perms).unwrap();
+        let h = root.create("h", perms).unwrap();
+        root.unlink("h").unwrap();
+        h.write(0, &[1u8; 4 * BLOCK_SIZE]).unwrap();
+        drop(h);
+        // start - 4 data blocks and an indirect one: more than is free
+        // while the orphan keeps its four, within what is free after.
+        let data = (start as usize - 4) * BLOCK_SIZE;
+        assert_eq!(big.fallocate(falloc(0, 0, data)), Ok(()));
+        // Still refused when it cannot fit at all.
+        let more = root.create("more", perms).unwrap();
+        assert_eq!(
+            more.fallocate(falloc(0, 0, 8 * BLOCK_SIZE)),
+            Err(KernelError::FsError(FsError::NoSpace))
+        );
+    }
+
+    /// Freeing an inode's blocks clears each pointer before freeing what it
+    /// names, so running it again (a retry after a failure, or after a
+    /// remount) frees nothing twice: here a file reaching the single
+    /// indirect block (PR #49 review).
+    #[test]
+    fn freeing_an_inodes_blocks_again_frees_nothing() {
+        let fs = BlockFs::format(128, 16).unwrap();
+        let root = fs.root();
+        let f = root.create("f", Permissions::from_mode(0o644)).unwrap();
+        let ino = crate::fs::inode_key(&f).1 as u32;
+        f.write(0, &[5u8; 20 * BLOCK_SIZE]).unwrap();
+        let mut inner = fs.inner.write();
+        inner.free_inode_blocks(ino).unwrap();
+        let after = inner.superblock.free_blocks;
+        let i = &inner.inode_table[ino as usize];
+        assert_eq!((i.indirect_block, i.double_indirect_block), (0, 0));
+        assert!(i.direct_blocks.iter().all(|&b| b == 0));
+        inner.free_inode_blocks(ino).unwrap();
+        assert_eq!(inner.superblock.free_blocks, after);
+    }
+
+    /// An orphan whose reclamation failed (poisoned) keeps its number out
+    /// of use, so its stale block pointers are never followed again (PR
+    /// #49 review).
+    #[test]
+    fn a_poisoned_orphan_is_never_reused() {
+        let fs = BlockFs::format(128, 16).unwrap();
+        let root = fs.root();
+        let perms = Permissions::from_mode(0o644);
+        let f = root.create("f", perms).unwrap();
+        let ino = crate::fs::inode_key(&f).1 as u32;
+        root.unlink("f").unwrap();
+        f.write(0, &[3u8; 4096]).unwrap();
+        drop(f);
+        fs.inner.write().poisoned.insert(ino);
+        for i in 0..8 {
+            let g = root.create(&alloc::format!("g{i}"), perms).unwrap();
+            assert_ne!(crate::fs::inode_key(&g).1 as u32, ino);
+        }
     }
 
     /// statfs reports the superblock's counts, and they move as a file

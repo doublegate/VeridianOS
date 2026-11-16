@@ -631,6 +631,13 @@ pub trait VfsNode: Send + Sync {
         None
     }
 
+    /// The node with the name, when this one is what an open made of it:
+    /// an open FIFO's end, an open device's file. `None` (the default) for
+    /// a node that is itself the named one.
+    fn named_node(&self) -> Option<Arc<dyn VfsNode>> {
+        None
+    }
+
     /// Create a symbolic link in this directory.
     ///
     /// Creates a new symlink entry named `name` in this directory node
@@ -1628,6 +1635,124 @@ impl MountTable {
         }
         Ok(node)
     }
+
+    /// Landlock's view of the canonical path `canon` (ADR 0029): the keys of
+    /// the object, then of every directory above it up to the real root. At
+    /// a mount point only the top mount's root counts: Linux's walk up
+    /// skips the covered directory and the roots of mounts under the top one
+    /// (`follow_up`, then on to the point's parent). `last` is the object
+    /// itself when the caller holds it. A part that has gone is left out,
+    /// which can only grant less. So is the whole chain when the caller
+    /// holds the object and the walk does not end at it: it ended at
+    /// another (a rename between the lookup and the check), or stopped
+    /// short (the path no longer leads anywhere: a file moved or removed
+    /// since a descriptor recorded it). The ancestors are then not
+    /// `last`'s, and only its own key is kept (PR #49 review). A file with
+    /// no name, O_TMPFILE's, has its directory given instead
+    /// ([`Vfs::landlock_open_rights_under`]).
+    #[cfg(feature = "alloc")]
+    fn ancestry(
+        &self,
+        canon: &[String],
+        last: Option<&Arc<dyn VfsNode>>,
+    ) -> veridian_landlock::Ancestry {
+        let mut down: Vec<Option<(u64, u64)>> = Vec::with_capacity(canon.len() + 2);
+        let Some(root) = self.root.as_ref() else {
+            return veridian_landlock::Ancestry::default();
+        };
+        let mut node = root.root();
+        let mut path = String::new();
+        let mut complete = true;
+        for c in canon {
+            down.push(Some(inode_key(&node)));
+            path.push('/');
+            path.push_str(c);
+            // At a mount point only the top mount's root is on the way:
+            // Linux's walk up follows a mount root to the point it covers and
+            // goes straight on to that point's parent, so neither the covered
+            // directory nor the roots of mounts stacked under the top one
+            // count ("Ignores hidden mount points", is_access_to_paths_allowed;
+            // PR #49 independent review).
+            node = match self.mounts.get(&path) {
+                Some(mount) => mount.root(),
+                None => match node.lookup(c) {
+                    Ok(n) => n,
+                    Err(_) => {
+                        complete = false;
+                        break;
+                    }
+                },
+            };
+        }
+        let target = match last {
+            Some(l) if !complete || inode_key(&node) != inode_key(l) => {
+                let internal = is_internal_file(l);
+                return veridian_landlock::Ancestry {
+                    keys: alloc::vec![Some(inode_key(l))],
+                    internal,
+                    partial: true,
+                };
+            }
+            Some(l) => l.clone(),
+            None if complete => node,
+            None => {
+                down.reverse();
+                return veridian_landlock::Ancestry {
+                    keys: down,
+                    internal: false,
+                    partial: true,
+                };
+            }
+        };
+        // nsfs, reached through a /proc magic link, is internal: always
+        // allowed (MNT_INTERNAL).
+        let internal = is_internal_file(&target);
+        down.push(Some(inode_key(&target)));
+        down.reverse();
+        veridian_landlock::Ancestry {
+            keys: down,
+            internal,
+            partial: false,
+        }
+    }
+}
+
+/// A file on a filesystem no one can mount, at the root of it (Landlock's
+/// MNT_INTERNAL case, is_access_to_paths_allowed): nsfs, reached through a
+/// /proc magic link, and a memfd, on the kernel's internal shmem mount.
+/// Landlock always allows it, and it cannot anchor a rule (PR #49
+/// independent review).
+#[cfg(feature = "alloc")]
+pub fn is_internal_file(node: &Arc<dyn VfsNode>) -> bool {
+    node.as_any()
+        .is_some_and(|a| a.is::<nsfs::NsFileNode>() || a.is::<memfd::MemfdNode>())
+}
+
+/// [`MountTable::ancestry`] of canonical `path` (a path in the whole tree of
+/// `mounts`, or in a detached tree) for a Landlock check.
+#[cfg(feature = "alloc")]
+fn ancestry_in(
+    mounts: &Arc<mount::Mounts>,
+    path: &str,
+    last: Option<&Arc<dyn VfsNode>>,
+) -> veridian_landlock::Ancestry {
+    let split = |p: &str| -> Vec<String> {
+        p.split('/')
+            .filter(|c| !c.is_empty())
+            .map(String::from)
+            .collect()
+    };
+    if let Some((id, rest)) = mount::parse_detached(path) {
+        let Some((tree, point)) = mount::detached_place(id) else {
+            return veridian_landlock::Ancestry::default();
+        };
+        let full = match point {
+            Some(p) if p != "/" => alloc::format!("{p}{rest}"),
+            _ => String::from(rest),
+        };
+        return tree.snapshot().ancestry(&split(&full), last);
+    }
+    mounts.snapshot().ancestry(&split(path), last)
 }
 
 /// File seals (fcntl F_ADD_SEALS / F_GET_SEALS), with Linux's values. A
@@ -1672,6 +1797,56 @@ pub struct PathContext {
     pub resolve: u32,
     /// The mount tree the walk uses: the caller's mount namespace's.
     pub mounts: Arc<mount::Mounts>,
+    /// The caller's Landlock domain (ADR 0029); `None` checks nothing.
+    #[cfg(feature = "alloc")]
+    pub landlock: Option<Arc<crate::security::landlock::KDomain>>,
+}
+
+/// The Landlock rights (ADR 0029) the VFS's own operations need, so that
+/// the no-`alloc` build, which has no Landlock, still names them.
+pub mod landlock_rights {
+    use super::NodeType;
+
+    /// LANDLOCK_ACCESS_FS_MAKE_DIR.
+    pub const MAKE_DIR: u32 = 1 << 7;
+    /// LANDLOCK_ACCESS_FS_MAKE_SYM.
+    pub const MAKE_SYM: u32 = 1 << 12;
+
+    /// The `S_IFMT` bits of a node of type `kind`.
+    pub fn mode_of(kind: NodeType) -> u32 {
+        match kind {
+            NodeType::Directory => 0o040000,
+            NodeType::Symlink => 0o120000,
+            NodeType::CharDevice => 0o020000,
+            NodeType::BlockDevice => 0o060000,
+            NodeType::Pipe => 0o010000,
+            NodeType::Socket => 0o140000,
+            NodeType::File => 0o100000,
+        }
+    }
+
+    /// The right to remove a node of type `kind` (maybe_remove).
+    pub fn remove(kind: NodeType) -> u32 {
+        if kind == NodeType::Directory {
+            1 << 4
+        } else {
+            1 << 5
+        }
+    }
+
+    /// The right to make a node of type `kind` (get_mode_access): a
+    /// regular file for anything without its own.
+    pub fn make(kind: NodeType) -> u32 {
+        match kind {
+            NodeType::Directory => MAKE_DIR,
+            NodeType::Symlink => MAKE_SYM,
+            NodeType::CharDevice => 1 << 6,
+            NodeType::Socket => 1 << 9,
+            NodeType::Pipe => 1 << 10,
+            NodeType::BlockDevice => 1 << 11,
+            _ => 1 << 8,
+        }
+    }
 }
 
 /// openat2's `how.resolve` flags, with Linux's values.
@@ -1905,13 +2080,19 @@ impl<'a> CallerView<'a> {
         rdev: u32,
         check: impl FnOnce(&dyn VfsNode) -> Result<(), KernelError>,
     ) -> Result<Arc<dyn VfsNode>, KernelError> {
-        self.vfs.create_in(&self.ctx, path, check, |parent, name| {
-            if kind == NodeType::File {
-                parent.create(name, permissions)
-            } else {
-                parent.mknod(name, kind, permissions, rdev)
-            }
-        })
+        self.vfs.create_in(
+            &self.ctx,
+            path,
+            landlock_rights::make(kind),
+            check,
+            |parent, name| {
+                if kind == NodeType::File {
+                    parent.create(name, permissions)
+                } else {
+                    parent.mknod(name, kind, permissions, rdev)
+                }
+            },
+        )
     }
 
     pub fn unlink(&self, path: &str) -> Result<(), KernelError> {
@@ -1951,6 +2132,207 @@ impl<'a> CallerView<'a> {
         follow: bool,
     ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
         self.vfs.lookup(&self.ctx, path, &self.ctx.cwd, follow)
+    }
+
+    /// The caller's Landlock domain (ADR 0029), `None` when it is not
+    /// restricted.
+    #[cfg(feature = "alloc")]
+    pub fn landlock(&self) -> Option<&Arc<crate::security::landlock::KDomain>> {
+        self.ctx.landlock.as_ref()
+    }
+
+    /// The objects above canonical `path` (`node` itself when the caller
+    /// has it), for a Landlock check in the caller's tree.
+    #[cfg(feature = "alloc")]
+    pub fn landlock_ancestry(
+        &self,
+        path: &str,
+        node: Option<&Arc<dyn VfsNode>>,
+    ) -> veridian_landlock::Ancestry {
+        ancestry_in(&self.ctx.mounts, path, node)
+    }
+
+    /// The authority entry (ADR 0029): whether the caller holds the
+    /// Landlock rights `access` on the object at canonical `path` (`node`
+    /// itself when the caller has it). EACCES if not; nothing to check for
+    /// an unrestricted caller.
+    #[cfg(feature = "alloc")]
+    pub fn landlock_check(
+        &self,
+        path: &str,
+        node: Option<&Arc<dyn VfsNode>>,
+        access: u32,
+    ) -> Result<(), KernelError> {
+        match &self.ctx.landlock {
+            None => Ok(()),
+            Some(d) => crate::cap::authority::holds_path(
+                d,
+                &ancestry_in(&self.ctx.mounts, path, node),
+                access,
+            ),
+        }
+    }
+
+    /// The node at canonical `path` (a path in the whole tree, no symlinks
+    /// or `..`) in the caller's tree; `None` for a detached path or one
+    /// that has gone.
+    #[cfg(feature = "alloc")]
+    pub fn canonical_node(&self, path: &str) -> Option<Arc<dyn VfsNode>> {
+        if mount::parse_detached(path).is_some() {
+            return None;
+        }
+        let parts: Vec<String> = path
+            .split('/')
+            .filter(|c| !c.is_empty())
+            .map(String::from)
+            .collect();
+        self.ctx.mounts.snapshot().walk_canonical(&parts).ok()
+    }
+
+    /// The node at canonical `path` in the caller's tree or in a detached
+    /// tree, for a Landlock check that an object is still where its path
+    /// says. [`Self::canonical_node`] answers `None` for a detached path,
+    /// so a check built on it refused a link into an `open_tree` copy even
+    /// for a domain with no filesystem rule (PR #49 review).
+    #[cfg(feature = "alloc")]
+    pub fn landlock_node_at(&self, path: &str) -> Option<Arc<dyn VfsNode>> {
+        let Some((id, rest)) = mount::parse_detached(path) else {
+            return self.canonical_node(path);
+        };
+        let (tree, point) = mount::detached_place(id)?;
+        let full = match point {
+            Some(p) if p != "/" => alloc::format!("{p}{rest}"),
+            _ => String::from(rest),
+        };
+        let parts: Vec<String> = full
+            .split('/')
+            .filter(|c| !c.is_empty())
+            .map(String::from)
+            .collect();
+        tree.snapshot().walk_canonical(&parts).ok()
+    }
+
+    /// [`Self::canonical_parent`] for a Landlock check, in the caller's tree
+    /// or a detached one: the parent of a detached path is the detached path
+    /// of its directory, which [`Self::landlock_refer`] walks as such (PR #49
+    /// review).
+    #[cfg(feature = "alloc")]
+    pub fn landlock_parent_at(&self, path: &str) -> Option<(String, Arc<dyn VfsNode>)> {
+        let Some((id, rest)) = mount::parse_detached(path) else {
+            return self.canonical_parent(path);
+        };
+        let rest = rest.trim_end_matches('/');
+        let (dir, _) = rest.rsplit_once('/')?;
+        let dir_path = mount::detached_path(id, dir);
+        let node = self.landlock_node_at(&dir_path)?;
+        Some((dir_path, node))
+    }
+
+    /// The node at canonical `path` (a path in the whole tree, no symlinks
+    /// or `..`), and that path, for the directory holding it: what a
+    /// Landlock check of a name's parent needs. `None` for the root, a
+    /// detached path, or a directory that has gone.
+    #[cfg(feature = "alloc")]
+    pub fn canonical_parent(&self, path: &str) -> Option<(String, Arc<dyn VfsNode>)> {
+        if mount::parse_detached(path).is_some() {
+            return None;
+        }
+        let parts: Vec<String> = path
+            .split('/')
+            .filter(|c| !c.is_empty())
+            .map(String::from)
+            .collect();
+        let (_, dir) = parts.split_last()?;
+        let node = self.ctx.mounts.snapshot().walk_canonical(dir).ok()?;
+        Some((join_components(dir), node))
+    }
+
+    /// Landlock's link and rename check (hook_path_link, hook_path_rename:
+    /// current_check_refer_path). `old` moves (or gets a new name) from the
+    /// directory `old_dir` to `new_dir` (canonical paths and nodes), where
+    /// `new` is the object it replaces or, with `exchange`, swaps with.
+    /// `removable` is a rename's: the names are removed as well as made.
+    /// EACCES, or EXDEV when only the move to another directory would give
+    /// an object more rights.
+    #[cfg(feature = "alloc")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn landlock_refer(
+        &self,
+        old: &Arc<dyn VfsNode>,
+        new: Option<&Arc<dyn VfsNode>>,
+        old_dir: (&str, &Arc<dyn VfsNode>),
+        new_dir: (&str, &Arc<dyn VfsNode>),
+        removable: bool,
+        exchange: bool,
+    ) -> Result<(), KernelError> {
+        use crate::security::landlock as l;
+        let Some(d) = &self.ctx.landlock else {
+            return Ok(());
+        };
+        let entry = |n: &Arc<dyn VfsNode>| veridian_landlock::Entry {
+            key: Some(l::key_of(n)),
+            mode: landlock_rights::mode_of(n.node_type()),
+        };
+        let same_dir = l::key_of(old_dir.1) == l::key_of(new_dir.1);
+        let old_anc = ancestry_in(&self.ctx.mounts, old_dir.0, Some(old_dir.1));
+        let new_anc = ancestry_in(&self.ctx.mounts, new_dir.0, Some(new_dir.1));
+        // How many objects are above the mount both are on: the walk up
+        // from each directory stops at that mount's root.
+        let common = if mount::parse_detached(new_dir.0).is_some() {
+            0
+        } else {
+            let point = self.mount_point_of(new_dir.0);
+            ancestry_in(&self.ctx.mounts, &point, None)
+                .keys
+                .len()
+                .saturating_sub(1)
+        };
+        d.dom
+            .check_refer(
+                entry(old),
+                new.map(entry),
+                &old_anc,
+                &new_anc,
+                common,
+                same_dir,
+                removable,
+                exchange,
+            )
+            .map_err(l::to_kernel)
+    }
+
+    /// [`Vfs::landlock_open_rights`] of `node`, a file with no name in
+    /// directory `dir` at canonical `dir_path` (O_TMPFILE): its own key,
+    /// then the directory's chain, as Linux's walk up from the file's
+    /// d_parent.
+    #[cfg(feature = "alloc")]
+    pub fn landlock_open_rights_under(
+        &self,
+        dir_path: &str,
+        dir: &Arc<dyn VfsNode>,
+        node: &Arc<dyn VfsNode>,
+        request: u32,
+    ) -> u32 {
+        match &self.ctx.landlock {
+            None => request,
+            Some(d) => {
+                let mut anc = ancestry_in(&self.ctx.mounts, dir_path, Some(dir));
+                anc.keys.insert(0, Some(inode_key(node)));
+                d.dom.open_rights(&anc, request)
+            }
+        }
+    }
+
+    /// The part of `request` an open of `node` at canonical `path` is
+    /// allowed (hook_file_open); all of it for an unrestricted caller.
+    #[cfg(feature = "alloc")]
+    pub fn landlock_open_rights(&self, path: &str, node: &Arc<dyn VfsNode>, request: u32) -> u32 {
+        match &self.ctx.landlock {
+            None => request,
+            Some(d) => d
+                .dom
+                .open_rights(&ancestry_in(&self.ctx.mounts, path, Some(node)), request),
+        }
     }
 
     /// The caller's mount namespace's tree (mount(2), umount2).
@@ -2083,6 +2465,8 @@ impl Vfs {
             pid: 0,
             resolve: 0,
             mounts: self.mounts.clone(),
+            #[cfg(feature = "alloc")]
+            landlock: None,
         }
     }
 
@@ -2103,6 +2487,7 @@ impl Vfs {
             if Arc::ptr_eq(&self.mounts, &initial_mounts()) {
                 ctx.mounts = thread.namespaces().mnt.mounts.clone();
             }
+            ctx.landlock = thread.landlock.get();
         }
         if let Some(process) = crate::process::current_process() {
             ctx.pid = process.pid.0;
@@ -2579,6 +2964,7 @@ impl Vfs {
         self.create_in(
             &self.kernel_context(),
             path,
+            0,
             |_| Ok(()),
             |parent, name| parent.mknod(name, kind, permissions, rdev),
         )
@@ -2591,9 +2977,13 @@ impl Vfs {
         permissions: Permissions,
         check: impl FnOnce(&dyn VfsNode) -> Result<(), KernelError>,
     ) -> Result<Arc<dyn VfsNode>, KernelError> {
-        self.create_in(ctx, path, check, |parent, name| {
-            parent.mkdir(name, permissions)
-        })
+        self.create_in(
+            ctx,
+            path,
+            landlock_rights::MAKE_DIR,
+            check,
+            |parent, name| parent.mkdir(name, permissions),
+        )
     }
 
     /// Create the entry `path` names with `make(parent, name)`, after the
@@ -2602,6 +2992,7 @@ impl Vfs {
         &self,
         ctx: &PathContext,
         path: &str,
+        landlock: u32,
         check: impl FnOnce(&dyn VfsNode) -> Result<(), KernelError>,
         make: impl FnOnce(&dyn VfsNode, &str) -> Result<Arc<dyn VfsNode>, KernelError>,
     ) -> Result<Arc<dyn VfsNode>, KernelError> {
@@ -2680,6 +3071,23 @@ impl Vfs {
             crate::security::AccessType::Write,
             ctx.pid,
         )?;
+        // Landlock's hook_path_mknod, hook_path_mkdir and hook_path_symlink
+        // (ADR 0029), on the parent directory: after a name that exists is
+        // found (EEXIST, filename_create) and before the permission check
+        // (may_create).
+        #[cfg(feature = "alloc")]
+        if let Some(d) = &ctx.landlock {
+            if parent.lookup(name).is_ok() {
+                return Err(KernelError::FsError(crate::error::FsError::AlreadyExists));
+            }
+            crate::cap::authority::holds_path(
+                d,
+                &ancestry_in(&ctx.mounts, &canonical_parent, Some(&parent)),
+                landlock,
+            )?;
+        }
+        #[cfg(not(feature = "alloc"))]
+        let _ = landlock;
         check(&*parent)?;
 
         let node = make(&*parent, name)?;
@@ -3251,6 +3659,82 @@ pub fn append_file(path: &str, data: &[u8]) -> Result<usize, KernelError> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// Landlock's walk: the object and every directory above it; when the
+    /// walk reaches an object other than the one the lookup gave (a rename
+    /// in between), no ancestors, only that object's own key (PR #49
+    /// review).
+    /// A directory a mount now covers is not on the walk: Linux's walk
+    /// skips hidden mount points, so a rule on the covered directory does not
+    /// reach the mount's files (PR #49 independent review).
+    #[test]
+    fn landlock_ancestry_skips_the_covered_directory() {
+        let vfs = Vfs::new();
+        vfs.mount_root(Arc::new(ramfs::RamFs::new())).unwrap();
+        let root = vfs.root_fs().unwrap().root();
+        let covered = root.mkdir("data", Permissions::default()).unwrap();
+        vfs.mount("/data".into(), Arc::new(tmpfs::TmpFs::new(1 << 20)))
+            .unwrap();
+        let t = vfs.mounts().snapshot();
+        let top = t.walk_canonical(&[String::from("data")]).unwrap();
+        let f = top.create("secret", Permissions::default()).unwrap();
+        let keys = t
+            .ancestry(&[String::from("data"), String::from("secret")], Some(&f))
+            .keys;
+        assert_eq!(
+            keys,
+            [
+                Some(inode_key(&f)),
+                Some(inode_key(&top)),
+                Some(inode_key(&root))
+            ]
+        );
+        assert!(!keys.contains(&Some(inode_key(&covered))));
+    }
+
+    /// procfs makes a new node on each lookup; its identity is still one
+    /// per file, so a walk that looks a /proc path up again finds the
+    /// object an open holds (PR #49 independent review).
+    #[test]
+    fn a_proc_file_has_one_identity() {
+        let proc = Arc::new(procfs::ProcFs::new());
+        let root = proc.root();
+        let a = root.lookup("meminfo").unwrap();
+        let b = root.lookup("meminfo").unwrap();
+        assert!(!Arc::ptr_eq(&a, &b));
+        assert_eq!(inode_key(&a), inode_key(&b));
+        let other = root.lookup("version").unwrap();
+        assert_ne!(inode_key(&a), inode_key(&other));
+    }
+
+    #[test]
+    fn landlock_ancestry_is_the_looked_up_objects() {
+        let vfs = Vfs::new();
+        vfs.mount_root(Arc::new(ramfs::RamFs::new())).unwrap();
+        let root = vfs.root_fs().unwrap().root();
+        let a = root.mkdir("a", Permissions::default()).unwrap();
+        let x = a.create("x", Permissions::default()).unwrap();
+        let other = root.create("y", Permissions::default()).unwrap();
+        let path = [String::from("a"), String::from("x")];
+        let t = vfs.mounts().snapshot();
+        let keys = |anc: veridian_landlock::Ancestry| anc.keys;
+        assert_eq!(
+            keys(t.ancestry(&path, Some(&x))),
+            [
+                Some(inode_key(&x)),
+                Some(inode_key(&a)),
+                Some(inode_key(&root))
+            ]
+        );
+        assert_eq!(
+            keys(t.ancestry(&path, Some(&other))),
+            [Some(inode_key(&other))]
+        );
+        // A path that no longer leads anywhere (the file moved or removed
+        // since it was recorded): no ancestors either.
+        let gone = [String::from("a"), String::from("gone")];
+        assert_eq!(keys(t.ancestry(&gone, Some(&x))), [Some(inode_key(&x))]);
+    }
 
     /// Linux's device-number encoding (`new_encode_dev`): 12 bits of
     /// major, 20 of minor, both round-trip.
@@ -4161,6 +4645,7 @@ pub(crate) mod tests {
             vfs.create_in(
                 ctx,
                 path,
+                0,
                 |_| Ok(()),
                 |p, n| p.mkdir(n, Permissions::default()),
             )
@@ -4322,6 +4807,7 @@ pub(crate) mod tests {
                 pid: 0,
                 resolve: 0,
                 mounts: vfs.mounts.clone(),
+                landlock: None,
             },
         }
     }
@@ -4804,6 +5290,7 @@ pub(crate) mod tests {
                 pid: 0,
                 resolve: 0,
                 mounts: vfs.mounts.clone(),
+                landlock: None,
             },
         }
         .resolving(resolve, start)
@@ -5079,6 +5566,7 @@ pub(crate) mod tests {
                 pid: 0,
                 resolve: 0,
                 mounts: vfs.mounts.clone(),
+                landlock: None,
             },
         };
         caller.unmount("/dev/shm").unwrap();

@@ -2457,6 +2457,37 @@ mod tests {
     /// A detached tree (fsmount, open_tree) is reached only through its
     /// marker path, until it is attached; then the marker leads to where
     /// it went, also after a move. It goes with its last reference.
+    /// Landlock's identity checks find a node in a detached tree by its
+    /// marker path, as they do one in the caller's tree (PR #49 review).
+    #[test]
+    fn landlock_finds_a_node_in_a_detached_tree() {
+        let vfs = work_tree();
+        let t = vfs.mounts();
+        let ctx = vfs.kernel_context();
+        let tree = Arc::new(t.detached_new(tmpfs(), "det".into(), flags::RELATIME, false));
+        let id = register_detached(&tree);
+        let root = detached_path(id, "/");
+        let d = vfs
+            .lookup(&ctx, &root, "/", true)
+            .unwrap()
+            .0
+            .mkdir("d", crate::fs::Permissions::default())
+            .unwrap();
+        let view = crate::fs::CallerView {
+            vfs: &vfs,
+            ctx: ctx.clone(),
+        };
+        let found = view.landlock_node_at(&detached_path(id, "/d")).unwrap();
+        assert_eq!(crate::fs::inode_key(&found), crate::fs::inode_key(&d));
+        assert!(view.landlock_node_at(&detached_path(id, "/gone")).is_none());
+        assert!(view.canonical_node(&detached_path(id, "/d")).is_none());
+        let (dir, node) = view.landlock_parent_at(&detached_path(id, "/d/f")).unwrap();
+        assert_eq!(dir, detached_path(id, "/d"));
+        assert_eq!(crate::fs::inode_key(&node), crate::fs::inode_key(&d));
+        let (top, _) = view.landlock_parent_at(&detached_path(id, "/d")).unwrap();
+        assert_eq!(top, detached_path(id, ""));
+    }
+
     #[test]
     fn a_detached_tree_is_reached_by_its_marker_until_attached() {
         let vfs = work_tree();

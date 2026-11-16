@@ -22,6 +22,12 @@ extern "C" {
 /// PSCI conduit found during enumeration.
 static CONDUIT: spin::Once<Conduit> = spin::Once::new();
 
+/// The PSCI conduit, for power calls: the one the device tree named, or
+/// HVC (QEMU virt's without virtualization) if none was read.
+pub fn conduit() -> Conduit {
+    CONDUIT.get().copied().unwrap_or(Conduit::Hvc)
+}
+
 /// MPIDR affinity bits (Aff2..Aff0) used as hardware ids.
 const MPIDR_AFF_MASK: u64 = 0x00FF_FFFF;
 

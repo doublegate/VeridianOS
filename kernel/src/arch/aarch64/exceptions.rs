@@ -401,6 +401,7 @@ fn irq(user: bool) {
 
 /// Report an unhandled exception and stop.
 extern "C" fn aarch64_fatal(kind: u64) -> ! {
+    crate::printk::console_verbose();
     let (esr, elr, far): (u64, u64, u64);
     // SAFETY: reading the EL1 syndrome registers has no side effects.
     unsafe {

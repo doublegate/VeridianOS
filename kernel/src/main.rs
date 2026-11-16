@@ -172,6 +172,8 @@ fn x86_64_kernel_entry(boot_info: &'static mut BootInfo) -> ! {
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
+    // Whatever console level a program set, a panic is shown.
+    printk::console_verbose();
     // Use architecture-specific panic handler
     #[cfg(target_arch = "x86_64")]
     arch::x86_64::entry::arch_panic_handler(_info);

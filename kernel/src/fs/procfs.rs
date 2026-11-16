@@ -296,6 +296,13 @@ enum Sysctl {
     /// `fs/mqueue/*`: the reader's IPC namespace's message-queue limits
     /// (`syscall::mqueue::SYSCTLS`).
     Mqueue(&'static str),
+    /// `kernel/keys/*`: the key quotas and delays (`syscall::keys::SYSCTLS`).
+    Keys(&'static str),
+    /// `kernel/printk`: the console log level and its fixed companions
+    /// (`printk::levels`).
+    Printk,
+    /// `kernel/dmesg_restrict` (`syscall::system::DMESG_RESTRICT`).
+    DmesgRestrict,
 }
 
 impl Sysctl {
@@ -313,6 +320,8 @@ impl Sysctl {
             "sys/user/max_pid_namespaces" => Some(Self::MaxPidNamespaces),
             "sys/user/max_net_namespaces" => Some(Self::MaxNetNamespaces),
             "sys/kernel/threads-max" => Some(Self::ThreadsMax),
+            "sys/kernel/printk" => Some(Self::Printk),
+            "sys/kernel/dmesg_restrict" => Some(Self::DmesgRestrict),
             _ => {
                 #[cfg(feature = "alloc")]
                 if let Some(n) = name.strip_prefix("sys/fs/mqueue/") {
@@ -320,6 +329,13 @@ impl Sysctl {
                         .iter()
                         .find(|s| **s == n)
                         .map(|s| Self::Mqueue(s));
+                }
+                #[cfg(feature = "alloc")]
+                if let Some(n) = name.strip_prefix("sys/kernel/keys/") {
+                    return crate::syscall::keys::SYSCTLS
+                        .iter()
+                        .find(|s| **s == n)
+                        .map(|s| Self::Keys(s));
                 }
                 #[cfg(feature = "alloc")]
                 if let Some(n) = name.strip_prefix("sys/kernel/") {
@@ -340,6 +356,12 @@ impl Sysctl {
             Self::Ipc(name) => crate::syscall::sysvipc::sysctl_text(name),
             #[cfg(feature = "alloc")]
             Self::Mqueue(name) => crate::syscall::mqueue::sysctl_text(name),
+            #[cfg(feature = "alloc")]
+            Self::Keys(name) => crate::syscall::keys::sysctl_text(name),
+            Self::Printk => {
+                let [a, b, c, d] = crate::printk::levels();
+                format!("{a}\t{b}\t{c}\t{d}\n")
+            }
             _ => format!("{}\n", self.get()),
         }
     }
@@ -361,7 +383,10 @@ impl Sysctl {
                 .max
                 .load(Ordering::Acquire) as usize,
             Self::ThreadsMax => crate::process::rlimit::max_threads() as usize,
-            Self::Ipc(_) | Self::Mqueue(_) => 0,
+            Self::Ipc(_) | Self::Mqueue(_) | Self::Keys(_) | Self::Printk => 0,
+            Self::DmesgRestrict => {
+                crate::syscall::system::DMESG_RESTRICT.load(Ordering::Relaxed) as usize
+            }
         }
     }
 
@@ -387,9 +412,13 @@ impl Sysctl {
     /// whole system's rather than a namespace's.
     fn writer_may(self, writer: &crate::process::creds::Caller) -> bool {
         match self {
-            Self::Inotify(_) | Self::UnprivilegedUsernsClone | Self::ThreadsMax => {
-                writer.creds.euid == 0
-            }
+            Self::Inotify(_)
+            | Self::UnprivilegedUsernsClone
+            | Self::ThreadsMax
+            | Self::Keys(_)
+            | Self::Printk => writer.creds.euid == 0,
+            // proc_dointvec_minmax_sysadmin: CAP_SYS_ADMIN.
+            Self::DmesgRestrict => writer.capable(crate::process::linux_caps::CAP_SYS_ADMIN),
             Self::MaxUserNamespaces | Self::MaxPidNamespaces | Self::MaxNetNamespaces => {
                 writer.capable(crate::process::linux_caps::CAP_SYS_RESOURCE)
             }
@@ -429,9 +458,44 @@ impl Sysctl {
                     }
                 })
             }
+            #[cfg(feature = "alloc")]
+            Self::Keys(name) => {
+                return crate::syscall::keys::sysctl_write(name, text).map_err(|_| {
+                    KernelError::InvalidArgument {
+                        name: "value",
+                        value: "out of the sysctl's range",
+                    }
+                })
+            }
             #[cfg(not(feature = "alloc"))]
-            Self::Ipc(_) | Self::Mqueue(_) => {
+            Self::Ipc(_) | Self::Mqueue(_) | Self::Keys(_) => {
                 return Err(KernelError::FsError(FsError::PermissionDenied))
+            }
+            // The first value sets the console level; the others are fixed
+            // here, as their values are (__do_proc_dointvec over four ints).
+            Self::Printk => {
+                let level = core::str::from_utf8(text)
+                    .ok()
+                    .and_then(|t| t.split_whitespace().next())
+                    .and_then(|v| v.parse::<u8>().ok())
+                    .ok_or(KernelError::InvalidArgument {
+                        name: "value",
+                        value: "not a console level",
+                    })?;
+                crate::printk::set_console_level(level);
+                return Ok(());
+            }
+            Self::DmesgRestrict => {
+                let v = core::str::from_utf8(text)
+                    .ok()
+                    .and_then(|t| t.trim().parse::<u8>().ok())
+                    .filter(|v| *v <= 1)
+                    .ok_or(KernelError::InvalidArgument {
+                        name: "value",
+                        value: "out of the sysctl's range",
+                    })?;
+                crate::syscall::system::DMESG_RESTRICT.store(v == 1, Ordering::Relaxed);
+                return Ok(());
             }
             Self::UnprivilegedUsernsClone => (&userns::UNPRIVILEGED_CLONE, 1),
             Self::ThreadsMax => (
@@ -675,6 +739,16 @@ impl VfsNode for ProcNode {
         Some(self)
     }
 
+    /// Which file this is, the same on every lookup: procfs makes a new node
+    /// each time, so its address names nothing. The mount (by its PID
+    /// namespace, one per procfs instance) and the stable inode number do,
+    /// so a Landlock walk that looks a path up again finds the object the
+    /// open holds, and a rule on a /proc directory holds (PR #49
+    /// independent review).
+    fn file_identity(&self) -> Option<(u64, u64)> {
+        Some((Arc::as_ptr(&self.ns) as *const () as u64, self.inode()))
+    }
+
     /// procfs: `simple_statfs`, no counts.
     fn statfs(&self) -> Result<crate::fs::statfs::FsStats, crate::error::KernelError> {
         Ok(crate::fs::statfs::FsStats::simple(
@@ -841,6 +915,20 @@ impl VfsNode for ProcNode {
                     name if Sysctl::from_name(name).is_some() => {
                         Sysctl::from_name(name).map_or_else(String::new, Sysctl::text)
                     }
+                    // The keys the opener may View, and every key user
+                    // its namespace maps (security/keys/proc.c).
+                    #[cfg(feature = "alloc")]
+                    "keys" => crate::syscall::keys::proc_keys(
+                        &opener
+                            .cloned()
+                            .unwrap_or_else(crate::process::creds::Caller::current),
+                    ),
+                    #[cfg(feature = "alloc")]
+                    "key-users" => crate::syscall::keys::proc_key_users(
+                        &opener
+                            .cloned()
+                            .unwrap_or_else(crate::process::creds::Caller::current),
+                    ),
                     // The reader's IPC namespace's System V objects.
                     #[cfg(feature = "alloc")]
                     name if name.starts_with("sysvipc/") => {
@@ -887,7 +975,7 @@ impl VfsNode for ProcNode {
                             let caps = process
                                 .get_main_thread_id()
                                 .and_then(|tid| process.get_thread(tid))
-                                .map(|t| status_caps(&t.caps.lock()))
+                                .map(|t| status_caps(&t.caps.lock()) + &status_security(&t))
                                 .unwrap_or_default();
 
                             format!(
@@ -1097,6 +1185,15 @@ impl VfsNode for ProcNode {
                     inode: 0,
                 });
 
+                // The key retention service's (security/keys/proc.c).
+                for name in ["keys", "key-users"] {
+                    entries.push(DirEntry {
+                        name: String::from(name),
+                        node_type: NodeType::File,
+                        inode: 0,
+                    });
+                }
+
                 entries.push(DirEntry {
                     name: String::from("mounts"),
                     node_type: NodeType::Symlink,
@@ -1211,6 +1308,14 @@ impl VfsNode for ProcNode {
                         ("msgsize_max", NodeType::File),
                         ("queues_max", NodeType::File),
                     ],
+                    "sys/kernel/keys" => &[
+                        ("gc_delay", NodeType::File),
+                        ("maxbytes", NodeType::File),
+                        ("maxkeys", NodeType::File),
+                        ("persistent_keyring_expiry", NodeType::File),
+                        ("root_maxbytes", NodeType::File),
+                        ("root_maxkeys", NodeType::File),
+                    ],
                     "sys/fs/inotify" => &[
                         ("max_queued_events", NodeType::File),
                         ("max_user_instances", NodeType::File),
@@ -1219,14 +1324,17 @@ impl VfsNode for ProcNode {
                     "sys/kernel" => &[
                         ("cap_last_cap", NodeType::File),
                         ("core_pattern", NodeType::File),
+                        ("dmesg_restrict", NodeType::File),
                         ("domainname", NodeType::File),
                         ("hostname", NodeType::File),
+                        ("keys", NodeType::Directory),
                         ("msgmax", NodeType::File),
                         ("msgmnb", NodeType::File),
                         ("msgmni", NodeType::File),
                         ("osrelease", NodeType::File),
                         ("ostype", NodeType::File),
                         ("pid_max", NodeType::File),
+                        ("printk", NodeType::File),
                         ("random", NodeType::Directory),
                         ("sem", NodeType::File),
                         ("shm_rmid_forced", NodeType::File),
@@ -1282,7 +1390,8 @@ impl VfsNode for ProcNode {
             ProcNodeType::Root => {
                 // Check for system files
                 match name {
-                    "version" | "uptime" | "meminfo" | "cpuinfo" | "loadavg" | "filesystems" => {
+                    "version" | "uptime" | "meminfo" | "cpuinfo" | "loadavg" | "filesystems"
+                    | "keys" | "key-users" => {
                         Ok(Arc::new(self.system_file(String::from(name))) as Arc<dyn VfsNode>)
                     }
                     "mounts" => Ok(
@@ -1372,6 +1481,17 @@ impl VfsNode for ProcNode {
                         ) as Arc<dyn VfsNode>),
                         _ => Err(KernelError::FsError(FsError::NotFound)),
                     },
+                    "sys/kernel/keys" => match name {
+                        "gc_delay"
+                        | "maxbytes"
+                        | "maxkeys"
+                        | "persistent_keyring_expiry"
+                        | "root_maxbytes"
+                        | "root_maxkeys" => Ok(Arc::new(
+                            self.system_file(format!("sys/kernel/keys/{}", name)),
+                        ) as Arc<dyn VfsNode>),
+                        _ => Err(KernelError::FsError(FsError::NotFound)),
+                    },
                     "sys/fs/inotify" => match name {
                         "max_queued_events" | "max_user_instances" | "max_user_watches" => Ok(
                             Arc::new(self.system_file(format!("sys/fs/inotify/{}", name)))
@@ -1395,6 +1515,13 @@ impl VfsNode for ProcNode {
                         "random" => Ok(Arc::new(
                             self.child(ProcNodeType::SubDir(String::from("sys/kernel/random"))),
                         ) as Arc<dyn VfsNode>),
+                        "keys" => Ok(Arc::new(
+                            self.child(ProcNodeType::SubDir(String::from("sys/kernel/keys"))),
+                        ) as Arc<dyn VfsNode>),
+                        "printk" | "dmesg_restrict" => {
+                            Ok(Arc::new(self.system_file(format!("sys/kernel/{}", name)))
+                                as Arc<dyn VfsNode>)
+                        }
                         "unprivileged_userns_clone" => Ok(Arc::new(
                             self.system_file(String::from("sys/kernel/unprivileged_userns_clone")),
                         )
@@ -1784,6 +1911,18 @@ fn status_caps(c: &crate::process::linux_caps::CapSets) -> String {
         c.effective.bits(),
         c.bounding.bits(),
         c.ambient.bits()
+    )
+}
+
+/// The lines after the capability sets (proc_pid_status): no_new_privs and
+/// the seccomp mode and filter count.
+fn status_security(t: &crate::process::thread::Thread) -> String {
+    let (mode, filters) = crate::process::seccomp::status_lines(&t.seccomp);
+    format!(
+        "NoNewPrivs:\t{}\nSeccomp:\t{}\nSeccomp_filters:\t{}\n",
+        u8::from(t.no_new_privs.load(core::sync::atomic::Ordering::Acquire)),
+        mode,
+        filters
     )
 }
 
@@ -2335,14 +2474,17 @@ mod tests {
                 &[
                     "cap_last_cap",
                     "core_pattern",
+                    "dmesg_restrict",
                     "domainname",
                     "hostname",
+                    "keys",
                     "msgmax",
                     "msgmnb",
                     "msgmni",
                     "osrelease",
                     "ostype",
                     "pid_max",
+                    "printk",
                     "random",
                     "sem",
                     "shm_rmid_forced",
@@ -2356,6 +2498,17 @@ mod tests {
                 ][..],
             ),
             ("sys/kernel/random", &["boot_id"][..]),
+            (
+                "sys/kernel/keys",
+                &[
+                    "gc_delay",
+                    "maxbytes",
+                    "maxkeys",
+                    "persistent_keyring_expiry",
+                    "root_maxbytes",
+                    "root_maxkeys",
+                ][..],
+            ),
             (
                 "sys/user",
                 &[

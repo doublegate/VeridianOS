@@ -392,6 +392,22 @@ pub mod sysno {
     pub const SYS_cachestat: usize = 451;
     pub const SYS_file_getattr: usize = 468;
     pub const SYS_file_setattr: usize = 469;
+    pub const SYS_seccomp: usize = 317;
+    pub const SYS_landlock_create_ruleset: usize = 444;
+    pub const SYS_landlock_add_rule: usize = 445;
+    pub const SYS_landlock_restrict_self: usize = 446;
+    pub const SYS_add_key: usize = 248;
+    pub const SYS_request_key: usize = 249;
+    pub const SYS_keyctl: usize = 250;
+    pub const SYS_lsm_get_self_attr: usize = 459;
+    pub const SYS_lsm_set_self_attr: usize = 460;
+    pub const SYS_lsm_list_modules: usize = 461;
+    pub const SYS_vhangup: usize = 153;
+    pub const SYS_iopl: usize = 172;
+    pub const SYS_ioperm: usize = 173;
+    pub const SYS_acct: usize = 163;
+    pub const SYS_syslog: usize = 103;
+    pub const SYS_reboot: usize = 169;
 }
 
 // Linux's generic table: calls RISC-V leaves to user space are absent.
@@ -743,6 +759,20 @@ pub mod sysno {
     pub const SYS_cachestat: usize = 451;
     pub const SYS_file_getattr: usize = 468;
     pub const SYS_file_setattr: usize = 469;
+    pub const SYS_seccomp: usize = 277;
+    pub const SYS_landlock_create_ruleset: usize = 444;
+    pub const SYS_landlock_add_rule: usize = 445;
+    pub const SYS_landlock_restrict_self: usize = 446;
+    pub const SYS_add_key: usize = 217;
+    pub const SYS_request_key: usize = 218;
+    pub const SYS_keyctl: usize = 219;
+    pub const SYS_lsm_get_self_attr: usize = 459;
+    pub const SYS_lsm_set_self_attr: usize = 460;
+    pub const SYS_lsm_list_modules: usize = 461;
+    pub const SYS_vhangup: usize = 58;
+    pub const SYS_acct: usize = 89;
+    pub const SYS_syslog: usize = 116;
+    pub const SYS_reboot: usize = 142;
 }
 
 // Linux's generic table with arm64's ABIs (renameat included).
@@ -1095,4 +1125,18 @@ pub mod sysno {
     pub const SYS_cachestat: usize = 451;
     pub const SYS_file_getattr: usize = 468;
     pub const SYS_file_setattr: usize = 469;
+    pub const SYS_seccomp: usize = 277;
+    pub const SYS_landlock_create_ruleset: usize = 444;
+    pub const SYS_landlock_add_rule: usize = 445;
+    pub const SYS_landlock_restrict_self: usize = 446;
+    pub const SYS_add_key: usize = 217;
+    pub const SYS_request_key: usize = 218;
+    pub const SYS_keyctl: usize = 219;
+    pub const SYS_lsm_get_self_attr: usize = 459;
+    pub const SYS_lsm_set_self_attr: usize = 460;
+    pub const SYS_lsm_list_modules: usize = 461;
+    pub const SYS_vhangup: usize = 58;
+    pub const SYS_acct: usize = 89;
+    pub const SYS_syslog: usize = 116;
+    pub const SYS_reboot: usize = 142;
 }

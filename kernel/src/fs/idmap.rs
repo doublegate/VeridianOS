@@ -241,6 +241,9 @@ impl VfsNode for IdmappedNode {
     fn file_identity(&self) -> Option<(u64, u64)> {
         self.inner.file_identity()
     }
+    fn named_node(&self) -> Option<Arc<dyn VfsNode>> {
+        self.inner.named_node()
+    }
     fn symlink(&self, name: &str, target: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
         self.wrap(self.inner.symlink(name, target))
     }

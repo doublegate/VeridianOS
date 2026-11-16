@@ -22,6 +22,7 @@ pub fn bti_supported() -> bool {
 #[cfg(any(test, target_arch = "aarch64", target_arch = "riscv64"))]
 pub mod mmio_rtc;
 pub mod percpu;
+pub mod power;
 pub mod smp_boot;
 
 #[cfg(all(feature = "smp", target_arch = "aarch64", target_os = "none"))]

@@ -23,6 +23,7 @@
 #include <poll.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <pthread.h>
 #include <sched.h>
@@ -5638,6 +5639,14 @@ static void test_mount_calls(void);
 static void test_mount_flags(void);
 static void test_mount_api(void);
 static void test_idmapped_mount(void);
+static void test_seccomp(void);
+static void test_seccomp_notify(void);
+static void test_landlock(void);
+static void test_keyrings(void);
+static void test_lsm_calls(void);
+static void test_acct(void);
+static void test_syslog(void);
+static void test_reboot(void);
 static void test_mount_no_escape(void);
 static void test_pivot_root(void);
 static void test_mount_object_cap(void);
@@ -5716,6 +5725,14 @@ static const struct {
     {"mount_flags", test_mount_flags},
     {"mount_api", test_mount_api},
     {"idmapped_mount", test_idmapped_mount},
+    {"seccomp", test_seccomp},
+    {"seccomp_notify", test_seccomp_notify},
+    {"landlock", test_landlock},
+    {"keyrings", test_keyrings},
+    {"lsm_calls", test_lsm_calls},
+    {"acct", test_acct},
+    {"syslog", test_syslog},
+    {"reboot", test_reboot},
     {"pivot_root", test_pivot_root},
     {"mount_object_cap", test_mount_object_cap},
     {"mount_modify_drop", test_mount_modify_drop},
@@ -11164,6 +11181,11 @@ struct t_statmount {
 #endif
 
 static unsigned long long t_ns_id(const char *name);
+/* Drop rights from the caller's own capabilities (ADR 0024); defined after
+ * <veridian/capability.h>. The number of capabilities narrowed, or -1. */
+static long t_drop_system_read(void);
+static long t_drop_system_modify(void);
+static long t_drop_ns_write(const char *name);
 
 /* listns (Linux 7.3): the caller's mount namespace is listed, by type
  * too, and a bad request is refused; 0 when all of it holds. */
@@ -11253,6 +11275,1108 @@ struct t_mount_attr {
 };
 
 static int t_write_text(const char *path, const char *text);
+
+/* seccomp (Linux's kernel/seccomp.c, v0.28 item 5): filters run on every
+ * call and their strictest action wins; ERRNO, TRAP (SIGSYS with
+ * SYS_SECCOMP), KILL_PROCESS, strict mode, no_new_privs or CAP_SYS_ADMIN,
+ * TSYNC, GET_ACTION_AVAIL, and the status lines. */
+static ssize_t t_read_text(const char *path, char *buf, size_t len);
+struct t_sock_filter {
+    uint16_t code;
+    uint8_t jt, jf;
+    uint32_t k;
+};
+struct t_sock_fprog {
+    unsigned short len;
+    struct t_sock_filter *filter;
+};
+#if defined(__x86_64__)
+#define T_AUDIT_ARCH 0xc000003eu
+#elif defined(__aarch64__)
+#define T_AUDIT_ARCH 0xc00000b7u
+#else
+#define T_AUDIT_ARCH 0xc00000f3u
+#endif
+/* Filter: other architectures killed; getppid gets `action`; the rest run. */
+static long t_seccomp_install(uint32_t action, unsigned flags)
+{
+    static struct t_sock_filter prog[7];
+    struct t_sock_filter p[7] = {
+        {0x20, 0, 0, 4},                    /* ld [4] (arch) */
+        {0x15, 1, 0, T_AUDIT_ARCH},         /* jeq arch, +1 */
+        {0x06, 0, 0, 0x80000000u},          /* ret KILL_PROCESS */
+        {0x20, 0, 0, 0},                    /* ld [0] (nr) */
+        {0x15, 0, 1, (uint32_t)SYS_getppid}, /* jeq getppid */
+        {0x06, 0, 0, action},               /* ret action */
+        {0x06, 0, 0, 0x7fff0000u},          /* ret ALLOW */
+    };
+    memcpy(prog, p, sizeof(p));
+    struct t_sock_fprog fp = {7, prog};
+    return syscall(SYS_seccomp, 1 /* SET_MODE_FILTER */, flags, &fp);
+}
+static volatile int t_sigsys_code, t_sigsys_nr;
+static volatile unsigned t_sigsys_arch;
+static void t_sigsys(int sig, siginfo_t *si, void *uc)
+{
+    (void)sig;
+    (void)uc;
+    t_sigsys_code = si->si_code;
+    t_sigsys_nr = si->si_syscall;
+    t_sigsys_arch = si->si_arch;
+}
+/* Set once the TSYNC install returned: the probe runs only then, however
+ * long the installer was kept from running (PR #49 review). */
+static atomic_int t_seccomp_installed;
+static void *t_seccomp_thread(void *arg)
+{
+    (void)arg;
+    /* An atomic, not volatile: the flag publishes the install to this
+     * thread (PR #49 review). */
+    while (!atomic_load_explicit(&t_seccomp_installed, memory_order_acquire)) sched_yield();
+    long r = syscall(SYS_getppid);
+    return (void *)(intptr_t)(r == -1 && errno == EPERM ? 0 : 1);
+}
+static void test_seccomp(void)
+{
+    char why[96];
+    int f = 0;
+    if (prctl(PR_GET_SECCOMP) != 0) f |= 1;
+    uint32_t act = 0x7fff0000u;
+    if (syscall(SYS_seccomp, 2 /* GET_ACTION_AVAIL */, 0, &act) != 0) f |= 2;
+    act = 0x12340000u;
+    if (!(syscall(SYS_seccomp, 2, 0, &act) == -1 && errno == EOPNOTSUPP)) f |= 2;
+    /* ERRNO, and the status lines. */
+    pid_t c = fork();
+    if (c == 0) {
+        char st[4096];
+        if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 || t_seccomp_install(0x00050000u | EACCES, 0) != 0)
+            _exit(2);
+        int ok = syscall(SYS_getppid) == -1 && errno == EACCES && getpid() > 0;
+        ok = ok && t_read_text("/proc/self/status", st, sizeof(st)) > 0 &&
+             strstr(st, "Seccomp:\t2\n") && strstr(st, "Seccomp_filters:\t1\n") &&
+             strstr(st, "NoNewPrivs:\t1\n") && prctl(PR_GET_SECCOMP) == 2;
+        _exit(ok ? 0 : 1);
+    }
+    if (t_exit_status(c) != 0) f |= 4;
+    /* TRAP: SIGSYS with SYS_SECCOMP, the call and the architecture. */
+    c = fork();
+    if (c == 0) {
+        struct sigaction sa = {0};
+        sa.sa_sigaction = t_sigsys;
+        sa.sa_flags = SA_SIGINFO;
+        sigaction(SIGSYS, &sa, NULL);
+        prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+        if (t_seccomp_install(0x00030000u | 7, 0) != 0) _exit(2);
+        /* After the handler, the call returns what syscall_rollback left in
+         * the return register: the number on x86_64 (orig_ax), the first
+         * argument elsewhere (orig_x0, orig_a0; PR #49 review). */
+        long r = syscall(SYS_getppid, 0x1234L);
+#if defined(__x86_64__)
+        long want = SYS_getppid;
+#else
+        long want = 0x1234;
+#endif
+        if (r != want) _exit(3);
+        _exit(t_sigsys_code == 1 && t_sigsys_nr == SYS_getppid && t_sigsys_arch == T_AUDIT_ARCH ? 0 : 1);
+    }
+    if (t_exit_status(c) != 0) f |= 8;
+    /* KILL_PROCESS: dies of SIGSYS, which no handler sees. */
+    c = fork();
+    if (c == 0) {
+        signal(SIGSYS, SIG_IGN);
+        prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+        if (t_seccomp_install(0x80000000u, 0) != 0) _exit(2);
+        syscall(SYS_getppid);
+        _exit(0);
+    }
+    int ws = 0;
+    waitpid(c, &ws, 0);
+    if (!WIFSIGNALED(ws) || WTERMSIG(ws) != SIGSYS) f |= 16;
+    /* Strict mode: write runs, anything else is SIGKILL. */
+    c = fork();
+    if (c == 0) {
+        if (prctl(PR_SET_SECCOMP, 1, 0, 0, 0) != 0) _exit(2);
+        if (syscall(SYS_write, 1, "", 0) != 0) syscall(SYS_exit, 3);
+        syscall(SYS_getppid);
+        syscall(SYS_exit, 4);
+    }
+    waitpid(c, &ws, 0);
+    if (!WIFSIGNALED(ws) || WTERMSIG(ws) != SIGKILL) f |= 32;
+    /* Without no_new_privs and CAP_SYS_ADMIN: EACCES. */
+    c = fork();
+    if (c == 0) {
+        if (setuid(65534) != 0) _exit(2);
+        _exit(t_seccomp_install(0x7fff0000u, 0) == -1 && errno == EACCES ? 0 : 1);
+    }
+    if (t_exit_status(c) != 0) f |= 64;
+    /* TSYNC: another thread of the process gets the filter. */
+    c = fork();
+    if (c == 0) {
+        pthread_t t;
+        void *res = (void *)1;
+        if (pthread_create(&t, NULL, t_seccomp_thread, NULL) != 0) _exit(2);
+        prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+        long r = t_seccomp_install(0x00050000u | EPERM, 1 /* TSYNC */);
+        atomic_store_explicit(&t_seccomp_installed, 1, memory_order_release);
+        pthread_join(t, &res);
+        _exit(r == 0 && res == NULL ? 0 : 1);
+    }
+    if (t_exit_status(c) != 0) f |= 128;
+    snprintf(why, sizeof(why), "f=%#x", f);
+    report("seccomp", f == 0, why);
+}
+
+/* seccomp user notification (SECCOMP_RET_USER_NOTIF, Linux's
+ * seccomp_do_user_notification): a supervisor holding the listener gets
+ * the call, answers it with a value, a descriptor (ADDFD with SEND) or
+ * CONTINUE; POLLHUP and ENOENT once nothing can notify, ENOSYS once the
+ * listener is closed, EBUSY for a second listener on one chain. */
+struct t_seccomp_data {
+    int nr;
+    uint32_t arch;
+    uint64_t ip, args[6];
+};
+struct t_notif {
+    uint64_t id;
+    uint32_t pid, flags;
+    struct t_seccomp_data data;
+};
+struct t_notif_resp {
+    uint64_t id;
+    int64_t val;
+    int32_t error;
+    uint32_t flags;
+};
+struct t_notif_addfd {
+    uint64_t id;
+    uint32_t flags, srcfd, newfd, newfd_flags;
+};
+#define T_NOTIF_RECV 0xc0502100u
+#define T_NOTIF_SEND 0xc0182101u
+#define T_NOTIF_ID_VALID 0x40082102u
+#define T_NOTIF_ADDFD 0x40182103u
+/* Receive one notification for getppid from `pid`, within 5 s. */
+static int t_notif_recv(int l, pid_t pid, struct t_notif *n)
+{
+    struct pollfd pf = {l, POLLIN, 0};
+    if (poll(&pf, 1, 5000) != 1 || !(pf.revents & POLLIN)) return 0;
+    memset(n, 0, sizeof(*n));
+    if (ioctl(l, T_NOTIF_RECV, n) != 0) return 0;
+    return n->pid == (uint32_t)pid && n->data.nr == SYS_getppid && n->data.arch == T_AUDIT_ARCH;
+}
+/* Landlock (ADR 0029), as Linux 7.3's ABI 11. */
+#ifndef SYS_landlock_create_ruleset
+#define SYS_landlock_create_ruleset 444
+#define SYS_landlock_add_rule 445
+#define SYS_landlock_restrict_self 446
+#endif
+#define T_LL_EXECUTE (1u << 0)
+#define T_LL_WRITE_FILE (1u << 1)
+#define T_LL_READ_FILE (1u << 2)
+#define T_LL_READ_DIR (1u << 3)
+#define T_LL_REMOVE_FILE (1u << 5)
+#define T_LL_MAKE_DIR (1u << 7)
+#define T_LL_MAKE_REG (1u << 8)
+#define T_LL_REFER (1u << 13)
+#define T_LL_TRUNCATE (1u << 14)
+struct t_ll_attr {
+    uint64_t fs, net, scoped, quiet_fs, quiet_net, quiet_scoped;
+};
+struct t_ll_path {
+    uint64_t allowed;
+    int32_t parent_fd;
+} __attribute__((packed));
+static int t_ll_ruleset(uint64_t fs)
+{
+    struct t_ll_attr a = {0};
+    a.fs = fs;
+    return (int)syscall(SYS_landlock_create_ruleset, &a, sizeof(a), 0);
+}
+static int t_ll_allow(int rs, const char *dir, uint64_t allowed)
+{
+    int d = open(dir, O_PATH | O_CLOEXEC);
+    if (d < 0) return -1;
+    struct t_ll_path p = {allowed, d};
+    int r = (int)syscall(SYS_landlock_add_rule, rs, 1 /* PATH_BENEATH */, &p, 0);
+    close(d);
+    return r;
+}
+static int t_ll_errno(long r, int e)
+{
+    return r == -1 && errno == e;
+}
+/* Sends its thread id down the pipe, then waits for the process to end. */
+static void *t_ll_tid_thread(void *arg)
+{
+    pid_t tid = (pid_t)syscall(SYS_gettid);
+    if (write(((int *)arg)[1], &tid, sizeof(tid)) != sizeof(tid)) return NULL;
+    for (;;) pause();
+    return NULL;
+}
+static volatile int t_ll_go;
+static void *t_ll_thread(void *arg)
+{
+    (void)arg;
+    while (!t_ll_go) usleep(1000);
+    int fd = open("/tmp/ll/c/h", O_RDONLY);
+    return (void *)(intptr_t)(fd == -1 && errno == EACCES ? 0 : 1);
+}
+static void test_landlock(void)
+{
+    char why[96];
+    int f = 0;
+    /* The ABI version and errata; argument checks. */
+    if (syscall(SYS_landlock_create_ruleset, NULL, 0, 1 /* VERSION */) != 11) f |= 1;
+    if (syscall(SYS_landlock_create_ruleset, NULL, 0, 2 /* ERRATA */) != 0xf) f |= 1;
+    if (!t_ll_errno(syscall(SYS_landlock_create_ruleset, NULL, 0, 4), EINVAL)) f |= 2;
+    if (!t_ll_errno(syscall(SYS_landlock_create_ruleset, NULL, 0, 0), EFAULT)) f |= 2;
+    struct t_ll_attr zero = {0};
+    if (!t_ll_errno(syscall(SYS_landlock_create_ruleset, &zero, 4, 0), EINVAL)) f |= 2;
+    if (!t_ll_errno(syscall(SYS_landlock_create_ruleset, &zero, sizeof(zero), 0), ENOMSG)) f |= 2;
+    zero.fs = 1ull << 40;
+    if (!t_ll_errno(syscall(SYS_landlock_create_ruleset, &zero, sizeof(zero), 0), EINVAL)) f |= 2;
+    int pfd[2] = {-1, -1};
+    if (pipe(pfd) != 0) f |= 2;
+    struct t_ll_path bad = {T_LL_READ_FILE, 0};
+    if (!t_ll_errno(syscall(SYS_landlock_add_rule, pfd[0], 1, &bad, 0), EBADFD)) f |= 2;
+    int rs = t_ll_ruleset(T_LL_READ_FILE);
+    if (rs < 0) f |= 2;
+    bad.parent_fd = pfd[0];
+    if (!t_ll_errno(syscall(SYS_landlock_add_rule, rs, 1, &bad, 0), EBADFD)) f |= 2;
+    bad.allowed = 0;
+    if (!t_ll_errno(syscall(SYS_landlock_add_rule, rs, 1, &bad, 0), ENOMSG)) f |= 2;
+    if (!t_ll_errno(syscall(SYS_landlock_add_rule, rs, 9, &bad, 0), EINVAL)) f |= 2;
+    close(rs);
+    close(pfd[0]);
+    close(pfd[1]);
+    /* A tree: rules on a (read, write, make and remove files) and b
+     * (read only); none on c. */
+    mkdir("/tmp/ll", 0755);
+    mkdir("/tmp/ll/a", 0755);
+    mkdir("/tmp/ll/b", 0755);
+    mkdir("/tmp/ll/c", 0755);
+    close(open("/tmp/ll/a/f", O_CREAT | O_WRONLY | O_TRUNC, 0644));
+    close(open("/tmp/ll/b/g", O_CREAT | O_WRONLY | O_TRUNC, 0644));
+    int hf = open("/tmp/ll/c/h", O_CREAT | O_RDWR | O_TRUNC, 0644);
+    if (hf < 0 || write(hf, "x", 1) != 1) f |= 4;
+    pid_t c = fork();
+    if (c == 0) {
+        uint64_t handled = T_LL_READ_FILE | T_LL_WRITE_FILE | T_LL_READ_DIR | T_LL_REMOVE_FILE |
+                           T_LL_MAKE_DIR | T_LL_MAKE_REG | T_LL_REFER | T_LL_TRUNCATE;
+        int r = t_ll_ruleset(handled);
+        if (r < 0) _exit(10);
+        if (t_ll_allow(r, "/tmp/ll/a",
+                       T_LL_READ_FILE | T_LL_WRITE_FILE | T_LL_READ_DIR | T_LL_REMOVE_FILE |
+                           T_LL_MAKE_REG | T_LL_REFER | T_LL_TRUNCATE) != 0)
+            _exit(11);
+        if (t_ll_allow(r, "/tmp/ll/b", T_LL_READ_FILE | T_LL_READ_DIR) != 0) _exit(12);
+        /* A file rule may not carry directory rights. */
+        int fd = open("/tmp/ll/a/f", O_PATH);
+        struct t_ll_path fr = {T_LL_READ_DIR, fd};
+        if (!t_ll_errno(syscall(SYS_landlock_add_rule, r, 1, &fr, 0), EINVAL)) _exit(13);
+        close(fd);
+        pthread_t th;
+        void *res = (void *)1;
+        if (pthread_create(&th, NULL, t_ll_thread, NULL) != 0) _exit(14);
+        if (syscall(SYS_landlock_restrict_self, r, (1u << 4) /* NO_NEW_PRIVS */ | (1u << 3) /* TSYNC */) != 0)
+            _exit(15);
+        t_ll_go = 1;
+        pthread_join(th, &res);
+        int bits = 0;
+        if (res != NULL) bits |= 1 << 0;
+        if (prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 1) bits |= 1 << 1;
+        fd = open("/tmp/ll/a/f", O_RDWR);
+        if (fd < 0) bits |= 1 << 2;
+        if (fd >= 0 && ftruncate(fd, 0) != 0) bits |= 1 << 3;
+        close(fd);
+        fd = open("/tmp/ll/b/g", O_RDONLY);
+        if (fd < 0) bits |= 1 << 4;
+        /* Opened without TRUNCATE: ftruncate is refused even writable
+         * elsewhere, so check through the path. */
+        close(fd);
+        if (!t_ll_errno(open("/tmp/ll/b/g", O_WRONLY), EACCES)) bits |= 1 << 5;
+        if (!t_ll_errno(open("/tmp/ll/c/h", O_RDONLY), EACCES)) bits |= 1 << 6;
+        if (!t_ll_errno(truncate("/tmp/ll/b/g", 0), EACCES)) bits |= 1 << 7;
+        if (truncate("/tmp/ll/a/f", 0) != 0) bits |= 1 << 8;
+        fd = open("/tmp/ll/a/new", O_CREAT | O_WRONLY, 0644);
+        if (fd < 0) bits |= 1 << 9;
+        close(fd);
+        if (!t_ll_errno(open("/tmp/ll/b/new", O_CREAT | O_WRONLY, 0644), EACCES)) bits |= 1 << 10;
+        if (!t_ll_errno(mkdir("/tmp/ll/a/d", 0755), EACCES)) bits |= 1 << 11;
+        /* EEXIST before the Landlock check. */
+        if (!t_ll_errno(mkdir("/tmp/ll/a", 0755), EEXIST)) bits |= 1 << 12;
+        if (unlink("/tmp/ll/a/new") != 0) bits |= 1 << 13;
+        if (!t_ll_errno(unlink("/tmp/ll/b/g"), EACCES)) bits |= 1 << 14;
+        /* Renames: within a directory, the make and remove rights; into b,
+         * which may not make files, EACCES. */
+        if (rename("/tmp/ll/a/f", "/tmp/ll/a/f2") != 0) bits |= 1 << 15;
+        if (!t_ll_errno(rename("/tmp/ll/a/f2", "/tmp/ll/b/f2"), EACCES)) bits |= 1 << 16;
+        if (!t_ll_errno(link("/tmp/ll/a/f2", "/tmp/ll/b/x"), EACCES)) bits |= 1 << 17;
+        /* No mount changes under a filesystem domain. */
+        if (!t_ll_errno(mount("none", "/tmp/ll/a", "tmpfs", 0, NULL), EPERM)) bits |= 1 << 18;
+        /* A file opened before still works. */
+        char ch = 0;
+        if (pread(hf, &ch, 1, 0) != 1 || ch != 'x') bits |= 1 << 19;
+        /* At most 16 layers. */
+        int layers = 1, e = 0;
+        while (layers < 20) {
+            if (syscall(SYS_landlock_restrict_self, r, 0) != 0) {
+                e = errno;
+                break;
+            }
+            layers++;
+        }
+        if (layers != 16 || e != E2BIG) bits |= 1 << 20;
+        _exit(bits ? 64 + __builtin_ctz(bits) : 0);
+    }
+    int st = t_exit_status(c);
+    if (st != 0) {
+        f |= 8;
+        snprintf(why, sizeof(why), "f=%#x child=%d", f, st);
+        report("landlock", 0, why);
+        close(hf);
+        return;
+    }
+    close(hf);
+    /* Tripwire (ADR 0029, MASTER_TODO item 10): under
+     * LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET, an abstract socket made outside
+     * the domain must not be reached. Abstract names are not supported
+     * yet, so today the connect fails for that reason; once they are, it
+     * must still fail (EPERM), or the scope was not wired in. */
+    int srv = socket(AF_UNIX, SOCK_STREAM, 0);
+    struct sockaddr_un sa = {0};
+    sa.sun_family = AF_UNIX;
+    memcpy(sa.sun_path, "\0ll-tripwire", 12);
+    socklen_t salen = (socklen_t)(sizeof(sa.sun_family) + 12);
+    int bound = srv >= 0 && bind(srv, (struct sockaddr *)&sa, salen) == 0 && listen(srv, 1) == 0;
+    c = fork();
+    if (c == 0) {
+        struct t_ll_attr at = {0};
+        at.scoped = 1; /* LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET */
+        int r = (int)syscall(SYS_landlock_create_ruleset, &at, sizeof(at), 0);
+        if (r < 0 || syscall(SYS_landlock_restrict_self, r, 1u << 4 /* NO_NEW_PRIVS */) != 0)
+            _exit(2);
+        int cl = socket(AF_UNIX, SOCK_STREAM, 0);
+        long rc = connect(cl, (struct sockaddr *)&sa, salen);
+        /* Reached: the scope is missing. EPERM is the answer once abstract
+         * sockets exist; any failure is accepted until then. */
+        _exit(rc == 0 ? 1 : (bound && errno != EPERM) ? 3 : 0);
+    }
+    st = t_exit_status(c);
+    if (st != 0) f |= 32;
+    if (srv >= 0) close(srv);
+    /* Without no_new_privs, an unprivileged caller is EPERM. */
+    c = fork();
+    if (c == 0) {
+        int r = t_ll_ruleset(T_LL_READ_FILE);
+        if (r < 0 || setuid(65534) != 0) _exit(2);
+        _exit(t_ll_errno(syscall(SYS_landlock_restrict_self, r, 0), EPERM) ? 0 : 1);
+    }
+    if (t_exit_status(c) != 0) f |= 16;
+    /* A file moved out of a directory whose rules allowed it, after an
+     * O_PATH open recorded its path there: neither a reopen through the
+     * descriptor (O_EMPTYPATH) nor a link back keeps the old directory's
+     * rights (PR #49 review). Before the move both work. */
+    mkdir("/tmp/ll/mv", 0755);
+    mkdir("/tmp/ll/mv/a", 0755);
+    mkdir("/tmp/ll/mv/z", 0755);
+    close(open("/tmp/ll/mv/a/m", O_CREAT | O_WRONLY | O_TRUNC, 0644));
+    int go[2], moved[2];
+    if (pipe(go) != 0 || pipe(moved) != 0) f |= 0x10000;
+    c = fork();
+    if (c == 0) {
+        close(go[0]);
+        close(moved[1]);
+        int r = t_ll_ruleset(T_LL_READ_FILE | T_LL_WRITE_FILE | T_LL_MAKE_REG | T_LL_REFER);
+        if (r < 0 || t_ll_allow(r, "/tmp/ll/mv/a",
+                                T_LL_READ_FILE | T_LL_WRITE_FILE | T_LL_MAKE_REG | T_LL_REFER) != 0 ||
+            syscall(SYS_landlock_restrict_self, r, 1u << 4 /* NO_NEW_PRIVS */) != 0)
+            _exit(2);
+        int pf = open("/tmp/ll/mv/a/m", O_PATH);
+        if (pf < 0) _exit(3);
+        int rw = openat(pf, "", O_RDWR | (1 << 26) /* O_EMPTYPATH */);
+        if (rw < 0) _exit(4);
+        close(rw);
+        char b = 'x';
+        if (write(go[1], &b, 1) != 1 || read(moved[0], &b, 1) != 1) _exit(5);
+        if (!t_ll_errno(openat(pf, "", O_RDWR | (1 << 26)), EACCES)) _exit(6);
+        if (!t_ll_errno(linkat(pf, "", AT_FDCWD, "/tmp/ll/mv/a/back", AT_EMPTY_PATH), EACCES)) _exit(7);
+        _exit(0);
+    }
+    close(go[1]);
+    close(moved[0]);
+    char gb;
+    if (read(go[0], &gb, 1) != 1 || rename("/tmp/ll/mv/a/m", "/tmp/ll/mv/z/m") != 0 ||
+        write(moved[1], "x", 1) != 1)
+        f |= 0x10000;
+    close(go[0]);
+    close(moved[1]);
+    st = t_exit_status(c);
+    if (st != 0) f |= 0x20000 | (st << 24);
+    unlink("/tmp/ll/mv/z/m");
+    unlink("/tmp/ll/mv/a/back");
+    rmdir("/tmp/ll/mv/a");
+    rmdir("/tmp/ll/mv/z");
+    rmdir("/tmp/ll/mv");
+    /* LANDLOCK_SCOPE_SIGNAL (hook_task_kill): a scoped domain cannot
+     * signal a process outside it, and can signal its own child. */
+    pid_t outside = fork();
+    if (outside == 0) {
+        pause();
+        _exit(0);
+    }
+    c = fork();
+    if (c == 0) {
+        struct t_ll_attr at = {0};
+        at.scoped = 2; /* LANDLOCK_SCOPE_SIGNAL */
+        int r = (int)syscall(SYS_landlock_create_ruleset, &at, sizeof(at), 0);
+        if (r < 0 || syscall(SYS_landlock_restrict_self, r, 1u << 4 /* NO_NEW_PRIVS */) != 0)
+            _exit(2);
+        if (!t_ll_errno(kill(outside, SIGKILL), EPERM)) _exit(1);
+        pid_t in = fork();
+        if (in == 0) {
+            pause();
+            _exit(0);
+        }
+        int ok = kill(in, SIGKILL) == 0;
+        int ws = 0;
+        waitpid(in, &ws, 0);
+        _exit(ok && WIFSIGNALED(ws) && WTERMSIG(ws) == SIGKILL ? 0 : 3);
+    }
+    if (t_exit_status(c) != 0) f |= 64;
+    kill(outside, SIGKILL);
+    waitpid(outside, NULL, 0);
+    /* A thread-directed signal is checked against the named thread's
+     * domain (hook_task_kill on that task): the leader alone restricts
+     * itself (no TSYNC) and forks Q, which may signal the leader, in its
+     * own domain, but not the process's other, unrestricted thread. */
+    c = fork();
+    if (c == 0) {
+        int tp[2];
+        pthread_t t;
+        pid_t ttid = 0;
+        if (pipe(tp) != 0 || pthread_create(&t, NULL, t_ll_tid_thread, tp) != 0 ||
+            read(tp[0], &ttid, sizeof(ttid)) != sizeof(ttid))
+            _exit(2);
+        struct t_ll_attr at = {0};
+        at.scoped = 2; /* LANDLOCK_SCOPE_SIGNAL */
+        int r = (int)syscall(SYS_landlock_create_ruleset, &at, sizeof(at), 0);
+        if (r < 0 || syscall(SYS_landlock_restrict_self, r, 1u << 4 /* NO_NEW_PRIVS */) != 0)
+            _exit(2);
+        pid_t q = fork();
+        if (q == 0) {
+            pid_t pp = getppid();
+            int ok = syscall(SYS_tgkill, pp, pp, 0) == 0 &&
+                     t_ll_errno(syscall(SYS_tgkill, pp, ttid, 0), EPERM);
+            _exit(ok ? 0 : 1);
+        }
+        _exit(t_exit_status(q));
+    }
+    st = t_exit_status(c);
+    if (st != 0) f |= 0x10000 | (st << 20);
+    /* Network rules: under a domain handling BIND_TCP, bind() reaches only
+     * the ports a rule allows (EACCES otherwise). */
+    c = fork();
+    if (c == 0) {
+        struct t_ll_attr at = {0};
+        at.net = 1; /* LANDLOCK_ACCESS_NET_BIND_TCP */
+        int r = (int)syscall(SYS_landlock_create_ruleset, &at, sizeof(at), 0);
+        struct {
+            uint64_t allowed, port;
+        } np = {1, 34567};
+        if (r < 0 || syscall(SYS_landlock_add_rule, r, 2 /* NET_PORT */, &np, 0) != 0 ||
+            syscall(SYS_landlock_restrict_self, r, 1u << 4 /* NO_NEW_PRIVS */) != 0)
+            _exit(2);
+        struct sockaddr_in in4 = {0};
+        in4.sin_family = AF_INET;
+        in4.sin_port = htons(34567);
+        int s1 = socket(AF_INET, SOCK_STREAM, 0);
+        if (s1 < 0 || bind(s1, (struct sockaddr *)&in4, sizeof(in4)) != 0) _exit(3);
+        in4.sin_port = htons(34568);
+        int s2 = socket(AF_INET, SOCK_STREAM, 0);
+        _exit(s2 >= 0 && t_ll_errno(bind(s2, (struct sockaddr *)&in4, sizeof(in4)), EACCES) ? 0 : 1);
+    }
+    st = t_exit_status(c);
+    if (st != 0) f |= 128 | (st << 8);
+    snprintf(why, sizeof(why), "f=%#x", f);
+    report("landlock", f == 0, why);
+}
+
+/* The key retention service core (Linux 7.3 security/keys). */
+#define T_KEYCTL_GET_KEYRING_ID 0
+#define T_KEYCTL_JOIN_SESSION 1
+#define T_KEYCTL_UPDATE 2
+#define T_KEYCTL_REVOKE 3
+#define T_KEYCTL_DESCRIBE 6
+#define T_KEYCTL_READ 11
+#define T_KEYCTL_SET_TIMEOUT 15
+#define T_KEYCTL_CAPABILITIES 31
+static long t_keyctl(long op, long a, long b, long c, long d)
+{
+    return syscall(SYS_keyctl, op, a, b, c, d);
+}
+static void test_keyrings(void)
+{
+    char why[96];
+    int f = 0;
+    pid_t c = fork();
+    if (c == 0) {
+        int bits = 0;
+        /* A session keyring of its own. */
+        long ses = t_keyctl(T_KEYCTL_JOIN_SESSION, 0, 0, 0, 0);
+        if (ses < 3) bits |= 1 << 0;
+        long k = syscall(SYS_add_key, "user", "ltp:one", "hello", 5, -3 /* SESSION */);
+        if (k < 3) bits |= 1 << 1;
+        char buf[64] = {0};
+        if (t_keyctl(T_KEYCTL_READ, k, (long)buf, sizeof(buf), 0) != 5 || memcmp(buf, "hello", 5) != 0)
+            bits |= 1 << 2;
+        /* DESCRIBE: type;uid;gid;perm;description, the NUL counted. */
+        memset(buf, 0, sizeof(buf));
+        char want[64];
+        snprintf(want, sizeof(want), "user;%d;%d;3f010000;ltp:one", (int)getuid(), (int)getgid());
+        long n = t_keyctl(T_KEYCTL_DESCRIBE, k, (long)buf, sizeof(buf), 0);
+        if (n != (long)strlen(want) + 1 || strcmp(buf, want) != 0) bits |= 1 << 3;
+        /* add_key of the same description updates the key. */
+        if (syscall(SYS_add_key, "user", "ltp:one", "x", 1, -3) != k) bits |= 1 << 4;
+        if (t_keyctl(T_KEYCTL_READ, k, (long)buf, sizeof(buf), 0) != 1) bits |= 1 << 5;
+        /* The session keyring holds it: 4 bytes, its serial. */
+        int32_t ids[4] = {0};
+        if (t_keyctl(T_KEYCTL_READ, ses, (long)ids, sizeof(ids), 0) != 4 || ids[0] != k) bits |= 1 << 6;
+        if (t_keyctl(T_KEYCTL_REVOKE, k, 0, 0, 0) != 0 ||
+            t_keyctl(T_KEYCTL_READ, k, (long)buf, sizeof(buf), 0) != -1 || errno != EKEYREVOKED)
+            bits |= 1 << 7;
+        /* request_key: nothing to find, no callout: ENOKEY; with one, no
+         * helper runs: ENOENT, and a negative key is left (ENOKEY). */
+        if (syscall(SYS_request_key, "user", "ltp:none", NULL, 0) != -1 || errno != ENOKEY) bits |= 1 << 8;
+        if (syscall(SYS_request_key, "user", "ltp:two", "info", -3) != -1 || errno != ENOENT) bits |= 1 << 9;
+        if (syscall(SYS_request_key, "user", "ltp:two", "info", 0) != -1 || errno != ENOKEY) bits |= 1 << 10;
+        /* The user keyring is "_uid.<uid>". */
+        long uk = t_keyctl(T_KEYCTL_GET_KEYRING_ID, -4, 1, 0, 0);
+        memset(buf, 0, sizeof(buf));
+        snprintf(want, sizeof(want), "_uid.%d", (int)getuid());
+        if (uk < 3 || t_keyctl(T_KEYCTL_DESCRIBE, uk, (long)buf, sizeof(buf), 0) < 0 ||
+            !strstr(buf, want))
+            bits |= 1 << 11;
+        /* Errors of the special ids. */
+        if (t_keyctl(T_KEYCTL_GET_KEYRING_ID, -6, 0, 0, 0) != -1 || errno != EINVAL) bits |= 1 << 12;
+        if (syscall(SYS_add_key, "nosuch", "d", "x", 1, -3) != -1 || errno != ENODEV) bits |= 1 << 13;
+        if (syscall(SYS_add_key, ".dot", "d", "x", 1, -3) != -1 || errno != EPERM) bits |= 1 << 14;
+        unsigned char caps[4] = {0xff, 0xff, 0xff, 0xff};
+        if (t_keyctl(T_KEYCTL_CAPABILITIES, (long)caps, 4, 0, 0) != 2 || caps[0] != 0xe3 || caps[1] != 0x03 ||
+            caps[2] != 0 || caps[3] != 0)
+            bits |= 1 << 15;
+        /* A NULL buffer: with a length the copy is tried and is EFAULT, as
+         * copy_to_user; with none the size is still returned (PR #49
+         * review). */
+        if (t_keyctl(T_KEYCTL_CAPABILITIES, 0, 2, 0, 0) != -1 || errno != EFAULT) bits |= 1 << 15;
+        if (t_keyctl(T_KEYCTL_CAPABILITIES, 0, 0, 0, 0) != 2) bits |= 1 << 15;
+        /* /proc/keys lists the session keyring. */
+        char pk[4096];
+        snprintf(want, sizeof(want), "%08lx", ses);
+        if (t_read_text("/proc/keys", pk, sizeof(pk)) <= 0 || !strstr(pk, want)) bits |= 1 << 16;
+        if (t_read_text("/proc/sys/kernel/keys/maxkeys", pk, sizeof(pk)) <= 0 || atoi(pk) != 200)
+            bits |= 1 << 17;
+        /* A timeout expires the key. */
+        long t = syscall(SYS_add_key, "user", "ltp:t", "z", 1, -3);
+        if (t < 3 || t_keyctl(T_KEYCTL_SET_TIMEOUT, t, 1, 0, 0) != 0) bits |= 1 << 18;
+        sleep(2);
+        if (t_keyctl(T_KEYCTL_READ, t, (long)buf, sizeof(buf), 0) != -1 || errno != EKEYEXPIRED) bits |= 1 << 19;
+        _exit(bits ? 64 + __builtin_ctz(bits) : 0);
+    }
+    int st = t_exit_status(c);
+    if (st != 0) f |= 1;
+    snprintf(why, sizeof(why), "f=%#x child=%d", f, st);
+    report("keyrings", f == 0, why);
+}
+
+/* The security modules' calls: capability and Landlock, neither with
+ * process attributes. */
+#ifndef SYS_lsm_list_modules
+#define SYS_lsm_get_self_attr 459
+#define SYS_lsm_set_self_attr 460
+#define SYS_lsm_list_modules 461
+#endif
+static void test_lsm_calls(void)
+{
+    char why[96];
+    int f = 0;
+    uint64_t ids[4] = {0};
+    uint32_t size = sizeof(ids);
+    if (syscall(SYS_lsm_list_modules, ids, &size, 0) != 2 || size != 16 || ids[0] != 100 || ids[1] != 110)
+        f |= 1;
+    size = 8;
+    if (syscall(SYS_lsm_list_modules, ids, &size, 0) != -1 || errno != E2BIG || size != 16) f |= 2;
+    if (syscall(SYS_lsm_list_modules, ids, &size, 1) != -1 || errno != EINVAL) f |= 4;
+    uint8_t ctx[64] = {0};
+    size = sizeof(ctx);
+    if (syscall(SYS_lsm_get_self_attr, 100 /* CURRENT */, ctx, &size, 0) != -1 || errno != EOPNOTSUPP ||
+        size != 0)
+        f |= 8;
+    if (syscall(SYS_lsm_get_self_attr, 0, ctx, &size, 0) != -1 || errno != EINVAL) f |= 16;
+    if (syscall(SYS_lsm_set_self_attr, 100, ctx, 8, 0) != -1 || errno != EINVAL) f |= 32;
+    snprintf(why, sizeof(why), "f=%#x", f);
+    report("lsm_calls", f == 0, why);
+}
+
+/* BSD process accounting, version 3 records (Linux 7.3 kernel/acct.c). */
+struct t_acct_v3 {
+    char ac_flag, ac_version;
+    uint16_t ac_tty;
+    uint32_t ac_exitcode, ac_uid, ac_gid, ac_pid, ac_ppid, ac_btime, ac_etime;
+    uint16_t ac_utime, ac_stime, ac_mem, ac_io, ac_rw, ac_minflt, ac_majflt, ac_swaps;
+    char ac_comm[16];
+};
+static void test_acct(void)
+{
+    char why[96];
+    int f = 0;
+    if (sizeof(struct t_acct_v3) != 64) f |= 1;
+    /* The files live in a new directory only this process can enter:
+     * acct(2) opens them again by path, which in /tmp itself another user
+     * could swap for a symlink between the setup and the call (PR #49
+     * review). */
+    char dir[] = "/tmp/veridian-acct.XXXXXX";
+    if (!mkdtemp(dir)) {
+        report("acct", 0, "mkdtemp");
+        return;
+    }
+    char path[64], pa[64], pb[64];
+    snprintf(path, sizeof(path), "%s/acct", dir);
+    snprintf(pa, sizeof(pa), "%s/a", dir);
+    snprintf(pb, sizeof(pb), "%s/b", dir);
+    int fd = open(path, O_CREAT | O_WRONLY | O_TRUNC | O_NOFOLLOW, 0600);
+    if (fd < 0) {
+        rmdir(dir);
+        report("acct", 0, "open");
+        return;
+    }
+    close(fd);
+    if (syscall(SYS_acct, "/tmp") != -1 || errno != EISDIR) f |= 4;
+    /* A procfs file: EINVAL, as acct_on refuses FS_USERNS_MOUNT_RESTRICTED
+     * filesystems (a record written into a /proc/sys file would set it). */
+    if (syscall(SYS_acct, "/proc/sys/kernel/printk") != -1 || errno != EINVAL) f |= 4;
+    if (syscall(SYS_acct, path) != 0) f |= 8;
+    pid_t c = fork();
+    if (c == 0)
+        _exit(7);
+    int st = 0;
+    waitpid(c, &st, 0);
+    if (syscall(SYS_acct, NULL) != 0) f |= 16;
+    /* The child's record: forked without exec (AFORK), its exit status,
+     * this process as its parent. */
+    fd = open(path, O_RDONLY);
+    struct t_acct_v3 r;
+    int found = 0;
+    while (fd >= 0 && read(fd, &r, sizeof(r)) == (ssize_t)sizeof(r)) {
+        if ((pid_t)r.ac_pid == c) {
+            found = 1;
+            if (r.ac_version != 3 || !(r.ac_flag & 0x01) || r.ac_exitcode != (7u << 8) ||
+                (pid_t)r.ac_ppid != getpid() || r.ac_uid != getuid())
+                f |= 32;
+        }
+    }
+    if (fd >= 0) close(fd);
+    if (!found) f |= 64;
+    unlink(path);
+    /* A PID namespace's accounting lasts until the namespace is empty: a
+     * process killed when its init exits is recorded in the namespace's
+     * file (zap_pid_ns_processes, then acct_exit_ns), and in every
+     * accounting namespace above it too (slow_acct_process; PR #49 review).
+     * Outer file A here; the namespace's init turns on file B. */
+    int ok_files = 1;
+    for (int i = 0; i < 2; i++) {
+        int t = open(i ? pb : pa, O_CREAT | O_WRONLY | O_TRUNC | O_NOFOLLOW, 0600);
+        if (t < 0) ok_files = 0;
+        else close(t);
+    }
+    if (!ok_files) {
+        /* The private directory goes too, with whatever was made in it
+         * (PR #49 review). */
+        unlink(pa);
+        unlink(pb);
+        rmdir(dir);
+        snprintf(why, sizeof(why), "f=%#x open", f | 256);
+        report("acct", 0, why);
+        return;
+    }
+    if (syscall(SYS_acct, pa) != 0) f |= 256;
+    c = fork();
+    if (c == 0) {
+        if (unshare(0x20000000 /* CLONE_NEWPID */) != 0) _exit(2);
+        pid_t init = fork();
+        if (init == 0) {
+            if (syscall(SYS_acct, pb) != 0) _exit(3);
+            int up[2];
+            if (pipe(up) != 0) _exit(4);
+            pid_t g = fork();
+            if (g == 0) {
+                close(up[0]);
+                (void)!write(up[1], "x", 1);
+                for (;;) pause();
+            }
+            char b;
+            close(up[1]);
+            if (read(up[0], &b, 1) != 1) _exit(6);
+            _exit(5); /* takes g along with SIGKILL */
+        }
+        int ist = 0;
+        if (init < 0 || waitpid(init, &ist, 0) != init) _exit(7);
+        _exit(WIFEXITED(ist) && WEXITSTATUS(ist) == 5 ? 0 : 8);
+    }
+    st = t_exit_status(c);
+    if (st != 0) f |= 512 | (st << 16);
+    if (syscall(SYS_acct, NULL) != 0) f |= 256;
+    /* In B: the killed process (pid 2 there, killed by SIGKILL) and init
+     * (pid 1, status 5). In A: the killed process too. */
+    int in_b_killed = 0, in_b_init = 0, in_a_killed = 0;
+    for (int i = 0; i < 2; i++) {
+        fd = open(i ? pb : pa, O_RDONLY);
+        while (fd >= 0 && read(fd, &r, sizeof(r)) == (ssize_t)sizeof(r)) {
+            if (i && r.ac_pid == 2 && r.ac_exitcode == 9) in_b_killed = 1;
+            if (i && r.ac_pid == 1 && r.ac_exitcode == (5u << 8)) in_b_init = 1;
+            if (!i && r.ac_exitcode == 9) in_a_killed = 1;
+        }
+        if (fd >= 0) close(fd);
+    }
+    if (!in_b_killed) f |= 1024;
+    if (!in_b_init) f |= 2048;
+    if (!in_a_killed) f |= 4096;
+    unlink(pa);
+    unlink(pb);
+    rmdir(dir);
+    /* Without CAP_SYS_PACCT: EPERM. */
+    c = fork();
+    if (c == 0)
+        _exit(setuid(65534) == 0 && syscall(SYS_acct, NULL) == -1 && errno == EPERM ? 0 : 1);
+    if (t_exit_status(c) != 0) f |= 128;
+    snprintf(why, sizeof(why), "f=%#x", f);
+    report("acct", f == 0, why);
+}
+
+/* syslog(2) over the kernel log ring. */
+static void test_syslog(void)
+{
+    char why[96];
+    int f = 0;
+    static char logbuf[16384];
+    long n = syscall(SYS_syslog, 3 /* READ_ALL */, logbuf, sizeof(logbuf));
+    if (n <= 0 || strncmp(logbuf, "<4>[", 4) != 0) f |= 1;
+    if (syscall(SYS_syslog, 10 /* SIZE_BUFFER */, NULL, 0) != 131072) f |= 2;
+    if (syscall(SYS_syslog, 8 /* CONSOLE_LEVEL */, NULL, 0) != -1 || errno != EINVAL) f |= 4;
+    if (syscall(SYS_syslog, 99, NULL, 0) != -1 || errno != EINVAL) f |= 8;
+    if (syscall(SYS_syslog, 3, NULL, 10) != -1 || errno != EINVAL) f |= 16;
+    char pk[64];
+    if (t_read_text("/proc/sys/kernel/printk", pk, sizeof(pk)) <= 0 || strcmp(pk, "7\t4\t1\t7\n") != 0)
+        f |= 32;
+    if (t_read_text("/proc/sys/kernel/dmesg_restrict", pk, sizeof(pk)) <= 0 || strcmp(pk, "1\n") != 0)
+        f |= 64;
+    /* dmesg_restrict: an unprivileged reader is EPERM even for READ_ALL. */
+    pid_t c = fork();
+    if (c == 0)
+        _exit(setuid(65534) == 0 && syscall(SYS_syslog, 3, logbuf, sizeof(logbuf)) == -1 && errno == EPERM ? 0
+                                                                                                        : 1);
+    if (t_exit_status(c) != 0) f |= 128;
+    /* The `System` object's rights (ADR 0024), each dropped on its own:
+     * without READ nothing of the log is read, READ_CLEAR included; without
+     * MODIFY it is still read but not cleared (READ_CLEAR, CLEAR: EPERM). */
+    c = fork();
+    if (c == 0) {
+        if (t_drop_system_read() != 1) _exit(2);
+        _exit(syscall(SYS_syslog, 3, logbuf, sizeof(logbuf)) == -1 && errno == EPERM &&
+                      syscall(SYS_syslog, 4, logbuf, sizeof(logbuf)) == -1 && errno == EPERM
+                  ? 0
+                  : 1);
+    }
+    if (t_exit_status(c) != 0) f |= 256;
+    c = fork();
+    if (c == 0) {
+        if (t_drop_system_modify() != 1) _exit(2);
+        _exit(syscall(SYS_syslog, 3, logbuf, sizeof(logbuf)) >= 0 &&
+                      syscall(SYS_syslog, 4, logbuf, sizeof(logbuf)) == -1 && errno == EPERM &&
+                      syscall(SYS_syslog, 5, 0, 0) == -1 && errno == EPERM
+                  ? 0
+                  : 1);
+    }
+    if (t_exit_status(c) != 0) f |= 512;
+    snprintf(why, sizeof(why), "f=%#x", f);
+    report("syslog", f == 0, why);
+}
+
+#ifndef CLONE_NEWPID
+#define CLONE_NEWPID 0x20000000
+#endif
+#define T_REBOOT_MAGIC1 0xfee1deadu
+#define T_REBOOT_MAGIC2 672274793u
+#define T_REBOOT_RESTART 0x01234567u
+#define T_REBOOT_HALT 0xcdef0123u
+#define T_REBOOT_CAD_ON 0x89abcdefu
+#define T_REBOOT_CAD_OFF 0u
+
+/* reboot(cmd) from a process in a new PID namespace: the namespace's init
+ * is reported killed by `sig`; a command other than the four is EINVAL
+ * first. 0 when both held. */
+static int reboot_in_pidns(unsigned cmd, int sig)
+{
+    pid_t a = fork();
+    if (a == 0) {
+        if (unshare(CLONE_NEWPID) != 0) _exit(2);
+        pid_t init = fork();
+        if (init == 0) {
+            pid_t c = fork();
+            if (c == 0) {
+                if (!(syscall(SYS_reboot, T_REBOOT_MAGIC1, T_REBOOT_MAGIC2, T_REBOOT_CAD_ON, 0) == -1 &&
+                      errno == EINVAL))
+                    _exit(3);
+                syscall(SYS_reboot, T_REBOOT_MAGIC1, T_REBOOT_MAGIC2, cmd, 0);
+                _exit(4);
+            }
+            /* A working reboot kills this init before the child is reaped;
+             * a child that exits (a check failed, the reboot returned)
+             * ends it with a status the outer wait reports, instead of a
+             * pause forever (PR #49 review). */
+            int cs = 0;
+            while (waitpid(c, &cs, 0) == -1 && errno == EINTR)
+                ;
+            _exit(7);
+        }
+        int st = 0;
+        if (waitpid(init, &st, 0) != init) _exit(5);
+        _exit(WIFSIGNALED(st) && WTERMSIG(st) == sig ? 0 : 6);
+    }
+    return t_exit_status(a);
+}
+
+/* reboot(RESTART) in a new PID namespace by a process that dropped WRITE
+ * on that namespace and on the user namespace standing for it, keeping
+ * MODIFY and CAP_SYS_BOOT: EPERM, and init lives on to exit by itself
+ * (ADR 0024: killing init takes WRITE over it). 0 when both held. */
+static int reboot_without_write_in_pidns(void)
+{
+    pid_t a = fork();
+    if (a == 0) {
+        if (unshare(CLONE_NEWPID) != 0) _exit(2);
+        pid_t init = fork();
+        if (init == 0) {
+            pid_t c = fork();
+            if (c == 0) {
+                /* Each drop counts the capabilities it narrowed: none is
+                 * fine (one may hold nothing on the new PID namespace
+                 * itself); what matters is that no WRITE is left. */
+                if (t_drop_ns_write("pid") < 0 || t_drop_ns_write("user") < 0) _exit(3);
+                _exit(syscall(SYS_reboot, T_REBOOT_MAGIC1, T_REBOOT_MAGIC2, T_REBOOT_RESTART, 0) == -1 &&
+                              errno == EPERM
+                          ? 0
+                          : 4);
+            }
+            int cs = 0;
+            while (waitpid(c, &cs, 0) == -1 && errno == EINTR)
+                ;
+            _exit(WIFEXITED(cs) ? WEXITSTATUS(cs) : 5);
+        }
+        int st = 0;
+        if (waitpid(init, &st, 0) != init) _exit(6);
+        /* Exited by itself with the child's verdict: not killed. */
+        _exit(WIFEXITED(st) ? WEXITSTATUS(st) : 7);
+    }
+    return t_exit_status(a);
+}
+
+/* reboot(2): the checks, Ctrl-Alt-Del, and reboot inside a PID namespace
+ * (the machine itself is not restarted here). */
+static void test_reboot(void)
+{
+    char why[96];
+    int f = 0;
+    if (!(syscall(SYS_reboot, 0, 0, T_REBOOT_RESTART, 0) == -1 && errno == EINVAL)) f |= 1;
+    if (!(syscall(SYS_reboot, T_REBOOT_MAGIC1, 1, T_REBOOT_RESTART, 0) == -1 && errno == EINVAL)) f |= 1;
+    if (syscall(SYS_reboot, T_REBOOT_MAGIC1, T_REBOOT_MAGIC2, T_REBOOT_CAD_OFF, 0) != 0) f |= 2;
+    if (syscall(SYS_reboot, T_REBOOT_MAGIC1, T_REBOOT_MAGIC2, T_REBOOT_CAD_ON, 0) != 0) f |= 2;
+    if (!(syscall(SYS_reboot, T_REBOOT_MAGIC1, T_REBOOT_MAGIC2, 0x45584543u /* KEXEC */, 0) == -1 &&
+          errno == EINVAL))
+        f |= 4;
+    /* Without CAP_SYS_BOOT: EPERM, before the magic is looked at. */
+    pid_t c = fork();
+    if (c == 0)
+        _exit(setuid(65534) == 0 && syscall(SYS_reboot, 0, 0, T_REBOOT_RESTART, 0) == -1 && errno == EPERM
+                  ? 0
+                  : 1);
+    if (t_exit_status(c) != 0) f |= 8;
+    int r = reboot_in_pidns(T_REBOOT_RESTART, SIGHUP);
+    if (r != 0) f |= 16 | (r << 8);
+    r = reboot_in_pidns(T_REBOOT_HALT, SIGINT);
+    if (r != 0) f |= 32 | (r << 12);
+    r = reboot_without_write_in_pidns();
+    if (r != 0) f |= 64 | (r << 16);
+    snprintf(why, sizeof(why), "f=%#x", f);
+    report("reboot", f == 0, why);
+}
+
+static void test_seccomp_notify(void)
+{
+    char why[96];
+    int f = 0, p1[2], p2[2];
+    if (pipe(p1) != 0 || pipe(p2) != 0) {
+        report("seccomp_notify", 0, "pipe");
+        return;
+    }
+    pid_t me = getpid();
+    pid_t g = fork();
+    /* A failed fork must not reach kill(g) or a wait: kill(-1, ...)
+     * would signal every process the runner may (PR #49 review). */
+    if (g < 0) {
+        report("seccomp_notify", 0, "fork");
+        return;
+    }
+    if (g == 0) {
+        char c;
+        close(p1[0]);
+        close(p2[1]);
+        prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+        /* WAIT_KILLABLE_RECV needs NEW_LISTENER. */
+        if (!(t_seccomp_install(0x7fc00000u, 1u << 5) == -1 && errno == EINVAL)) _exit(2);
+        int l = (int)t_seccomp_install(0x7fc00000u, 1u << 3 /* NEW_LISTENER */);
+        if (l < 0) _exit(3);
+        if (!(t_seccomp_install(0x7fc00000u, 1u << 3) == -1 && errno == EBUSY)) _exit(4);
+        if (write(p1[1], &l, sizeof(l)) != sizeof(l) || read(p2[0], &c, 1) != 1) _exit(5);
+        close(l);
+        if (syscall(SYS_getppid) != 4242) _exit(6);
+        long fd = syscall(SYS_getppid);
+        if (fd < 0 || write((int)fd, "x", 1) != 1) _exit(7);
+        if (syscall(SYS_getppid) != me) _exit(8);
+        _exit(0);
+    }
+    /* Each side keeps only its own ends, so a child that dies early makes
+     * the reads below see EOF instead of blocking (PR #49 review). */
+    close(p1[1]);
+    close(p2[0]);
+    int l = -1, gl = -1, pfd = sys_pidfd_open(g, 0);
+    if (pfd < 0 || read(p1[0], &gl, sizeof(gl)) != sizeof(gl) || (l = sys_pidfd_getfd(pfd, gl, 0)) < 0) {
+        f |= 1;
+        kill(g, SIGKILL);
+    } else if (write(p2[1], "g", 1) != 1) {
+        f |= 1;
+        kill(g, SIGKILL);
+    }
+    struct t_notif n;
+    if (!(f & 1)) {
+        /* Each step runs only after the one before worked; the first that
+         * fails ends the exchange, and the tracee is killed rather than
+         * left waiting for an answer (PR #49 review). */
+        int ok = 1;
+        /* A receive buffer that is not zeroed: EINVAL. */
+        memset(&n, 0xff, sizeof(n));
+        if (!(ioctl(l, T_NOTIF_RECV, &n) == -1 && errno == EINVAL)) f |= 2;
+        /* An answer with a value. */
+        if (!t_notif_recv(l, g, &n) || ioctl(l, T_NOTIF_ID_VALID, &n.id) != 0) {
+            f |= 4;
+            ok = 0;
+        }
+        struct t_notif_resp r = {n.id, 4242, 0, 0};
+        if (ok && ioctl(l, T_NOTIF_SEND, &r) != 0) {
+            f |= 4;
+            ok = 0;
+        }
+        /* A descriptor, which is also the call's result. */
+        int q[2] = {-1, -1};
+        char x = 0;
+        if (ok && (pipe(q) != 0 || !t_notif_recv(l, g, &n))) {
+            f |= 8;
+            ok = 0;
+        }
+        if (ok) {
+            struct t_notif_addfd a = {n.id, 1u << 1 /* SEND */, (uint32_t)q[1], 0, 0};
+            if (ioctl(l, T_NOTIF_ADDFD, &a) < 0) {
+                f |= 8;
+                ok = 0;
+            }
+        }
+        /* The tracee writes through the descriptor; this end closed first,
+         * so a tracee that never writes gives EOF, not a hang. */
+        if (q[1] >= 0) close(q[1]);
+        if (ok && (read(q[0], &x, 1) != 1 || x != 'x')) {
+            f |= 8;
+            ok = 0;
+        }
+        if (q[0] >= 0) close(q[0]);
+        /* CONTINUE: the call runs. */
+        if (ok && !t_notif_recv(l, g, &n)) {
+            f |= 16;
+            ok = 0;
+        }
+        struct t_notif_resp cont = {n.id, 0, 0, 1};
+        if (ok && ioctl(l, T_NOTIF_SEND, &cont) != 0) {
+            f |= 16;
+            ok = 0;
+        }
+        if (!ok) kill(g, SIGKILL);
+    }
+    if (t_exit_status(g) != 0) f |= 32;
+    if (!(f & 1)) {
+        /* Nothing can notify any more: POLLHUP, and a receive is ENOENT. */
+        struct pollfd pf = {l, POLLIN, 0};
+        if (poll(&pf, 1, 1000) != 1 || !(pf.revents & POLLHUP)) f |= 64;
+        memset(&n, 0, sizeof(n));
+        if (!(ioctl(l, T_NOTIF_RECV, &n) == -1 && errno == ENOENT)) f |= 64;
+    }
+    close(l);
+    close(pfd);
+    /* The listener closed: the call gets ENOSYS. */
+    pid_t c = fork();
+    if (c == 0) {
+        prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+        int fd = (int)t_seccomp_install(0x7fc00000u, 1u << 3);
+        if (fd < 0) _exit(2);
+        close(fd);
+        _exit(syscall(SYS_getppid) == -1 && errno == ENOSYS ? 0 : 1);
+    }
+    if (t_exit_status(c) != 0) f |= 128;
+    /* WAIT_KILLABLE_RECV: once received, the target waits killably, and a
+     * signal left at a default action that ends the process still ends it
+     * (Linux starts group exit when it is sent); the supervisor never
+     * answers here. */
+    int kp[2];
+    if (pipe(kp) != 0) {
+        f |= 256;
+    } else {
+        pid_t k = fork();
+        if (k == 0) {
+            close(kp[0]);
+            prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+            int kl = (int)t_seccomp_install(0x7fc00000u, 1u << 3 | 1u << 5);
+            if (kl < 0 || write(kp[1], &kl, sizeof(kl)) != sizeof(kl)) _exit(2);
+            syscall(SYS_getppid);
+            _exit(3);
+        }
+        close(kp[1]);
+        int kl = -1, kfd = k > 0 ? sys_pidfd_open(k, 0) : -1, ll = -1;
+        if (kfd < 0 || read(kp[0], &kl, sizeof(kl)) != sizeof(kl) ||
+            (ll = sys_pidfd_getfd(kfd, kl, 0)) < 0 || !t_notif_recv(ll, k, &n) ||
+            kill(k, SIGTERM) != 0) {
+            f |= 256;
+        }
+        int ks = 0, gone = 0;
+        for (int i = 0; k > 0 && i < 50 && !gone; i++) {
+            if (waitpid(k, &ks, WNOHANG) == k)
+                gone = 1;
+            else
+                usleep(100000);
+        }
+        if (k > 0 && !gone) {
+            f |= 512; /* still waiting after SIGTERM */
+            kill(k, SIGKILL);
+            waitpid(k, &ks, 0);
+        } else if (k > 0 && !(WIFSIGNALED(ks) && WTERMSIG(ks) == SIGTERM)) {
+            f |= 512;
+        }
+        if (ll >= 0) close(ll);
+        if (kfd >= 0) close(kfd);
+        close(kp[0]);
+    }
+    close(p1[0]);
+    close(p2[1]);
+    snprintf(why, sizeof(why), "f=%#x", f);
+    report("seccomp_notify", f == 0, why);
+}
 
 /* An idmapped mount (mount_setattr's MOUNT_ATTR_IDMAP, Linux's
  * fs/mnt_idmapping.c): a detached tmpfs mount made idmapped through a user
@@ -11923,6 +13047,19 @@ static unsigned long long t_ns_id(const char *name)
  * a namespace, named by its NS_GET_ID id. Rights 0 drops the capability
  * whole; otherwise those rights (the token's encoding) go. */
 #include <veridian/capability.h>
+static long t_drop_system_read(void)
+{
+    return veridian_capability_drop(VERIDIAN_CAP_SYSTEM, 0, VERIDIAN_RIGHT_READ);
+}
+static long t_drop_system_modify(void)
+{
+    return veridian_capability_drop(VERIDIAN_CAP_SYSTEM, 0, VERIDIAN_RIGHT_MODIFY);
+}
+static long t_drop_ns_write(const char *name)
+{
+    unsigned long long id = t_ns_id(name);
+    return id ? veridian_capability_drop(VERIDIAN_CAP_NAMESPACE, id, VERIDIAN_RIGHT_WRITE) : -1;
+}
 
 /* failfs from a chroot (ADR 0024): leaving the jail for failfs, whose
  * relative lookups walk the whole tree, needs MODIFY on the mount
@@ -13492,6 +14629,14 @@ int main(int argc, char **argv)
     test_mount_flags();
     test_mount_api();
     test_idmapped_mount();
+    test_seccomp();
+    test_seccomp_notify();
+    test_landlock();
+    test_keyrings();
+    test_lsm_calls();
+    test_acct();
+    test_syslog();
+    test_reboot();
     test_mount_no_escape();
     test_pivot_root();
     test_mount_object_cap();

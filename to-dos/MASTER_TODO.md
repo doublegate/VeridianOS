@@ -436,7 +436,9 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
        FSMOUNT_NAMESPACE, OPEN_TREE_NAMESPACE, locked mounts and idmapped mounts (ADR 0027
        decision 24); quotactl and quotactl_fd ENOSYS (with the sockets). MOVE_MOUNT_BENEATH
        moved to item 6.
-     - [ ] Sockets: shutdown, recvmmsg, sendmmsg.
+     - [ ] Sockets: shutdown, recvmmsg, sendmmsg. With them (found 2026-11-14 from LTP
+       landlock08): bind() to port 0 takes a free port from `ip_local_port_range`
+       (inet_csk_get_port), and an address is taken at bind(), not at listen().
      - [x] Files and scheduling: cachestat, file_getattr, file_setattr, ioprio_get, ioprio_set;
        memfd_secret moved to the memory group's follow-up. fanotify and rseq (with rseq_slice_yield) stay ENOSYS, as decided
        in group 3.
@@ -445,6 +447,30 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
        perf_event_open, bpf, uprobe, uretprobe, and the calls a microkernel does not honour
        (init_module, finit_module, delete_module, kexec_load, kexec_file_load, iopl, ioperm,
        modify_ldt; `_sysctl`, which Linux removed).
+       - [x] seccomp in full: strict mode, classic BPF filters by the shared `veridian-cbpf`
+         crate, every action, TSYNC, user notification with its listener and ioctls, the status
+         lines (ADR 0027 decision 27).
+       - [x] syslog and the kernel log ring; dmesg_restrict on by default (decision 29).
+       - [x] acct (version 3, per PID namespace), vhangup, iopl and ioperm (IoPort
+         capabilities only; none granted yet, Track M M2).
+       - [x] reboot: CAP_SYS_BOOT, magic numbers, reboot_pid_ns, restart/halt/power off on
+         three architectures (decision 29). Ctrl-Alt-Del is not reported by the keyboard yet.
+       - [x] lsm_list_modules, lsm_get_self_attr, lsm_set_self_attr: capability and Landlock
+         reported; no process attributes (EOPNOTSUPP). `/sys/kernel/security/lsm` waits for
+         sysfs (Track C item 3).
+       - [x] Keyrings core (ADR 0027 decision 28): add_key, request_key and keyctl through the
+         shared `veridian-keys` crate; user, logon and keyring keys, the special and persistent
+         keyrings, `/proc/keys`, `/proc/key-users`, `/proc/sys/kernel/keys`.
+       - [x] Landlock, ABI 11 (ADR 0029): the three calls, every filesystem, network and scope
+         check, through `cap::authority::holds_path` and `holds_net` and the shared
+         `veridian-landlock` crate.
+       - [ ] modify_ldt (x86_64): Linux's GDT layout, a per-mm LDT, selectors kept per thread,
+         iret faults as SIGSEGV (decision 29).
+     - [ ] Cheap LTP fixes (found from the system tier's run, 2026-11-14): `/proc/<pid>/stat` in
+       Linux's format (do_task_stat; 27 LTP tests are TBROK on its ENOENT through
+       TST_PROCESS_STATE_WAIT, and Open POSIX's `include/proc.h` reads it); F_GETPIPE_SZ,
+       F_SETPIPE_SZ and `/proc/sys/fs/pipe-max-size`; a per-test limit that covers a test's own
+       `.runtime` (keyctl02 passes, then is killed at 60 s).
      - [ ] Linux AIO (io_setup, io_destroy, io_submit, io_cancel, io_getevents, io_pgetevents) and
        io_uring (io_uring_setup, io_uring_enter, io_uring_register) move to v0.29: they need an
        asynchronous completion path in the kernel.
@@ -482,6 +508,19 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
   9. [x] Decision point (decided 2026-11-05): v0.28.0 is cut here, after items 4 to 8, and
      released (item 17); items 10 to 16 are the v0.29 queue, worked straight after the release.
   10. [ ] (v0.29) Sprint F (networking, storage), with `knetd` (N-69) and INET socket readiness.
+      - [ ] With abstract AF_UNIX names: Landlock's LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET in the
+        same change, on stream connect and on datagram send to a socket not already connected
+        (hook_unix_stream_connect, hook_unix_may_send): `security::landlock::may_reach` between
+        the caller's domain and the domain recorded on the socket (`UnixSocket::landlock`),
+        EPERM. The runtime test `landlock` has a tripwire that fails if abstract sockets work
+        without it (ADR 0029).
+      - [ ] With controlling terminals (TIOCSCTTY, TIOCNOTTY, the session's terminal; the pty
+        and n_tty work): vhangup hangs the caller's controlling terminal up (tty_vhangup_self:
+        its descriptors read end of file and write EIO, SIGHUP and SIGCONT to the session),
+        which today has none to hang up, as a Linux process without one.
+      - [ ] With SIGIO (F_SETOWN, O_ASYNC, FIOASYNC): Landlock's signal scope on the signal a
+        file sends (hook_file_set_fowner, hook_file_send_sigiotask), recording the owner's
+        domain at F_SETOWN; until then FIOASYNC refuses to turn SIGIO on.
   11. [ ] (v0.29) Sprint G (hardening).
   12. [ ] (v0.29) Sprint H (real hardware, the parts QEMU can check).
   13. [ ] (v0.29) RISC-V boot: HR-02, HR-04 to HR-06, HR-11.
@@ -489,6 +528,9 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
   15. [ ] (v0.29) MFA through PAM.
   16. [ ] (v0.29) IPC redesign (N-79 to N-91); package signing keys (N-55 follow-up).
   17. [ ] Release v0.28.0, after item 8 (the tag and GitHub release need the maintainer's confirmation).
+      The "at most 20 missing" target counts the calls still to be written; the `declined` ones
+      (ENOSYS by decision, listed with reasons in the coverage reports) are counted apart, on the
+      condition that each has a plan (item 18) (maintainer, 2026-11-14).
       - [x] Licensing by component (ADR 0028, maintainer 2026-11-15, moved ahead of v0.28.0):
         GPL-3.0-or-later with the user-space exception for the kernel, system servers and Linux
         runtime, GPL-3.0-or-later for the driver and server framework, MIT OR Apache-2.0 for the
@@ -497,6 +539,29 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       - [ ] Before the tag: a licensing lawyer reviews the exception, the CLA and
         `COMMERCIAL.md`; the release notes state the change (v0.27.0 and earlier stay MIT OR
         Apache-2.0).
+  18. [ ] (v0.29 onward) The declined calls, each brought in where it fits (maintainer, 2026-11-14:
+      every declined call needs a plan to be written and integrated in a later release):
+      - [ ] (v0.29) mbind, get_mempolicy, set_mempolicy, set_mempolicy_home_node, migrate_pages,
+        move_pages with Linux's single-node semantics (a NUMA kernel on one node: MPOL_DEFAULT,
+        node 0, the policy kept and reported); real placement once multi-node hardware is
+        supported (Track C 14).
+      - [ ] (v0.30) swapon and swapoff with the page cache and eviction (Track P, P3): swap files
+        and partitions, priorities, `/proc/swaps`.
+      - [ ] (v0.30) quotactl and quotactl_fd with ext4 read-write (Track C 2): user, group and
+        project quotas on ext4, then BlockFS.
+      - [ ] (v0.31) perf_event_open: software events first (Track C 14), then the hardware PMU
+        per architecture (x86 PMU, Arm PMUv3, RISC-V Sscofpmf).
+      - [ ] (v0.31) bpf: an eBPF verifier and interpreter in a no_std crate beside
+        `veridian-cbpf` (the Kani target), running in the user-space runtime (linuxd) where it
+        can, the kernel only where a hook needs it; program types in order: socket filters,
+        tracepoints and kprobes over perf_event_open, cgroup; a JIT last, behind the verifier.
+      - [ ] (v0.31) uprobe and uretprobe with uprobes (breakpoint insertion in user text, the
+        return trampoline), over perf_event_open and bpf.
+      - [ ] (v0.31) kexec_load and kexec_file_load: loading a kernel image and jumping to it,
+        with kexec_file_load verifying its signature against the measured-boot keys (Track S).
+      - [ ] (with Track M, M5) init_module, finit_module, delete_module: a Linux `.ko` cannot
+        run in this kernel; the calls load and unload signed VeridianOS driver servers, the
+        microkernel's equivalent of modules, through the same capability checks.
   - Outside the groups: pin every workflow `uses:` to a commit SHA with Dependabot (one ci: pull
     request); delete merged branches once the maintainer agrees.
 - [ ] **v0.28.0:** first the items carried over from v0.27.0, which was cut early (2026-10-18):

@@ -57,7 +57,22 @@ pub(super) fn sys_net_sendto(
     // most the limit goes, and the count sent is returned, as a short
     // write (PR #23 review: every send() of more than 1 MiB on a TCP or
     // Unix stream failed with EINVAL).
-    let stream = match socket_handle(fd)? {
+    // The socket is looked up once: the length rule, Landlock's check and
+    // the send are all on the one socket, which a dup2 from another thread
+    // between lookups could otherwise swap (PR #49 review).
+    let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    let file = process
+        .file_table
+        .lock()
+        .get(fd)
+        .ok_or(SyscallError::BadFileDescriptor)?;
+    let sock = file
+        .node
+        .as_any()
+        .and_then(|a| a.downcast_ref::<crate::net::socket_fd::SocketNode>())
+        .ok_or(SyscallError::NotASocket)?;
+    let handle = sock.handle();
+    let stream = match handle {
         SocketHandle::Inet(id) => crate::net::socket::with_socket(id, |s| {
             s.socket_type == crate::net::socket::SocketType::Stream
         })
@@ -75,13 +90,16 @@ pub(super) fn sys_net_sendto(
     let data = super::userspace::read_user_vec(buf_ptr, len, super::userspace::MAX_USER_MESSAGE)?;
     let data = &data[..];
 
-    match socket_handle(fd)? {
+    match handle {
         SocketHandle::Inet(id) => {
-            let dest = if addr_ptr != 0 {
-                Some(parse_sockaddr(addr_ptr, addr_len)?)
+            let raw = if addr_ptr != 0 {
+                Some(read_sockaddr(addr_ptr, addr_len)?)
             } else {
                 None
             };
+            #[cfg(feature = "alloc")]
+            super::landlock_inet(id, raw.as_deref(), super::NetHook::Send)?;
+            let dest = raw.as_deref().map(parse_sockaddr_bytes).transpose()?;
             if !crate::net::socket::reachable(id) {
                 return Err(SyscallError::NetworkUnreachable);
             }
@@ -90,9 +108,7 @@ pub(super) fn sys_net_sendto(
         // send() is sendto() with no address; addressed Unix datagrams are
         // not supported.
         SocketHandle::Unix(_) if addr_ptr != 0 => Err(SyscallError::NotImplemented),
-        SocketHandle::Unix(_) => {
-            with_socket_fd(fd, |s| s.send(data, None))?.map_err(super::socket_err)
-        }
+        SocketHandle::Unix(_) => sock.send(data, None).map_err(super::socket_err),
     }
 }
 
@@ -344,13 +360,39 @@ pub(super) fn parse_sockaddr(
     addr_ptr: usize,
     addr_len: usize,
 ) -> Result<crate::net::SocketAddr, SyscallError> {
-    if addr_len < 16 {
+    parse_sockaddr_bytes(&read_sockaddr(addr_ptr, addr_len)?)
+}
+
+/// The size of `struct sockaddr_storage`, the longest address a socket
+/// call takes.
+pub(super) const SOCKADDR_STORAGE: usize = 128;
+
+/// A socket address copied in once (Linux's move_addr_to_kernel): longer
+/// than `struct sockaddr_storage` is EINVAL. Every check and the decoding
+/// then read this copy, so another thread changing the user memory in
+/// between cannot make them see different addresses (commit security
+/// review).
+pub(super) fn read_sockaddr(
+    addr_ptr: usize,
+    addr_len: usize,
+) -> Result<alloc::vec::Vec<u8>, SyscallError> {
+    if addr_len > SOCKADDR_STORAGE {
         return Err(SyscallError::InvalidArgument);
     }
-    // struct sockaddr_in { u16 family, u16 port_be, u32 addr_be, u8 zero[8] }
-    let mut raw = [0u8; 8];
+    let mut raw = alloc::vec![0u8; addr_len];
     super::userspace::read_user_bytes(addr_ptr, &mut raw)?;
-    sockaddr_in_from_bytes(&raw)
+    Ok(raw)
+}
+
+/// [`parse_sockaddr`] of an address already copied in.
+pub(super) fn parse_sockaddr_bytes(raw: &[u8]) -> Result<crate::net::SocketAddr, SyscallError> {
+    // struct sockaddr_in { u16 family, u16 port_be, u32 addr_be, u8 zero[8] }
+    if raw.len() < 16 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let mut head = [0u8; 8];
+    head.copy_from_slice(&raw[..8]);
+    sockaddr_in_from_bytes(&head)
 }
 
 /// Decode the first 8 bytes of a `struct sockaddr_in` (family, port,
@@ -533,6 +575,17 @@ mod tests {
             Err(SyscallError::InvalidArgument)
         );
         assert!(parse_sockaddr(0xFFFF_8000_0000_1000, 16).is_err());
+        // Longer than sockaddr_storage: EINVAL, as move_addr_to_kernel, so
+        // no length lets a check skip an address the call then uses.
+        let big = [0u8; SOCKADDR_STORAGE + 1];
+        assert_eq!(
+            read_sockaddr(big.as_ptr() as usize, SOCKADDR_STORAGE + 1),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(
+            read_sockaddr(big.as_ptr() as usize, SOCKADDR_STORAGE).map(|v| v.len()),
+            Ok(SOCKADDR_STORAGE)
+        );
     }
 
     /// An IPv6 address has no sockaddr_in form; it is reported as
