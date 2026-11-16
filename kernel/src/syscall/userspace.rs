@@ -476,6 +476,11 @@ pub fn read_user_vec(addr: usize, len: usize, max: usize) -> Result<Vec<u8>, Sys
 /// (PR #49 review).
 pub fn clear_user(addr: usize, len: usize) -> Result<(), SyscallError> {
     const ZEROS: [u8; 256] = [0; 256];
+    // Nothing to clear touches nothing, whatever the address (access_ok
+    // of an empty range: modify_ldt(2, NULL, 0) is 0).
+    if len == 0 {
+        return Ok(());
+    }
     validate_user_ptr(addr as *const u8, len)?;
     let mut done = 0;
     while done < len {
@@ -1156,5 +1161,6 @@ mod tests {
             Err(SyscallError::InvalidPointer)
         );
         assert_eq!(clear_user(at, 0), Ok(()));
+        assert_eq!(clear_user(0, 0), Ok(()), "an empty range at NULL");
     }
 }

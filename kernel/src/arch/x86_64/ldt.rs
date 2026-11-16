@@ -540,22 +540,12 @@ pub fn sys_modify_ldt(func: usize, ptr: usize, bytecount: usize) -> crate::sysca
         1 => write_ldt(ptr, bytecount, true),
         2 => {
             let n = bytecount.min(128);
-            clear_user(ptr, n).map(|_| n)
+            crate::syscall::userspace::clear_user(ptr, n).map(|_| n)
         }
         0x11 => write_ldt(ptr, bytecount, false),
         _ => Err(SyscallError::NotImplemented),
     };
     int_result(r)
-}
-
-/// Zero `len` user bytes at `ptr` (clear_user).
-#[cfg(feature = "alloc")]
-fn clear_user(ptr: usize, len: usize) -> Result<(), crate::syscall::SyscallError> {
-    if len == 0 {
-        return Ok(());
-    }
-    let zeros = crate::syscall::userspace::zeroed_buf(len)?;
-    crate::syscall::userspace::write_user_bytes(ptr, &zeros)
 }
 
 #[cfg(feature = "alloc")]
@@ -582,7 +572,7 @@ fn read_ldt(ptr: usize, bytecount: usize) -> Result<usize, crate::syscall::Sysca
     userspace::write_user_bytes(ptr, &bytes)?;
     if size != count {
         let rest = ptr.checked_add(size).ok_or(SyscallError::InvalidPointer)?;
-        clear_user(rest, count - size)?;
+        userspace::clear_user(rest, count - size)?;
     }
     Ok(count)
 }
