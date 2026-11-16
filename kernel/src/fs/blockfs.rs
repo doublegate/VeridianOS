@@ -995,9 +995,11 @@ pub struct BlockFsInner {
     /// new FIFO or socket could be found as the old one (PR #20 review).
     reporting_special: Vec<u32>,
     /// Unlinked inodes whose leftover blocks could not all be freed (an
-    /// indirect block unreadable): neither reused nor reclaimed again,
-    /// since their pointers may name blocks already freed and given to
-    /// other files. What they still hold stays allocated (PR #49 review).
+    /// indirect block unreadable): not reused, and not tried again in this
+    /// mount, where the same read would fail again. A later mount may try
+    /// again safely: truncation clears each pointer before freeing what it
+    /// names, so what such an inode still points to is still allocated (PR
+    /// #49 review).
     poisoned: alloc::collections::BTreeSet<u32>,
 }
 
@@ -2930,12 +2932,19 @@ impl BlockFsInner {
             return Ok(());
         }
 
+        // Restart-safe: every pointer is cleared before the block it names
+        // is freed, so a failure part-way (an unreadable block) leaves only
+        // pointers to blocks still allocated, and the truncation can run
+        // again, after a remount too. A failure between the two leaks one
+        // block rather than leaving a pointer to a freed one (PR #49
+        // review).
         // If all indirect entries are being freed
         if first_free_block <= DIRECT_BLOCKS {
             // Free every data block referenced by the indirect block
             for idx in 0..PTRS_PER_BLOCK {
                 let blk = self.read_block_ptr(indirect, idx)?;
                 if blk != 0 {
+                    self.write_block_ptr(indirect, idx, 0)?;
                     self.free_block(blk);
                     if self.inode_table[inode_num as usize].blocks > 0 {
                         self.inode_table[inode_num as usize].blocks -= 1;
@@ -2943,8 +2952,8 @@ impl BlockFsInner {
                 }
             }
             // Free the indirect block itself
-            self.free_block(indirect);
             self.inode_table[inode_num as usize].indirect_block = 0;
+            self.free_block(indirect);
             if self.inode_table[inode_num as usize].blocks > 0 {
                 self.inode_table[inode_num as usize].blocks -= 1;
             }
@@ -2956,8 +2965,8 @@ impl BlockFsInner {
                 if idx >= start_idx {
                     let blk = self.read_block_ptr(indirect, idx)?;
                     if blk != 0 {
-                        self.free_block(blk);
                         self.write_block_ptr(indirect, idx, 0)?;
+                        self.free_block(blk);
                         if self.inode_table[inode_num as usize].blocks > 0 {
                             self.inode_table[inode_num as usize].blocks -= 1;
                         }
@@ -2971,8 +2980,8 @@ impl BlockFsInner {
             }
             // If no entries remain, free the indirect block itself
             if !any_remain {
-                self.free_block(indirect);
                 self.inode_table[inode_num as usize].indirect_block = 0;
+                self.free_block(indirect);
                 if self.inode_table[inode_num as usize].blocks > 0 {
                     self.inode_table[inode_num as usize].blocks -= 1;
                 }
@@ -3004,10 +3013,12 @@ impl BlockFsInner {
             for l1_idx in 0..PTRS_PER_BLOCK {
                 let l1_block = self.read_block_ptr(dbl_indirect, l1_idx)?;
                 if l1_block != 0 {
-                    // Free all data blocks in this L1 indirect block
+                    // Free all data blocks in this L1 indirect block,
+                    // clearing each pointer first (restart-safe, above).
                     for l2_idx in 0..PTRS_PER_BLOCK {
                         let data_blk = self.read_block_ptr(l1_block, l2_idx)?;
                         if data_blk != 0 {
+                            self.write_block_ptr(l1_block, l2_idx, 0)?;
                             self.free_block(data_blk);
                             if self.inode_table[inode_num as usize].blocks > 0 {
                                 self.inode_table[inode_num as usize].blocks -= 1;
@@ -3015,6 +3026,7 @@ impl BlockFsInner {
                         }
                     }
                     // Free the L1 indirect block itself
+                    self.write_block_ptr(dbl_indirect, l1_idx, 0)?;
                     self.free_block(l1_block);
                     if self.inode_table[inode_num as usize].blocks > 0 {
                         self.inode_table[inode_num as usize].blocks -= 1;
@@ -3022,8 +3034,8 @@ impl BlockFsInner {
                 }
             }
             // Free the double-indirect block itself
-            self.free_block(dbl_indirect);
             self.inode_table[inode_num as usize].double_indirect_block = 0;
+            self.free_block(dbl_indirect);
             if self.inode_table[inode_num as usize].blocks > 0 {
                 self.inode_table[inode_num as usize].blocks -= 1;
             }
@@ -3053,8 +3065,8 @@ impl BlockFsInner {
                     if l2_idx >= l2_start {
                         let data_blk = self.read_block_ptr(l1_block, l2_idx)?;
                         if data_blk != 0 {
-                            self.free_block(data_blk);
                             self.write_block_ptr(l1_block, l2_idx, 0)?;
+                            self.free_block(data_blk);
                             if self.inode_table[inode_num as usize].blocks > 0 {
                                 self.inode_table[inode_num as usize].blocks -= 1;
                             }
@@ -3069,8 +3081,8 @@ impl BlockFsInner {
 
                 if !any_l2_remain {
                     // Free the now-empty L1 indirect block
-                    self.free_block(l1_block);
                     self.write_block_ptr(dbl_indirect, l1_idx, 0)?;
+                    self.free_block(l1_block);
                     if self.inode_table[inode_num as usize].blocks > 0 {
                         self.inode_table[inode_num as usize].blocks -= 1;
                     }
@@ -3080,8 +3092,8 @@ impl BlockFsInner {
             }
 
             if !any_l1_remain {
-                self.free_block(dbl_indirect);
                 self.inode_table[inode_num as usize].double_indirect_block = 0;
+                self.free_block(dbl_indirect);
                 if self.inode_table[inode_num as usize].blocks > 0 {
                     self.inode_table[inode_num as usize].blocks -= 1;
                 }
@@ -3634,6 +3646,27 @@ mod tests {
         // while the orphan keeps its four.
         let data = (start as usize - 4) * BLOCK_SIZE;
         assert!(big.write(0, &alloc::vec![2u8; data]).is_ok());
+    }
+
+    /// Freeing an inode's blocks clears each pointer before freeing what it
+    /// names, so running it again (a retry after a failure, or after a
+    /// remount) frees nothing twice: here a file reaching the single
+    /// indirect block (PR #49 review).
+    #[test]
+    fn freeing_an_inodes_blocks_again_frees_nothing() {
+        let fs = BlockFs::format(128, 16).unwrap();
+        let root = fs.root();
+        let f = root.create("f", Permissions::from_mode(0o644)).unwrap();
+        let ino = crate::fs::inode_key(&f).1 as u32;
+        f.write(0, &[5u8; 20 * BLOCK_SIZE]).unwrap();
+        let mut inner = fs.inner.write();
+        inner.free_inode_blocks(ino).unwrap();
+        let after = inner.superblock.free_blocks;
+        let i = &inner.inode_table[ino as usize];
+        assert_eq!((i.indirect_block, i.double_indirect_block), (0, 0));
+        assert!(i.direct_blocks.iter().all(|&b| b == 0));
+        inner.free_inode_blocks(ino).unwrap();
+        assert_eq!(inner.superblock.free_blocks, after);
     }
 
     /// An orphan whose reclamation failed (poisoned) keeps its number out
