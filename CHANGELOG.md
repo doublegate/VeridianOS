@@ -175,8 +175,9 @@
 - modify_ldt(2) on x86_64 (Linux 7.3 `arch/x86/kernel/ldt.c`, ADR 0027 decision 29): read,
   write (old and new rules), the default table, Linux's descriptors and EINVAL rules, and its
   unsigned 32-bit result. The GDT now has Linux's layout, with the 32-bit user code segment
-  0x23 (TSS at 0x40, LDT at 0x50); a thread's ds, es, fs and gs survive switches, fork copies
-  the table and exec drops it; SYSCALL from compatibility mode is ENOSYS; a return to a
+  0x23 (TSS at 0x40, LDT at 0x50); a thread's ds, es, fs and gs survive switches, a write
+  reloads LDT-backed ds and es on every CPU running the address space before it returns
+  (Linux's flush_ldt), CLONE_VM shares the table, fork copies it and exec drops it; SYSCALL from compatibility mode is ENOSYS; a return to a
   segment another thread cleared is the program's fault, not a kernel fault (Linux's bad_iret:
   SIGSEGV for a #GP, SIGBUS for a #NP or #SS, as its traps deliver them); signal
   handlers enter in 64-bit mode and sigreturn restores the saved code and stack segments.

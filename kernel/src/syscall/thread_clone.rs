@@ -883,7 +883,7 @@ fn thread_clone(
     // The new thread runs as its own dispatcher task (stage D2), starting
     // from the registers prepared above and a copy of the caller's vector
     // state. (CLONE_CHILD_CLEARTID is honoured by exit_dispatched.)
-    if crate::process::start_thread(&proc, &thread, true).is_err() {
+    if crate::process::start_thread(&proc, &thread, true, req.on(CLONE_SETTLS)).is_err() {
         // The thread never ran: take it out again (with its kernel
         // stack), or it counted as alive and its process could never
         // finish exiting (N-46); and put the TID words back.

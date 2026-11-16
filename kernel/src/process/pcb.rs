@@ -342,9 +342,10 @@ pub struct Process {
     /// Read by sys_exec before enter_usermode to set MSR 0xC0000100.
     pub tls_fs_base: AtomicU64,
 
-    /// x86_64: the address space's local descriptor table (modify_ldt),
-    /// made on its first write. A fork child gets a copy, a CLONE_VM child
-    /// the same table, and exec drops it (`arch::x86_64::ldt`).
+    /// x86_64: the address space's LDT slot (modify_ldt), whose table is
+    /// made on its first write. A fork child gets a slot with a copy, a
+    /// CLONE_VM child the same slot, and exec a fresh one
+    /// (`arch::x86_64::ldt`).
     #[cfg(all(target_arch = "x86_64", feature = "alloc"))]
     pub ldt: spin::Mutex<alloc::sync::Arc<crate::arch::x86_64::ldt::LdtSlot>>,
 
@@ -674,7 +675,7 @@ impl Process {
             uname_linux: crate::utils::uname::UnameMode::new(),
             tls_fs_base: AtomicU64::new(0),
             #[cfg(all(target_arch = "x86_64", feature = "alloc"))]
-            ldt: spin::Mutex::new(alloc::sync::Arc::new(Default::default())),
+            ldt: spin::Mutex::new(crate::arch::x86_64::ldt::new_slot(None)),
             container_id: AtomicU64::new(0),
             clear_child_tid: AtomicU64::new(0),
         }

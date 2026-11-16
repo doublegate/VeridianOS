@@ -22,6 +22,12 @@
 //!
 //! With one CPU online the remote part is a single atomic load.
 //!
+//! **LDT refresh.** The same request reaches the CPUs running an address
+//! space whose LDT changed (x86_64, [`refresh_ldt_in`]): each reloads its
+//! LDT-backed ds and es before acknowledging, as Linux's install_ldt does
+//! with on_each_cpu_mm(flush_ldt). A request names what it asks for, a
+//! flush, a refresh or both, per CPU.
+//!
 //! **Targeted flushes (N-262).** A change to a user address space only has to
 //! reach the CPUs running it: user mappings are not global and PCIDs are not
 //! used, so a CPU that switched to another page-table root dropped every
@@ -157,6 +163,19 @@ fn remote(addr: Option<u64>) {
     remote_to(u64::MAX, addr);
 }
 
+/// x86_64: after a write to the LDT of address space `root`, every other
+/// CPU running it reloads its LDT-backed ds and es; returns once each has
+/// (the writer refreshes its own first, `arch::x86_64::ldt::write_ldt`).
+pub fn refresh_ldt_in(root: u64) {
+    if crate::arch::smp_boot::online_cpus() <= 1 {
+        return;
+    }
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    x86::request(cpus_on(root), x86::REFRESH_LDT);
+    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+    let _ = root;
+}
+
 /// Reach the CPUs in `mask` (all of them on RISC-V, which has no user mode
 /// yet and flushes every hart through the SBI).
 fn remote_to(mask: u64, addr: Option<u64>) {
@@ -166,7 +185,7 @@ fn remote_to(mask: u64, addr: Option<u64>) {
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     {
         let _ = addr;
-        x86::shootdown(mask);
+        x86::request(mask, x86::FLUSH);
     }
     #[cfg(all(target_arch = "riscv64", target_os = "none"))]
     {
@@ -204,8 +223,13 @@ mod x86 {
     static REQUEST_LOCK: AtomicBool = AtomicBool::new(false);
     /// CPUs that have yet to acknowledge the request in flight.
     static ACKS_OUTSTANDING: AtomicU32 = AtomicU32::new(0);
-    /// Per CPU: a flush is requested of it.
-    static PENDING: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+    /// What a request asks: a TLB flush.
+    pub(super) const FLUSH: u8 = 1;
+    /// What a request asks: an LDT refresh (`ldt::refresh_segments`).
+    pub(super) const REFRESH_LDT: u8 = 2;
+    /// Per CPU: what is requested of it (0: nothing).
+    static PENDING: [core::sync::atomic::AtomicU8; MAX_CPUS] =
+        [const { core::sync::atomic::AtomicU8::new(0) }; MAX_CPUS];
 
     /// Wait after which a missing acknowledgement is reported (and still
     /// waited for).
@@ -217,14 +241,27 @@ mod x86 {
 
     pub(super) fn service_pending() {
         let me = crate::arch::percpu::this_cpu_id() as usize;
-        if me < MAX_CPUS && PENDING[me].swap(false, Ordering::AcqRel) {
-            crate::arch::tlb_flush_all();
-            ACKS_OUTSTANDING.fetch_sub(1, Ordering::AcqRel);
+        if me >= MAX_CPUS {
+            return;
         }
+        let asked = PENDING[me].swap(0, Ordering::AcqRel);
+        if asked == 0 {
+            return;
+        }
+        if asked & FLUSH != 0 {
+            crate::arch::tlb_flush_all();
+        }
+        if asked & REFRESH_LDT != 0 {
+            let _irq = crate::arch::disable_interrupts();
+            // SAFETY: interrupts off.
+            unsafe { crate::arch::x86_64::ldt::refresh_segments() };
+        }
+        ACKS_OUTSTANDING.fetch_sub(1, Ordering::AcqRel);
     }
 
-    /// Flush on the CPUs in `mask` (other than this one) and wait for each.
-    pub(super) fn shootdown(mask: u64) {
+    /// Ask the CPUs in `mask` (other than this one) for `what` and wait for
+    /// each.
+    pub(super) fn request(mask: u64, what: u8) {
         let me = crate::arch::percpu::this_cpu_id() as usize;
         while REQUEST_LOCK
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -247,7 +284,7 @@ mod x86 {
         ACKS_OUTSTANDING.store(targets.count_ones(), Ordering::Release);
         for (cpu, pending) in PENDING.iter().enumerate().take(online) {
             if targets & (1 << cpu) != 0 {
-                pending.store(true, Ordering::Release);
+                pending.store(what, Ordering::Release);
             }
         }
         if targets == everyone {

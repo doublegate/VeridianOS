@@ -6,11 +6,23 @@
 //! has at most one table, made on its first write. Linux replaces its table
 //! on every write and switches every CPU over with an IPI; here the table
 //! is a fixed 8,192 entries (64 KiB, LDT_ENTRIES), never moved, and a write
-//! stores one 8-byte descriptor in place, so a CPU never holds a stale
-//! base. Every task of the address space holds a reference to it; a
-//! table is freed only when the last of them is dropped, which is after
-//! each has left its CPU, and a switch always loads the next task's table
-//! (or none), so no CPU's LDTR names a freed table.
+//! stores one 8-byte descriptor in place, so no CPU's LDTR names a stale
+//! table. A segment register caches its descriptor when loaded, though:
+//! after a write, ds and es holding LDT selectors are reloaded on every CPU
+//! running the address space, the writer's first and the others through the
+//! shootdown IPI, before modify_ldt returns, as Linux's flush_ldt and
+//! refresh_ldt_segments do (fs and gs keep their 64-bit bases, as there).
+//!
+//! The table lives in the address space's slot ([`LdtSlot`]), which is set
+//! once, on the first write, and never changed: exec gives the process a
+//! fresh slot instead. Every task holds its address space's slot, read at
+//! each switch-in without a lock, so a table made after a thread started is
+//! that thread's at its next switch with no pass over the tasks (PR #50
+//! review: such a pass could miss a task being started, or reach one after
+//! its process had exec'd). A slot, and its table, is freed only when the
+//! last task holding it is dropped, after it has left its CPU, and a switch
+//! always loads the next task's table (or none), so no CPU's LDTR names a
+//! freed table.
 //!
 //! A thread on another CPU whose LDTR predates the table (made by a
 //! sibling after it was switched in) loads it on its next switch, or at
@@ -168,6 +180,7 @@ impl Ldt {
     /// A copy for a fork child (Linux's ldt_dup_context).
     pub fn duplicate(&self) -> Option<Arc<Self>> {
         let new = Self::new()?;
+        let _irq = irq_off();
         let _g = self.lock.lock();
         let n = self.nr_entries.load(Ordering::Acquire);
         for i in 0..n as usize {
@@ -190,41 +203,76 @@ impl Ldt {
     }
 
     fn write(&self, index: usize, desc: u64) {
+        let _irq = irq_off();
         let _g = self.lock.lock();
         self.entries[index].store(desc, Ordering::Release);
         self.nr_entries
             .fetch_max(index as u32 + 1, Ordering::AcqRel);
     }
 
-    /// Hold the table still while selectors are checked and loaded.
+    /// Hold the table still while selectors are checked and loaded. The
+    /// caller has interrupts off, as every holder does: the shootdown
+    /// handler takes it too, so a holder interrupted on its own CPU would
+    /// wait for itself.
     pub fn hold(&self) -> spin::MutexGuard<'_, ()> {
         self.lock.lock()
     }
 }
 
-/// A process's LDT slot: the table, once its first write made one. CLONE_VM
-/// processes share the slot itself, so a table made after the clone is
-/// both processes' (the address space has one LDT; PR #50 review).
+/// Interrupts off for a holder of a table's lock (see [`Ldt::hold`]); a
+/// no-op in host tests, which have no interrupts to turn off.
 #[cfg(feature = "alloc")]
-pub type LdtSlot = spin::Mutex<Option<Arc<Ldt>>>;
+fn irq_off() -> impl Drop {
+    #[cfg(target_os = "none")]
+    {
+        crate::arch::disable_interrupts()
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        struct NoIrq;
+        impl Drop for NoIrq {
+            fn drop(&mut self) {}
+        }
+        NoIrq
+    }
+}
+
+/// An address space's LDT slot: the table, once its first write made one,
+/// and never another (see the module docs). CLONE_VM processes share the
+/// slot itself, so a table made after the clone is both processes' (the
+/// address space has one LDT; PR #50 review); their tasks hold it too.
+/// Read without a lock (`get`), so a switch never waits for a writer.
+#[cfg(feature = "alloc")]
+pub type LdtSlot = spin::Once<Arc<Ldt>>;
+
+/// A fresh slot, or one holding `table` (a fork child's copy).
+#[cfg(feature = "alloc")]
+pub fn new_slot(table: Option<Arc<Ldt>>) -> Arc<LdtSlot> {
+    Arc::new(match table {
+        Some(t) => spin::Once::initialized(t),
+        None => spin::Once::new(),
+    })
+}
 
 /// Whether `sel` may be loaded into a data segment register now, `ldt`
 /// being the table the CPU has loaded. In the GDT only null and the user
-/// selectors a ring-3 program can load (`__USER_DS`, `__USER_CS`,
-/// `__USER32_CS`, at RPL 3) qualify: anything else there is a null, kernel
-/// or system descriptor, and loading it in ring 0 at a switch would fault
-/// (a stale firmware selector a boot task recorded, say; PR #50 review).
-/// An LDT selector must name a loadable entry.
+/// descriptors (`__USER_DS`, `__USER_CS`, `__USER32_CS`) qualify: anything
+/// else there is a null, kernel or system descriptor, and loading it in
+/// ring 0 at a switch would fault (a stale firmware selector a boot task
+/// recorded, say; PR #50 review). Any RPL: a data-register load needs
+/// DPL >= max(CPL, RPL), which a DPL 3 descriptor meets at every RPL, in
+/// ring 3 as in ring 0, so a program may hold 0x28 in ds (PR #50 review;
+/// the RPL 3 rule is ss's, `trap::valid_user_ss`). An LDT selector must
+/// name a loadable entry.
 #[cfg(feature = "alloc")]
 pub fn selector_ok(sel: u16, ldt: Option<&Ldt>) -> bool {
     if sel & 4 == 0 {
         use super::gdt::{USER32_CS, USER_CS, USER_DS};
         let index = sel & !3;
         return index == 0
-            || (sel & 3 == 3
-                && [USER_DS, USER_CS, USER32_CS]
-                    .iter()
-                    .any(|u| u & !3 == index));
+            || [USER_DS, USER_CS, USER32_CS]
+                .iter()
+                .any(|u| u & !3 == index);
     }
     match ldt.and_then(|l| l.entry(sel)) {
         Some(d) => loadable_data(d),
@@ -431,9 +479,43 @@ pub fn exec_reset() {
     super::switch::write_user_gs_base(0);
     drop(irq);
     if let Some(p) = crate::process::current_process() {
-        let old = core::mem::replace(&mut *p.ldt.lock(), Arc::new(LdtSlot::default()));
-        crate::sched::dispatch::set_process_ldt(p.pid.0, None);
+        let fresh = new_slot(None);
+        let old = core::mem::replace(&mut *p.ldt.lock(), fresh.clone());
+        // exec has left one thread, this one, so no task of the process is
+        // being started meanwhile; a CLONE_VM sharer keeps the old slot,
+        // which no task of this process names any more.
+        crate::sched::dispatch::set_process_ldt_slot(p.pid.0, &fresh);
         drop(old);
+    }
+}
+
+/// After a write to the table this CPU's task uses: reload ds and es if
+/// they hold LDT selectors, so their cached descriptors match the table
+/// (Linux's refresh_ldt_segments), each checked under the table's lock
+/// first and loaded as 0 if its entry is no longer loadable (the
+/// loadsegment fixup). Run by the writer and by each CPU the shootdown
+/// reaches, with interrupts off.
+///
+/// # Safety
+/// Interrupts off.
+#[cfg(all(target_arch = "x86_64", target_os = "none", feature = "alloc"))]
+pub unsafe fn refresh_segments() {
+    let Some(table) = crate::sched::dispatch::current_ldt() else {
+        return;
+    };
+    // SAFETY: interrupts off; the running task holds the table.
+    unsafe { install(Some(&table)) };
+    let _hold = table.hold();
+    let now = read_segments();
+    let fresh = |s: u16| if selector_ok(s, Some(&table)) { s } else { 0 };
+    // SAFETY: each selector was checked under the table's lock.
+    unsafe {
+        if now.ds & 4 != 0 {
+            hw::load_ds(fresh(now.ds));
+        }
+        if now.es & 4 != 0 {
+            hw::load_es(fresh(now.es));
+        }
     }
 }
 
@@ -481,7 +563,7 @@ fn read_ldt(ptr: usize, bytecount: usize) -> Result<usize, crate::syscall::Sysca
     use crate::syscall::{userspace, SyscallError};
     let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
     let slot = process.ldt.lock().clone();
-    let Some(table) = slot.lock().clone() else {
+    let Some(table) = slot.get().cloned() else {
         return Ok(0);
     };
     let count = bytecount.min(LDT_ENTRIES * LDT_ENTRY_SIZE);
@@ -525,38 +607,24 @@ fn write_ldt(
     let desc = descriptor_for(&info, oldmode).ok_or(SyscallError::InvalidArgument)?;
     let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
     let slot = process.ldt.lock().clone();
-    let table = {
-        let mut held = slot.lock();
-        match held.as_ref() {
-            Some(t) => t.clone(),
-            None => {
-                let t = Ldt::new().ok_or(SyscallError::OutOfMemory)?;
-                *held = Some(t.clone());
-                drop(held);
-                // Every thread of the address space takes it, in every
-                // process sharing the slot (CLONE_VM), the running ones on
-                // their next switch or LDT fault.
-                let mut sharers = Vec::new();
-                crate::process::table::PROCESS_TABLE.for_each(|p| {
-                    if Arc::ptr_eq(&p.ldt.lock(), &slot) {
-                        sharers.push(p.pid.0);
-                    }
-                });
-                for pid in sharers {
-                    crate::sched::dispatch::set_process_ldt(pid, Some(t.clone()));
-                }
-                t
-            }
-        }
-    };
+    // Made once, in the slot every task of the address space holds, in
+    // every process sharing it (CLONE_VM): each loads it at its next
+    // switch, or at its first fault on an LDT selector.
+    let table = slot
+        .try_call_once(|| Ldt::new().ok_or(SyscallError::OutOfMemory))?
+        .clone();
     table.write(info.entry_number as usize, desc);
-    // This thread uses it from its return on.
+    // Every CPU running the address space reloads its LDT-backed ds and es
+    // before this returns (Linux's install_ldt: on_each_cpu_mm(flush_ldt)).
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     {
-        let irq = crate::arch::disable_interrupts();
-        // SAFETY: interrupts off; the running task holds the table.
-        unsafe { install(Some(&table)) };
-        drop(irq);
+        {
+            let _irq = crate::arch::disable_interrupts();
+            // SAFETY: interrupts off; the running task holds the table.
+            unsafe { refresh_segments() };
+        }
+        let root = process.memory_space.lock().get_page_table();
+        crate::mm::tlb::refresh_ldt_in(root);
     }
     Ok(0)
 }
@@ -652,14 +720,38 @@ mod tests {
             selector_ok(0, None) && selector_ok(3, None),
             "null at any RPL"
         );
-        // A null, kernel or system GDT descriptor, or a user one at RPL 0,
-        // would fault if loaded at a switch (PR #50 review).
-        for sel in [0x08, 0x10, 0x18, 0x28, 0x30, 0x38, 0x40, 0x48, 0x50, 0x58] {
+        // A user descriptor loads at any RPL (DPL 3 >= max(CPL, RPL)).
+        for sel in [0x20, 0x28, 0x29, 0x2a, 0x30] {
+            assert!(selector_ok(sel, None), "{sel:#x}");
+        }
+        // A null, kernel or system GDT descriptor would fault if loaded at
+        // a switch (PR #50 review).
+        for sel in [0x08, 0x10, 0x18, 0x38, 0x40, 0x48, 0x50, 0x58, 0x0b] {
             assert!(!selector_ok(sel, None), "{sel:#x}");
         }
         let copy = t.duplicate().unwrap();
         assert_eq!(copy.entry((3 << 3) | 7), Some(data));
         t.write(3, 0);
         assert_eq!(copy.entry((3 << 3) | 7), Some(data), "the copy is apart");
+    }
+
+    /// A slot is set once: a second first-write finds the table the first
+    /// made, and a slot cloned for a sharer (CLONE_VM) sees a table made
+    /// after the clone (PR #50 review).
+    #[test]
+    fn a_slot_is_made_once_and_shared() {
+        let slot = new_slot(None);
+        let sharer = slot.clone();
+        assert!(sharer.get().is_none());
+        let a = slot.try_call_once(|| Ldt::new().ok_or(())).unwrap().clone();
+        let b = sharer
+            .try_call_once(|| Ldt::new().ok_or(()))
+            .unwrap()
+            .clone();
+        assert!(Arc::ptr_eq(&a, &b));
+        assert!(Arc::ptr_eq(sharer.get().unwrap(), &a));
+        // A fork child's slot holds its copy from the start.
+        let child = new_slot(Some(a.duplicate().unwrap()));
+        assert!(!Arc::ptr_eq(child.get().unwrap(), &a));
     }
 }

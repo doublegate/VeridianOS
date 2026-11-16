@@ -251,7 +251,7 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
             let child = if opts.share_vm {
                 parent
             } else {
-                let copy = match parent.lock().clone() {
+                let copy = match parent.get() {
                     Some(t) => Some(t.duplicate().ok_or(KernelError::OutOfMemory {
                         requested: crate::arch::x86_64::ldt::LDT_ENTRIES
                             * crate::arch::x86_64::ldt::LDT_ENTRY_SIZE,
@@ -259,7 +259,7 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
                     })?),
                     None => None,
                 };
-                alloc::sync::Arc::new(spin::Mutex::new(copy))
+                crate::arch::x86_64::ldt::new_slot(copy)
             };
             *new_process.ldt.lock() = child;
         }

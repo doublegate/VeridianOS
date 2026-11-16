@@ -11992,7 +11992,10 @@ static unsigned long t_ldt_gs_read(unsigned short sel)
 /* A page below 4 GiB with 32-bit code at 0 (a loop of `count`, then
  * ebx = 42 and a far jump to 64-bit code at 0x40, which exits with ebx)
  * entered by a far jump through LDT entry 1 (selector 0x0f). With count 0
- * the 32-bit code spins forever. */
+ * the 32-bit code stores 1 to T_LDT_IN (the page after, which the caller
+ * maps writable, zero) and then spins forever, so a thread waiting for that
+ * store knows it is there. */
+#define T_LDT_IN ((volatile unsigned char *)0x20001000)
 static void t_ldt_far_child(unsigned count)
 {
     unsigned char *pg = mmap((void *)0x20000000, 4096, PROT_READ | PROT_WRITE,
@@ -12008,8 +12011,11 @@ static void t_ldt_far_child(unsigned count)
     memcpy(&c32[1], &count, 4);
     memcpy(pg, c32, sizeof(c32));
     if (count == 0) {
-        pg[0] = 0xeb; /* jmp . */
-        pg[1] = 0xfe;
+        static const unsigned char in[] = {
+            0xc6, 0x05, 0x00, 0x10, 0x00, 0x20, 0x01, /* mov byte [0x20001000], 1 */
+            0xeb, 0xfe,                               /* jmp . */
+        };
+        memcpy(pg, in, sizeof(in));
     }
     unsigned char c64[] = {
         0xb8, 60, 0, 0, 0,  /* mov eax, 60 (exit) */
@@ -12029,12 +12035,30 @@ static void t_ldt_far_child(unsigned count)
 static void *t_ldt_clearer(void *arg)
 {
     (void)arg;
-    usleep(50000);
-    /* Clear entry 1 under the thread running in it: its next return to
-     * user mode (a timer interrupt's iretq) faults on CS, which must be
-     * the process's SIGSEGV, not the kernel's fault. */
+    /* Once the other thread runs in entry 1's segment (its own store says
+     * so; a sleep could end before it installed the entry, which it would
+     * then install again and spin in forever; PR #50 review), clear entry 1
+     * under it: its next return to user mode (a timer interrupt's iretq)
+     * faults on CS, which must be the process's SIGSEGV, not the kernel's
+     * fault. The page is mapped before this thread starts. */
+    while (T_LDT_IN[0] == 0) sched_yield();
     t_ldt_set(1, 0, 0, T_LDT_RO | T_LDT_NP);
     return NULL;
+}
+/* waitpid with a limit of `ms`: a child still running then is killed and
+ * reaped, and the result is -1. */
+static int t_wait_bounded(pid_t pid, int *ws, int ms)
+{
+    for (int waited = 0; waited < ms; waited += 10) {
+        pid_t r = waitpid(pid, ws, WNOHANG);
+        if (r == pid) return 0;
+        if (r < 0 && errno != EINTR) return -1;
+        usleep(10000);
+    }
+    kill(pid, SIGKILL);
+    while (waitpid(pid, ws, 0) < 0 && errno == EINTR)
+        ;
+    return -1;
 }
 /* CLONE_VM before any table exists: the child shares the parent's address
  * space, so a table the parent makes afterwards is the child's too (PR #50
@@ -12057,9 +12081,12 @@ static int t_ldt_clone_vm(void)
     int st = t_exit_status(c);
     return r != 0 ? 2 : st;
 }
-static void test_modify_ldt(void)
+/* The test proper, in a process of its own (test_modify_ldt), so each run
+ * starts with no table (`--only modify_ldt 2`; a table, once made, stays
+ * until exec; PR #50 review). Its results: the failure bits and the last
+ * child's wait status. */
+static void t_ldt_run(int out[2])
 {
-    char why[96];
     int f = 0;
     unsigned char buf[256];
     /* In a child with no table yet: CLONE_VM shares the one made later. */
@@ -12144,16 +12171,43 @@ static void test_modify_ldt(void)
      * at the return, and the kernel goes on. */
     c = fork();
     if (c == 0) {
+        /* Mapped first, so the clearer's wait reads a mapped page. */
+        if (mmap((void *)0x20001000, 4096, PROT_READ | PROT_WRITE,
+                 MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) != (void *)0x20001000)
+            _exit(31);
         pthread_t t;
         if (pthread_create(&t, NULL, t_ldt_clearer, NULL) != 0) _exit(30);
         t_ldt_far_child(0);
     }
     int ws = 0;
-    waitpid(c, &ws, 0);
+    if (t_wait_bounded(c, &ws, 30000) != 0) f |= 1024;
     if (!(WIFSIGNALED(ws) && WTERMSIG(ws) == SIGSEGV)) f |= 128;
     /* exec drops the table: tested by the exec of every later program. */
-    snprintf(why, sizeof(why), "f=%#x ws=%#x", f, ws);
-    report("modify_ldt", f == 0, why);
+    out[0] = f;
+    out[1] = ws;
+}
+static void test_modify_ldt(void)
+{
+    char why[96];
+    int res[2] = {0, 0};
+    int p[2];
+    if (pipe(p) != 0) {
+        report("modify_ldt", 0, "pipe");
+        return;
+    }
+    pid_t c = fork();
+    if (c == 0) {
+        close(p[0]);
+        int out[2];
+        t_ldt_run(out);
+        _exit(write(p[1], out, sizeof(out)) == (ssize_t)sizeof(out) ? 0 : 1);
+    }
+    close(p[1]);
+    if (c < 0 || read(p[0], res, sizeof(res)) != (ssize_t)sizeof(res)) res[0] |= 0x4000;
+    close(p[0]);
+    if (c > 0 && t_exit_status(c) != 0) res[0] |= 0x8000;
+    snprintf(why, sizeof(why), "f=%#x ws=%#x", res[0], res[1]);
+    report("modify_ldt", res[0] == 0, why);
 }
 #endif
 

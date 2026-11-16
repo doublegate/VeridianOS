@@ -108,7 +108,8 @@ pub(crate) fn sys_fork_with(opts: &crate::process::fork::ForkOptions) -> Syscall
                 if crate::sched::dispatch::current_owner().is_some() {
                     let thread = child_process.threads.lock().values().next().cloned();
                     let started = thread.is_some_and(|t| {
-                        crate::process::start_thread(&child_process, &t, true).is_ok()
+                        crate::process::start_thread(&child_process, &t, true, opts.tls.is_some())
+                            .is_ok()
                     });
                     if !started {
                         // The TID words first, the child's then the
