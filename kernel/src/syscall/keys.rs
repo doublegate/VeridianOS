@@ -72,6 +72,9 @@ fn from_errno(n: i32) -> SyscallError {
         e::EIO => SyscallError::IoError,
         e::EAGAIN => SyscallError::WouldBlock,
         e::EACCES => SyscallError::PermissionDenied,
+        // A user string the caller copied failed to read: EFAULT, as
+        // Linux (PR #49 review).
+        e::EFAULT => SyscallError::InvalidPointer,
         e::EBUSY => SyscallError::Busy,
         e::EEXIST => SyscallError::FileExists,
         e::ENODEV => SyscallError::NoDevice,
@@ -350,7 +353,7 @@ pub fn sys_keyctl(option: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> 
 fn to_errno(err: SyscallError) -> i32 {
     match err {
         SyscallError::OperationNotPermitted => e::EPERM,
-        SyscallError::InvalidPointer | SyscallError::UnmappedMemory => 14,
+        SyscallError::InvalidPointer | SyscallError::UnmappedMemory => e::EFAULT,
         _ => e::EINVAL,
     }
 }
@@ -377,6 +380,15 @@ fn session_to_parent() -> SyscallResult {
     let c = Caller::current().creds;
     let p = parent.credentials();
     let mut pkc = pt.keys.lock();
+    // An exiting thread is marked exited before its keys are taken under
+    // this lock: seen exited, the parent gets nothing (it would keep it
+    // for good); not yet, its exit takes the new one too (PR #49 review).
+    if matches!(
+        pt.get_state(),
+        crate::process::thread::ThreadState::Zombie | crate::process::thread::ThreadState::Dead
+    ) {
+        return Err(SyscallError::OperationNotPermitted);
+    }
     let mut ks = store().lock();
     if pkc.session == Some(ses) {
         return Ok(0);

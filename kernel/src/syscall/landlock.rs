@@ -179,9 +179,9 @@ fn rule_anchor(fd: i32) -> Result<Arc<dyn VfsNode>, SyscallError> {
     if ruleset_of(&file).is_some() {
         return Err(SyscallError::BadFdState);
     }
-    let Some(path) = file.path.as_deref() else {
+    if file.path.is_none() {
         return Err(SyscallError::BadFdState);
-    };
+    }
     if file
         .node
         .as_any()
@@ -191,19 +191,10 @@ fn rule_anchor(fd: i32) -> Result<Arc<dyn VfsNode>, SyscallError> {
     }
     // An opened device or FIFO's node is what the driver gave the open,
     // not the inode with the name: the name's node is the anchor, as on
-    // Linux, where a rule names the dentry's inode.
-    use crate::fs::NodeType;
-    let named = matches!(
-        file.node.node_type(),
-        NodeType::Directory | NodeType::File | NodeType::Symlink
-    );
-    if named {
-        return Ok(file.node.clone());
-    }
-    let view = super::filesystem::vfs()?;
-    Ok(view
-        .canonical_node(path)
-        .unwrap_or_else(|| file.node.clone()))
+    // Linux, where a rule names the dentry's inode. The open keeps that
+    // node; the path is not looked up again, since what is there now may
+    // be another file (PR #49 review).
+    Ok(file.node.named_node().unwrap_or_else(|| file.node.clone()))
 }
 
 /// `struct landlock_net_port_attr`: `u64 allowed_access; u64 port`.

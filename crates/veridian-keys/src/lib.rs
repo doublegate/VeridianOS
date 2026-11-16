@@ -39,6 +39,9 @@ pub mod errno {
     pub const ENOENT: i32 = 2;
     pub const EIO: i32 = 5;
     pub const EACCES: i32 = 13;
+    /// A bad user pointer (the type or restriction string of
+    /// KEYCTL_RESTRICT_KEYRING), passed through the crate's results.
+    pub const EFAULT: i32 = 14;
     pub const EBUSY: i32 = 16;
     pub const EEXIST: i32 = 17;
     pub const ENODEV: i32 = 19;

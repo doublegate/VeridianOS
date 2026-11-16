@@ -2609,8 +2609,12 @@ fn sys_get_robust_list(tid: usize, head_out: usize, len_out: usize) -> SyscallRe
                 thread.landlock.get().as_deref(),
             ),
         };
+        // A thread of the caller's own process is always allowed, before
+        // any credential or LSM check (__ptrace_may_access's
+        // same_thread_group test; PR #49 review).
+        let same_process = crate::process::current_process().is_some_and(|me| me.pid == pid);
         let me = crate::process::creds::Caller::current();
-        if !debug::may_access(&me, debug::current_permitted(), &target) {
+        if !same_process && !debug::may_access(&me, debug::current_permitted(), &target) {
             return Err(SyscallError::OperationNotPermitted);
         }
         thread
@@ -3912,8 +3916,8 @@ fn sys_socket_connect(fd: usize, addr_ptr: usize, addr_len: usize) -> SyscallRes
         }
         SocketHandle::Unix(id) => {
             let name = read_sockaddr_un(addr_ptr, addr_len)?;
-            let file = filesystem::find_socket_file(&name)?;
-            crate::net::unix_socket::socket_connect(id, &file)
+            let (_file, target) = filesystem::find_socket_file(&name)?;
+            crate::net::unix_socket::socket_connect_to(id, target)
                 .map(|()| 0)
                 .map_err(|e| match e {
                     crate::error::KernelError::ResourceExhausted { .. } => SyscallError::WouldBlock,

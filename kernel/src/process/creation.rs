@@ -324,7 +324,16 @@ impl ExecFile {
     pub fn check_mount(&self) -> Result<(), KernelError> {
         refuse_noexec(self.mnt_flags)?;
         let vfs = crate::fs::get_vfs().as_caller();
-        if vfs.landlock().is_some() {
+        // Only a domain that handles one of the two rights checks the file
+        // at all, and only then is a file with no path refused: a
+        // network-only domain lets a descriptor-backed program run (PR #49
+        // review).
+        let exec_rights = crate::security::landlock::ll::fs::READ_FILE
+            | crate::security::landlock::ll::fs::EXECUTE;
+        if vfs
+            .landlock()
+            .is_some_and(|d| d.dom.handled().fs & exec_rights != 0)
+        {
             let path = self
                 .canonical
                 .as_deref()

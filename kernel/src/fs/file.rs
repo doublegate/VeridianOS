@@ -234,6 +234,11 @@ pub struct File {
     /// and device ioctls check this, not the caller's domain.
     pub landlock_allowed: AtomicU32,
 
+    /// The directory an O_TMPFILE file was made in, whatever its path says
+    /// later: linkat checks a nameless file's move from there, not from
+    /// whatever directory has the recorded path now (PR #49 review).
+    pub tmpfile_dir: Option<Arc<dyn VfsNode>>,
+
     /// What the node asks its open files to keep alive
     /// ([`VfsNode::held_by_open`]), dropped with the file.
     _held: Option<Arc<dyn core::any::Any + Send + Sync>>,
@@ -313,6 +318,7 @@ impl File {
             path: None,
             flock_owner: AtomicU64::new(0),
             landlock_allowed: AtomicU32::new(u32::MAX),
+            tmpfile_dir: None,
             ofd_locked: AtomicBool::new(false),
             opener: None,
             write_access: None,
@@ -338,6 +344,7 @@ impl File {
             path: Some(path),
             flock_owner: AtomicU64::new(0),
             landlock_allowed: AtomicU32::new(u32::MAX),
+            tmpfile_dir: None,
             ofd_locked: AtomicBool::new(false),
             opener: None,
             write_access: None,

@@ -932,17 +932,19 @@ pub fn create_thread(
                 thread.landlock.copy_from(&creator.landlock);
                 let sets = *creator.caps.lock();
                 *thread.caps.lock() = sets;
-                // A thread of the process: its keyrings shared, a thread
-                // keyring of its own if the creator has one.
-                #[cfg(feature = "alloc")]
-                {
-                    let keys = crate::syscall::keys::thread_keys(&creator.keys.lock());
-                    *thread.keys.lock() = keys;
-                }
             }
 
             // Add thread to process
             let thread = process.add_thread(thread)?;
+            // A thread of the process: its keyrings shared, a thread
+            // keyring of its own if the creator has one. Taken once the
+            // thread is in the process, whose cleanup gives them back: a
+            // failed add left them held (PR #49 review).
+            #[cfg(feature = "alloc")]
+            if let Some(creator) = &creator {
+                let keys = crate::syscall::keys::thread_keys(&creator.keys.lock());
+                *thread.keys.lock() = keys;
+            }
             // Copied again under the thread map, which a set*id call on
             // another thread fixes every thread's sets under
             // (`Process::change_uids`), as clone does.

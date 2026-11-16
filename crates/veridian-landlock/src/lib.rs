@@ -545,6 +545,14 @@ impl Domain {
         removable: bool,
         exchange: bool,
     ) -> Result<(), Error> {
+        // A domain no layer of which handles a filesystem right does not
+        // apply (landlock_get_applicable_subject with every filesystem
+        // right): REFER, initially denied in each layer's own mask, is
+        // asked only once some layer handles the filesystem (PR #49
+        // review).
+        if self.layers.iter().all(|l| l.fs == 0) {
+            return Ok(());
+        }
         let mut request1 = if exchange {
             new.map_or(0, |n| make_access(n.mode))
         } else {
@@ -983,6 +991,27 @@ mod tests {
             d.check_refer(file, None, &dst, &other, 0, false, true, false),
             Err(Error::Denied)
         );
+    }
+
+    /// A domain that handles only network rights or scopes does not stop a
+    /// rename across directories (PR #49 review); one with a filesystem
+    /// layer under the network one does, through that layer.
+    #[test]
+    fn refer_needs_a_filesystem_layer() {
+        let file = Entry {
+            key: Some((0, 11)),
+            mode: 0o100644,
+        };
+        let (src, dst) = (path(&[10, 1]), path(&[20, 1]));
+        let net_only = Domain::restrict(None, &ruleset(0, net::BIND_TCP), 1).unwrap();
+        assert!(net_only
+            .check_refer(file, None, &src, &dst, 0, false, true, false)
+            .is_ok());
+        let fs_layer = Domain::restrict(None, &ruleset(fs::MAKE_REG, 0), 1).unwrap();
+        let both = Domain::restrict(Some(&fs_layer), &ruleset(0, net::BIND_TCP), 2).unwrap();
+        assert!(both
+            .check_refer(file, None, &src, &dst, 0, false, true, false)
+            .is_err());
     }
 
     /// A socket made in the same domain (or a lower one) is reached

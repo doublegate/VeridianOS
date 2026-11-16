@@ -138,15 +138,30 @@ fn machine_power_off(s5: Option<crate::arch::x86_64::acpi_pm::S5>) {
     }
 }
 
+/// The PSCI conduit: the one SMP bring-up read from the device tree, or
+/// HVC (QEMU virt's), its default, in a kernel built without SMP, which
+/// reads no conduit (PR #49 review).
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+fn psci_conduit() -> crate::arch::aarch64::psci::Conduit {
+    #[cfg(feature = "smp")]
+    {
+        crate::arch::aarch64::smp::conduit()
+    }
+    #[cfg(not(feature = "smp"))]
+    {
+        crate::arch::aarch64::psci::Conduit::Hvc
+    }
+}
+
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 fn machine_restart() -> ! {
-    crate::arch::aarch64::psci::system_reset(crate::arch::aarch64::smp::conduit());
+    crate::arch::aarch64::psci::system_reset(psci_conduit());
     stop_this_cpu()
 }
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 fn machine_power_off(_: NothingPrepared) {
-    crate::arch::aarch64::psci::system_off(crate::arch::aarch64::smp::conduit());
+    crate::arch::aarch64::psci::system_off(psci_conduit());
 }
 
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]

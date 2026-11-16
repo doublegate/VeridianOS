@@ -820,11 +820,32 @@ fn force_terminate_process(process: &Process, signal: i32) -> Result<(), KernelE
 }
 
 /// Clean up process resources
+/// Give back what thread `thread` holds of the key store and its seccomp
+/// chain, if its exit has not: a thread that never ran (an unstarted or
+/// killed process's, a failed clone's) leaves through cleanup only. Both
+/// are taken, so a second call, or one after the thread's own exit, gives
+/// back nothing (PR #49 review).
+#[cfg(feature = "alloc")]
+fn release_thread_holds(thread: &super::Thread) {
+    let keys = core::mem::take(&mut *thread.keys.lock());
+    crate::syscall::keys::release_keys(&keys);
+    thread.seccomp.release();
+}
+
 pub fn cleanup_process(process: &Process) {
     println!(
         "[PROCESS] Cleaning up resources for process {}",
         process.pid.0
     );
+    // Its threads' keys and filters, taken under the thread map and given
+    // back after it.
+    #[cfg(feature = "alloc")]
+    {
+        let threads: Vec<_> = process.threads.lock().values().cloned().collect();
+        for t in &threads {
+            release_thread_holds(t);
+        }
+    }
 
     // A parent waiting in vfork for this child may resume.
     process.release_vfork_parent();
@@ -1081,21 +1102,9 @@ pub(crate) fn child_reaper(process: &Process) -> Option<alloc::sync::Arc<Process
 /// process table. Nothing may be running in it.
 #[cfg(feature = "alloc")]
 pub(crate) fn discard_unstarted(process: &Process) {
-    // Its threads never ran, so no exit gives their keys back: a failed
-    // fork's copy of the session keyring reference, say (PR #49 review).
-    // Taken under the thread map, given back after it.
-    #[cfg(feature = "alloc")]
-    {
-        let taken: Vec<_> = process
-            .threads
-            .lock()
-            .values()
-            .map(|t| core::mem::take(&mut *t.keys.lock()))
-            .collect();
-        for keys in &taken {
-            crate::syscall::keys::release_keys(keys);
-        }
-    }
+    // Its threads never ran, so no exit gives their keys back (a failed
+    // fork's copy of the session keyring reference, say): cleanup_process
+    // does (PR #49 review).
     cleanup_process(process);
     super::free_page_tables(process);
     forget_unstarted(process);
@@ -1144,6 +1153,8 @@ pub fn cleanup_thread(process: &Process, tid: ThreadId) -> Result<(), KernelErro
 
         // Make sure thread is marked as dead
         thread.set_state(super::thread::ThreadState::Dead);
+        #[cfg(feature = "alloc")]
+        release_thread_holds(&thread);
 
         // Free user stack pages from the VAS. User stack frames are managed
         // by the VAS (allocated via map_page), so unmap them to free the

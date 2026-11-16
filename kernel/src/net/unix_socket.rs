@@ -294,16 +294,25 @@ pub fn forget_file(key: NameKey) {
     drop(stale);
 }
 
-/// The socket bound to `file`, if any.
-/// The Landlock domain of the process that made the socket bound to
-/// `file`: `None` when no socket is bound to it, `Some(None)` for an
-/// unrestricted maker.
+/// The socket bound to `file` and the Landlock domain of the process that
+/// made it (`None` for an unrestricted maker), or `None` when no socket is
+/// bound. A connect goes to this socket by its id, which is never used
+/// again, so the socket checked is the one reached: one bound to the file
+/// later is not (unix_find_bsd's sk; PR #49 review).
 #[cfg(feature = "alloc")]
-pub fn bound_landlock(
+pub fn bound_socket(
     file: &Arc<dyn VfsNode>,
-) -> Option<Option<Arc<crate::security::landlock::KDomain>>> {
+) -> Option<(u64, Option<Arc<crate::security::landlock::KDomain>>)> {
     let id = bound_to(file).ok()?;
-    UNIX_SOCKETS.lock().get(&id).map(|s| s.landlock.clone())
+    UNIX_SOCKETS
+        .lock()
+        .get(&id)
+        .map(|s| (id, s.landlock.clone()))
+}
+
+/// The id of the socket bound to `file`, if any.
+pub fn bound_id(file: &Arc<dyn VfsNode>) -> Option<u64> {
+    bound_to(file).ok()
 }
 
 fn bound_to(file: &Arc<dyn VfsNode>) -> KernelResult<u64> {
@@ -474,8 +483,13 @@ pub fn socket_listen(socket_id: u64, backlog: usize) -> KernelResult<()> {
 /// Returns Ok(()) on success. The connection is immediately established
 /// (no three-way handshake for local sockets).
 pub fn socket_connect(socket_id: u64, file: &Arc<dyn VfsNode>) -> KernelResult<()> {
+    socket_connect_to(socket_id, bound_to(file)?)
+}
+
+/// [`socket_connect`] to the socket `target_id` itself, as found (and
+/// checked) earlier: gone since, it is refused.
+pub fn socket_connect_to(socket_id: u64, target_id: u64) -> KernelResult<()> {
     let _changed = ReadinessChange;
-    let target_id = bound_to(file)?;
 
     let cred = PeerCred::current();
     let mut sockets = UNIX_SOCKETS.lock();
