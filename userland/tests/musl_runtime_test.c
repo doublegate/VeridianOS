@@ -11655,6 +11655,51 @@ static void test_landlock(void)
         _exit(t_ll_errno(syscall(SYS_landlock_restrict_self, r, 0), EPERM) ? 0 : 1);
     }
     if (t_exit_status(c) != 0) f |= 16;
+    /* A file moved out of a directory whose rules allowed it, after an
+     * O_PATH open recorded its path there: neither a reopen through the
+     * descriptor (O_EMPTYPATH) nor a link back keeps the old directory's
+     * rights (PR #49 review). Before the move both work. */
+    mkdir("/tmp/ll/mv", 0755);
+    mkdir("/tmp/ll/mv/a", 0755);
+    mkdir("/tmp/ll/mv/z", 0755);
+    close(open("/tmp/ll/mv/a/m", O_CREAT | O_WRONLY | O_TRUNC, 0644));
+    int go[2], moved[2];
+    if (pipe(go) != 0 || pipe(moved) != 0) f |= 0x10000;
+    c = fork();
+    if (c == 0) {
+        close(go[0]);
+        close(moved[1]);
+        int r = t_ll_ruleset(T_LL_READ_FILE | T_LL_WRITE_FILE | T_LL_MAKE_REG | T_LL_REFER);
+        if (r < 0 || t_ll_allow(r, "/tmp/ll/mv/a",
+                                T_LL_READ_FILE | T_LL_WRITE_FILE | T_LL_MAKE_REG | T_LL_REFER) != 0 ||
+            syscall(SYS_landlock_restrict_self, r, 1u << 4 /* NO_NEW_PRIVS */) != 0)
+            _exit(2);
+        int pf = open("/tmp/ll/mv/a/m", O_PATH);
+        if (pf < 0) _exit(3);
+        int rw = openat(pf, "", O_RDWR | (1 << 26) /* O_EMPTYPATH */);
+        if (rw < 0) _exit(4);
+        close(rw);
+        char b = 'x';
+        if (write(go[1], &b, 1) != 1 || read(moved[0], &b, 1) != 1) _exit(5);
+        if (!t_ll_errno(openat(pf, "", O_RDWR | (1 << 26)), EACCES)) _exit(6);
+        if (!t_ll_errno(linkat(pf, "", AT_FDCWD, "/tmp/ll/mv/a/back", AT_EMPTY_PATH), EACCES)) _exit(7);
+        _exit(0);
+    }
+    close(go[1]);
+    close(moved[0]);
+    char gb;
+    if (read(go[0], &gb, 1) != 1 || rename("/tmp/ll/mv/a/m", "/tmp/ll/mv/z/m") != 0 ||
+        write(moved[1], "x", 1) != 1)
+        f |= 0x10000;
+    close(go[0]);
+    close(moved[1]);
+    st = t_exit_status(c);
+    if (st != 0) f |= 0x20000 | (st << 24);
+    unlink("/tmp/ll/mv/z/m");
+    unlink("/tmp/ll/mv/a/back");
+    rmdir("/tmp/ll/mv/a");
+    rmdir("/tmp/ll/mv/z");
+    rmdir("/tmp/ll/mv");
     /* LANDLOCK_SCOPE_SIGNAL (hook_task_kill): a scoped domain cannot
      * signal a process outside it, and can signal its own child. */
     pid_t outside = fork();

@@ -54,12 +54,18 @@ Two facts shape the design:
   and the directory under them all, which Linux's walk up also visits (`follow_up`). The key
   is `fs::inode_key` of the base node, so idmapped views are transparent.
 - The walk is bound to the object the lookup resolved by a final identity comparison: when
-  the caller holds that object and the walk ends at a different one (a rename between the
-  lookup and the check), the ancestors are not the object's, so the check keeps only the
-  object's own key and grants what rules on the object itself allow. Like a part of the path
-  that has gone, this can only grant less. Linux walks the object's own parents (`d_parent`)
-  and so has no such window; a check here can then be refused where Linux's would pass, only
-  under that race.
+  the caller holds that object and the walk does not end at it, the ancestors are not the
+  object's, so the check keeps only the object's own key and grants what rules on the object
+  itself allow. The walk ends elsewhere after a rename between the lookup and the check, and
+  stops short when the path no longer leads anywhere: a file moved or removed since a
+  descriptor recorded its path (`O_PATH` with `AT_EMPTY_PATH`). Like a part of the path that
+  has gone, this can only grant less. Linux walks the object's own parents (`d_parent`): it
+  has no rename window, finds a moved file's new directory, and for a removed file still
+  walks the old one, so a check here can be refused where Linux's would pass in those cases.
+  linkat of a descriptor whose path no longer leads to its file is EACCES for the same
+  reason: the directory the file is in is not known.
+- An O_TMPFILE file has no name; its check is its own key then its directory's chain, which
+  the open passes explicitly, as Linux's walk starts at the file's `d_parent`.
 - The check then reads that list once from the target up, which is O(depth) with no lookup
   per ancestor. The walk happens only when the caller's domain is not empty, so unrestricted
   processes pay one null test per hook.
