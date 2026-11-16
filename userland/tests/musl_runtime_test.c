@@ -11356,7 +11356,16 @@ static void test_seccomp(void)
         sigaction(SIGSYS, &sa, NULL);
         prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
         if (t_seccomp_install(0x00030000u | 7, 0) != 0) _exit(2);
-        syscall(SYS_getppid);
+        /* After the handler, the call returns what syscall_rollback left in
+         * the return register: the number on x86_64 (orig_ax), the first
+         * argument elsewhere (orig_x0, orig_a0; PR #49 review). */
+        long r = syscall(SYS_getppid, 0x1234L);
+#if defined(__x86_64__)
+        long want = SYS_getppid;
+#else
+        long want = 0x1234;
+#endif
+        if (r != want) _exit(3);
         _exit(t_sigsys_code == 1 && t_sigsys_nr == SYS_getppid && t_sigsys_arch == T_AUDIT_ARCH ? 0 : 1);
     }
     if (t_exit_status(c) != 0) f |= 8;

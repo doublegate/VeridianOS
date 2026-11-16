@@ -599,6 +599,26 @@ impl BlockFsNode {
         }
     }
 
+    /// A new file `make` creates under the filesystem write lock, counted
+    /// in `holds` before the lock is released: an unlink and a create
+    /// between could otherwise give its number to another file, which the
+    /// node would then name (PR #49 review).
+    fn created(
+        &self,
+        make: impl FnOnce(&mut BlockFsInner) -> Result<u32, KernelError>,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        let inode = self.mutate(|fs| {
+            let inode = make(fs)?;
+            self.holds.hold(inode);
+            Ok(inode)
+        })?;
+        Ok(Arc::new(Self {
+            inode_num: inode,
+            fs: self.fs.clone(),
+            holds: self.holds.clone(),
+        }))
+    }
+
     /// Run one whole modifying operation under the filesystem write lock,
     /// then write back excess unpinned data. The write-back runs only here,
     /// between operations, never half-way through one.
@@ -723,21 +743,11 @@ impl VfsNode for BlockFsNode {
         name: &str,
         permissions: Permissions,
     ) -> Result<Arc<dyn VfsNode>, KernelError> {
-        let new_inode = self.mutate(|fs| fs.create_file(self.inode_num, name, permissions))?;
-        Ok(Arc::new(BlockFsNode::new(
-            new_inode,
-            self.fs.clone(),
-            self.holds.clone(),
-        )))
+        self.created(|fs| fs.create_file(self.inode_num, name, permissions))
     }
 
     fn mkdir(&self, name: &str, permissions: Permissions) -> Result<Arc<dyn VfsNode>, KernelError> {
-        let new_inode = self.mutate(|fs| fs.create_directory(self.inode_num, name, permissions))?;
-        Ok(Arc::new(BlockFsNode::new(
-            new_inode,
-            self.fs.clone(),
-            self.holds.clone(),
-        )))
+        self.created(|fs| fs.create_directory(self.inode_num, name, permissions))
     }
 
     fn unlink(&self, name: &str) -> Result<(), KernelError> {
@@ -783,12 +793,7 @@ impl VfsNode for BlockFsNode {
     }
 
     fn symlink(&self, name: &str, target: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
-        let new_inode = self.mutate(|fs| fs.create_symlink(self.inode_num, name, target))?;
-        Ok(Arc::new(BlockFsNode::new(
-            new_inode,
-            self.fs.clone(),
-            self.holds.clone(),
-        )))
+        self.created(|fs| fs.create_symlink(self.inode_num, name, target))
     }
 
     /// Read the target of a symbolic link in BlockFS.
@@ -884,13 +889,7 @@ impl VfsNode for BlockFsNode {
         permissions: Permissions,
         rdev: u32,
     ) -> Result<Arc<dyn VfsNode>, KernelError> {
-        let new_inode =
-            self.mutate(|fs| fs.create_special(self.inode_num, name, kind, permissions, rdev))?;
-        Ok(Arc::new(BlockFsNode::new(
-            new_inode,
-            self.fs.clone(),
-            self.holds.clone(),
-        )))
+        self.created(|fs| fs.create_special(self.inode_num, name, kind, permissions, rdev))
     }
 
     fn is_special_inode(&self) -> bool {

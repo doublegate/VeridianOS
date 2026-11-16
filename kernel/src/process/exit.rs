@@ -1081,6 +1081,21 @@ pub(crate) fn child_reaper(process: &Process) -> Option<alloc::sync::Arc<Process
 /// process table. Nothing may be running in it.
 #[cfg(feature = "alloc")]
 pub(crate) fn discard_unstarted(process: &Process) {
+    // Its threads never ran, so no exit gives their keys back: a failed
+    // fork's copy of the session keyring reference, say (PR #49 review).
+    // Taken under the thread map, given back after it.
+    #[cfg(feature = "alloc")]
+    {
+        let taken: Vec<_> = process
+            .threads
+            .lock()
+            .values()
+            .map(|t| core::mem::take(&mut *t.keys.lock()))
+            .collect();
+        for keys in &taken {
+            crate::syscall::keys::release_keys(keys);
+        }
+    }
     cleanup_process(process);
     super::free_page_tables(process);
     forget_unstarted(process);

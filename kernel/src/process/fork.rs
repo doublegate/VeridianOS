@@ -510,7 +510,13 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
         );
         *new_thread.altstack.lock() = *current_thread.altstack.lock();
         *new_thread.comm.lock() = *current_thread.comm.lock();
-        new_thread.seccomp.copy_from(&current_thread.seccomp);
+        // Under the thread map, which a sibling's TSYNC holds while it
+        // installs a chain and then the mode, so the child gets both or
+        // neither (copy_seccomp under siglock; PR #49 review).
+        {
+            let _threads = current_process.threads.lock();
+            new_thread.seccomp.copy_from(&current_thread.seccomp);
+        }
         #[cfg(feature = "alloc")]
         new_thread.landlock.copy_from(&current_thread.landlock);
         // A new process: no thread or process keyring (copy_creds).

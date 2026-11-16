@@ -45,6 +45,13 @@ struct State {
 /// Accounting, by PID namespace id.
 static ACCT: Mutex<BTreeMap<u64, Arc<Acct>>> = Mutex::new(BTreeMap::new());
 
+/// Held across a record's end-of-file read and write. Two accountings can
+/// write one file through different opens (`acct()` naming the current
+/// file again, before the old one retires), whose `io_lock`s do not
+/// exclude each other; Linux's appends are serialized by the inode lock
+/// (PR #49 review).
+static APPEND: SleepMutex<()> = SleepMutex::new(());
+
 /// acct_get: `f` with the accounting of namespace `id` and its lock held,
 /// if it has accounting on; one switched off while its lock was awaited is
 /// looked up again.
@@ -216,6 +223,7 @@ fn write_record(acct: &Acct, state: &mut State, p: &Process, exit_code: u32) {
     }
     let rec = record(acct, p, exit_code);
     let node = &acct.file.node;
+    let _append = APPEND.lock();
     let _io = acct.file.io_lock.lock();
     let end = node.metadata().map_or(0, |m| m.size);
     let _ = node.write(end, &rec);
@@ -324,9 +332,12 @@ mod tests {
         // 8192 = 1024 * 8: mantissa 1024, exponent 1.
         assert_eq!(encode_comp_t(8192), (1 << 13) | 1024);
         assert_eq!(encode_comp_t(u64::MAX), 0xffff);
+        // IEEE 754 single bits, compared as integers (no floating point in
+        // the kernel, its tests included; PR #49 review): 1.0, 100.0 and
+        // 12345.0.
         assert_eq!(encode_float(0), 0);
-        assert_eq!(f32::from_bits(encode_float(1)), 1.0);
-        assert_eq!(f32::from_bits(encode_float(100)), 100.0);
-        assert_eq!(f32::from_bits(encode_float(12345)), 12345.0);
+        assert_eq!(encode_float(1), 0x3f80_0000);
+        assert_eq!(encode_float(100), 0x42c8_0000);
+        assert_eq!(encode_float(12345), 0x4640_e400);
     }
 }

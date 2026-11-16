@@ -105,8 +105,10 @@ pub fn sys_syslog(ty: usize, buf: usize, len: usize) -> SyscallResult {
             let Some(n) = reads(len)? else {
                 return Ok(0);
             };
+            // No read gives more than the ring holds: the buffer is that at
+            // most, made once (PR #49 review).
+            let mut out = super::userspace::zeroed_buf(n.min(printk::size_buffer()))?;
             loop {
-                let mut out = super::userspace::zeroed_buf(n)?;
                 let got = printk::read(&mut out);
                 if got > 0 {
                     super::userspace::write_user_bytes(buf, &out[..got])?;
@@ -129,7 +131,7 @@ pub fn sys_syslog(ty: usize, buf: usize, len: usize) -> SyscallResult {
             let Some(n) = reads(len)? else {
                 return Ok(0);
             };
-            let mut out = super::userspace::zeroed_buf(n)?;
+            let mut out = super::userspace::zeroed_buf(n.min(printk::size_buffer()))?;
             let got = printk::read_all(&mut out, ty == action::READ_CLEAR);
             super::userspace::write_user_bytes(buf, &out[..got])?;
             Ok(got)
@@ -202,7 +204,10 @@ pub fn sys_reboot(magic1: usize, magic2: usize, cmd: usize, arg: usize) -> Sysca
     }
     let cmd = cmd as u32;
     if !ns.is_initial() {
-        return reboot_pid_ns(&ns, cmd);
+        // The thread exits there without unwinding this frame: nothing it
+        // owns may be left on it (PR #49 review).
+        drop(process);
+        return reboot_pid_ns(ns, cmd);
     }
     if !crate::cap::authority::current_may_change_system() {
         return Err(SyscallError::OperationNotPermitted);
@@ -235,7 +240,7 @@ pub fn sys_reboot(magic1: usize, magic2: usize, cmd: usize, arg: usize) -> Sysca
 
 /// reboot_pid_ns: record the signal the namespace's init is reported
 /// killed by, kill it, and end the calling thread (do_exit(0)).
-fn reboot_pid_ns(ns: &crate::process::pidns::PidNs, cmd: u32) -> SyscallResult {
+fn reboot_pid_ns(ns: alloc::sync::Arc<crate::process::pidns::PidNs>, cmd: u32) -> SyscallResult {
     use crate::process::{exit, signals::SigInfo};
     let sig = match cmd {
         reboot_cmd::RESTART | reboot_cmd::RESTART2 => exit::signals::SIGHUP,
@@ -250,6 +255,10 @@ fn reboot_pid_ns(ns: &crate::process::pidns::PidNs, cmd: u32) -> SyscallResult {
             SigInfo::kernel(exit::signals::SIGKILL as usize),
         );
     }
+    // exit_thread does not return to this frame: the namespace reference
+    // goes first, or the namespace (and its PID quota) would never be
+    // freed.
+    drop(ns);
     crate::process::exit_thread(0);
     Ok(0)
 }
