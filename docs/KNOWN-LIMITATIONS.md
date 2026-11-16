@@ -879,9 +879,11 @@ from `cap/token.rs`), and neither Kani nor TLC runs in CI.
 - CI's global `RUSTFLAGS` replaces the target rustflags from `.cargo/config.toml`, so CI's AArch64
   and x86_64 kernels are built with different flags from local ones (N-161).
 - The coverage job can never fail the build (N-162).
-- BusyBox, musl and the `tools/cross` sources are downloaded without checksum verification,
-  `cargo audit` covers one of five lockfiles, and the workflows have no top-level `permissions:`
-  and pin actions by tag rather than commit (N-164).
+- `cargo audit` covers one of five lockfiles, and the workflows have no top-level `permissions:`
+  and pin actions by tag rather than commit (N-164). The source downloads (BusyBox, musl and the
+  `tools/cross` packages) are checked against pinned SHA-256 sums; BusyBox falls back to
+  Buildroot's source mirror when busybox.net cannot be reached, and accepts it only with the
+  same checksum.
 
 Since v0.27, releases and the CI summary require the host, boot and rootfs test jobs, the release
 profile is booted on every architecture, and clippy runs on all three bare-metal targets with no
