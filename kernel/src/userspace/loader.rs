@@ -427,7 +427,7 @@ impl crate::fs::VfsNode for SerialConsoleNode {
 
     fn write(&self, _offset: usize, data: &[u8]) -> Result<usize, KernelError> {
         for &byte in data {
-            crate::print!("{}", byte as char);
+            crate::print::console_write(format_args!("{}", byte as char));
         }
         Ok(data.len())
     }

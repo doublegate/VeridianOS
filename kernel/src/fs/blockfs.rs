@@ -1120,13 +1120,34 @@ impl BlockFsInner {
     /// node kept writing to, after unlink freed what it had then.
     fn is_orphan_with_blocks(&self, inode: u32) -> bool {
         let i = &self.inode_table[inode as usize];
-        i.links_count == 0
-            && inode > 0
-            && !i.is_special()
-            && (i.blocks != 0
-                || i.direct_blocks.iter().any(|&b| b != 0)
-                || i.indirect_block != 0
-                || i.double_indirect_block != 0)
+        if i.links_count != 0 || inode == 0 {
+            return false;
+        }
+        // An attribute block counts whatever the type: fsetxattr through a
+        // node kept after the unlink gives one even to a FIFO or socket
+        // (PR #49 independent review).
+        let xattr = self.xattr_block_of(inode).is_ok_and(|b| b != 0);
+        xattr
+            || (!i.is_special()
+                && (i.blocks != 0
+                    || i.direct_blocks.iter().any(|&b| b != 0)
+                    || i.indirect_block != 0
+                    || i.double_indirect_block != 0))
+    }
+
+    /// What an orphan still holds goes back: a special file's attribute
+    /// block alone (its number was reported freed at its unlink, which a
+    /// second `free_inode_blocks` would repeat), anything else's blocks.
+    fn free_orphan(&mut self, inode: u32) -> Result<(), KernelError> {
+        if !self.inode_table[inode as usize].is_special() {
+            return self.free_inode_blocks(inode);
+        }
+        let xattr = self.xattr_block_of(inode)?;
+        self.inode_table[inode as usize].xattr_block = 0;
+        if xattr != 0 {
+            self.free_block(xattr);
+        }
+        Ok(())
     }
 
     /// Free what an unlinked inode still holds, if nothing refers to it
@@ -1140,8 +1161,10 @@ impl BlockFsInner {
             });
         }
         if self.is_orphan_with_blocks(inode) && !self.holds.is_held(inode) {
-            if let Err(e) = self.free_inode_blocks(inode) {
+            if let Err(e) = self.free_orphan(inode) {
+                // Counted free at its unlink, now never to be reused.
                 self.poisoned.insert(inode);
+                self.superblock.free_inodes = self.superblock.free_inodes.saturating_sub(1);
                 return Err(e);
             }
         }
@@ -2400,8 +2423,15 @@ impl BlockFsInner {
             // If links reach 0, free all data blocks and the inode itself
             // (allocate_inode takes any zero-link inode and decrements
             // free_inodes, so not counting it back here underflowed).
+            // Counted free only once its blocks are: one whose free failed
+            // part-way is poisoned and never reused, so counting it would
+            // leave the count one too high, and its later reclaim would take
+            // one off that was never added (PR #49 independent review).
             if self.inode_table[inode as usize].links_count == 0 {
-                self.free_inode_blocks(inode)?;
+                if let Err(e) = self.free_inode_blocks(inode) {
+                    self.poisoned.insert(inode);
+                    return Err(e);
+                }
                 self.superblock.free_inodes += 1;
             }
         }

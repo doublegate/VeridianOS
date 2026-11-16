@@ -160,7 +160,7 @@ fn set_strict() -> SyscallResult {
 /// Whether thread `t` is past the point where seccomp applies to it
 /// (PF_EXITING): TSYNC neither checks nor changes it.
 fn exiting(t: &crate::process::thread::Thread) -> bool {
-    matches!(t.get_state(), ThreadState::Zombie | ThreadState::Dead)
+    t.seccomp.released() || matches!(t.get_state(), ThreadState::Zombie | ThreadState::Dead)
 }
 
 /// SECCOMP_SET_MODE_FILTER (seccomp_set_mode_filter).
@@ -176,7 +176,12 @@ fn set_filter(flags: usize, uargs: usize) -> SyscallResult {
     if flags & FLAG_WAIT_KILLABLE_RECV != 0 && flags & FLAG_NEW_LISTENER == 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    let prog = read_prog(uargs)?;
+    // Linux's order (seccomp_prepare_user_filter, seccomp_prepare_filter,
+    // bpf_prog_create_from_user): the fprog's copy (EFAULT) and its length
+    // (EINVAL), then the privilege (EACCES), then a NULL filter (EINVAL),
+    // the instructions' copy (EFAULT) and the checker (EINVAL) (PR #49
+    // independent review).
+    let (len, ptr) = read_prog_header(uargs)?;
     let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
     let thread = crate::process::current_thread().ok_or(SyscallError::InvalidState)?;
     // Without no_new_privs, a filter needs CAP_SYS_ADMIN in the caller's
@@ -185,6 +190,7 @@ fn set_filter(flags: usize, uargs: usize) -> SyscallResult {
     if !thread.no_new_privs.load(Ordering::Acquire) && !me.ns_capable(&me.userns, CAP_SYS_ADMIN) {
         return Err(SyscallError::PermissionDenied);
     }
+    let prog = read_prog_insns(len, ptr)?;
     let prog = veridian_cbpf::check_seccomp(&prog).map_err(|_| SyscallError::InvalidArgument)?;
 
     // The listener's descriptor is reserved first, so running out of
@@ -312,15 +318,24 @@ fn first_notification_id() -> u64 {
 }
 
 /// `struct sock_fprog` at `uargs` and its instructions.
-fn read_prog(uargs: usize) -> Result<Vec<veridian_cbpf::Insn>, SyscallError> {
+fn read_prog_header(uargs: usize) -> Result<(usize, usize), SyscallError> {
     // { unsigned short len; struct sock_filter *filter; }
     let [len_word, ptr]: [u64; 2] = userspace::read_user(uargs)?;
     let len = (len_word & 0xffff) as usize;
     if len == 0 || len > veridian_cbpf::MAX_INSNS {
         return Err(SyscallError::InvalidArgument);
     }
+    Ok((len, ptr as usize))
+}
+
+/// The `len` instructions at `ptr`: a NULL `ptr` is EINVAL
+/// (bpf_check_basics_ok), an unreadable one EFAULT.
+fn read_prog_insns(len: usize, ptr: usize) -> Result<Vec<veridian_cbpf::Insn>, SyscallError> {
+    if ptr == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
     let mut bytes = alloc::vec![0u8; len * 8];
-    userspace::read_user_bytes(ptr as usize, &mut bytes)?;
+    userspace::read_user_bytes(ptr, &mut bytes)?;
     Ok(bytes
         .chunks_exact(8)
         .map(|c| veridian_cbpf::Insn::from_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
@@ -657,11 +672,19 @@ fn notif_recv(f: &Arc<Filter>, notify: &NotifyLock, arg: usize) -> SyscallResult
     if buf.iter().any(|&b| b != 0) {
         return Err(SyscallError::InvalidArgument);
     }
+    // The notification is taken in the wait itself, under the notify lock:
+    // of two receivers woken for one notification, one gets it and the
+    // other waits on, as Linux hands out one wakeup per notification
+    // (recv_wait_event's notif->requests). ENOENT only once nothing can
+    // notify any more and nothing is left to receive (PR #49 independent
+    // review).
+    let mut taken = None;
     crate::sched::dispatch::wait_event(&f.wq, None, || {
-        !f.has_users() || notify.lock().readiness().0
+        taken = notify.lock().recv();
+        taken.is_some() || !f.has_users()
     })
     .map_err(|_| SyscallError::Interrupted)?;
-    let (id, tid, data) = notify.lock().recv().ok_or(SyscallError::ResourceNotFound)?;
+    let (id, tid, data) = taken.ok_or(SyscallError::ResourceNotFound)?;
     f.changed();
     buf[0..8].copy_from_slice(&id.to_ne_bytes());
     // The notifying thread as the supervisor sees it (0 if outside its
@@ -726,11 +749,14 @@ fn notif_addfd(f: &Arc<Filter>, notify: &NotifyLock, arg: usize, size: usize) ->
         return Err(SyscallError::InvalidArgument);
     }
     let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
-    // An O_PATH descriptor too, as Linux's fget_raw (PR #49 review).
+    // Not an O_PATH descriptor: Linux's seccomp_notify_addfd uses fget,
+    // which is __fget(fd, FMODE_PATH) and refuses one (EBADF). An earlier
+    // round took get_path here on a review's claim of fget_raw, which the
+    // source does not bear out (PR #49 independent review).
     let file = process
         .file_table
         .lock()
-        .get_path(srcfd as usize)
+        .get(srcfd as usize)
         .ok_or(SyscallError::BadFileDescriptor)?;
     let req = Arc::new(AddFd {
         file,

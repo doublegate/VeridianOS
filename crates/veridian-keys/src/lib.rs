@@ -757,6 +757,20 @@ impl KeyStore {
     /// EDQUOT (the link's 4 bytes, unless it replaces one), EPERM for a
     /// restricted keyring, EDEADLK and ELOOP for a keyring cycle.
     fn link_check(&self, ring: Serial, key: Serial, excl: bool) -> KResult<bool> {
+        self.link_check_as(ring, key, excl, true)
+    }
+
+    /// [`Self::link_check`], with the ring's restriction applied or not:
+    /// request_key's construction links its new key without it
+    /// (construct_alloc_key's __key_link_begin and __key_link; PR #49
+    /// independent review).
+    fn link_check_as(
+        &self,
+        ring: Serial,
+        key: Serial,
+        excl: bool,
+        restrict: bool,
+    ) -> KResult<bool> {
         let r = self.k(ring)?;
         if !r.is_keyring() {
             return Err(ENOTDIR);
@@ -776,7 +790,7 @@ impl KeyStore {
         if excl && replace {
             return Err(EEXIST);
         }
-        if r.restricted {
+        if restrict && r.restricted {
             return Err(EPERM);
         }
         if k.is_keyring() {
@@ -1539,7 +1553,9 @@ impl KeyStore {
             flags::USER_CONSTRUCT,
             subj.ns,
         )?;
-        let linked = self.link(dest, s);
+        let linked = self
+            .link_check_as(dest, s, false, false)
+            .and_then(|replace| self.link_commit(dest, s, replace));
         if let Err(e) = linked {
             self.put(s);
             return Err(e);
@@ -1657,8 +1673,11 @@ impl KeyStore {
         if k.flags & flags::REVOKED != 0 {
             return Ok(());
         }
+        // The expiry is left as it was: a revoked key is not dead
+        // (key_is_dead looks at the expiry and DEAD/INVALIDATED only), so it
+        // stays linked and shows as it was in /proc/keys; revoked_at only
+        // schedules the collector (key_revoke; PR #49 independent review).
         k.flags |= flags::REVOKED;
-        k.expiry = Some(k.expiry.map_or(now, |e| e.min(now)));
         let ring = k.is_keyring();
         if ring {
             self.clear(s)?;
@@ -1687,7 +1706,9 @@ impl KeyStore {
         let (s, _) = self.lookup(subj, kc, id, CREATE | PARTIAL, Need::Perm(perm::SETATTR))?;
         let k = self.k(s)?;
         let uid_change = uid.is_some_and(|u| u != k.uid);
-        let gid_privileged = gid.is_some_and(|g| !subj.in_group(g));
+        // The key's own group is no change (keyctl_chown_key: !gid_eq(gid,
+        // key->gid) && !in_group_p(gid); PR #49 independent review).
+        let gid_privileged = gid.is_some_and(|g| Some(g) != k.gid && !subj.in_group(g));
         if (uid_change || gid_privileged) && !subj.sys_admin {
             return Err(EACCES);
         }
@@ -2360,11 +2381,16 @@ mod tests {
         ks.set_timeout(&s, &mut kc, e, 10).unwrap();
         s.now += 10;
         assert_eq!(ks.read(&s, &mut kc, e), Err(EKEYEXPIRED));
-        // Unlinked, and gone, at expiry + gc_delay.
+        // The expired one is unlinked, and gone, at expiry + gc_delay; the
+        // revoked one is not dead and stays linked, as on Linux (key_is_dead
+        // does not look at revocation).
         s.now += 300;
         assert_eq!(ks.read(&s, &mut kc, e), Err(ENOKEY));
-        assert_eq!(ks.read(&s, &mut kc, k), Err(ENOKEY));
-        assert!(ks.read(&s, &mut kc, spec::PROCESS).unwrap().data.is_empty());
+        assert_eq!(ks.read(&s, &mut kc, k), Err(EKEYREVOKED));
+        assert_eq!(
+            ks.read(&s, &mut kc, spec::PROCESS).unwrap().data,
+            k.to_ne_bytes()
+        );
     }
 
     #[test]

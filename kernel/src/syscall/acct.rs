@@ -129,7 +129,10 @@ pub fn sys_acct(name: usize) -> SyscallResult {
                     state: SleepMutex::new(State {
                         live: true,
                         active: true,
-                        needcheck: crate::timer::monotonic_ns().saturating_add(ACCT_TIMEOUT_NS),
+                        // The first record checks the free space at once,
+                        // as acct_on's needcheck = jiffies (PR #49
+                        // independent review).
+                        needcheck: crate::timer::monotonic_ns(),
                     }),
                 }),
             ),
@@ -160,6 +163,16 @@ fn open_acct_file(path: &str) -> Result<Arc<File>, SyscallError> {
         return Err(SyscallError::PermissionDenied);
     }
     if file.path.is_none() {
+        return Err(SyscallError::InvalidArgument);
+    }
+    // Not procfs (sysfs is part of it here): EINVAL, as acct_on excludes
+    // FS_USERNS_MOUNT_RESTRICTED filesystems; records written into a
+    // /proc/sys file would set a sysctl (PR #49 independent review).
+    if file
+        .node
+        .statfs()
+        .is_ok_and(|st| st.fs_type == crate::fs::statfs::PROC_SUPER_MAGIC)
+    {
         return Err(SyscallError::InvalidArgument);
     }
     Ok(file)

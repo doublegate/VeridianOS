@@ -2949,6 +2949,27 @@ fn rename_entry(old: &str, new: &str) -> SyscallResult {
         return Err(SyscallError::CrossDevice);
     }
     want_write(&vfs, &old_parent_canon)?;
+    // Lock_rename's traps come before the hook (__start_renaming, then
+    // security_path_rename): the source an ancestor of the target is
+    // EINVAL, the target an ancestor of the source ENOTEMPTY (PR #49
+    // independent review).
+    let join = |dir: &str, name: &str| {
+        if dir == "/" {
+            alloc::format!("/{}", name)
+        } else {
+            alloc::format!("{}/{}", dir, name)
+        }
+    };
+    let src_full = join(&old_parent_canon, &old_name);
+    let dst_full = join(&new_parent_canon, &new_name);
+    if src_full != dst_full {
+        if crate::fs::path_is_under(&new_parent_canon, &src_full) {
+            return Err(SyscallError::InvalidArgument);
+        }
+        if crate::fs::path_is_under(&old_parent_canon, &dst_full) {
+            return Err(SyscallError::DirectoryNotEmpty);
+        }
+    }
     // Landlock's hook_path_rename, after EXDEV and EROFS and before the
     // permission checks, as security_path_rename precedes vfs_rename.
     #[cfg(feature = "alloc")]
@@ -5020,21 +5041,32 @@ pub fn sys_unlinkat(dirfd: usize, path_ptr: usize, flags: usize) -> SyscallResul
         .resolve_path_no_follow(&abs_path)
         .map_err(map_resolve_err)?;
     let is_dir = node.node_type() == crate::fs::NodeType::Directory;
-    match (remove_dir, is_dir) {
-        (true, false) => return Err(SyscallError::NotADirectory),
-        (false, true) => return Err(SyscallError::IsADirectory),
-        (false, false) if trailing_slash => return Err(SyscallError::NotADirectory),
-        _ => {}
+    // A trailing slash on a non-directory fails in the lookup itself, before
+    // any hook (do_unlinkat's "slashes").
+    if !remove_dir && !is_dir && trailing_slash {
+        return Err(SyscallError::NotADirectory);
     }
     // Landlock's hook_path_unlink and hook_path_rmdir, on the directory,
-    // before the permission check (security_path_unlink, then vfs_unlink).
+    // before vfs_unlink's and vfs_rmdir's own checks (security_path_unlink
+    // then may_delete's EISDIR and ENOTDIR): REMOVE_FILE for unlink and
+    // REMOVE_DIR for rmdir, whatever the object is (PR #49 independent
+    // review).
     #[cfg(feature = "alloc")]
     vfs.landlock_check(
         &dir_canonical,
         Some(&dir),
-        crate::fs::landlock_rights::remove(node.node_type()),
+        crate::fs::landlock_rights::remove(if remove_dir {
+            crate::fs::NodeType::Directory
+        } else {
+            crate::fs::NodeType::File
+        }),
     )
     .map_err(super::map_kernel_error)?;
+    match (remove_dir, is_dir) {
+        (true, false) => return Err(SyscallError::NotADirectory),
+        (false, true) => return Err(SyscallError::IsADirectory),
+        _ => {}
+    }
     check_may_remove(&*dir, &name)?;
     let victim = crate::fs::inotify::active()
         .then(|| dir.lookup(&name).ok())

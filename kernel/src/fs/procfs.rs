@@ -739,6 +739,16 @@ impl VfsNode for ProcNode {
         Some(self)
     }
 
+    /// Which file this is, the same on every lookup: procfs makes a new node
+    /// each time, so its address names nothing. The mount (by its PID
+    /// namespace, one per procfs instance) and the stable inode number do,
+    /// so a Landlock walk that looks a path up again finds the object the
+    /// open holds, and a rule on a /proc directory holds (PR #49
+    /// independent review).
+    fn file_identity(&self) -> Option<(u64, u64)> {
+        Some((Arc::as_ptr(&self.ns) as *const () as u64, self.inode()))
+    }
+
     /// procfs: `simple_statfs`, no counts.
     fn statfs(&self) -> Result<crate::fs::statfs::FsStats, crate::error::KernelError> {
         Ok(crate::fs::statfs::FsStats::simple(

@@ -182,11 +182,9 @@ fn rule_anchor(fd: i32) -> Result<Arc<dyn VfsNode>, SyscallError> {
     if file.path.is_none() {
         return Err(SyscallError::BadFdState);
     }
-    if file
-        .node
-        .as_any()
-        .is_some_and(|a| a.is::<crate::fs::nsfs::NsFileNode>())
-    {
+    // An internal filesystem's file (nsfs, a memfd): EBADFD, as Linux's
+    // get_path_from_fd refuses MNT_INTERNAL (PR #49 independent review).
+    if crate::fs::is_internal_file(&file.node) {
         return Err(SyscallError::BadFdState);
     }
     // An opened device or FIFO's node is what the driver gave the open,
