@@ -72,8 +72,9 @@ mod action {
 
 /// syslog(type, buf, len), as Linux's do_syslog: CAP_SYSLOG for every
 /// action but READ_ALL and SIZE_BUFFER (for those too with
-/// dmesg_restrict), checked first (EPERM); then the action's own
-/// arguments (EINVAL, EFAULT). READ waits for unread text, interruptibly.
+/// dmesg_restrict), and with it authority over the `System` object (ADR
+/// 0024), checked first (EPERM); then the action's own arguments (EINVAL,
+/// EFAULT). READ waits for unread text, interruptibly.
 pub fn sys_syslog(ty: usize, buf: usize, len: usize) -> SyscallResult {
     use core::sync::atomic::Ordering;
 
@@ -84,6 +85,30 @@ pub fn sys_syslog(ty: usize, buf: usize, len: usize) -> SyscallResult {
         || (ty != action::READ_ALL && ty != action::SIZE_BUFFER);
     if restricted && !Caller::current().capable(linux_caps::CAP_SYSLOG) {
         return Err(SyscallError::OperationNotPermitted);
+    }
+    // ADR 0024: the kernel log is the `System` object's, so an action that
+    // needs CAP_SYSLOG needs authority over it too: READ to read it, MODIFY
+    // to clear it or change the console (EPERM). An unprivileged READ_ALL
+    // with dmesg_restrict off needs neither, as on Linux (PR #49 review).
+    #[cfg(feature = "alloc")]
+    if restricted {
+        let changes = matches!(
+            ty,
+            action::READ
+                | action::READ_CLEAR
+                | action::CLEAR
+                | action::CONSOLE_OFF
+                | action::CONSOLE_ON
+                | action::CONSOLE_LEVEL
+        );
+        let held = if changes {
+            crate::cap::authority::current_may_change_system()
+        } else {
+            crate::cap::authority::current_may_read_system()
+        };
+        if !held {
+            return Err(SyscallError::OperationNotPermitted);
+        }
     }
     let reads = |n: i32| -> Result<Option<usize>, SyscallError> {
         if buf == 0 || n < 0 {
@@ -132,8 +157,13 @@ pub fn sys_syslog(ty: usize, buf: usize, len: usize) -> SyscallResult {
                 return Ok(0);
             };
             let mut out = super::userspace::zeroed_buf(n.min(printk::size_buffer()))?;
-            let got = printk::read_all(&mut out, ty == action::READ_CLEAR);
+            let (got, end) = printk::read_all(&mut out);
+            // Cleared only once the caller has the text: a copy that fails
+            // leaves it for a retry (PR #49 review).
             super::userspace::write_user_bytes(buf, &out[..got])?;
+            if ty == action::READ_CLEAR {
+                printk::clear_to(end);
+            }
             Ok(got)
         }
         action::CONSOLE_OFF => {
@@ -180,7 +210,8 @@ pub static CTRL_ALT_DEL: core::sync::atomic::AtomicBool = core::sync::atomic::At
 /// CAP_SYS_BOOT in the user namespace owning the caller's PID namespace
 /// (EPERM), then the magic numbers (EINVAL).
 ///
-/// In a PID namespace below the initial one (reboot_pid_ns) only RESTART,
+/// In a PID namespace below the initial one (reboot_pid_ns), which also
+/// needs MODIFY on that namespace (ADR 0024; EPERM), only RESTART,
 /// RESTART2, POWER_OFF and HALT are taken (EINVAL otherwise): the
 /// namespace's init is killed and reported killed by SIGHUP (restart) or
 /// SIGINT (halt, power off), and the calling thread exits.
@@ -204,6 +235,16 @@ pub fn sys_reboot(magic1: usize, magic2: usize, cmd: usize, arg: usize) -> Sysca
     }
     let cmd = cmd as u32;
     if !ns.is_initial() {
+        // ADR 0024: ending a PID namespace kills its init, which needs
+        // authority over that namespace as well as CAP_SYS_BOOT (EPERM; PR
+        // #49 review).
+        #[cfg(feature = "alloc")]
+        if !crate::cap::authority::current_holds_namespace(
+            &crate::process::ns::NsRef::Pid(ns.clone()),
+            crate::cap::Rights::MODIFY,
+        ) {
+            return Err(SyscallError::OperationNotPermitted);
+        }
         // The thread exits there without unwinding this frame: nothing it
         // owns may be left on it (PR #49 review).
         drop(process);

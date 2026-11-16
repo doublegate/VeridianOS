@@ -50,9 +50,11 @@ Two facts shape the design:
 - Every check names its object by the canonical path the lookup produced (no `.`, `..` or
   followed symlink, in the whole tree). For a restricted caller, the check walks that path
   once more from the root and records the object key of every directory it passes. A mount
-  point contributes three kinds of key: the mount's root, the roots of the mounts it covers,
-  and the directory under them all, which Linux's walk up also visits (`follow_up`). The key
-  is `fs::inode_key` of the base node, so idmapped views are transparent.
+  point contributes only the top mount's root: Linux's walk up follows a mount root to the
+  point it covers and goes straight on to that point's parent ("ignores hidden mount
+  points"), so neither the covered directory nor the roots of mounts stacked under the top
+  one carry a rule that counts. The key is `fs::inode_key` of the base node, so idmapped
+  views are transparent.
 - The walk is bound to the object the lookup resolved by a final identity comparison: when
   the caller holds that object and the walk does not end at it, the ancestors are not the
   object's, so the check keeps only the object's own key and grants what rules on the object
@@ -95,8 +97,13 @@ Two facts shape the design:
 - **Network:** `cap::authority::holds_net(domain, port, access)` is checked on bind and
   connect for TCP, and on bind, connect and sendto/sendmsg with an address for UDP (ABI 10).
 - **Scopes:** an abstract UNIX socket or a signal may reach only a process whose domain is the
-  caller's or below it (`domain_is_scoped`). The same domain relation governs ptrace, process_vm,
-  pidfd_getfd and `/proc/<pid>/mem`, as `hook_ptrace_access_check`.
+  caller's or below it (`domain_is_scoped`). The domain is the named task's, as
+  `hook_task_kill`'s: for a signal sent to one thread (tkill, tgkill, rt_tgsigqueueinfo,
+  PIDFD_SIGNAL_THREAD) that thread's, which differs from the leader's when the leader
+  restricted itself without TSYNC; for a process, its leader's. The same domain relation
+  governs ptrace, process_vm, pidfd_getfd and `/proc/<pid>/mem`, as `hook_ptrace_access_check`;
+  ptrace names a process here (attaching one thread of a process is not supported yet), so
+  that check takes the leader's domain.
   Abstract UNIX sockets and SIGIO do not exist yet: whoever adds them adds these scope checks
   in the same change (MASTER_TODO item 10), and the runtime test `landlock` has a tripwire
   that fails if an abstract socket outside the domain can be reached.

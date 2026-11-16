@@ -2678,12 +2678,23 @@ fn sys_sendmsg(socket_fd: usize, msghdr_ptr: usize, _flags: usize) -> SyscallRes
         None
     };
 
+    // The socket is looked up once: Landlock's check and the send are on
+    // the same one, which a dup2 from another thread between two lookups
+    // could otherwise swap (PR #49 review).
+    let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    let file = process
+        .file_table
+        .lock()
+        .get(socket_fd)
+        .ok_or(SyscallError::BadFileDescriptor)?;
+    let sock = file
+        .node
+        .as_any()
+        .and_then(|a| a.downcast_ref::<SocketNode>())
+        .ok_or(SyscallError::NotASocket)?;
     // Landlock's hook_socket_sendmsg, with msg_name and msg_namelen.
     #[cfg(feature = "alloc")]
-    if let Some(SocketHandle::Inet(id)) = with_socket_fd(socket_fd, |s| Some(s.handle()))
-        .ok()
-        .flatten()
-    {
+    if let SocketHandle::Inet(id) = sock.handle() {
         let name = if hdr[0] != 0 {
             Some(network_ext_syscalls::read_sockaddr(
                 hdr[0],
@@ -2694,11 +2705,11 @@ fn sys_sendmsg(socket_fd: usize, msghdr_ptr: usize, _flags: usize) -> SyscallRes
         };
         landlock_inet(id, name.as_deref(), NetHook::Send)?;
     }
-    with_socket_fd(socket_fd, |s| match s.handle() {
+    match sock.handle() {
         // INET sockets cannot pass files.
         SocketHandle::Inet(_) if rights.is_some() => Err(SyscallError::InvalidArgument),
-        _ => s.send(&data, rights).map_err(socket_err),
-    })?
+        _ => sock.send(&data, rights).map_err(socket_err),
+    }
 }
 
 /// An fd from an SCM_RIGHTS array as a table index; a negative fd is EBADF.

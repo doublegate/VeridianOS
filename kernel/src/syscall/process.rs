@@ -1659,7 +1659,7 @@ pub fn sys_tkill(tid: usize, signal: usize) -> SyscallResult {
                 .load(core::sync::atomic::Ordering::Acquire)
             {
                 if let Some(thread) = target.get_thread(ThreadId(tid as u64)) {
-                    super::filesystem::kill_one(&caller, pid, 0)?;
+                    super::filesystem::kill_one_to(&caller, pid, Some(tid as u64), 0)?;
                     let info = crate::process::signals::SigInfo::from_sender(
                         sig as usize,
                         crate::process::signals::SI_TKILL,
@@ -1672,7 +1672,7 @@ pub fn sys_tkill(tid: usize, signal: usize) -> SyscallResult {
             }
         }
     }
-    super::filesystem::kill_one(&caller, pid, sig)
+    super::filesystem::kill_one_to(&caller, pid, Some(tid as u64), sig)
 }
 
 /// tgkill(2): like tkill, but the thread must belong to process `tgid`.

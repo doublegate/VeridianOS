@@ -251,6 +251,34 @@ const CONSOLE_FREE: usize = usize::MAX;
 static CONSOLE_OWNER: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(CONSOLE_FREE);
 
+/// A program's output to the console (/dev/console, the serial console
+/// node): straight to the console's sinks, as a tty write on Linux, which
+/// neither enters the kernel log nor obeys console_loglevel. Through
+/// `print!` it was stored in the log ring, where any program could write
+/// lines that look like the kernel's and push the kernel's own out, and
+/// syslog CONSOLE_OFF (dmesg -n 1) silenced every program (PR #49
+/// independent review).
+pub fn console_write(args: core::fmt::Arguments) {
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    {
+        crate::serial::_serial_print(args);
+        crate::graphics::fbcon::_fbcon_print(args);
+        crate::print_capture::_capture_print(args);
+    }
+    #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+    {
+        use core::fmt::Write;
+        with_console(|| {
+            let mut w = crate::arch::aarch64::direct_uart::DirectUartWriter;
+            let _ = w.write_fmt(args);
+        });
+    }
+    #[cfg(all(target_arch = "riscv64", target_os = "none"))]
+    crate::serial::_serial_print(args);
+    #[cfg(not(target_os = "none"))]
+    let _ = args;
+}
+
 /// Run `f`, which writes one message to the console, with no other CPU
 /// writing at the same time and interrupts off, so lines from several CPUs
 /// do not interleave (a boot-test tally once came out as

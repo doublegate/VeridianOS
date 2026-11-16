@@ -273,10 +273,11 @@ pub fn read(out: &mut [u8]) -> usize {
     n
 }
 
-/// syslog READ_ALL (and READ_CLEAR with `clear`): the newest whole lines
-/// since the last CLEAR that fit in `out`.
-pub fn read_all(out: &mut [u8], clear: bool) -> usize {
-    let mut r = RING.lock();
+/// syslog READ_ALL and READ_CLEAR: the newest whole lines since the last
+/// CLEAR that fit in `out`, and where they end, for READ_CLEAR to commit
+/// with [`clear_to`] once they reached the caller (PR #49 review).
+pub fn read_all(out: &mut [u8]) -> (usize, u64) {
+    let r = RING.lock();
     let mut from = r.clear_pos.max(r.oldest());
     while r.head - from > out.len() as u64 {
         let next = r.next_line(from + 1);
@@ -287,10 +288,17 @@ pub fn read_all(out: &mut [u8], clear: bool) -> usize {
         from = next;
     }
     let n = r.copy(from, r.head, out);
-    if clear {
-        r.clear_pos = r.head;
+    (n, r.head)
+}
+
+/// READ_CLEAR's commit: what a read up to `end` returned is cleared, and
+/// nothing written since, as Linux's syslog_print_all clears to the
+/// sequence it read.
+pub fn clear_to(end: u64) {
+    let mut r = RING.lock();
+    if end > r.clear_pos {
+        r.clear_pos = end;
     }
-    n
 }
 
 /// syslog CLEAR.

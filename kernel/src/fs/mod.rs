@@ -1638,17 +1638,18 @@ impl MountTable {
 
     /// Landlock's view of the canonical path `canon` (ADR 0029): the keys of
     /// the object, then of every directory above it up to the real root. At
-    /// a mount point the mount's root comes first, then the roots of the
-    /// mounts it covers and the directory under them all, as Linux's walk up
-    /// goes through `follow_up`. `last` is the object itself when the caller
-    /// holds it. A part that has gone is left out, which can only grant
-    /// less. So is the whole chain when the caller holds the object and the
-    /// walk does not end at it: it ended at another (a rename between the
-    /// lookup and the check), or stopped short (the path no longer leads
-    /// anywhere: a file moved or removed since a descriptor recorded it).
-    /// The ancestors are then not `last`'s, and only its own key is kept
-    /// (PR #49 review). A file with no name, O_TMPFILE's, has its
-    /// directory given instead ([`Vfs::landlock_open_rights_under`]).
+    /// a mount point only the top mount's root counts: Linux's walk up
+    /// skips the covered directory and the roots of mounts under the top one
+    /// (`follow_up`, then on to the point's parent). `last` is the object
+    /// itself when the caller holds it. A part that has gone is left out,
+    /// which can only grant less. So is the whole chain when the caller
+    /// holds the object and the walk does not end at it: it ended at
+    /// another (a rename between the lookup and the check), or stopped
+    /// short (the path no longer leads anywhere: a file moved or removed
+    /// since a descriptor recorded it). The ancestors are then not
+    /// `last`'s, and only its own key is kept (PR #49 review). A file with
+    /// no name, O_TMPFILE's, has its directory given instead
+    /// ([`Vfs::landlock_open_rights_under`]).
     #[cfg(feature = "alloc")]
     fn ancestry(
         &self,
@@ -1659,9 +1660,6 @@ impl MountTable {
         let Some(root) = self.root.as_ref() else {
             return veridian_landlock::Ancestry::default();
         };
-        if let Some(under) = self.covered.get("/") {
-            down.extend(under.iter().map(|m| Some(inode_key(&m.root()))));
-        }
         let mut node = root.root();
         let mut path = String::new();
         let mut complete = true;
@@ -1669,16 +1667,14 @@ impl MountTable {
             down.push(Some(inode_key(&node)));
             path.push('/');
             path.push_str(c);
+            // At a mount point only the top mount's root is on the way:
+            // Linux's walk up follows a mount root to the point it covers and
+            // goes straight on to that point's parent, so neither the covered
+            // directory nor the roots of mounts stacked under the top one
+            // count ("Ignores hidden mount points", is_access_to_paths_allowed;
+            // PR #49 independent review).
             node = match self.mounts.get(&path) {
-                Some(mount) => {
-                    if let Ok(under) = node.lookup(c) {
-                        down.push(Some(inode_key(&under)));
-                    }
-                    if let Some(covered) = self.covered.get(&path) {
-                        down.extend(covered.iter().map(|m| Some(inode_key(&m.root()))));
-                    }
-                    mount.root()
-                }
+                Some(mount) => mount.root(),
                 None => match node.lookup(c) {
                     Ok(n) => n,
                     Err(_) => {
@@ -1690,7 +1686,7 @@ impl MountTable {
         }
         let target = match last {
             Some(l) if !complete || inode_key(&node) != inode_key(l) => {
-                let internal = l.as_any().is_some_and(|a| a.is::<nsfs::NsFileNode>());
+                let internal = is_internal_file(l);
                 return veridian_landlock::Ancestry {
                     keys: alloc::vec![Some(inode_key(l))],
                     internal,
@@ -1710,7 +1706,7 @@ impl MountTable {
         };
         // nsfs, reached through a /proc magic link, is internal: always
         // allowed (MNT_INTERNAL).
-        let internal = target.as_any().is_some_and(|a| a.is::<nsfs::NsFileNode>());
+        let internal = is_internal_file(&target);
         down.push(Some(inode_key(&target)));
         down.reverse();
         veridian_landlock::Ancestry {
@@ -1719,6 +1715,17 @@ impl MountTable {
             partial: false,
         }
     }
+}
+
+/// A file on a filesystem no one can mount, at the root of it (Landlock's
+/// MNT_INTERNAL case, is_access_to_paths_allowed): nsfs, reached through a
+/// /proc magic link, and a memfd, on the kernel's internal shmem mount.
+/// Landlock always allows it, and it cannot anchor a rule (PR #49
+/// independent review).
+#[cfg(feature = "alloc")]
+pub fn is_internal_file(node: &Arc<dyn VfsNode>) -> bool {
+    node.as_any()
+        .is_some_and(|a| a.is::<nsfs::NsFileNode>() || a.is::<memfd::MemfdNode>())
 }
 
 /// [`MountTable::ancestry`] of canonical `path` (a path in the whole tree of
@@ -2180,6 +2187,45 @@ impl<'a> CallerView<'a> {
             .map(String::from)
             .collect();
         self.ctx.mounts.snapshot().walk_canonical(&parts).ok()
+    }
+
+    /// The node at canonical `path` in the caller's tree or in a detached
+    /// tree, for a Landlock check that an object is still where its path
+    /// says. [`Self::canonical_node`] answers `None` for a detached path,
+    /// so a check built on it refused a link into an `open_tree` copy even
+    /// for a domain with no filesystem rule (PR #49 review).
+    #[cfg(feature = "alloc")]
+    pub fn landlock_node_at(&self, path: &str) -> Option<Arc<dyn VfsNode>> {
+        let Some((id, rest)) = mount::parse_detached(path) else {
+            return self.canonical_node(path);
+        };
+        let (tree, point) = mount::detached_place(id)?;
+        let full = match point {
+            Some(p) if p != "/" => alloc::format!("{p}{rest}"),
+            _ => String::from(rest),
+        };
+        let parts: Vec<String> = full
+            .split('/')
+            .filter(|c| !c.is_empty())
+            .map(String::from)
+            .collect();
+        tree.snapshot().walk_canonical(&parts).ok()
+    }
+
+    /// [`Self::canonical_parent`] for a Landlock check, in the caller's tree
+    /// or a detached one: the parent of a detached path is the detached path
+    /// of its directory, which [`Self::landlock_refer`] walks as such (PR #49
+    /// review).
+    #[cfg(feature = "alloc")]
+    pub fn landlock_parent_at(&self, path: &str) -> Option<(String, Arc<dyn VfsNode>)> {
+        let Some((id, rest)) = mount::parse_detached(path) else {
+            return self.canonical_parent(path);
+        };
+        let rest = rest.trim_end_matches('/');
+        let (dir, _) = rest.rsplit_once('/')?;
+        let dir_path = mount::detached_path(id, dir);
+        let node = self.landlock_node_at(&dir_path)?;
+        Some((dir_path, node))
     }
 
     /// The node at canonical `path` (a path in the whole tree, no symlinks
@@ -3618,6 +3664,49 @@ pub(crate) mod tests {
     /// walk reaches an object other than the one the lookup gave (a rename
     /// in between), no ancestors, only that object's own key (PR #49
     /// review).
+    /// A directory a mount now covers is not on the walk: Linux's walk
+    /// skips hidden mount points, so a rule on the covered directory does not
+    /// reach the mount's files (PR #49 independent review).
+    #[test]
+    fn landlock_ancestry_skips_the_covered_directory() {
+        let vfs = Vfs::new();
+        vfs.mount_root(Arc::new(ramfs::RamFs::new())).unwrap();
+        let root = vfs.root_fs().unwrap().root();
+        let covered = root.mkdir("data", Permissions::default()).unwrap();
+        vfs.mount("/data".into(), Arc::new(tmpfs::TmpFs::new(1 << 20)))
+            .unwrap();
+        let t = vfs.mounts().snapshot();
+        let top = t.walk_canonical(&[String::from("data")]).unwrap();
+        let f = top.create("secret", Permissions::default()).unwrap();
+        let keys = t
+            .ancestry(&[String::from("data"), String::from("secret")], Some(&f))
+            .keys;
+        assert_eq!(
+            keys,
+            [
+                Some(inode_key(&f)),
+                Some(inode_key(&top)),
+                Some(inode_key(&root))
+            ]
+        );
+        assert!(!keys.contains(&Some(inode_key(&covered))));
+    }
+
+    /// procfs makes a new node on each lookup; its identity is still one
+    /// per file, so a walk that looks a /proc path up again finds the
+    /// object an open holds (PR #49 independent review).
+    #[test]
+    fn a_proc_file_has_one_identity() {
+        let proc = Arc::new(procfs::ProcFs::new());
+        let root = proc.root();
+        let a = root.lookup("meminfo").unwrap();
+        let b = root.lookup("meminfo").unwrap();
+        assert!(!Arc::ptr_eq(&a, &b));
+        assert_eq!(inode_key(&a), inode_key(&b));
+        let other = root.lookup("version").unwrap();
+        assert_ne!(inode_key(&a), inode_key(&other));
+    }
+
     #[test]
     fn landlock_ancestry_is_the_looked_up_objects() {
         let vfs = Vfs::new();

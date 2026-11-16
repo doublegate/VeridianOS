@@ -133,6 +133,12 @@ pub fn sys_add_key(
     } else {
         None
     };
+    // A keyring whose name starts with '.' is the kernel's: EPERM before
+    // the payload is copied, as sys_add_key (PR #49 independent review).
+    // strncmp(type, "keyring", 7): the prefix, as Linux compares it.
+    if ty.starts_with("keyring") && desc.as_deref().is_some_and(|d| d.starts_with('.')) {
+        return Err(SyscallError::OperationNotPermitted);
+    }
     let data = if plen > 0 {
         userspace::read_user_vec(payload, plen, 1_048_575)?
     } else {
@@ -251,7 +257,8 @@ pub fn sys_keyctl(option: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> 
                 d.perm,
                 d.desc
             );
-            copy_if_room(a3, a4 as u32 as usize, text.as_bytes())
+            // buflen is a size_t (keyctl_describe_key).
+            copy_if_room(a3, a4, text.as_bytes())
         }
         op::CLEAR => run(|ks, s, kc| ks.clear_ring(s, kc, id)).map(|()| 0),
         op::LINK => run(|ks, s, kc| ks.link_key(s, kc, id, a3 as i32)).map(|()| 0),
@@ -331,8 +338,10 @@ pub fn sys_keyctl(option: usize, a2: usize, a3: usize, a4: usize, a5: usize) -> 
             run(|ks, s, kc| ks.move_key(s, kc, id, a3 as i32, a4 as i32, a5 & 1 != 0)).map(|()| 0)
         }
         op::CAPABILITIES => {
+            // A NULL buffer with a length is EFAULT, as copy_to_user (PR #49
+            // independent review).
             let n = a3.min(veridian_keys::CAPABILITIES.len());
-            if a2 != 0 && a3 > 0 {
+            if a3 > 0 {
                 userspace::write_user_bytes(a2, &veridian_keys::CAPABILITIES[..n])?;
                 // The rest is cleared, as keyctl_capabilities' clear_user, in
                 // place: never a kernel buffer of a user-chosen size (PR #49
@@ -380,9 +389,11 @@ fn session_to_parent() -> SyscallResult {
     let c = Caller::current().creds;
     let p = parent.credentials();
     let mut pkc = pt.keys.lock();
-    // An exiting thread is marked exited before its keys are taken under
-    // this lock: seen exited, the parent gets nothing (it would keep it
-    // for good); not yet, its exit takes the new one too (PR #49 review).
+    // An exited parent gets nothing. One still exiting may have had its
+    // keys taken already (exit takes them before marking the thread
+    // exited); what this installs then is given back by its process's
+    // cleanup (`release_thread_holds`), so nothing is kept for good (PR #49
+    // review and independent review).
     if matches!(
         pt.get_state(),
         crate::process::thread::ThreadState::Zombie | crate::process::thread::ThreadState::Dead
@@ -430,11 +441,17 @@ pub fn release_keys(kc: &KeyCred) {
     store().lock().release_cred(kc);
 }
 
-/// setfsuid or setfsgid changed the thread's file-system ids: its thread
-/// keyring follows.
+/// A set*id call changed the file-system ids. Credentials are the
+/// process's here, so every thread now has them, and every thread's thread
+/// keyring follows, as each Linux thread's commit_creds calls
+/// key_fsuid_changed (PR #49 independent review).
 pub fn fsid_changed() {
-    if let Some(t) = crate::process::current_thread() {
-        let subj = subject_of(&Caller::current());
+    let Some(process) = crate::process::current_process() else {
+        return;
+    };
+    let subj = subject_of(&Caller::current());
+    let threads: Vec<_> = process.threads.lock().values().cloned().collect();
+    for t in &threads {
         let kc = t.keys.lock();
         store().lock().fsid_changed(&subj, &kc);
     }

@@ -1120,13 +1120,34 @@ impl BlockFsInner {
     /// node kept writing to, after unlink freed what it had then.
     fn is_orphan_with_blocks(&self, inode: u32) -> bool {
         let i = &self.inode_table[inode as usize];
-        i.links_count == 0
-            && inode > 0
-            && !i.is_special()
-            && (i.blocks != 0
-                || i.direct_blocks.iter().any(|&b| b != 0)
-                || i.indirect_block != 0
-                || i.double_indirect_block != 0)
+        if i.links_count != 0 || inode == 0 {
+            return false;
+        }
+        // An attribute block counts whatever the type: fsetxattr through a
+        // node kept after the unlink gives one even to a FIFO or socket
+        // (PR #49 independent review).
+        let xattr = self.xattr_block_of(inode).is_ok_and(|b| b != 0);
+        xattr
+            || (!i.is_special()
+                && (i.blocks != 0
+                    || i.direct_blocks.iter().any(|&b| b != 0)
+                    || i.indirect_block != 0
+                    || i.double_indirect_block != 0))
+    }
+
+    /// What an orphan still holds goes back: a special file's attribute
+    /// block alone (its number was reported freed at its unlink, which a
+    /// second `free_inode_blocks` would repeat), anything else's blocks.
+    fn free_orphan(&mut self, inode: u32) -> Result<(), KernelError> {
+        if !self.inode_table[inode as usize].is_special() {
+            return self.free_inode_blocks(inode);
+        }
+        let xattr = self.xattr_block_of(inode)?;
+        self.inode_table[inode as usize].xattr_block = 0;
+        if xattr != 0 {
+            self.free_block(xattr);
+        }
+        Ok(())
     }
 
     /// Free what an unlinked inode still holds, if nothing refers to it
@@ -1140,8 +1161,10 @@ impl BlockFsInner {
             });
         }
         if self.is_orphan_with_blocks(inode) && !self.holds.is_held(inode) {
-            if let Err(e) = self.free_inode_blocks(inode) {
+            if let Err(e) = self.free_orphan(inode) {
+                // Counted free at its unlink, now never to be reused.
                 self.poisoned.insert(inode);
+                self.superblock.free_inodes = self.superblock.free_inodes.saturating_sub(1);
                 return Err(e);
             }
         }
@@ -2400,8 +2423,15 @@ impl BlockFsInner {
             // If links reach 0, free all data blocks and the inode itself
             // (allocate_inode takes any zero-link inode and decrements
             // free_inodes, so not counting it back here underflowed).
+            // Counted free only once its blocks are: one whose free failed
+            // part-way is poisoned and never reused, so counting it would
+            // leave the count one too high, and its later reclaim would take
+            // one off that was never added (PR #49 independent review).
             if self.inode_table[inode as usize].links_count == 0 {
-                self.free_inode_blocks(inode)?;
+                if let Err(e) = self.free_inode_blocks(inode) {
+                    self.poisoned.insert(inode);
+                    return Err(e);
+                }
                 self.superblock.free_inodes += 1;
             }
         }
@@ -2552,9 +2582,16 @@ impl BlockFsInner {
         };
         match request.op {
             Op::Allocate | Op::ZeroRange => {
-                if self.blocks_missing(inode_num, blocks.clone())?
-                    > self.superblock.free_blocks as usize
-                {
+                // Orphans' blocks count as free, as for a write, which gets
+                // them back when the bitmap runs out: reclaimed here before
+                // the range is refused (PR #49 review).
+                let missing = self.blocks_missing(inode_num, blocks.clone())?;
+                let mut fits = missing <= self.superblock.free_blocks as usize;
+                // reclaim_orphans raises free_blocks when it frees any.
+                if !fits && self.reclaim_orphans() {
+                    fits = missing <= self.superblock.free_blocks as usize;
+                }
+                if !fits {
                     return Err(KernelError::FsError(FsError::NoSpace));
                 }
                 for lb in blocks {
@@ -3646,6 +3683,32 @@ mod tests {
         // while the orphan keeps its four.
         let data = (start as usize - 4) * BLOCK_SIZE;
         assert!(big.write(0, &alloc::vec![2u8; data]).is_ok());
+    }
+
+    /// fallocate counts an orphan's blocks as free, as a write does: the
+    /// range is refused only if it does not fit once they are reclaimed
+    /// (PR #49 review).
+    #[test]
+    fn fallocate_reclaims_orphans_before_refusing() {
+        let fs = BlockFs::format(128, 16).unwrap();
+        let root = fs.root();
+        let perms = Permissions::from_mode(0o644);
+        let start = fs.inner.read().superblock.free_blocks;
+        let big = root.create("big", perms).unwrap();
+        let h = root.create("h", perms).unwrap();
+        root.unlink("h").unwrap();
+        h.write(0, &[1u8; 4 * BLOCK_SIZE]).unwrap();
+        drop(h);
+        // start - 4 data blocks and an indirect one: more than is free
+        // while the orphan keeps its four, within what is free after.
+        let data = (start as usize - 4) * BLOCK_SIZE;
+        assert_eq!(big.fallocate(falloc(0, 0, data)), Ok(()));
+        // Still refused when it cannot fit at all.
+        let more = root.create("more", perms).unwrap();
+        assert_eq!(
+            more.fallocate(falloc(0, 0, 8 * BLOCK_SIZE)),
+            Err(KernelError::FsError(FsError::NoSpace))
+        );
     }
 
     /// Freeing an inode's blocks clears each pointer before freeing what it

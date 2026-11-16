@@ -616,8 +616,11 @@ filesystem.
 
 ### Filesystem semantics (N-117, N-123, N-124, N-126, N-128 to N-130; sprints D, G, v0.29)
 
-- **Unlinked open files (N-117).** BlockFS frees an inode as soon as it is unlinked, even while a
-  descriptor is still open, so that descriptor can read the next file that reuses the inode.
+- **Unlinked open files (N-117).** BlockFS frees a file's data at its last unlink even while a
+  descriptor still has it open, so a program that writes a file, unlinks it and reads it back
+  through the descriptor gets nothing (Linux keeps the data until the last close). The inode
+  number itself is held while any descriptor has the file, so it is not given to another file
+  meanwhile. Scheduled to be fixed before v0.28.0, in its own change.
 - **Directory listing (N-124).** `getdents64` re-reads the directory and seeks by index, so
   removing entries while listing (`rm -r`) skips entries; listing is O(n^2).
 - **`O_APPEND` (N-126)** is not atomic across separate opens of a file.

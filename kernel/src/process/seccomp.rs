@@ -502,6 +502,11 @@ pub struct ModeConflict;
 pub struct ThreadSeccomp {
     mode: AtomicU8,
     chain: Mutex<Option<Chain>>,
+    /// The thread is exiting and has let go of its chain (seccomp's part
+    /// of PF_EXITING): TSYNC neither checks nor changes it, as Linux's
+    /// seccomp_can_sync_threads and seccomp_sync_threads skip PF_EXITING
+    /// threads (PR #49 independent review).
+    released: core::sync::atomic::AtomicBool,
 }
 
 impl Default for ThreadSeccomp {
@@ -515,7 +520,13 @@ impl ThreadSeccomp {
         Self {
             mode: AtomicU8::new(MODE_DISABLED),
             chain: Mutex::new(None),
+            released: core::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Whether the thread has let go of its chain on its way out.
+    pub fn released(&self) -> bool {
+        self.released.load(Ordering::Acquire)
     }
 
     /// The mode (the fast path reads only this).
@@ -536,6 +547,8 @@ impl ThreadSeccomp {
         Self {
             mode: AtomicU8::new(self.mode()),
             chain: Mutex::new(chain),
+            // The new thread has not exited.
+            released: core::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -574,6 +587,9 @@ impl ThreadSeccomp {
     /// The thread is exiting (seccomp_filter_release): it stops being a
     /// user of its chain.
     pub fn release(&self) {
+        // Marked first, so TSYNC never sees it without a chain and not
+        // exiting.
+        self.released.store(true, Ordering::Release);
         let old = self.chain.lock().take();
         drop(old);
     }

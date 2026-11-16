@@ -29,6 +29,18 @@ pub fn conduit_from_method(method: &[u8]) -> Option<Conduit> {
     }
 }
 
+/// The conduit the device tree's `/psci` `method` names, read from the blob
+/// firmware passed: what reset and power-off use in a kernel built without
+/// SMP, which never enumerates CPUs (PR #49 review).
+#[cfg(target_os = "none")]
+pub fn conduit_from_device_tree() -> Option<Conduit> {
+    // SAFETY: the blob firmware passed (or QEMU virt's), reached through
+    // the physical map; from_phys validates the header before reading on.
+    let fdt = unsafe { crate::arch::fdt::Fdt::from_phys(super::boot::dtb_pa()) }?;
+    fdt.property(&["psci"], "method")
+        .and_then(conduit_from_method)
+}
+
 /// Human-readable PSCI return code.
 pub fn error_name(code: i64) -> &'static str {
     match code {

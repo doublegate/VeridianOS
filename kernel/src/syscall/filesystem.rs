@@ -2585,6 +2585,7 @@ pub fn sys_kill(pid: usize, signal: usize) -> SyscallResult {
 fn may_signal(
     caller: &crate::process::Process,
     target: &crate::process::Process,
+    thread: Option<u64>,
     sig: i32,
 ) -> bool {
     use core::sync::atomic::Ordering;
@@ -2598,25 +2599,35 @@ fn may_signal(
         same_session,
     ) && (caller.pid == target.pid
         || (crate::cap::authority::current_may_act_on_process(target, crate::cap::Rights::WRITE)
-            && landlock_may_signal(target)))
+            && landlock_may_signal(target, thread)))
 }
 
 /// Landlock's signal scope (hook_task_kill): a domain that sets
 /// LANDLOCK_SCOPE_SIGNAL reaches only processes in it or below it; its own
-/// threads always.
-fn landlock_may_signal(target: &crate::process::Process) -> bool {
+/// threads always. The domain checked is the named task's, as
+/// hook_task_kill's: thread `thread` for a thread-directed signal (tkill,
+/// tgkill, rt_tgsigqueueinfo, PIDFD_SIGNAL_THREAD), else the process's
+/// leader. With the leader's domain for a named thread, a sandboxed
+/// process could signal a thread outside its domain whose leader had
+/// restricted itself without TSYNC, which Linux refuses (PR #49
+/// independent review).
+fn landlock_may_signal(target: &crate::process::Process, thread: Option<u64>) -> bool {
     #[cfg(feature = "alloc")]
     {
         use crate::security::landlock as l;
+        let domain = match thread.and_then(|t| target.get_thread(crate::process::ThreadId(t))) {
+            Some(t) => t.landlock.get(),
+            None => l::of_process(target),
+        };
         l::may_reach(
             l::current().as_deref(),
-            l::of_process(target).as_deref(),
+            domain.as_deref(),
             l::ll::scope::SIGNAL,
         )
     }
     #[cfg(not(feature = "alloc"))]
     {
-        let _ = target;
+        let _ = (target, thread);
         true
     }
 }
@@ -2650,8 +2661,19 @@ pub(crate) fn kill_one(
     pid: crate::process::ProcessId,
     sig: i32,
 ) -> SyscallResult {
+    kill_one_to(caller, pid, None, sig)
+}
+
+/// [`kill_one`] for a signal that names thread `thread` of `pid`: the
+/// permission check takes that thread's Landlock domain.
+pub(crate) fn kill_one_to(
+    caller: &crate::process::Process,
+    pid: crate::process::ProcessId,
+    thread: Option<u64>,
+    sig: i32,
+) -> SyscallResult {
     let target = crate::process::table::get_process(pid).ok_or(SyscallError::ProcessNotFound)?;
-    if !may_signal(caller, &target, sig) {
+    if !may_signal(caller, &target, thread, sig) {
         return Err(SyscallError::OperationNotPermitted);
     }
     // A zombie (exited, not yet reaped) takes the signal and discards it,
@@ -2949,6 +2971,27 @@ fn rename_entry(old: &str, new: &str) -> SyscallResult {
         return Err(SyscallError::CrossDevice);
     }
     want_write(&vfs, &old_parent_canon)?;
+    // Lock_rename's traps come before the hook (__start_renaming, then
+    // security_path_rename): the source an ancestor of the target is
+    // EINVAL, the target an ancestor of the source ENOTEMPTY (PR #49
+    // independent review).
+    let join = |dir: &str, name: &str| {
+        if dir == "/" {
+            alloc::format!("/{}", name)
+        } else {
+            alloc::format!("{}/{}", dir, name)
+        }
+    };
+    let src_full = join(&old_parent_canon, &old_name);
+    let dst_full = join(&new_parent_canon, &new_name);
+    if src_full != dst_full {
+        if crate::fs::path_is_under(&new_parent_canon, &src_full) {
+            return Err(SyscallError::InvalidArgument);
+        }
+        if crate::fs::path_is_under(&old_parent_canon, &dst_full) {
+            return Err(SyscallError::DirectoryNotEmpty);
+        }
+    }
     // Landlock's hook_path_rename, after EXDEV and EROFS and before the
     // permission checks, as security_path_rename precedes vfs_rename.
     #[cfg(feature = "alloc")]
@@ -4224,12 +4267,18 @@ pub(crate) fn link_at(
         .then(|| crate::fs::RENAME_LOCK.lock());
     #[cfg(feature = "alloc")]
     if vfs.landlock().is_some() {
+        // Only a domain that handles a filesystem right checks a link
+        // (landlock_get_applicable_subject): one with network or scope
+        // layers alone is not held to where the names are now.
+        let fs_checked = vfs.landlock().is_some_and(|d| d.handles_fs());
         // The new name's directory, found before renames were held off:
-        // still where its path says, or the check below would use another
-        // directory's chain (PR #49 review).
-        let parent_there = vfs
-            .canonical_node(&parent_canonical)
-            .is_some_and(|n| crate::fs::inode_key(&n) == crate::fs::inode_key(&parent));
+        // still where its path says, in the caller's tree or a detached
+        // one, or the check below would use another directory's chain (PR
+        // #49 review).
+        let parent_there = !fs_checked
+            || vfs
+                .landlock_node_at(&parent_canonical)
+                .is_some_and(|n| crate::fs::inode_key(&n) == crate::fs::inode_key(&parent));
         if !parent_there {
             return Err(SyscallError::PermissionDenied);
         }
@@ -4241,10 +4290,11 @@ pub(crate) fn link_at(
         // An O_TMPFILE file made to be named has no entry: its path is
         // `<dir>/#<inode>`, whose directory is the one it was made in.
         let nameless_tmpfile = target.link_count() == 0 && target.tmpfile_linkable();
-        let still_there = nameless_tmpfile
+        let still_there = !fs_checked
+            || nameless_tmpfile
             || old_canonical
                 .as_deref()
-                .and_then(|p| vfs.canonical_node(p))
+                .and_then(|p| vfs.landlock_node_at(p))
                 .is_some_and(|n| crate::fs::inode_key(&n) == crate::fs::inode_key(&target));
         if !still_there {
             return Err(SyscallError::PermissionDenied);
@@ -4259,20 +4309,25 @@ pub(crate) fn link_at(
                 let dir_path = if dir_path.is_empty() { "/" } else { dir_path };
                 (alloc::string::String::from(dir_path), dir.clone())
             }
+            _ if !fs_checked => (alloc::string::String::new(), parent.clone()),
             _ => old_canonical
                 .as_deref()
-                .and_then(|p| vfs.canonical_parent(p))
+                .and_then(|p| vfs.landlock_parent_at(p))
                 .ok_or(SyscallError::PermissionDenied)?,
         };
-        vfs.landlock_refer(
-            &target,
-            None,
-            (&old_dir.0, &old_dir.1),
-            (&parent_canonical, &parent),
-            false,
-            false,
-        )
-        .map_err(super::map_kernel_error)?;
+        // A domain with no filesystem right checks no link (and needs
+        // neither place found above; PR #49 review).
+        if fs_checked {
+            vfs.landlock_refer(
+                &target,
+                None,
+                (&old_dir.0, &old_dir.1),
+                (&parent_canonical, &parent),
+                false,
+                false,
+            )
+            .map_err(super::map_kernel_error)?;
+        }
     }
     // vfs_link: an append-only or immutable file gets no new name (EPERM).
     #[cfg(feature = "alloc")]
@@ -5020,21 +5075,32 @@ pub fn sys_unlinkat(dirfd: usize, path_ptr: usize, flags: usize) -> SyscallResul
         .resolve_path_no_follow(&abs_path)
         .map_err(map_resolve_err)?;
     let is_dir = node.node_type() == crate::fs::NodeType::Directory;
-    match (remove_dir, is_dir) {
-        (true, false) => return Err(SyscallError::NotADirectory),
-        (false, true) => return Err(SyscallError::IsADirectory),
-        (false, false) if trailing_slash => return Err(SyscallError::NotADirectory),
-        _ => {}
+    // A trailing slash on a non-directory fails in the lookup itself, before
+    // any hook (do_unlinkat's "slashes").
+    if !remove_dir && !is_dir && trailing_slash {
+        return Err(SyscallError::NotADirectory);
     }
     // Landlock's hook_path_unlink and hook_path_rmdir, on the directory,
-    // before the permission check (security_path_unlink, then vfs_unlink).
+    // before vfs_unlink's and vfs_rmdir's own checks (security_path_unlink
+    // then may_delete's EISDIR and ENOTDIR): REMOVE_FILE for unlink and
+    // REMOVE_DIR for rmdir, whatever the object is (PR #49 independent
+    // review).
     #[cfg(feature = "alloc")]
     vfs.landlock_check(
         &dir_canonical,
         Some(&dir),
-        crate::fs::landlock_rights::remove(node.node_type()),
+        crate::fs::landlock_rights::remove(if remove_dir {
+            crate::fs::NodeType::Directory
+        } else {
+            crate::fs::NodeType::File
+        }),
     )
     .map_err(super::map_kernel_error)?;
+    match (remove_dir, is_dir) {
+        (true, false) => return Err(SyscallError::NotADirectory),
+        (false, true) => return Err(SyscallError::IsADirectory),
+        _ => {}
+    }
     check_may_remove(&*dir, &name)?;
     let victim = crate::fs::inotify::active()
         .then(|| dir.lookup(&name).ok())

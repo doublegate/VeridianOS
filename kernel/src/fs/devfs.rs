@@ -274,7 +274,7 @@ impl VfsNode for DevNode {
             "console" | "tty0" => {
                 // Write to console
                 for &_byte in data {
-                    crate::print!("{}", _byte as char);
+                    crate::print::console_write(format_args!("{}", _byte as char));
                 }
                 Ok(data.len())
             }
