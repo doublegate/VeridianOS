@@ -152,6 +152,14 @@ pub fn current_may_change_system() -> bool {
     current_holds(&ObjectRef::System, Rights::MODIFY)
 }
 
+/// Whether the caller may read what the machine keeps as a whole, the
+/// kernel log (ADR 0024): READ on the `System` object, besides the Linux
+/// privilege. Kernel context passes.
+#[cfg(feature = "alloc")]
+pub fn current_may_read_system() -> bool {
+    current_holds(&ObjectRef::System, Rights::READ)
+}
+
 /// Whether `space` may create the namespaces `flags` asks for (ADR 0024,
 /// step 3): CREATE on each namespace a new one is made from -- the one of
 /// that kind in `current`, for PID and time the one for children, below

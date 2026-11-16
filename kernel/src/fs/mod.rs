@@ -2212,6 +2212,22 @@ impl<'a> CallerView<'a> {
         tree.snapshot().walk_canonical(&parts).ok()
     }
 
+    /// [`Self::canonical_parent`] for a Landlock check, in the caller's tree
+    /// or a detached one: the parent of a detached path is the detached path
+    /// of its directory, which [`Self::landlock_refer`] walks as such (PR #49
+    /// review).
+    #[cfg(feature = "alloc")]
+    pub fn landlock_parent_at(&self, path: &str) -> Option<(String, Arc<dyn VfsNode>)> {
+        let Some((id, rest)) = mount::parse_detached(path) else {
+            return self.canonical_parent(path);
+        };
+        let rest = rest.trim_end_matches('/');
+        let (dir, _) = rest.rsplit_once('/')?;
+        let dir_path = mount::detached_path(id, dir);
+        let node = self.landlock_node_at(&dir_path)?;
+        Some((dir_path, node))
+    }
+
     /// The node at canonical `path` (a path in the whole tree, no symlinks
     /// or `..`), and that path, for the directory holding it: what a
     /// Landlock check of a name's parent needs. `None` for the root, a

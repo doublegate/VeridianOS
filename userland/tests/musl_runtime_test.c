@@ -23,6 +23,7 @@
 #include <poll.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <pthread.h>
 #include <sched.h>
@@ -11320,11 +11321,13 @@ static void t_sigsys(int sig, siginfo_t *si, void *uc)
 }
 /* Set once the TSYNC install returned: the probe runs only then, however
  * long the installer was kept from running (PR #49 review). */
-static volatile int t_seccomp_installed;
+static atomic_int t_seccomp_installed;
 static void *t_seccomp_thread(void *arg)
 {
     (void)arg;
-    while (!t_seccomp_installed) sched_yield();
+    /* An atomic, not volatile: the flag publishes the install to this
+     * thread (PR #49 review). */
+    while (!atomic_load_explicit(&t_seccomp_installed, memory_order_acquire)) sched_yield();
     long r = syscall(SYS_getppid);
     return (void *)(intptr_t)(r == -1 && errno == EPERM ? 0 : 1);
 }
@@ -11409,7 +11412,7 @@ static void test_seccomp(void)
         if (pthread_create(&t, NULL, t_seccomp_thread, NULL) != 0) _exit(2);
         prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
         long r = t_seccomp_install(0x00050000u | EPERM, 1 /* TSYNC */);
-        t_seccomp_installed = 1;
+        atomic_store_explicit(&t_seccomp_installed, 1, memory_order_release);
         pthread_join(t, &res);
         _exit(r == 0 && res == NULL ? 0 : 1);
     }
@@ -11918,17 +11921,30 @@ static void test_acct(void)
     char why[96];
     int f = 0;
     if (sizeof(struct t_acct_v3) != 64) f |= 1;
-    const char *path = "/tmp/veridian-acct";
-    /* O_NOFOLLOW: a symlink planted at the fixed name is not truncated
-     * through, and no accounting is turned on without the file (PR #49
+    /* The files live in a new directory only this process can enter:
+     * acct(2) opens them again by path, which in /tmp itself another user
+     * could swap for a symlink between the setup and the call (PR #49
      * review). */
+    char dir[] = "/tmp/veridian-acct.XXXXXX";
+    if (!mkdtemp(dir)) {
+        report("acct", 0, "mkdtemp");
+        return;
+    }
+    char path[64], pa[64], pb[64];
+    snprintf(path, sizeof(path), "%s/acct", dir);
+    snprintf(pa, sizeof(pa), "%s/a", dir);
+    snprintf(pb, sizeof(pb), "%s/b", dir);
     int fd = open(path, O_CREAT | O_WRONLY | O_TRUNC | O_NOFOLLOW, 0600);
     if (fd < 0) {
+        rmdir(dir);
         report("acct", 0, "open");
         return;
     }
     close(fd);
     if (syscall(SYS_acct, "/tmp") != -1 || errno != EISDIR) f |= 4;
+    /* A procfs file: EINVAL, as acct_on refuses FS_USERNS_MOUNT_RESTRICTED
+     * filesystems (a record written into a /proc/sys file would set it). */
+    if (syscall(SYS_acct, "/proc/sys/kernel/printk") != -1 || errno != EINVAL) f |= 4;
     if (syscall(SYS_acct, path) != 0) f |= 8;
     pid_t c = fork();
     if (c == 0)
@@ -11957,7 +11973,6 @@ static void test_acct(void)
      * file (zap_pid_ns_processes, then acct_exit_ns), and in every
      * accounting namespace above it too (slow_acct_process; PR #49 review).
      * Outer file A here; the namespace's init turns on file B. */
-    const char *pa = "/tmp/veridian-acct-a", *pb = "/tmp/veridian-acct-b";
     int ok_files = 1;
     for (int i = 0; i < 2; i++) {
         int t = open(i ? pb : pa, O_CREAT | O_WRONLY | O_TRUNC | O_NOFOLLOW, 0600);
@@ -12013,6 +12028,7 @@ static void test_acct(void)
     if (!in_a_killed) f |= 4096;
     unlink(pa);
     unlink(pb);
+    rmdir(dir);
     /* Without CAP_SYS_PACCT: EPERM. */
     c = fork();
     if (c == 0)
@@ -12131,6 +12147,12 @@ static void test_seccomp_notify(void)
     }
     pid_t me = getpid();
     pid_t g = fork();
+    /* A failed fork must not reach kill(g) or a wait: kill(-1, ...)
+     * would signal every process the runner may (PR #49 review). */
+    if (g < 0) {
+        report("seccomp_notify", 0, "fork");
+        return;
+    }
     if (g == 0) {
         char c;
         close(p1[0]);
@@ -12234,6 +12256,48 @@ static void test_seccomp_notify(void)
         _exit(syscall(SYS_getppid) == -1 && errno == ENOSYS ? 0 : 1);
     }
     if (t_exit_status(c) != 0) f |= 128;
+    /* WAIT_KILLABLE_RECV: once received, the target waits killably, and a
+     * signal left at a default action that ends the process still ends it
+     * (Linux starts group exit when it is sent); the supervisor never
+     * answers here. */
+    int kp[2];
+    if (pipe(kp) != 0) {
+        f |= 256;
+    } else {
+        pid_t k = fork();
+        if (k == 0) {
+            close(kp[0]);
+            prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+            int kl = (int)t_seccomp_install(0x7fc00000u, 1u << 3 | 1u << 5);
+            if (kl < 0 || write(kp[1], &kl, sizeof(kl)) != sizeof(kl)) _exit(2);
+            syscall(SYS_getppid);
+            _exit(3);
+        }
+        close(kp[1]);
+        int kl = -1, kfd = k > 0 ? sys_pidfd_open(k, 0) : -1, ll = -1;
+        if (kfd < 0 || read(kp[0], &kl, sizeof(kl)) != sizeof(kl) ||
+            (ll = sys_pidfd_getfd(kfd, kl, 0)) < 0 || !t_notif_recv(ll, k, &n) ||
+            kill(k, SIGTERM) != 0) {
+            f |= 256;
+        }
+        int ks = 0, gone = 0;
+        for (int i = 0; k > 0 && i < 50 && !gone; i++) {
+            if (waitpid(k, &ks, WNOHANG) == k)
+                gone = 1;
+            else
+                usleep(100000);
+        }
+        if (k > 0 && !gone) {
+            f |= 512; /* still waiting after SIGTERM */
+            kill(k, SIGKILL);
+            waitpid(k, &ks, 0);
+        } else if (k > 0 && !(WIFSIGNALED(ks) && WTERMSIG(ks) == SIGTERM)) {
+            f |= 512;
+        }
+        if (ll >= 0) close(ll);
+        if (kfd >= 0) close(kfd);
+        close(kp[0]);
+    }
     close(p1[0]);
     close(p2[1]);
     snprintf(why, sizeof(why), "f=%#x", f);

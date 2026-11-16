@@ -4309,20 +4309,25 @@ pub(crate) fn link_at(
                 let dir_path = if dir_path.is_empty() { "/" } else { dir_path };
                 (alloc::string::String::from(dir_path), dir.clone())
             }
+            _ if !fs_checked => (alloc::string::String::new(), parent.clone()),
             _ => old_canonical
                 .as_deref()
-                .and_then(|p| vfs.canonical_parent(p))
+                .and_then(|p| vfs.landlock_parent_at(p))
                 .ok_or(SyscallError::PermissionDenied)?,
         };
-        vfs.landlock_refer(
-            &target,
-            None,
-            (&old_dir.0, &old_dir.1),
-            (&parent_canonical, &parent),
-            false,
-            false,
-        )
-        .map_err(super::map_kernel_error)?;
+        // A domain with no filesystem right checks no link (and needs
+        // neither place found above; PR #49 review).
+        if fs_checked {
+            vfs.landlock_refer(
+                &target,
+                None,
+                (&old_dir.0, &old_dir.1),
+                (&parent_canonical, &parent),
+                false,
+                false,
+            )
+            .map_err(super::map_kernel_error)?;
+        }
     }
     // vfs_link: an append-only or immutable file gets no new name (EPERM).
     #[cfg(feature = "alloc")]

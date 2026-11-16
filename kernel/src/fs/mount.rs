@@ -2481,6 +2481,11 @@ mod tests {
         assert_eq!(crate::fs::inode_key(&found), crate::fs::inode_key(&d));
         assert!(view.landlock_node_at(&detached_path(id, "/gone")).is_none());
         assert!(view.canonical_node(&detached_path(id, "/d")).is_none());
+        let (dir, node) = view.landlock_parent_at(&detached_path(id, "/d/f")).unwrap();
+        assert_eq!(dir, detached_path(id, "/d"));
+        assert_eq!(crate::fs::inode_key(&node), crate::fs::inode_key(&d));
+        let (top, _) = view.landlock_parent_at(&detached_path(id, "/d")).unwrap();
+        assert_eq!(top, detached_path(id, ""));
     }
 
     #[test]

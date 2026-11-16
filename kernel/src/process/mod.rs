@@ -781,7 +781,9 @@ pub fn wait_interrupted() -> bool {
 }
 
 /// [`wait_interrupted`] for killable waits: only a fatal signal (or another
-/// thread's exec) ends them, not a signal a handler catches.
+/// thread's exec) ends them, not a signal a handler catches. Fatal includes
+/// one left at a default action that ends the process, which Linux turns
+/// into group exit when it is sent (`signals::group_fatal`; PR #49 review).
 pub fn wait_killed() -> bool {
     if dispatched_context().is_none() {
         return false;
@@ -790,7 +792,7 @@ pub fn wait_killed() -> bool {
         return false;
     };
     match process.kill_pending.load(Ordering::Acquire) {
-        0 => false,
+        0 => signals::group_fatal(&process, &thread),
         exit::EXEC_PENDING => process.exec_tid.load(Ordering::Acquire) != thread.tid.0,
         _ => true,
     }

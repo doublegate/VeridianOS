@@ -2582,9 +2582,16 @@ impl BlockFsInner {
         };
         match request.op {
             Op::Allocate | Op::ZeroRange => {
-                if self.blocks_missing(inode_num, blocks.clone())?
-                    > self.superblock.free_blocks as usize
-                {
+                // Orphans' blocks count as free, as for a write, which gets
+                // them back when the bitmap runs out: reclaimed here before
+                // the range is refused (PR #49 review).
+                let missing = self.blocks_missing(inode_num, blocks.clone())?;
+                let mut fits = missing <= self.superblock.free_blocks as usize;
+                // reclaim_orphans raises free_blocks when it frees any.
+                if !fits && self.reclaim_orphans() {
+                    fits = missing <= self.superblock.free_blocks as usize;
+                }
+                if !fits {
                     return Err(KernelError::FsError(FsError::NoSpace));
                 }
                 for lb in blocks {
@@ -3676,6 +3683,32 @@ mod tests {
         // while the orphan keeps its four.
         let data = (start as usize - 4) * BLOCK_SIZE;
         assert!(big.write(0, &alloc::vec![2u8; data]).is_ok());
+    }
+
+    /// fallocate counts an orphan's blocks as free, as a write does: the
+    /// range is refused only if it does not fit once they are reclaimed
+    /// (PR #49 review).
+    #[test]
+    fn fallocate_reclaims_orphans_before_refusing() {
+        let fs = BlockFs::format(128, 16).unwrap();
+        let root = fs.root();
+        let perms = Permissions::from_mode(0o644);
+        let start = fs.inner.read().superblock.free_blocks;
+        let big = root.create("big", perms).unwrap();
+        let h = root.create("h", perms).unwrap();
+        root.unlink("h").unwrap();
+        h.write(0, &[1u8; 4 * BLOCK_SIZE]).unwrap();
+        drop(h);
+        // start - 4 data blocks and an indirect one: more than is free
+        // while the orphan keeps its four, within what is free after.
+        let data = (start as usize - 4) * BLOCK_SIZE;
+        assert_eq!(big.fallocate(falloc(0, 0, data)), Ok(()));
+        // Still refused when it cannot fit at all.
+        let more = root.create("more", perms).unwrap();
+        assert_eq!(
+            more.fallocate(falloc(0, 0, 8 * BLOCK_SIZE)),
+            Err(KernelError::FsError(FsError::NoSpace))
+        );
     }
 
     /// Freeing an inode's blocks clears each pointer before freeing what it

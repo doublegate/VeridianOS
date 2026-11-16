@@ -369,7 +369,10 @@ The reference for every behaviour below is the Linux 7.3 source (kernel.org tarb
       in syslog's text form, in 128 KiB that need no heap. The print path never waits for the
       ring: a print that finds it busy loses its text there, not on the console. The console
       shows messages below `console_loglevel` (default 7), so CONSOLE_OFF and CONSOLE_LEVEL
-      work. Only the kernel's own messages go through the ring and the level: what programs
+      work. Every action that needs CAP_SYSLOG also needs the `System` object (ADR 0024
+      lists the kernel log under it): READ to read the log, MODIFY to consume, clear it or
+      change the console; READ_CLEAR clears only what reached the caller. Only the kernel's
+      own messages go through the ring and the level: what programs
       write to the console (`/dev/console`, the serial console, a tty echo) goes straight to
       it (`print::console_write`), as a tty write on Linux, so no program can put lines in the
       kernel log or be silenced by `dmesg -n`. A panic or a fatal trap first raises the level to 15, as Linux's console_verbose,
@@ -392,11 +395,14 @@ The reference for every behaviour below is the Linux 7.3 source (kernel.org tarb
     - **reboot** checks CAP_SYS_BOOT in the user namespace owning the caller's PID namespace,
       then the magic numbers. Inside a PID namespace below the initial one it is Linux's
       reboot_pid_ns: the namespace's init is killed and reported killed by SIGHUP (restart)
-      or SIGINT (halt, power off). On the machine it also needs MODIFY on the `System`
-      object. The other CPUs are stopped first (each is sent the reschedule interrupt and
+      or SIGINT (halt, power off); that needs MODIFY on the PID namespace too (ADR 0024), as
+      killing another process's init needs authority over it. On the machine it also needs
+      MODIFY on the `System` object. The other CPUs are stopped first (each is sent the reschedule interrupt and
       halts in it); restart is the PCI reset register, then the keyboard controller, then a
       triple fault on x86_64, PSCI SYSTEM_RESET on AArch64 and SBI SRST on RISC-V; power off
-      is ACPI S5, PSCI SYSTEM_OFF and SBI SRST (or the legacy shutdown call), halting where it
+      is ACPI S5 (with the sleep type the DSDT's `\_S5` gives; QEMU's is 0, not the 7 of
+      Intel chipsets), PSCI SYSTEM_OFF (through the conduit the device tree names, in every
+      build) and SBI SRST (or the legacy shutdown call), halting where it
       does not take. As on Linux nothing is synced. KEXEC and SW_SUSPEND are EINVAL, as a
       Linux built without kexec and hibernation; kexec has its plan in MASTER_TODO item 18.
 

@@ -602,8 +602,69 @@ fn try_parse_fadt(vaddr: usize) -> Option<FadtPmInfo> {
     info.acpi_disable = fadt.acpi_disable;
     info.gpe0_blk = fadt.gpe0_blk as u16;
     info.gpe0_blk_len = fadt.gpe0_blk_len;
+    // S5's sleep type is the firmware's, from `\_S5` in the DSDT, as Linux
+    // reads it (acpi_get_sleep_type_data). The fallback of 7 is Intel ICH
+    // hardware's; QEMU's `_S5` is 0, and its PM1 control handler powers off
+    // only for 0, so with the fallback reboot's POWER_OFF halted instead
+    // (PR #49 review).
+    if let Some(typ) = dsdt_s5_type(fadt.dsdt as usize) {
+        info.slp_typ_s5 = typ;
+    }
 
     Some(info)
+}
+
+/// The DSDT at physical `pa`'s `\_S5` SLP_TYPa, if it has one.
+fn dsdt_s5_type(pa: usize) -> Option<u16> {
+    if pa == 0 {
+        return None;
+    }
+    let vaddr = super::msr::phys_to_virt(pa)?;
+    // SAFETY: the FADT names the DSDT's physical address, and the physical
+    // map covers it, as it covers the FADT; the header is read first and
+    // the body only up to the length it gives, bounded below.
+    let sdt = unsafe { &*(vaddr as *const SdtHeader) };
+    if &{ sdt.signature } != b"DSDT" {
+        return None;
+    }
+    let len = { sdt.length } as usize;
+    let header = core::mem::size_of::<SdtHeader>();
+    if !(header..=(4 << 20)).contains(&len) {
+        return None;
+    }
+    // SAFETY: as above, `len` bytes from the header's start are the table.
+    let aml = unsafe { core::slice::from_raw_parts((vaddr + header) as *const u8, len - header) };
+    s5_sleep_type(aml).map(u16::from)
+}
+
+/// SLP_TYPa from AML's `Name (_S5_, Package () { a, b, ... })`, found by its
+/// encoding (NameOp, optionally a root prefix, `_S5_`, PackageOp): enough
+/// for the one object a power-off needs, without an AML interpreter. The
+/// value is ZeroOp, OneOp or a BytePrefix constant, as firmware writes it.
+fn s5_sleep_type(aml: &[u8]) -> Option<u8> {
+    let at = aml.windows(4).position(|w| w == b"_S5_")?;
+    let named = match at {
+        0 => false,
+        _ if aml[at - 1] == 0x08 => true,
+        _ => at >= 2 && aml[at - 1] == b'\\' && aml[at - 2] == 0x08,
+    };
+    if !named {
+        return None;
+    }
+    let rest = aml.get(at + 4..)?;
+    if *rest.first()? != 0x12 {
+        return None;
+    }
+    // PkgLength: its lead byte's top two bits count the bytes after it.
+    let pkg_len_bytes = 1 + (*rest.get(1)? >> 6) as usize;
+    // Then NumElements, then the first element.
+    let first = rest.get(1 + pkg_len_bytes + 1..)?;
+    match *first.first()? {
+        0x00 => Some(0),
+        0x01 => Some(1),
+        0x0A => first.get(1).copied(),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1302,6 +1363,38 @@ mod tests {
             alloc::format!("{}", AcpiSleepState::S5SoftOff),
             "S5 (Soft Off)"
         );
+    }
+
+    #[test]
+    fn s5_sleep_type_from_aml() {
+        // QEMU's: Name (_S5, Package (4) { Zero, Zero, Zero, Zero }).
+        let qemu = [
+            0x10, 0x08, 0x08, 0x5F, 0x53, 0x35, 0x5F, 0x12, 0x06, 0x04, 0x00, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(s5_sleep_type(&qemu), Some(0));
+        // An Intel board's: \_S5 with byte constants 7, 7.
+        let ich = [
+            0x08, b'\\', 0x5F, 0x53, 0x35, 0x5F, 0x12, 0x0A, 0x04, 0x0A, 0x07, 0x0A, 0x07, 0x00,
+            0x00,
+        ];
+        assert_eq!(s5_sleep_type(&ich), Some(7));
+        // OneOp, and a two-byte PkgLength.
+        let one = [0x08, 0x5F, 0x53, 0x35, 0x5F, 0x12, 0x40, 0x01, 0x04, 0x01];
+        assert_eq!(s5_sleep_type(&one), Some(1));
+        // Not a Name, no package, truncated: nothing.
+        assert_eq!(
+            s5_sleep_type(&[0x5F, 0x53, 0x35, 0x5F, 0x12, 0x06, 0x04, 0x00]),
+            None
+        );
+        assert_eq!(
+            s5_sleep_type(&[0x14, 0x5F, 0x53, 0x35, 0x5F, 0x12, 0x06, 0x04, 0x00]),
+            None
+        );
+        assert_eq!(
+            s5_sleep_type(&[0x08, 0x5F, 0x53, 0x35, 0x5F, 0x12, 0x06]),
+            None
+        );
+        assert_eq!(s5_sleep_type(b"no sleep states"), None);
     }
 
     #[test]
