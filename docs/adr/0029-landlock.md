@@ -97,8 +97,13 @@ Two facts shape the design:
 - **Network:** `cap::authority::holds_net(domain, port, access)` is checked on bind and
   connect for TCP, and on bind, connect and sendto/sendmsg with an address for UDP (ABI 10).
 - **Scopes:** an abstract UNIX socket or a signal may reach only a process whose domain is the
-  caller's or below it (`domain_is_scoped`). The same domain relation governs ptrace, process_vm,
-  pidfd_getfd and `/proc/<pid>/mem`, as `hook_ptrace_access_check`.
+  caller's or below it (`domain_is_scoped`). The domain is the named task's, as
+  `hook_task_kill`'s: for a signal sent to one thread (tkill, tgkill, rt_tgsigqueueinfo,
+  PIDFD_SIGNAL_THREAD) that thread's, which differs from the leader's when the leader
+  restricted itself without TSYNC; for a process, its leader's. The same domain relation
+  governs ptrace, process_vm, pidfd_getfd and `/proc/<pid>/mem`, as `hook_ptrace_access_check`;
+  ptrace names a process here (attaching one thread of a process is not supported yet), so
+  that check takes the leader's domain.
   Abstract UNIX sockets and SIGIO do not exist yet: whoever adds them adds these scope checks
   in the same change (MASTER_TODO item 10), and the runtime test `landlock` has a tripwire
   that fails if an abstract socket outside the domain can be reached.

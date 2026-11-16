@@ -369,7 +369,10 @@ The reference for every behaviour below is the Linux 7.3 source (kernel.org tarb
       in syslog's text form, in 128 KiB that need no heap. The print path never waits for the
       ring: a print that finds it busy loses its text there, not on the console. The console
       shows messages below `console_loglevel` (default 7), so CONSOLE_OFF and CONSOLE_LEVEL
-      work. A panic or a fatal trap first raises the level to 15, as Linux's console_verbose,
+      work. Only the kernel's own messages go through the ring and the level: what programs
+      write to the console (`/dev/console`, the serial console, a tty echo) goes straight to
+      it (`print::console_write`), as a tty write on Linux, so no program can put lines in the
+      kernel log or be silenced by `dmesg -n`. A panic or a fatal trap first raises the level to 15, as Linux's console_verbose,
       so a program that lowered it cannot hide a crash; the x86_64 fault report writes to the
       port directly anyway, and the CPU stall dump is taken by the host through QEMU. **`dmesg_restrict` starts at 1**, where Linux's built-in default is 0: the log
       names kernel addresses that KASLR is meant to hide, and Debian's and Ubuntu's kernels

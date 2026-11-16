@@ -139,8 +139,10 @@
   would gain rights), truncate and ftruncate, device ioctls, and connecting to a pathname UNIX
   socket (RESOLVE_UNIX, free within the maker's domain). No mount changes under a filesystem
   domain. TCP and UDP bind, connect and send by port, with Linux's address checks. Signal
-  scoping, and ptrace, process_vm, pidfd_getfd and kcmp limited to the caller's domain and
-  below. CONFIG_SECURITY_LANDLOCK is set. Runtime test landlock.
+  scoping (a signal sent to one thread by the domain of that thread), and ptrace, process_vm,
+  pidfd_getfd and kcmp limited to the caller's domain and below. Files on the kernel's internal
+  filesystems (namespace files, memfd) are always allowed and cannot anchor a rule, as Linux's
+  internal mounts. CONFIG_SECURITY_LANDLOCK is set. Runtime test landlock.
 - The key retention service core (v0.28 item 5 system tier, ADR 0027 decision 28): add_key,
   request_key and keyctl as Linux 7.3's `security/keys/`, through the new shared `veridian-keys`
   crate. User, logon and keyring keys; thread, process, session, user, user-session and
@@ -159,13 +161,16 @@
   the `missing` ones still to be written: 19 missing on x86_64, 17 on AArch64, 19 on RISC-V.
 - syslog(2) and the kernel log ring (ADR 0027 decision 29): every line the kernel prints is
   kept in syslog's form in a 128 KiB ring; READ (waiting), READ_ALL, READ_CLEAR, CLEAR,
-  CONSOLE_OFF, CONSOLE_ON, CONSOLE_LEVEL, SIZE_UNREAD and SIZE_BUFFER; the console follows
-  `console_loglevel`; `/proc/sys/kernel/printk` and `dmesg_restrict`, which starts at 1.
+  CONSOLE_OFF, CONSOLE_ON, CONSOLE_LEVEL, SIZE_UNREAD and SIZE_BUFFER; kernel messages on the
+  console follow `console_loglevel`, while what programs write to the console goes straight to
+  it, as a tty write, and never enters the log; `/proc/sys/kernel/printk` and
+  `dmesg_restrict`, which starts at 1.
 - acct(2) (Linux 7.3 `kernel/acct.c`): BSD process accounting with version 3 records, per PID
   namespace, written when a process's last thread exits into every namespace from its own up
   that accounts, with ids as each opener's user namespace sees them; a namespace's accounting
   ends once its init's exit has emptied it, so the processes that exit kills are recorded
-  there; paused below 2 % free space and resumed above 4 %. CONFIG_BSD_PROCESS_ACCT and _V3 set. Runtime test acct.
+  there; paused below 2 % free space and resumed above 4 %, checked from the first record; a
+  file on procfs is refused (EINVAL). CONFIG_BSD_PROCESS_ACCT and _V3 set. Runtime test acct.
 - vhangup (EPERM without CAP_SYS_TTY_CONFIG, else nothing to hang up, as a Linux process
   without a controlling terminal) and iopl and ioperm, whose ports come only from IoPort
   capabilities, of which none is granted yet: turning ports on is EPERM, iopl 3 EPERM.
