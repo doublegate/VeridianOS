@@ -430,7 +430,27 @@ pub unsafe fn switch_in(ldt: Option<&Ldt>, prev: Segments, next: Segments) -> (b
             hw::load_gs(n.gs);
         }
     }
-    (n.fs > 3, n.gs > 3)
+    // A selector whose entry went while the task was out is loaded as 0
+    // with base 0, as Linux's loadsegment fixup leaves it, whatever the
+    // previous task's register held; and reported as handled, so the base
+    // saved with the dead selector (the descriptor's) is not written back
+    // (PR #50 review). The base is written, not left to the null load,
+    // which keeps the old base on AMD.
+    let fs_dead = next.fs > 3 && n.fs == 0;
+    let gs_dead = next.gs > 3 && n.gs == 0;
+    // SAFETY: null selectors are always loadable; interrupts are off per
+    // the contract.
+    unsafe {
+        if fs_dead {
+            hw::load_fs(0);
+            super::switch::write_fs_base(0);
+        }
+        if gs_dead {
+            hw::load_gs(0);
+            super::switch::write_user_gs_base(0);
+        }
+    }
+    (n.fs > 3 || fs_dead, n.gs > 3 || gs_dead)
 }
 
 /// A #GP or #NP from ring 3 with the LDT bit in its error code, taken on a
@@ -466,6 +486,21 @@ pub fn refresh_for_fault(error_code: u64) -> bool {
 /// keeps it, with the slot: the exec'd process takes a fresh one.
 #[cfg(all(target_arch = "x86_64", target_os = "none", feature = "alloc"))]
 pub fn exec_reset() {
+    // The task's slot is swapped for a fresh, empty one before this CPU
+    // lets go of the old table, and the old one is dropped only after: with
+    // the clear first, a REFRESH_LDT interrupt taken between the two would
+    // install the old table again from the task's slot, and dropping it then
+    // would free the table this CPU's LDTR names (`install` keeps only its
+    // address; PR #50 review).
+    let old = crate::process::current_process().map(|p| {
+        let fresh = new_slot(None);
+        let old = core::mem::replace(&mut *p.ldt.lock(), fresh.clone());
+        // exec has left one thread, this one, so no task of the process is
+        // being started meanwhile; a CLONE_VM sharer keeps the old slot,
+        // which no task of this process names any more.
+        crate::sched::dispatch::set_process_ldt_slot(p.pid.0, &fresh);
+        old
+    });
     let irq = crate::arch::disable_interrupts();
     // SAFETY: interrupts off; null selectors are always loadable.
     unsafe {
@@ -478,15 +513,7 @@ pub fn exec_reset() {
     super::switch::write_fs_base(0);
     super::switch::write_user_gs_base(0);
     drop(irq);
-    if let Some(p) = crate::process::current_process() {
-        let fresh = new_slot(None);
-        let old = core::mem::replace(&mut *p.ldt.lock(), fresh.clone());
-        // exec has left one thread, this one, so no task of the process is
-        // being started meanwhile; a CLONE_VM sharer keeps the old slot,
-        // which no task of this process names any more.
-        crate::sched::dispatch::set_process_ldt_slot(p.pid.0, &fresh);
-        drop(old);
-    }
+    drop(old);
 }
 
 /// After a write to the table this CPU's task uses: reload ds and es if
@@ -613,8 +640,7 @@ fn write_ldt(
             // SAFETY: interrupts off; the running task holds the table.
             unsafe { refresh_segments() };
         }
-        let root = process.memory_space.lock().get_page_table();
-        crate::mm::tlb::refresh_ldt_in(root);
+        crate::mm::tlb::refresh_ldt_everywhere();
     }
     Ok(0)
 }

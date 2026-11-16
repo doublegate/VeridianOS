@@ -465,7 +465,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
          check, through `cap::authority::holds_path` and `holds_net` and the shared
          `veridian-landlock` crate.
        - [x] modify_ldt (x86_64): Linux's GDT layout, a per-mm LDT, selectors kept per thread,
-         iret faults as SIGSEGV (decision 29). LTP's modify_ldt tests are i386-only (TCONF on
+         iret faults as Linux reports them, SIGSEGV for #GP and SIGBUS for #NP and #SS (decision 29). LTP's modify_ldt tests are i386-only (TCONF on
          x86_64); the runtime test modify_ldt covers it.
      - [ ] Cheap LTP fixes (found from the system tier's run, 2026-11-14): `/proc/<pid>/stat` in
        Linux's format (do_task_stat; 27 LTP tests are TBROK on its ENOENT through

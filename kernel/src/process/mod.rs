@@ -351,7 +351,15 @@ pub fn start_thread(
             actual: "no page table",
         });
     }
-    let fs_base = if settls || ctx_tls != 0 {
+    // A clone or fork without CLONE_SETTLS gets the parent's FS base as it
+    // is now (copy_thread copies the live fsbase), 0 included, as gs takes
+    // the live user GS base below; the process's saved TLS base would
+    // bring back one the parent had cleared (PR #50 review).
+    let fs_base = if settls {
+        ctx_tls
+    } else if inherit_fpu {
+        crate::arch::x86_64::switch::read_fs_base()
+    } else if ctx_tls != 0 {
         ctx_tls
     } else {
         process.tls_fs_base.load(Ordering::Acquire)

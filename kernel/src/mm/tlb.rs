@@ -22,11 +22,11 @@
 //!
 //! With one CPU online the remote part is a single atomic load.
 //!
-//! **LDT refresh.** The same request reaches the CPUs running an address
-//! space whose LDT changed (x86_64, [`refresh_ldt_in`]): each reloads its
-//! LDT-backed ds and es before acknowledging, as Linux's install_ldt does
-//! with on_each_cpu_mm(flush_ldt). A request names what it asks for, a
-//! flush, a refresh or both, per CPU.
+//! **LDT refresh.** The same request reaches every other CPU after an LDT
+//! changed (x86_64, [`refresh_ldt_everywhere`]): each whose task uses that
+//! table reloads its LDT-backed ds and es before acknowledging, as Linux's
+//! install_ldt does with on_each_cpu_mm(flush_ldt). A request names what it
+//! asks for, a flush, a refresh or both, per CPU.
 //!
 //! **Targeted flushes (N-262).** A change to a user address space only has to
 //! reach the CPUs running it: user mappings are not global and PCIDs are not
@@ -163,17 +163,24 @@ fn remote(addr: Option<u64>) {
     remote_to(u64::MAX, addr);
 }
 
-/// x86_64: after a write to the LDT of address space `root`, every other
-/// CPU running it reloads its LDT-backed ds and es; returns once each has
+/// x86_64: after a write to an LDT, every other online CPU reloads its
+/// LDT-backed ds and es if its task uses that table; returns once each has
 /// (the writer refreshes its own first, `arch::x86_64::ldt::write_ldt`).
-pub fn refresh_ldt_in(root: u64) {
-    if crate::arch::smp_boot::online_cpus() <= 1 {
-        return;
-    }
+/// All of them, not the CPUs on one page-table root: a CLONE_VM process
+/// that is not a thread shares the table under a root of its own, where
+/// Linux's mm_cpumask covers it (PR #50 review). A write is rare and each
+/// CPU's check is its own task's table.
+pub fn refresh_ldt_everywhere() {
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-    x86::request(cpus_on(root), x86::REFRESH_LDT);
-    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
-    let _ = root;
+    {
+        let online = crate::arch::smp_boot::online_cpus() as usize;
+        if online > 1 {
+            let me = crate::arch::percpu::this_cpu_id() as usize;
+            let n = online.min(CPU_ROOT.len()).min(64);
+            let all = if n == 64 { u64::MAX } else { (1u64 << n) - 1 };
+            x86::request(all & !(1u64 << me), x86::REFRESH_LDT);
+        }
+    }
 }
 
 /// Reach the CPUs in `mask` (all of them on RISC-V, which has no user mode

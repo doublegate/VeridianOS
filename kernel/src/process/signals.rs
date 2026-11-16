@@ -2414,7 +2414,8 @@ mod frame {
         // restore_sigcontext): a 32-bit or LDT segment returns there. A
         // 64-bit context without UC_STRICT_RESTORE_SS keeps its stack
         // segment only if usable. A segment that is not usable faults at
-        // the return and becomes a SIGSEGV, as on Linux.
+        // the return, as on Linux: SIGSEGV for a #GP, SIGBUS for a segment
+        // not present (#NP, #SS).
         f.cs = (sc.cs | 3) as u64;
         f.ss = (sc.ss | 3) as u64;
         if frame.uc.uc_flags & 4 == 0
