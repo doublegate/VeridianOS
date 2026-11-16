@@ -391,7 +391,7 @@ pub fn sys_rt_tgsigqueueinfo(tgid: usize, tid: usize, sig: usize, uinfo: usize) 
     if super::process::process_of_thread(tid as usize) != Some(pid) {
         return Err(SyscallError::ProcessNotFound);
     }
-    super::filesystem::kill_one(&caller, pid, 0)?;
+    super::filesystem::kill_one_to(&caller, pid, Some(tid), 0)?;
     if sig == 0 {
         return Ok(0);
     }

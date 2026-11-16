@@ -2585,6 +2585,7 @@ pub fn sys_kill(pid: usize, signal: usize) -> SyscallResult {
 fn may_signal(
     caller: &crate::process::Process,
     target: &crate::process::Process,
+    thread: Option<u64>,
     sig: i32,
 ) -> bool {
     use core::sync::atomic::Ordering;
@@ -2598,25 +2599,35 @@ fn may_signal(
         same_session,
     ) && (caller.pid == target.pid
         || (crate::cap::authority::current_may_act_on_process(target, crate::cap::Rights::WRITE)
-            && landlock_may_signal(target)))
+            && landlock_may_signal(target, thread)))
 }
 
 /// Landlock's signal scope (hook_task_kill): a domain that sets
 /// LANDLOCK_SCOPE_SIGNAL reaches only processes in it or below it; its own
-/// threads always.
-fn landlock_may_signal(target: &crate::process::Process) -> bool {
+/// threads always. The domain checked is the named task's, as
+/// hook_task_kill's: thread `thread` for a thread-directed signal (tkill,
+/// tgkill, rt_tgsigqueueinfo, PIDFD_SIGNAL_THREAD), else the process's
+/// leader. With the leader's domain for a named thread, a sandboxed
+/// process could signal a thread outside its domain whose leader had
+/// restricted itself without TSYNC, which Linux refuses (PR #49
+/// independent review).
+fn landlock_may_signal(target: &crate::process::Process, thread: Option<u64>) -> bool {
     #[cfg(feature = "alloc")]
     {
         use crate::security::landlock as l;
+        let domain = match thread.and_then(|t| target.get_thread(crate::process::ThreadId(t))) {
+            Some(t) => t.landlock.get(),
+            None => l::of_process(target),
+        };
         l::may_reach(
             l::current().as_deref(),
-            l::of_process(target).as_deref(),
+            domain.as_deref(),
             l::ll::scope::SIGNAL,
         )
     }
     #[cfg(not(feature = "alloc"))]
     {
-        let _ = target;
+        let _ = (target, thread);
         true
     }
 }
@@ -2650,8 +2661,19 @@ pub(crate) fn kill_one(
     pid: crate::process::ProcessId,
     sig: i32,
 ) -> SyscallResult {
+    kill_one_to(caller, pid, None, sig)
+}
+
+/// [`kill_one`] for a signal that names thread `thread` of `pid`: the
+/// permission check takes that thread's Landlock domain.
+pub(crate) fn kill_one_to(
+    caller: &crate::process::Process,
+    pid: crate::process::ProcessId,
+    thread: Option<u64>,
+    sig: i32,
+) -> SyscallResult {
     let target = crate::process::table::get_process(pid).ok_or(SyscallError::ProcessNotFound)?;
-    if !may_signal(caller, &target, sig) {
+    if !may_signal(caller, &target, thread, sig) {
         return Err(SyscallError::OperationNotPermitted);
     }
     // A zombie (exited, not yet reaped) takes the signal and discards it,

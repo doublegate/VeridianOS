@@ -11497,6 +11497,14 @@ static int t_ll_errno(long r, int e)
 {
     return r == -1 && errno == e;
 }
+/* Sends its thread id down the pipe, then waits for the process to end. */
+static void *t_ll_tid_thread(void *arg)
+{
+    pid_t tid = (pid_t)syscall(SYS_gettid);
+    if (write(((int *)arg)[1], &tid, sizeof(tid)) != sizeof(tid)) return NULL;
+    for (;;) pause();
+    return NULL;
+}
 static volatile int t_ll_go;
 static void *t_ll_thread(void *arg)
 {
@@ -11730,6 +11738,34 @@ static void test_landlock(void)
     if (t_exit_status(c) != 0) f |= 64;
     kill(outside, SIGKILL);
     waitpid(outside, NULL, 0);
+    /* A thread-directed signal is checked against the named thread's
+     * domain (hook_task_kill on that task): the leader alone restricts
+     * itself (no TSYNC) and forks Q, which may signal the leader, in its
+     * own domain, but not the process's other, unrestricted thread. */
+    c = fork();
+    if (c == 0) {
+        int tp[2];
+        pthread_t t;
+        pid_t ttid = 0;
+        if (pipe(tp) != 0 || pthread_create(&t, NULL, t_ll_tid_thread, tp) != 0 ||
+            read(tp[0], &ttid, sizeof(ttid)) != sizeof(ttid))
+            _exit(2);
+        struct t_ll_attr at = {0};
+        at.scoped = 2; /* LANDLOCK_SCOPE_SIGNAL */
+        int r = (int)syscall(SYS_landlock_create_ruleset, &at, sizeof(at), 0);
+        if (r < 0 || syscall(SYS_landlock_restrict_self, r, 1u << 4 /* NO_NEW_PRIVS */) != 0)
+            _exit(2);
+        pid_t q = fork();
+        if (q == 0) {
+            pid_t pp = getppid();
+            int ok = syscall(SYS_tgkill, pp, pp, 0) == 0 &&
+                     t_ll_errno(syscall(SYS_tgkill, pp, ttid, 0), EPERM);
+            _exit(ok ? 0 : 1);
+        }
+        _exit(t_exit_status(q));
+    }
+    st = t_exit_status(c);
+    if (st != 0) f |= 0x10000 | (st << 20);
     /* Network rules: under a domain handling BIND_TCP, bind() reaches only
      * the ports a rule allows (EACCES otherwise). */
     c = fork();
