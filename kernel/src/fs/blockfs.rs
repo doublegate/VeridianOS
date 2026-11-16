@@ -994,6 +994,11 @@ pub struct BlockFsInner {
     /// new file until the FIFO and socket tables have forgotten them, or a
     /// new FIFO or socket could be found as the old one (PR #20 review).
     reporting_special: Vec<u32>,
+    /// Unlinked inodes whose leftover blocks could not all be freed (an
+    /// indirect block unreadable): neither reused nor reclaimed again,
+    /// since their pointers may name blocks already freed and given to
+    /// other files. What they still hold stays allocated (PR #49 review).
+    poisoned: alloc::collections::BTreeSet<u32>,
 }
 
 /// The wall clock in seconds since 1970, as the inode times are stored
@@ -1044,6 +1049,7 @@ impl BlockFsInner {
             freed_special: Vec::new(),
             holds: Arc::new(InodeHolds::default()),
             reporting_special: Vec::new(),
+            poisoned: alloc::collections::BTreeSet::new(),
         };
 
         // Create "." and ".." entries in the root directory (both point to inode 0)
@@ -1085,23 +1091,27 @@ impl BlockFsInner {
     }
 
     fn allocate_inode(&mut self) -> Option<u32> {
-        let found = self
-            .inode_table
-            .iter()
-            .enumerate()
-            .position(|(idx, inode)| {
-                inode.links_count == 0
-                    && idx > 0
-                    && !self.special_unreported(idx as u32)
-                    && !self.holds.is_held(idx as u32)
-            })?;
         // Don't allocate root. A cache of the inode's previous file must
         // not serve the new one, and blocks a node gave it after its last
-        // unlink go back first (PR #49 review).
-        let _ = self.reclaim_orphan(found as u32);
-        self.superblock.free_inodes -= 1;
-        self.page_cache.invalidate(found as u64);
-        Some(found as u32)
+        // unlink go back first; one whose blocks cannot all go back is
+        // passed over for good (PR #49 review).
+        for idx in 1..self.inode_table.len() as u32 {
+            let inode = &self.inode_table[idx as usize];
+            if inode.links_count != 0
+                || self.special_unreported(idx)
+                || self.holds.is_held(idx)
+                || self.poisoned.contains(&idx)
+            {
+                continue;
+            }
+            if self.reclaim_orphan(idx).is_err() {
+                continue;
+            }
+            self.superblock.free_inodes -= 1;
+            self.page_cache.invalidate(idx as u64);
+            return Some(idx);
+        }
+        None
     }
 
     /// Whether `inode` has no name but still blocks: an unlinked file a
@@ -1118,23 +1128,39 @@ impl BlockFsInner {
     }
 
     /// Free what an unlinked inode still holds, if nothing refers to it
-    /// any more. Its number was counted free at its last unlink.
+    /// any more. Its number was counted free at its last unlink. A failure
+    /// leaves the inode poisoned: never retried, never reused.
     fn reclaim_orphan(&mut self, inode: u32) -> Result<(), KernelError> {
+        if self.poisoned.contains(&inode) {
+            return Err(KernelError::InvalidState {
+                expected: "reclaimable inode",
+                actual: "earlier reclamation failed",
+            });
+        }
         if self.is_orphan_with_blocks(inode) && !self.holds.is_held(inode) {
-            self.free_inode_blocks(inode)?;
+            if let Err(e) = self.free_inode_blocks(inode) {
+                self.poisoned.insert(inode);
+                return Err(e);
+            }
         }
         Ok(())
     }
 
-    /// Every orphan's blocks back, when the bitmap ran out.
+    /// Every orphan's blocks back, when the bitmap ran out: whether any
+    /// came back. A failed one is poisoned and skipped from then on.
     fn reclaim_orphans(&mut self) -> bool {
         let orphans: Vec<u32> = (1..self.inode_table.len() as u32)
-            .filter(|&i| self.is_orphan_with_blocks(i) && !self.holds.is_held(i))
+            .filter(|&i| {
+                self.is_orphan_with_blocks(i)
+                    && !self.holds.is_held(i)
+                    && !self.poisoned.contains(&i)
+            })
             .collect();
+        let mut any = false;
         for &i in &orphans {
-            let _ = self.free_inode_blocks(i);
+            any |= self.reclaim_orphan(i).is_ok();
         }
-        !orphans.is_empty()
+        any
     }
 
     /// Allocate a block. Its contents start as zeros and are dirty, so the
@@ -1662,6 +1688,7 @@ impl BlockFsInner {
             freed_special: Vec::new(),
             holds: Arc::new(InodeHolds::default()),
             reporting_special: Vec::new(),
+            poisoned: alloc::collections::BTreeSet::new(),
         };
         fs.attach_disk(backend)?;
 
@@ -3607,6 +3634,26 @@ mod tests {
         // while the orphan keeps its four.
         let data = (start as usize - 4) * BLOCK_SIZE;
         assert!(big.write(0, &alloc::vec![2u8; data]).is_ok());
+    }
+
+    /// An orphan whose reclamation failed (poisoned) keeps its number out
+    /// of use, so its stale block pointers are never followed again (PR
+    /// #49 review).
+    #[test]
+    fn a_poisoned_orphan_is_never_reused() {
+        let fs = BlockFs::format(128, 16).unwrap();
+        let root = fs.root();
+        let perms = Permissions::from_mode(0o644);
+        let f = root.create("f", perms).unwrap();
+        let ino = crate::fs::inode_key(&f).1 as u32;
+        root.unlink("f").unwrap();
+        f.write(0, &[3u8; 4096]).unwrap();
+        drop(f);
+        fs.inner.write().poisoned.insert(ino);
+        for i in 0..8 {
+            let g = root.create(&alloc::format!("g{i}"), perms).unwrap();
+            assert_ne!(crate::fs::inode_key(&g).1 as u32, ino);
+        }
     }
 
     /// statfs reports the superblock's counts, and they move as a file
