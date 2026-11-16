@@ -103,8 +103,12 @@ extern "C" fn syscall_exit_prepare(frame: &mut SyscallFrame) -> u64 {
     }
     drop(irq);
     super::trap::sanitize_user_frame(frame);
+    // SYSRETQ returns to the 64-bit pair only; a sigreturn into a 32-bit
+    // or LDT segment goes through iretq.
     let sysret_ok = frame.rcx == frame.rip
         && frame.r11 == frame.rflags
+        && frame.cs == super::trap::USER_CS
+        && frame.ss == super::trap::USER_SS
         && frame.rip < super::trap::USER_END - 4096;
     sysret_ok as u64
 }
@@ -210,6 +214,9 @@ pub unsafe extern "C" fn syscall_entry() {
         "2:",
         "add rsp, 16",                // vector, error_code
         "swapgs",
+        // A fault here is the user's (trap_common's bad_iret check).
+        ".globl veridian_iret_syscall",
+        "veridian_iret_syscall:",
         "iretq",
 
         handler = sym syscall_handler,
@@ -217,6 +224,22 @@ pub unsafe extern "C" fn syscall_entry() {
         user_ss = const super::trap::USER_SS,
         user_cs = const super::trap::USER_CS,
         rax_off = const core::mem::offset_of!(super::trap::TrapFrame, rax),
+    );
+}
+
+/// SYSCALL from compatibility mode (IA32_CSTAR): Linux's
+/// entry_SYSCALL32_ignore. No 32-bit system calls exist (no IA32
+/// emulation), so the call returns ENOSYS at once with SYSRETL to the
+/// 32-bit caller (ECX, R11). Nothing here touches the stack or GS.
+///
+/// # Safety
+/// Only the CPU's SYSCALL instruction enters here.
+#[unsafe(naked)]
+unsafe extern "C" fn syscall32_ignore() {
+    core::arch::naked_asm!(
+        "mov eax, -38",
+        // sysretl: SYSRET without REX.W (0F 07).
+        ".byte 0x0f, 0x07",
     );
 }
 
@@ -272,15 +295,20 @@ pub fn init_syscall_msrs() {
 
     // Set up SYSCALL entry point
     LStar::write(x86_64::VirtAddr::new(syscall_entry as usize as u64));
+    // SYSCALL from compatibility mode (a 32-bit segment, reachable through
+    // __USER32_CS or the LDT): ENOSYS, as Linux without IA32 emulation.
+    // SAFETY: IA32_CSTAR takes any canonical address; this one is the stub.
+    unsafe {
+        x86_64::registers::model_specific::Msr::new(0xC000_0083)
+            .write(syscall32_ignore as usize as u64)
+    };
 
     // Set up segment selectors for SYSCALL/SYSRET transitions.
     //
-    // GDT layout after gdt::init():
-    //   0x08: Kernel CS (Ring 0)
-    //   0x10: Kernel DS (Ring 0)
-    //   0x18: TSS (occupies 2 entries)
-    //   0x28: User Data (Ring 3, selector 0x2B with RPL)
-    //   0x30: User Code (Ring 3, selector 0x33 with RPL)
+    // GDT layout after gdt::init() (Linux's, see `gdt::GDT_ENTRIES`):
+    //   0x08: Kernel CS, 0x10: Kernel DS
+    //   0x20: User Code 32-bit (0x23), 0x28: User Data (0x2B),
+    //   0x30: User Code 64-bit (0x33); TSS at 0x40, LDT at 0x50
     //
     // Star::write validates:
     //   cs_sysret(0x33) - 16 = 0x23 == ss_sysret(0x2B) - 8 = 0x23  (match)
@@ -289,7 +317,8 @@ pub fn init_syscall_msrs() {
     //   ss_syscall RPL = 0 (Ring0)                                    (correct)
     //
     // Internally writes STAR[63:48] = ss_sysret - 8 = 0x23, which means:
-    //   SYSRET: CS = 0x23+16 = 0x33 (user code), SS = 0x23+8 = 0x2B (user data)
+    //   SYSRETQ: CS = 0x23+16 = 0x33 (user code), SS = 0x23+8 = 0x2B (user data)
+    //   SYSRETL: CS = 0x23 (32-bit user code), SS = 0x2B
     Star::write(
         sels.user_code_selector, // User CS for SYSRET (0x33)
         sels.user_data_selector, // User SS for SYSRET (0x2B)

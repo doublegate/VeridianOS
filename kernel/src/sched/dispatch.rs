@@ -94,6 +94,10 @@ struct ArchState {
     user_rsp: u64,
     #[cfg(target_arch = "x86_64")]
     syscall_frame: u64,
+    /// The data segment registers the thread loaded (ds, es, fs, gs),
+    /// kept across switches as Linux's `thread.ds` and friends.
+    #[cfg(target_arch = "x86_64")]
+    segs: crate::arch::x86_64::ldt::Segments,
     /// RISC-V: the physical root of the task's address space (satp), and
     /// this CPU's user-entry state while the task runs: the kernel stack a
     /// trap from user mode lands on and the user frame of the trap in
@@ -158,6 +162,13 @@ pub struct Task {
     /// rule as `saved_sp`.
     #[cfg(target_arch = "x86_64")]
     xsave: UnsafeCell<Option<crate::arch::x86_64::switch::xsave::Area>>,
+    /// x86_64: the LDT slot of the task's address space (modify_ldt), whose
+    /// table, once made, is loaded at each switch-in. Holding it keeps the
+    /// table alive until the task is off every CPU. Changed only at exec
+    /// ([`set_process_ldt_slot`]), with interrupts off, so the switch on
+    /// the same CPU never waits for it. None for a kernel thread.
+    #[cfg(all(target_arch = "x86_64", feature = "alloc"))]
+    ldt: Mutex<Option<Arc<crate::arch::x86_64::ldt::LdtSlot>>>,
     /// AArch64 and RISC-V: the user FP/SIMD registers, switched eagerly the
     /// same way (both kernels are soft-float, N-178). Same access rule.
     #[cfg(target_arch = "aarch64")]
@@ -199,6 +210,8 @@ impl Task {
             usage: super::cputime::CpuUsage::new(),
             #[cfg(target_arch = "x86_64")]
             xsave: UnsafeCell::new(None),
+            #[cfg(all(target_arch = "x86_64", feature = "alloc"))]
+            ldt: Mutex::new(None),
             #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
             fp: UnsafeCell::new(None),
         }
@@ -802,6 +815,7 @@ unsafe fn arch_switch(prev: *const Task, next: *const Task) {
             .as_u64();
         a.fs_base = switch::read_fs_base();
         a.user_gs_base = switch::read_user_gs_base();
+        a.segs = crate::arch::x86_64::ldt::read_segments();
         a.entry_stack = (*cpu).kernel_rsp;
         a.user_rsp = (*cpu).user_rsp;
         a.syscall_frame = (*cpu).syscall_frame;
@@ -815,14 +829,26 @@ unsafe fn arch_switch(prev: *const Task, next: *const Task) {
 
         let b = &*(*next).arch.get();
         switch::switch_address_space(b.cr3);
-        // Validated where it was set; a non-canonical value would #GP here.
-        switch::write_fs_base(if crate::arch::x86_64::trap::is_user_address(b.fs_base) {
-            b.fs_base
-        } else {
-            0
-        });
-        // Read from the MSR when the task was switched out, so canonical.
-        switch::write_user_gs_base(b.user_gs_base);
+        // The task's LDT, then its segment registers checked against it.
+        // A selector in fs or gs brings its own base from its descriptor
+        // (Linux's load_seg_legacy); a null one takes the saved base.
+        let (fs_sel, gs_sel) = {
+            let slot = (*next).ldt.lock();
+            let ldt = slot.as_ref().and_then(|s| s.get());
+            crate::arch::x86_64::ldt::switch_in(ldt.map(|t| &**t), a.segs, b.segs)
+        };
+        if !fs_sel {
+            // Validated where it was set; a non-canonical value would #GP here.
+            switch::write_fs_base(if crate::arch::x86_64::trap::is_user_address(b.fs_base) {
+                b.fs_base
+            } else {
+                0
+            });
+        }
+        if !gs_sel {
+            // Read from the MSR when the task was switched out, so canonical.
+            switch::write_user_gs_base(b.user_gs_base);
+        }
         crate::arch::percpu::set_entry_stack(b.entry_stack);
         (*cpu).user_rsp = b.user_rsp;
         (*cpu).syscall_frame = b.syscall_frame;
@@ -1956,8 +1982,9 @@ pub fn spawn_user(
 
 /// Start a user thread as a task: its first switch-in enters ring 3 with
 /// `frame`, on address space `cr3`, with TLS base `fs_base` and vector
-/// state `xsave` and user GS base `gs_base`, scheduled with the thread's
-/// `policy` on the CPUs in `affinity`.
+/// state `xsave` and user GS base `gs_base`, segment registers `segs` and
+/// its address space's LDT slot `ldt`, scheduled with the thread's `policy` on
+/// the CPUs in `affinity`.
 #[cfg(target_arch = "x86_64")]
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_user(
@@ -1967,12 +1994,16 @@ pub fn spawn_user(
     fs_base: u64,
     xsave: crate::arch::x86_64::switch::xsave::Area,
     gs_base: u64,
+    segs: crate::arch::x86_64::ldt::Segments,
+    ldt: Arc<crate::arch::x86_64::ldt::LdtSlot>,
     policy: Policy,
     affinity: u64,
 ) -> Result<TaskKey, KernelError> {
     #[cfg(not(target_os = "none"))]
     {
-        let _ = (owner, frame, cr3, fs_base, xsave, gs_base, policy, affinity);
+        let _ = (
+            owner, frame, cr3, fs_base, xsave, gs_base, segs, ldt, policy, affinity,
+        );
         Err(KernelError::NotImplemented {
             feature: "user tasks on the host",
         })
@@ -1994,12 +2025,14 @@ pub fn spawn_user(
         let usable = affinity & dispatching_mask();
         *task.affinity.get_mut() = if usable != 0 { affinity } else { u64::MAX };
         *task.xsave.get_mut() = Some(xsave);
+        *task.ldt.get_mut() = Some(ldt);
         // SAFETY: the stack was just allocated for this task and is unused.
         let sp = unsafe { crate::arch::x86_64::switch::seed_user_thread(top, frame) };
         *task.saved_sp.get_mut() = sp;
         let arch = task.arch.get_mut();
         arch.cr3 = cr3;
         arch.fs_base = fs_base;
+        arch.segs = segs;
         // Written to the MSR at every switch-in: it must be canonical.
         arch.user_gs_base = if crate::arch::x86_64::trap::is_user_address(gs_base) {
             gs_base
@@ -2296,6 +2329,28 @@ pub fn tasks_of(pid: u64) -> Vec<Arc<Task>> {
         .filter(|t| t.owner.is_some_and(|(p, _)| p == pid))
         .cloned()
         .collect()
+}
+
+/// x86_64: the LDT of the task running on this CPU.
+#[cfg(target_arch = "x86_64")]
+pub fn current_ldt() -> Option<Arc<crate::arch::x86_64::ldt::Ldt>> {
+    let irq = irq_save();
+    let t = current().and_then(|t| t.ldt.lock().as_ref().and_then(|s| s.get().cloned()));
+    irq_restore(irq);
+    t
+}
+
+/// x86_64: every task of process `pid` takes LDT slot `slot` (exec's fresh
+/// one). Interrupts are off while each task's slot is held, so a switch on
+/// the same CPU never waits for it.
+#[cfg(target_arch = "x86_64")]
+pub fn set_process_ldt_slot(pid: u64, slot: &Arc<crate::arch::x86_64::ldt::LdtSlot>) {
+    for t in tasks_of(pid) {
+        let irq = irq_save();
+        let old = t.ldt.lock().replace(slot.clone());
+        irq_restore(irq);
+        drop(old);
+    }
 }
 
 /// Wait inside a system call for "something to happen" (data, a child, a

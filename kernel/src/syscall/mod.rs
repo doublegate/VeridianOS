@@ -1782,6 +1782,8 @@ fn handle_syscall(
         #[cfg(feature = "alloc")]
         Syscall::Acct => acct::sys_acct(arg1),
         Syscall::Iopl => system::sys_iopl(arg1),
+        #[cfg(all(target_arch = "x86_64", feature = "alloc"))]
+        Syscall::ModifyLdt => crate::arch::x86_64::ldt::sys_modify_ldt(arg1, arg2, arg3),
         Syscall::Ioperm => system::sys_ioperm(arg1, arg2, arg3),
         Syscall::LsmListModules => lsm::sys_lsm_list_modules(arg1, arg2, arg3),
         Syscall::LsmGetSelfAttr => lsm::sys_lsm_get_self_attr(arg1, arg2, arg3, arg4),

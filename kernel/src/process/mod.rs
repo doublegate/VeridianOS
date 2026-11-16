@@ -323,12 +323,15 @@ pub fn current_thread() -> Option<alloc::sync::Arc<Thread>> {
 /// Start `thread` of `process` as a dispatcher task (ADR 0006 stage D2):
 /// it enters ring 3 with the registers in its saved context. `inherit_fpu`
 /// gives it a copy of the calling thread's live vector registers (fork,
-/// clone) instead of the initial state (a new program).
+/// clone) instead of the initial state (a new program). `settls`: clone
+/// passed CLONE_SETTLS, so the context's TLS base is the new FS base,
+/// whatever its value, 0 included (PR #50 review).
 #[cfg(all(feature = "alloc", target_arch = "x86_64"))]
 pub fn start_thread(
     process: &Process,
     thread: &Thread,
     inherit_fpu: bool,
+    settls: bool,
 ) -> crate::error::KernelResult<()> {
     use crate::arch::x86_64::switch::{xsave::Area, UserFrame};
 
@@ -348,7 +351,15 @@ pub fn start_thread(
             actual: "no page table",
         });
     }
-    let fs_base = if ctx_tls != 0 {
+    // A clone or fork without CLONE_SETTLS gets the parent's FS base as it
+    // is now (copy_thread copies the live fsbase), 0 included, as gs takes
+    // the live user GS base below; the process's saved TLS base would
+    // bring back one the parent had cleared (PR #50 review).
+    let fs_base = if settls {
+        ctx_tls
+    } else if inherit_fpu {
+        crate::arch::x86_64::switch::read_fs_base()
+    } else if ctx_tls != 0 {
         ctx_tls
     } else {
         process.tls_fs_base.load(Ordering::Acquire)
@@ -368,12 +379,31 @@ pub fn start_thread(
     // A new thread or a fork child inherits the caller's GS base (Linux
     // copies it with the thread); a fresh program starts with 0.
     let mut gs_base = 0;
+    // Likewise its segment registers (copy_thread); a fresh program has
+    // them null.
+    // Assigned only on the bare-metal build (the host has no registers to
+    // read).
+    #[cfg_attr(not(target_os = "none"), allow(unused_mut))]
+    let mut segs = crate::arch::x86_64::ldt::Segments::default();
     if inherit_fpu {
         // The kernel is soft-float, so the CPU still holds the calling
         // thread's user vector state.
         area.save();
         gs_base = crate::arch::x86_64::switch::read_user_gs_base();
+        #[cfg(target_os = "none")]
+        {
+            segs = crate::arch::x86_64::ldt::read_segments();
+        }
+        // CLONE_SETTLS: fs takes the new base, so its selector is null, or
+        // the first switch-in would load the parent's descriptor base over
+        // it (Linux's copy_thread clears fsindex). The request decides, not
+        // the base: a fork copies a nonzero base with the parent's selector,
+        // and CLONE_SETTLS may ask for base 0 (PR #50 review).
+        if settls {
+            segs.fs = 0;
+        }
     }
+    let ldt = process.ldt.lock().clone();
     process
         .dispatched
         .store(true, core::sync::atomic::Ordering::Release);
@@ -385,6 +415,8 @@ pub fn start_thread(
         fs_base,
         area,
         gs_base,
+        segs,
+        ldt,
         policy,
         thread.get_affinity() as u64,
     )?;
@@ -394,12 +426,14 @@ pub fn start_thread(
 /// RISC-V: start `thread` as a dispatcher task entering user mode with the
 /// registers of its saved context (pc, sp, gp, tp, the argument registers).
 /// `inherit_fpu` gives it a copy of the calling thread's live FP registers
-/// (fork, clone) instead of the initial state (a new program).
+/// (fork, clone) instead of the initial state (a new program). `_settls`
+/// is x86_64's: tp comes with the context, and there are no segments.
 #[cfg(all(feature = "alloc", target_arch = "riscv64", target_os = "none"))]
 pub fn start_thread(
     process: &Process,
     thread: &Thread,
     inherit_fpu: bool,
+    _settls: bool,
 ) -> crate::error::KernelResult<()> {
     use crate::arch::riscv64::switch::UserFrame;
     let mut fp = crate::arch::riscv64::fpu::initial();
@@ -481,12 +515,15 @@ pub(crate) fn load_live_user_registers(ctx: &mut crate::arch::context::ArchThrea
 /// AArch64: start `thread` as a dispatcher task entering EL0 with the
 /// registers of its saved context (x0-x30, sp, pc) and its TLS register
 /// (TPIDR_EL0). `inherit_fpu` gives it a copy of the calling thread's live
-/// FP/SIMD registers (fork, clone) instead of the initial state.
+/// FP/SIMD registers (fork, clone) instead of the initial state. `_settls`
+/// is x86_64's: TPIDR_EL0 comes with the context, and there are no
+/// segments.
 #[cfg(all(feature = "alloc", target_arch = "aarch64", target_os = "none"))]
 pub fn start_thread(
     process: &Process,
     thread: &Thread,
     inherit_fpu: bool,
+    _settls: bool,
 ) -> crate::error::KernelResult<()> {
     use crate::arch::aarch64::switch::UserFrame;
     let mut fp = crate::arch::aarch64::context::initial_fpu();
@@ -580,7 +617,7 @@ pub fn run_and_wait_all(pids: &[ProcessId]) -> alloc::vec::Vec<Option<i32>> {
         .map(|&pid| {
             let process = table::get_process(pid)?;
             let thread = process.threads.lock().values().next().cloned()?;
-            if start_thread(&process, &thread, false).is_err() {
+            if start_thread(&process, &thread, false, false).is_err() {
                 // Never ran: free its address space, tables and stacks, as
                 // the shell's launch path did (PR #19 review).
                 exit::discard_unstarted(&process);

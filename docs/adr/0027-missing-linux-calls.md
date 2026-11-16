@@ -407,6 +407,24 @@ The reference for every behaviour below is the Linux 7.3 source (kernel.org tarb
       build) and SBI SRST (or the legacy shutdown call), halting where it
       does not take. As on Linux nothing is synced. KEXEC and SW_SUSPEND are EINVAL, as a
       Linux built without kexec and hibernation; kexec has its plan in MASTER_TODO item 18.
+    - **modify_ldt** (x86_64) is Linux's with MODIFY_LDT_SYSCALL=y, X86_16BIT=n and no IA32
+      emulation: functions 0, 1, 2 and 0x11, fill_ldt's descriptors, the same EINVAL rules
+      (16-bit segments among them) and the unsigned 32-bit result. The GDT takes Linux's
+      layout, so `__USER32_CS` (0x23) exists and a 32-bit program segment can run; a SYSCALL
+      from compatibility mode is ENOSYS and `int 0x80` a SIGSEGV, as without IA32 emulation.
+      Where Linux replaces the table on each write and switches every CPU with an IPI, each
+      address space has one fixed 8,192-entry table, made on the first write and written in
+      place, in a slot set once (exec gives a fresh slot) that every task of the address
+      space holds and reads at each switch-in, so it is freed only once no CPU can name it.
+      A write reloads the LDT-backed ds and es of every CPU running the address space before
+      it returns, the others through the shootdown IPI (Linux's flush_ldt). A CPU that has
+      not loaded a table made after its thread was switched in loads it on that thread's
+      first LDT fault, which then runs again. The ds, es, fs and gs selectors are kept per thread
+      and checked against the table, under its lock, before each load, so a switch never
+      faults; a return to ring 3 on a segment cleared meanwhile faults on its `iretq`, which
+      is taken as the program's fault (Linux's bad_iret), with the signal Linux's trap for it
+      delivers: SIGSEGV for a #GP, SIGBUS for a #NP or #SS. Signals follow Linux's
+      cs and ss rules (64-bit handlers; sigreturn restores the saved segments).
 
 ## Consequences
 

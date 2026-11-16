@@ -51,6 +51,9 @@ pub struct ArchCpu {
     /// the CPU switches to for an interrupt or exception from ring 3. Kept
     /// equal to `kernel_rsp` by [`set_entry_stack`].
     pub rsp0_slot: u64,
+    /// x86_64: base of the LDT this CPU's LDTR holds, 0 for none
+    /// (`arch::x86_64::ldt::install`).
+    pub ldt_loaded: u64,
 }
 
 const _: () = {
@@ -64,6 +67,7 @@ const _: () = {
     assert!(core::mem::offset_of!(ArchCpu, local_ticks) == 0x30);
     assert!(core::mem::offset_of!(ArchCpu, ipis) == 0x38);
     assert!(core::mem::offset_of!(ArchCpu, rsp0_slot) == 0x40);
+    assert!(core::mem::offset_of!(ArchCpu, ldt_loaded) == 0x48);
     assert!(core::mem::size_of::<ArchCpu>() == 128);
 };
 
@@ -89,6 +93,7 @@ impl ArchCpuCell {
             local_ticks: 0,
             ipis: core::sync::atomic::AtomicU64::new(0),
             rsp0_slot: 0,
+            ldt_loaded: 0,
         }))
     }
 

@@ -108,7 +108,8 @@ pub(crate) fn sys_fork_with(opts: &crate::process::fork::ForkOptions) -> Syscall
                 if crate::sched::dispatch::current_owner().is_some() {
                     let thread = child_process.threads.lock().values().next().cloned();
                     let started = thread.is_some_and(|t| {
-                        crate::process::start_thread(&child_process, &t, true).is_ok()
+                        crate::process::start_thread(&child_process, &t, true, opts.tls.is_some())
+                            .is_ok()
                     });
                     if !started {
                         // The TID words first, the child's then the
@@ -337,6 +338,10 @@ pub fn sys_execveat(
                         }
                     }
                 }
+
+                // No LDT and null segment registers in the new program.
+                #[cfg(all(target_os = "none", feature = "alloc"))]
+                crate::arch::x86_64::ldt::exec_reset();
 
                 // Set FS_BASE (MSR 0xC0000100) for TLS if the process has one.
                 // Must be done BEFORE enter_usermode since iretq doesn't

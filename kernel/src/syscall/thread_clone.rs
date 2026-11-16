@@ -887,7 +887,7 @@ fn thread_clone(
     // The new thread runs as its own dispatcher task (stage D2), starting
     // from the registers prepared above and a copy of the caller's vector
     // state. (CLONE_CHILD_CLEARTID is honoured by exit_dispatched.)
-    if crate::process::start_thread(&proc, &thread, true).is_err() {
+    if crate::process::start_thread(&proc, &thread, true, req.on(CLONE_SETTLS)).is_err() {
         #[cfg(feature = "alloc")]
         {
             let keys = core::mem::take(&mut *thread.keys.lock());

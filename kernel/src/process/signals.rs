@@ -2199,6 +2199,14 @@ mod frame {
                     pad: 0,
                     ss_size: saved_alt.size,
                 },
+                // UC_SIGCONTEXT_SS, and UC_STRICT_RESTORE_SS for a 64-bit
+                // context (Linux's frame_uc_flags; FXSAVE, so no
+                // UC_FP_XSTATE).
+                uc_flags: 2 | if f.cs == crate::arch::x86_64::trap::USER_CS {
+                    4
+                } else {
+                    0
+                },
                 uc_mcontext: sc,
                 uc_sigmask: old_mask,
                 ..Default::default()
@@ -2222,6 +2230,15 @@ mod frame {
         f.rax = 0;
         // DF, TF and RF cleared (Linux), the rest sanitised on return.
         f.rflags &= !(0x400 | 0x100 | 0x1_0000);
+        // The handler runs in 64-bit mode; the stack segment is kept if it
+        // is a usable one (DOSEMU relies on it), else the default (Linux's
+        // setup_rt_frame and force_valid_ss).
+        f.cs = crate::arch::x86_64::trap::USER_CS;
+        if f.ss != crate::arch::x86_64::trap::USER_SS
+            && !crate::arch::x86_64::trap::valid_user_ss(f.ss)
+        {
+            f.ss = crate::arch::x86_64::trap::USER_SS;
+        }
 
         // Block sa_mask, and the signal itself unless SA_NODEFER.
         let mut blocked = thread.sigmask.load(Ordering::Acquire) | sa_mask;
@@ -2393,6 +2410,20 @@ mod frame {
         f.rsp = sc.rsp;
         f.rip = sc.rip;
         f.rflags = sc.eflags;
+        // The saved code and stack segments, at RPL 3 (Linux's
+        // restore_sigcontext): a 32-bit or LDT segment returns there. A
+        // 64-bit context without UC_STRICT_RESTORE_SS keeps its stack
+        // segment only if usable. A segment that is not usable faults at
+        // the return, as on Linux: SIGSEGV for a #GP, SIGBUS for a segment
+        // not present (#NP, #SS).
+        f.cs = (sc.cs | 3) as u64;
+        f.ss = (sc.ss | 3) as u64;
+        if frame.uc.uc_flags & 4 == 0
+            && f.cs == crate::arch::x86_64::trap::USER_CS
+            && !crate::arch::x86_64::trap::valid_user_ss(f.ss)
+        {
+            f.ss = crate::arch::x86_64::trap::USER_SS;
+        }
         sanitize_user_frame(f);
         set_mask(&process, &thread, frame.uc.uc_sigmask);
         // The alternate stack settings the handler was entered with. As on

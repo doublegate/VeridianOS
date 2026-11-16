@@ -158,7 +158,7 @@
 - The syscall coverage reports count the calls that return ENOSYS by a recorded decision
   (modules, kexec, swap, uprobes, NUMA, disk quotas, perf_event_open, bpf) as `declined`, each
   with its reason and the release planned to bring it in (MASTER_TODO item 18), apart from
-  the `missing` ones still to be written: 19 missing on x86_64, 17 on AArch64, 19 on RISC-V.
+  the `missing` ones still to be written: 18 missing on x86_64, 17 on AArch64, 19 on RISC-V.
 - syslog(2) and the kernel log ring (ADR 0027 decision 29): every line the kernel prints is
   kept in syslog's form in a 128 KiB ring; READ (waiting), READ_ALL, READ_CLEAR, CLEAR,
   CONSOLE_OFF, CONSOLE_ON, CONSOLE_LEVEL, SIZE_UNREAD and SIZE_BUFFER, each that needs
@@ -184,6 +184,16 @@
   after stopping the other CPUs, and CAD_ON/CAD_OFF. ACPI power-off uses the DSDT's `\_S5`
   sleep type, and PSCI the device tree's conduit in every build.
   Runtime test reboot.
+- modify_ldt(2) on x86_64 (Linux 7.3 `arch/x86/kernel/ldt.c`, ADR 0027 decision 29): read,
+  write (old and new rules), the default table, Linux's descriptors and EINVAL rules, and its
+  unsigned 32-bit result. The GDT now has Linux's layout, with the 32-bit user code segment
+  0x23 (TSS at 0x40, LDT at 0x50); a thread's ds, es, fs and gs survive switches, a write
+  reloads LDT-backed ds and es on every CPU running the address space before it returns
+  (Linux's flush_ldt), CLONE_VM shares the table, fork copies it and exec drops it; SYSCALL from compatibility mode is ENOSYS; a return to a
+  segment another thread cleared is the program's fault, not a kernel fault (Linux's bad_iret:
+  SIGSEGV for a #GP, SIGBUS for a #NP or #SS, as its traps deliver them); signal
+  handlers enter in 64-bit mode and sigreturn restores the saved code and stack segments.
+  Runtime test modify_ldt.
 - BlockFS does not give a deleted file's inode number to a new file while a node in memory
   still names it (an open file, a working directory, a Landlock rule), as Linux keeps an
   inode until its last reference goes. A rule, FIFO or socket binding on the old file can no
@@ -893,6 +903,11 @@
 
 ### Fixed
 
+- `semget` no longer walks every semaphore set to check SEMMNS: the namespace keeps the number
+  of semaphores in use as sets are made and removed, as Linux's `used_sems` does, and SEM_INFO
+  reads the same count. Creating set n cost a walk over n sets, so LTP `semget05`, which makes
+  sets until SEMMNI (32,000), took 32 of its 60 seconds and timed out whenever the host was
+  busy.
 - No limit on threads per process, as on Linux: the cap of 256 is gone, and thread creation is
   limited only by RLIMIT_NPROC per real user and by `kernel.threads-max` for the whole system
   (new, `/proc/sys/kernel/threads-max`, root-writable within 20..=0x3fffffff; by default as many

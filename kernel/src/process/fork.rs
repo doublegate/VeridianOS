@@ -240,6 +240,30 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
             }
         }
 
+        // The LDT (modify_ldt): the same table for a CLONE_VM child, whose
+        // address space it describes too; a copy otherwise (Linux's
+        // ldt_dup_context at fork).
+        #[cfg(all(target_arch = "x86_64", feature = "alloc"))]
+        {
+            // A CLONE_VM child shares the slot itself, so a table made after
+            // the clone is both processes' (PR #50 review).
+            let parent = current_process.ldt.lock().clone();
+            let child = if opts.share_vm {
+                parent
+            } else {
+                let copy = match parent.get() {
+                    Some(t) => Some(t.duplicate().ok_or(KernelError::OutOfMemory {
+                        requested: crate::arch::x86_64::ldt::LDT_ENTRIES
+                            * crate::arch::x86_64::ldt::LDT_ENTRY_SIZE,
+                        available: 0,
+                    })?),
+                    None => None,
+                };
+                crate::arch::x86_64::ldt::new_slot(copy)
+            };
+            *new_process.ldt.lock() = child;
+        }
+
         // Clone capabilities
         {
             let current_caps = current_process.capability_space.lock();

@@ -1,9 +1,8 @@
 // Global Descriptor Table
 
-use lazy_static::lazy_static;
 use x86_64::{
     structures::{
-        gdt::{Descriptor, GlobalDescriptorTable, SegmentSelector},
+        gdt::{Descriptor, SegmentSelector},
         tss::TaskStateSegment,
     },
     VirtAddr,
@@ -73,41 +72,139 @@ fn rsp0_slot(tss: *mut TaskStateSegment) -> u64 {
     unsafe { core::ptr::addr_of_mut!((*tss).privilege_stack_table[0]) as u64 }
 }
 
-lazy_static! {
-    static ref GDT: (GlobalDescriptorTable, Selectors) = {
-        let mut gdt = GlobalDescriptorTable::new();
-        let code_selector = gdt.append(Descriptor::kernel_code_segment());     // 0x08
-        let data_selector = gdt.append(Descriptor::kernel_data_segment());     // 0x10
-        // SAFETY: the TSS is a static that lives for the kernel's lifetime;
-        // `init` fills it in before the selector is loaded.
-        let tss_selector = gdt.append(unsafe { Descriptor::tss_segment_unchecked(TSS.0.get()) }); // 0x18 (2 entries)
-        let user_data_selector = gdt.append(Descriptor::user_data_segment());  // 0x28 (+ RPL 3 = 0x2B)
-        let user_code_selector = gdt.append(Descriptor::user_code_segment());  // 0x30 (+ RPL 3 = 0x33)
-        (
-            gdt,
-            Selectors {
-                code_selector,
-                data_selector,
-                tss_selector,
-                user_data_selector,
-                user_code_selector,
+/// GDT entries: Linux's x86_64 layout (asm/segment.h), so the user
+/// selectors and the 32-bit code segment are where Linux programs (and
+/// modify_ldt users) expect them.
+///
+/// | Selector | Entry |
+/// |---|---|
+/// | 0x08 | kernel code (64-bit) |
+/// | 0x10 | kernel data |
+/// | 0x18 | unused |
+/// | 0x23 | user code, 32-bit (`__USER32_CS`, compatibility mode) |
+/// | 0x2b | user data (`__USER_DS`) |
+/// | 0x33 | user code, 64-bit (`__USER_CS`) |
+/// | 0x38 | unused |
+/// | 0x40 | TSS (two entries) |
+/// | 0x50 | LDT (two entries; written at each switch, `ldt::install`) |
+///
+/// SYSRET's base selector is 0x23: SYSRETQ returns to 0x33 with stack
+/// 0x2b, SYSRETL to 0x23 with 0x2b (STAR, `syscall::init_syscall_msrs`).
+pub const GDT_ENTRIES: usize = 12;
+pub const KERNEL_CS: u16 = 0x08;
+pub const KERNEL_DS: u16 = 0x10;
+pub const USER32_CS: u16 = 0x23;
+pub const USER_DS: u16 = 0x2b;
+pub const USER_CS: u16 = 0x33;
+pub const TSS_SELECTOR: u16 = 0x40;
+pub const LDT_SELECTOR: u16 = 0x50;
+
+/// Linux's descriptors (GDT_ENTRY_INIT in cpu/common.c), accessed bit set.
+const KERNEL_CS_DESC: u64 = 0x00af_9b00_0000_ffff;
+const KERNEL_DS_DESC: u64 = 0x00cf_9300_0000_ffff;
+const USER32_CS_DESC: u64 = 0x00cf_fb00_0000_ffff;
+const USER_DS_DESC: u64 = 0x00cf_f300_0000_ffff;
+const USER_CS_DESC: u64 = 0x00af_fb00_0000_ffff;
+
+/// One CPU's GDT. Atomic entries, because the LDT slot is rewritten while
+/// the table is loaded (and the CPU itself sets the TSS busy bit).
+#[repr(C, align(16))]
+pub struct Gdt([core::sync::atomic::AtomicU64; GDT_ENTRIES]);
+
+impl Gdt {
+    const fn new() -> Self {
+        Self([const { core::sync::atomic::AtomicU64::new(0) }; GDT_ENTRIES])
+    }
+
+    /// Fill in every entry, with the TSS at `tss`.
+    fn fill(&self, tss: *const TaskStateSegment) {
+        use core::sync::atomic::Ordering::Relaxed;
+        let e = &self.0;
+        e[1].store(KERNEL_CS_DESC, Relaxed);
+        e[2].store(KERNEL_DS_DESC, Relaxed);
+        e[4].store(USER32_CS_DESC, Relaxed);
+        e[5].store(USER_DS_DESC, Relaxed);
+        e[6].store(USER_CS_DESC, Relaxed);
+        // SAFETY: `tss` lives for the kernel's lifetime (a static or a
+        // leaked box); only its address is used.
+        let tss_desc = unsafe { Descriptor::tss_segment_unchecked(tss) };
+        if let Descriptor::SystemSegment(lo, hi) = tss_desc {
+            e[8].store(lo, Relaxed);
+            e[9].store(hi, Relaxed);
+        }
+    }
+
+    /// Load this table and its segments on the calling CPU.
+    ///
+    /// # Safety
+    /// `self` must live for the kernel's lifetime and be filled in; its
+    /// TSS must not be loaded by another CPU.
+    unsafe fn load(&'static self) {
+        use x86_64::{
+            instructions::{
+                segmentation::{Segment, CS, DS, ES, SS},
+                tables::{lgdt, load_tss},
             },
-        )
-    };
+            structures::DescriptorTablePointer,
+            PrivilegeLevel,
+        };
+        let ptr = DescriptorTablePointer {
+            limit: (GDT_ENTRIES * 8 - 1) as u16,
+            base: VirtAddr::from_ptr(self.0.as_ptr()),
+        };
+        let kcs = SegmentSelector::new(KERNEL_CS >> 3, PrivilegeLevel::Ring0);
+        let kds = SegmentSelector::new(KERNEL_DS >> 3, PrivilegeLevel::Ring0);
+        // SAFETY: the table is valid and permanent (the contract); the
+        // selectors name its kernel code and data entries and its TSS.
+        unsafe {
+            lgdt(&ptr);
+            CS::set_reg(kcs);
+            DS::set_reg(kds);
+            ES::set_reg(kds);
+            SS::set_reg(kds);
+            load_tss(SegmentSelector::new(
+                TSS_SELECTOR >> 3,
+                PrivilegeLevel::Ring0,
+            ));
+            core::arch::asm!("lldt {0:x}", in(reg) 0u16, options(nostack, preserves_flags));
+            // fs and gs null too: firmware leaves its own selectors there,
+            // which this layout makes null or system descriptors, and a
+            // task switched out records them (PR #50 review). gs between two
+            // `swapgs`, so the per-CPU base already in GS_BASE stays.
+            core::arch::asm!(
+                "mov fs, {0:x}", "swapgs", "mov gs, {0:x}", "swapgs",
+                in(reg) 0u16, options(nostack, preserves_flags)
+            );
+        }
+    }
 }
 
-/// GDT segment selectors for kernel and user mode.
+/// The calling CPU's GDT (its GDTR base).
+pub fn this_cpu_gdt() -> u64 {
+    x86_64::instructions::tables::sgdt().base.as_u64()
+}
+
+/// Write the LDT descriptor (two entries at [`LDT_SELECTOR`]) of the GDT at
+/// `gdt` (a `Gdt`'s address, [`this_cpu_gdt`]).
 ///
-/// Layout:
-/// - 0x00: Null descriptor
-/// - 0x08: Kernel code segment (Ring 0)
-/// - 0x10: Kernel data segment (Ring 0)
-/// - 0x18: TSS (occupies 2 entries, 0x18-0x20)
-/// - 0x28: User data segment (Ring 3, selector 0x2B with RPL)
-/// - 0x30: User code segment (Ring 3, selector 0x33 with RPL)
-///
-/// The user data/code order matches SYSRET expectations:
-/// SYSRET computes SS = STAR[63:48]+8, CS = STAR[63:48]+16.
+/// # Safety
+/// `gdt` must be the calling CPU's table, with interrupts off: `lldt`
+/// reads the slot right after.
+pub unsafe fn set_ldt_descriptor(gdt: u64, lo: u64, hi: u64) {
+    let e = gdt as *const core::sync::atomic::AtomicU64;
+    let i = (LDT_SELECTOR >> 3) as usize;
+    // SAFETY: `gdt` is a live `Gdt` of GDT_ENTRIES entries (the contract)
+    // and `i + 1` is within it.
+    unsafe {
+        (*e.add(i)).store(lo, core::sync::atomic::Ordering::Relaxed);
+        (*e.add(i + 1)).store(hi, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// The boot CPU's table.
+static BOOT_GDT: Gdt = Gdt::new();
+
+/// GDT segment selectors for kernel and user mode (see [`GDT_ENTRIES`]).
 pub struct Selectors {
     pub code_selector: SegmentSelector,
     pub data_selector: SegmentSelector,
@@ -116,12 +213,15 @@ pub struct Selectors {
     pub user_code_selector: SegmentSelector,
 }
 
-pub fn init() {
-    use x86_64::instructions::{
-        segmentation::{Segment, CS, DS},
-        tables::load_tss,
-    };
+static SELECTORS: Selectors = Selectors {
+    code_selector: SegmentSelector(KERNEL_CS),
+    data_selector: SegmentSelector(KERNEL_DS),
+    tss_selector: SegmentSelector(TSS_SELECTOR),
+    user_data_selector: SegmentSelector(USER_DS),
+    user_code_selector: SegmentSelector(USER_CS),
+};
 
+pub fn init() {
     /// The boot CPU's RSP0 (until the first `set_entry_stack`) and IST stacks.
     static BOOT_STACKS: [IstStack; 4] = [const { IstStack::new() }; 4];
     let mut stacks = BOOT_STACKS.iter();
@@ -133,16 +233,9 @@ pub fn init() {
     // SAFETY: the RSP0 field of the TSS this CPU loads below; a static.
     unsafe { crate::arch::percpu::set_rsp0_slot(0, rsp0_slot(TSS.0.get())) };
 
-    GDT.0.load();
-    // SAFETY: After loading the GDT, segment registers must be updated to reference
-    // the new descriptors. CS must be reloaded via a far return/jump. DS and TSS
-    // are loaded directly. The selectors come from GDT.1 which was computed
-    // from the same GDT we just loaded, so they reference valid descriptors.
-    unsafe {
-        CS::set_reg(GDT.1.code_selector);
-        DS::set_reg(GDT.1.data_selector);
-        load_tss(GDT.1.tss_selector);
-    }
+    BOOT_GDT.fill(TSS.0.get());
+    // SAFETY: a static table, just filled in, with the boot CPU's TSS.
+    unsafe { BOOT_GDT.load() };
 }
 
 /// Give the calling secondary CPU its own GDT and TSS (with its own RSP0
@@ -154,11 +247,6 @@ pub fn init() {
 #[cfg(feature = "alloc")]
 pub fn init_ap() {
     use alloc::boxed::Box;
-
-    use x86_64::instructions::{
-        segmentation::{Segment, CS, DS, SS},
-        tables::load_tss,
-    };
 
     // Guarded (an unmapped page below each, N-180) and never freed: they
     // are this CPU's for the kernel's lifetime.
@@ -180,31 +268,16 @@ pub fn init_ap() {
         crate::arch::percpu::set_rsp0_slot(cpu, rsp0_slot(tss));
     }
 
-    let gdt: &'static mut GlobalDescriptorTable = Box::leak(Box::new(GlobalDescriptorTable::new()));
-    let code = gdt.append(Descriptor::kernel_code_segment());
-    let data = gdt.append(Descriptor::kernel_data_segment());
-    // SAFETY: the TSS is leaked, so it lives for the kernel's lifetime.
-    let tss_sel = gdt.append(unsafe { Descriptor::tss_segment_unchecked(tss) });
-    gdt.append(Descriptor::user_data_segment());
-    gdt.append(Descriptor::user_code_segment());
-    let gdt: &'static GlobalDescriptorTable = gdt;
-    gdt.load();
-    // SAFETY: the selectors index the GDT just loaded, which lives for the
-    // kernel's lifetime (leaked), as does the TSS it describes.
-    unsafe {
-        CS::set_reg(code);
-        DS::set_reg(data);
-        SS::set_reg(data);
-        load_tss(tss_sel);
-    }
+    let gdt: &'static Gdt = Box::leak(Box::new(Gdt::new()));
+    gdt.fill(tss);
+    // SAFETY: leaked, so it lives for the kernel's lifetime, as does the
+    // TSS it describes, which no other CPU loads.
+    unsafe { gdt.load() };
 }
 
-/// Returns a reference to the GDT selectors (kernel and user mode).
-///
-/// Must only be called after `init()` has been called. The lazy_static
-/// ensures the GDT is initialized on first access.
+/// Returns the GDT selectors (kernel and user mode).
 pub fn selectors() -> &'static Selectors {
-    &GDT.1
+    &SELECTORS
 }
 
 /// Set the stack this CPU enters on from ring 3 (syscall and TSS.RSP0).

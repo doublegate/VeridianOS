@@ -7,7 +7,9 @@
 //!
 //! 1. executes `swapgs` only if the interrupted context was ring 3, judged from
 //!    the saved CS, followed by `lfence` on both paths so a mispredicted branch
-//!    cannot run kernel code on the user GS base (CVE-2019-1125);
+//!    cannot run kernel code on the user GS base (CVE-2019-1125); a fault of
+//!    one of the `iretq` that return to ring 3 is taken as the user's (Linux's
+//!    bad_iret: the frame it was returning replaces the fault's);
 //! 2. pushes the general registers, completing a [`TrapFrame`] on the stack;
 //! 3. calls [`trap_dispatch`] with the frame, which may modify it;
 //! 4. restores the registers and returns with `iretq`, swapping GS back only
@@ -87,6 +89,65 @@ pub const SYSCALL_VECTOR: u64 = u64::MAX;
 /// User code and stack selectors (RPL 3).
 pub const USER_CS: u64 = 0x33;
 pub const USER_SS: u64 = 0x2B;
+/// The 32-bit user code segment (compatibility mode, `__USER32_CS`).
+pub const USER32_CS: u64 = 0x23;
+
+/// Whether `sel` is an LDT selector with RPL 3: what a thread may run or
+/// keep its stack in after modify_ldt. Whether its entry is usable is the
+/// CPU's to check at the return (a bad one faults there, `bad_iret`).
+const fn user_ldt_selector(sel: u64) -> bool {
+    sel <= 0xffff && sel & 7 == 7
+}
+
+/// The code selectors a return to ring 3 may carry: 64-bit, 32-bit, or an
+/// LDT segment (fill_ldt never makes a 64-bit one).
+pub const fn user_cs_ok(cs: u64) -> bool {
+    cs == USER_CS || cs == USER32_CS || user_ldt_selector(cs)
+}
+
+/// The stack selectors a return to ring 3 may carry.
+pub const fn user_ss_ok(ss: u64) -> bool {
+    ss == USER_SS || user_ldt_selector(ss)
+}
+
+/// Whether `ss` names a usable 64-bit user stack segment now: RPL 3,
+/// present, DPL 3, read-write data (expand-up or down), checked by the CPU
+/// with `lar` against the GDT and the loaded LDT (Linux's force_valid_ss).
+/// The RPL is checked here, not left to callers: `lar` runs in ring 0, where
+/// a selector at RPL 0 naming a DPL 3 descriptor passes, though `iretq` to
+/// ring 3 refuses it (PR #50 review).
+pub fn valid_user_ss(ss: u64) -> bool {
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    {
+        if ss > 0xffff || ss & 3 != 3 {
+            return false;
+        }
+        let ar: u32;
+        // SAFETY: lar only reads the descriptor table; an unusable
+        // selector clears ZF and leaves the result 0.
+        unsafe {
+            core::arch::asm!(
+                "xor {ar:e}, {ar:e}",
+                "lar {ar:e}, {sel:e}",
+                "jz 2f",
+                "xor {ar:e}, {ar:e}",
+                "2:",
+                ar = out(reg) ar,
+                sel = in(reg) ss as u32,
+                // lar reads the descriptor table, which a modify_ldt write
+                // changes: not `nomem`, so it is not moved across one.
+                options(readonly, nostack)
+            );
+        }
+        // P, DPL, S and the type (AR_P | AR_DPL_MASK | AR_S | AR_TYPE_MASK).
+        let ar = ar & (0x8000 | 0x6000 | 0x1000 | 0x0e00);
+        ar == 0x8000 | 0x6000 | 0x1000 | 0x0200 || ar == 0x8000 | 0x6000 | 0x1000 | 0x0600
+    }
+    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+    {
+        ss == USER_SS
+    }
+}
 
 /// One past the highest user address.
 pub const USER_END: u64 = 0x0000_8000_0000_0000;
@@ -110,16 +171,27 @@ pub const fn is_user_address(addr: u64) -> bool {
     addr < USER_END
 }
 
-/// Make a frame that is about to return to ring 3 safe to return with: the
-/// user selectors, sanitised RFLAGS and a user RIP and RSP. A frame that
-/// fails the address check has been corrupted by kernel code (user code
-/// cannot load a non-user RIP); its RIP is replaced with 0 so the process
-/// faults in user mode instead of the return faulting in ring 0. Returns
-/// whether the frame was already valid.
+/// Make a frame that is about to return to ring 3 safe to return with:
+/// user selectors (the 64-bit pair, the 32-bit code segment, or LDT
+/// selectors of RPL 3; anything else becomes the 64-bit pair), sanitised
+/// RFLAGS and a user RIP and RSP. A frame that fails the address check
+/// has been corrupted by kernel code (user code cannot load a non-user
+/// RIP); its RIP is replaced with 0 so the process faults in user mode
+/// instead of the return faulting in ring 0. An LDT selector whose entry
+/// is gone faults at the return instead, which `trap_common`'s bad_iret
+/// check turns into the program's fault, as Linux: SIGSEGV for a #GP,
+/// SIGBUS for a #NP or #SS (Linux's traps for those). Returns whether the
+/// frame was already valid.
 pub fn sanitize_user_frame(f: &mut TrapFrame) -> bool {
     let mut ok = true;
-    f.cs = USER_CS;
-    f.ss = USER_SS;
+    if !user_cs_ok(f.cs) {
+        f.cs = USER_CS;
+        ok = false;
+    }
+    if !user_ss_ok(f.ss) {
+        f.ss = USER_SS;
+        ok = false;
+    }
     let flags = sanitize_user_rflags(f.rflags);
     ok &= flags == f.rflags;
     f.rflags = flags;
@@ -219,8 +291,55 @@ unsafe extern "C" fn trap_common() {
     naked_asm!(
         // [rsp] vector, [rsp+8] error code, [rsp+16] rip, [rsp+24] cs
         "test byte ptr [rsp + 24], 3",
-        "jz 2f",
+        "jnz 1f",
+        // From ring 0. A #NP, #SS or #GP raised by one of the iretq that
+        // return to ring 3 is the user's: the frame it was returning (at
+        // the faulting RSP) names a segment that is not usable, an LDT
+        // entry cleared or never loaded (Linux's bad_iret). That iretq
+        // ran after the exit's swapgs and with the user's registers, so
+        // the user frame is copied over the fault's own and the fault is
+        // taken as one from ring 3, swapgs included: it becomes the
+        // signal Linux's trap sends (SIGSEGV for #GP, SIGBUS for #NP or
+        // #SS), or, for an LDT this CPU had not loaded yet, a retry.
+        "cmp qword ptr [rsp], 11",
+        "jb 2f",
+        "cmp qword ptr [rsp], 13",
+        "ja 2f",
+        "push rax",
+        // [rsp] rax, [rsp+8] vector, [rsp+16] error code, [rsp+24] rip
+        "lea rax, [rip + veridian_iret_trap]",
+        "cmp [rsp + 24], rax",
+        "je 4f",
+        "lea rax, [rip + veridian_iret_syscall]",
+        "cmp [rsp + 24], rax",
+        "je 4f",
+        "pop rax",
+        "jmp 2f",
+        "4:",
+        "push rbx",
+        // [rsp] rbx, [rsp+8] rax, [rsp+16] vector, [rsp+24] error code,
+        // [rsp+32] rip, cs, rflags, rsp, ss
+        "mov rax, [rsp + 56]",
+        "test byte ptr [rax + 8], 3",
+        "jz 5f",
+        "mov rbx, [rax]",
+        "mov [rsp + 32], rbx",
+        "mov rbx, [rax + 8]",
+        "mov [rsp + 40], rbx",
+        "mov rbx, [rax + 16]",
+        "mov [rsp + 48], rbx",
+        "mov rbx, [rax + 24]",
+        "mov [rsp + 56], rbx",
+        "mov rbx, [rax + 32]",
+        "mov [rsp + 64], rbx",
+        "pop rbx",
+        "pop rax",
+        "1:",
         "swapgs",
+        "jmp 2f",
+        "5:",
+        "pop rbx",
+        "pop rax",
         "2:",
         "lfence",
         "push rax",
@@ -267,6 +386,8 @@ unsafe extern "C" fn trap_common() {
         "cli",
         "swapgs",
         "3:",
+        ".globl veridian_iret_trap",
+        "veridian_iret_trap:",
         "iretq",
         dispatch = sym trap_dispatch,
     );
@@ -497,6 +618,12 @@ fn exception_signal(vector: u64) -> u32 {
 /// Every exception except #PF, NMI, #DF and #MC.
 fn exception(f: &mut TrapFrame, user: bool) {
     if user {
+        // An LDT selector on a CPU that has not loaded the table another
+        // thread just made: load it and run the instruction again.
+        #[cfg(all(target_os = "none", feature = "alloc"))]
+        if matches!(f.vector, 11..=13) && super::ldt::refresh_for_fault(f.error_code) {
+            return;
+        }
         // SAFETY: COM1 is the kernel console on the supported platforms.
         unsafe {
             raw_serial_str(b"[TRAP] user ");
@@ -974,6 +1101,38 @@ mod tests {
             ..Default::default()
         };
         assert!(sanitize_user_frame(&mut f), "a valid frame is unchanged");
+
+        // Compatibility mode and LDT segments (modify_ldt) are kept; a GDT
+        // selector that is not a user one, or an RPL below 3, is not.
+        for (cs, ss) in [(USER32_CS, USER_SS), (0x0f, 0x17), (USER_CS, 0x1f)] {
+            let mut f = TrapFrame {
+                rip: 0x40_1000,
+                rsp: 0x7FFF_E000,
+                cs,
+                ss,
+                rflags: 0x202,
+                ..Default::default()
+            };
+            assert!(sanitize_user_frame(&mut f), "{cs:#x}:{ss:#x}");
+            assert_eq!((f.cs, f.ss), (cs, ss));
+        }
+        for (cs, ss) in [
+            (0x0c, USER_SS),
+            (0x2b, USER_SS),
+            (USER_CS, 0x14),
+            (USER_CS, 0x33),
+        ] {
+            let mut f = TrapFrame {
+                rip: 0x40_1000,
+                rsp: 0x7FFF_E000,
+                cs,
+                ss,
+                rflags: 0x202,
+                ..Default::default()
+            };
+            assert!(!sanitize_user_frame(&mut f), "{cs:#x}:{ss:#x}");
+            assert!(user_cs_ok(f.cs) && user_ss_ok(f.ss));
+        }
     }
 
     #[test]

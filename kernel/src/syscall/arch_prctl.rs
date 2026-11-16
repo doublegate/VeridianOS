@@ -61,6 +61,10 @@ pub fn sys_arch_prctl(code: usize, addr: usize) -> Result<isize, SyscallError> {
                 return Err(SyscallError::OperationNotPermitted);
             }
             ctx.set_tls_base(addr as u64);
+            // A 64-bit base needs a null selector (do_arch_prctl_64), or the
+            // next switch-in reloads the descriptor's (PR #50 review).
+            #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+            crate::arch::x86_64::ldt::clear_fs_selector();
 
             // Also write the MSR immediately so the FS base is active when
             // we return to user mode. iretq does not restore FS_BASE, so
@@ -101,6 +105,7 @@ pub fn sys_arch_prctl(code: usize, addr: usize) -> Result<isize, SyscallError> {
             if !fs_base_allowed(addr) {
                 return Err(SyscallError::OperationNotPermitted);
             }
+            crate::arch::x86_64::ldt::clear_gs_selector();
             crate::arch::x86_64::switch::write_user_gs_base(addr as u64);
             Ok(0)
         }

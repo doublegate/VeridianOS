@@ -408,6 +408,7 @@ pub mod sysno {
     pub const SYS_acct: usize = 163;
     pub const SYS_syslog: usize = 103;
     pub const SYS_reboot: usize = 169;
+    pub const SYS_modify_ldt: usize = 154;
 }
 
 // Linux's generic table: calls RISC-V leaves to user space are absent.

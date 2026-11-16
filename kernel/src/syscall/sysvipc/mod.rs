@@ -258,6 +258,12 @@ pub fn namespace_rights(ns: &Arc<PlainNs>) -> NsRights {
 pub trait IpcObject {
     fn perm(&self) -> &Perm;
     fn perm_mut(&mut self) -> &mut Perm;
+    /// What the object counts against its kind's namespace-wide total
+    /// (a semaphore set's semaphores, Linux's `used_sems`). It must not
+    /// change while the object is in a table.
+    fn units(&self) -> usize {
+        0
+    }
 }
 
 /// One kind's objects in one namespace (Linux's `ipc_ids`).
@@ -269,6 +275,10 @@ pub struct Ids<T> {
     last_idx: i64,
     /// Where the next search for a free slot starts (the idr's cursor).
     next: u32,
+    /// The objects' [`IpcObject::units`] summed, kept as they come and go
+    /// so that a create checks its limit without a walk over the table
+    /// (ns->used_sems in ipc/sem.c).
+    units: usize,
 }
 
 impl<T: IpcObject> Default for Ids<T> {
@@ -285,12 +295,18 @@ impl<T: IpcObject> Ids<T> {
             seq: 0,
             last_idx: -1,
             next: 0,
+            units: 0,
         }
     }
 
     /// How many objects there are (`in_use`).
     pub fn in_use(&self) -> usize {
         self.slots.len()
+    }
+
+    /// The objects' units in total (`used_sems`).
+    pub fn units(&self) -> usize {
+        self.units
     }
 
     /// The highest index in use, 0 with none (what IPC_INFO and the
@@ -336,6 +352,7 @@ impl<T: IpcObject> Ids<T> {
         if perm.key != IPC_PRIVATE {
             self.keys.insert(perm.key, idx);
         }
+        self.units += obj.units();
         self.slots.insert(idx, obj);
         Ok(id)
     }
@@ -380,6 +397,7 @@ impl<T: IpcObject> Ids<T> {
             return None;
         }
         let obj = self.slots.remove(&idx)?;
+        self.units -= obj.units();
         let key = obj.perm().key;
         if key != IPC_PRIVATE && self.keys.get(&key) == Some(&idx) {
             self.keys.remove(&key);
@@ -780,6 +798,43 @@ pub(crate) mod tests {
             ids.add(obj(IPC_PRIVATE, 0o600), 100).unwrap();
         }
         assert_eq!(ids.max_idx(), 64);
+    }
+
+    struct Sized(Perm, usize);
+
+    impl IpcObject for Sized {
+        fn perm(&self) -> &Perm {
+            &self.0
+        }
+        fn perm_mut(&mut self) -> &mut Perm {
+            &mut self.0
+        }
+        fn units(&self) -> usize {
+            self.1
+        }
+    }
+
+    #[test]
+    fn the_table_keeps_its_objects_units_as_they_come_and_go() {
+        let mut ids: Ids<Sized> = Ids::new();
+        let sized = |n| Sized(Perm::new(IPC_PRIVATE, 0o600, 1000, 1000), n);
+        assert_eq!(ids.units(), 0);
+        let a = ids.add(sized(3), 100).unwrap();
+        let b = ids.add(sized(5), 100).unwrap();
+        assert_eq!(ids.units(), 8);
+        // A refused add counts nothing.
+        assert!(ids.add(sized(7), 2).is_err());
+        assert_eq!(ids.units(), 8);
+        assert!(ids.remove(a).is_some());
+        assert_eq!(ids.units(), 5);
+        // A stale id removes nothing.
+        assert!(ids.remove(a).is_none());
+        assert_eq!(ids.units(), 5);
+        // make_private keeps the object, and its units.
+        ids.make_private(b);
+        assert_eq!(ids.units(), 5);
+        assert!(ids.remove(b).is_some());
+        assert_eq!(ids.units(), 0);
     }
 
     #[test]
