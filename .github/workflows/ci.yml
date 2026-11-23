@@ -64,10 +64,10 @@ jobs:
               run: cargo clippy --lib --all-features -- -D warnings
             - name: Run clippy (kernel, bare-metal targets)
               run: |
-                  BS="-Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem"
+                  BS=("-Zbuild-std=core,compiler_builtins,alloc" "-Zbuild-std-features=compiler-builtins-mem")
                   for t in targets/x86_64-veridian.json aarch64-unknown-none-softfloat riscv64imac-unknown-none-elf; do
                     echo "::group::clippy $t"
-                    cargo clippy --target "$t" -p veridian-kernel $BS -- -D warnings
+                    cargo clippy --target "$t" -p veridian-kernel "${BS[@]}" -- -D warnings
                     echo "::endgroup::"
                   done
             # Syscall numbers come from abi/syscalls.map; the generated
@@ -521,6 +521,15 @@ jobs:
               run: |
                   sudo apt-get update
                   sudo apt-get install -y qemu-system-x86 qemu-system-arm qemu-system-misc ovmf
+                  # The ubuntu-26.04 image's QEMU 10.2 moved qemu-system-riscv64 out of
+                  # qemu-system-misc into its own package; older images still ship it in -misc.
+                  if apt-cache show qemu-system-riscv >/dev/null 2>&1; then
+                      sudo apt-get install -y qemu-system-riscv
+                  fi
+                  if [ "${{ matrix.arch }}" = riscv64 ] && ! command -v qemu-system-riscv64 >/dev/null; then
+                      echo "::error::qemu-system-riscv64 is not installed on this runner image"
+                      exit 1
+                  fi
             - name: Enable KVM
               run: |
                   echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
@@ -908,55 +917,52 @@ jobs:
         if: always()
         steps:
             - name: Check job results
+              env:
+                  QUICK_CHECKS: ${{ needs.quick-checks.result }}
+                  BUILD_AND_TEST: ${{ needs.build-and-test.result }}
+                  DOCUMENTATION: ${{ needs.documentation.result }}
+                  SECURITY: ${{ needs.security.result }}
+                  HOST_TESTS: ${{ needs.host-tests.result }}
+                  BOOT_TESTS: ${{ needs.boot-tests.result }}
+                  ROOTFS_TESTS: ${{ needs.rootfs-tests.result }}
+                  COVERAGE: ${{ needs.coverage.result }}
+                  COMMIT_SHA: ${{ github.sha }}
+                  REF_NAME: ${{ github.ref_name }}
+                  RUN_NUMBER: ${{ github.run_number }}
               run: |
-                  echo "## CI Summary" >> $GITHUB_STEP_SUMMARY
-                  echo "" >> $GITHUB_STEP_SUMMARY
-                  if [ "${{ needs.quick-checks.result }}" == "success" ]; then
-                    echo "✅ **Quick Checks**: Passed" >> $GITHUB_STEP_SUMMARY
-                  else
-                    echo "❌ **Quick Checks**: Failed" >> $GITHUB_STEP_SUMMARY
-                  fi
-                  if [ "${{ needs.build-and-test.result }}" == "success" ]; then
-                    echo "✅ **Build & Test**: All architectures built successfully" >> $GITHUB_STEP_SUMMARY
-                  else
-                    echo "❌ **Build & Test**: Build or test failures" >> $GITHUB_STEP_SUMMARY
-                  fi
-                  if [ "${{ needs.documentation.result }}" == "success" ]; then
-                    echo "✅ **Documentation**: Generated successfully" >> $GITHUB_STEP_SUMMARY
-                  else
-                    echo "❌ **Documentation**: Generation failed" >> $GITHUB_STEP_SUMMARY
-                  fi
-                  if [ "${{ needs.security.result }}" == "success" ]; then
-                    echo "✅ **Security Audit**: No vulnerabilities found" >> $GITHUB_STEP_SUMMARY
-                  else
-                    echo "❌ **Security Audit**: Issues detected" >> $GITHUB_STEP_SUMMARY
-                  fi
-                  for job in "Host Unit Tests:${{ needs.host-tests.result }}" \
-                             "Boot Tests:${{ needs.boot-tests.result }}" \
-                             "Rootfs Runtime Tests:${{ needs.rootfs-tests.result }}"; do
-                    if [ "${job##*:}" == "success" ]; then
-                      echo "✅ **${job%:*}**: Passed" >> $GITHUB_STEP_SUMMARY
+                  # Context values arrive through env, never interpolated into the script.
+                  status() {  # status <result> <label> <pass text> <fail text>
+                    if [ "$1" == "success" ]; then
+                      echo "✅ **$2**: $3"
                     else
-                      echo "❌ **${job%:*}**: ${job##*:}" >> $GITHUB_STEP_SUMMARY
+                      echo "❌ **$2**: $4"
+                    fi
+                  }
+                  {
+                    echo "## CI Summary"
+                    echo ""
+                    status "$QUICK_CHECKS" "Quick Checks" "Passed" "Failed"
+                    status "$BUILD_AND_TEST" "Build & Test" "All architectures built successfully" "Build or test failures"
+                    status "$DOCUMENTATION" "Documentation" "Generated successfully" "Generation failed"
+                    status "$SECURITY" "Security Audit" "No vulnerabilities found" "Issues detected"
+                    status "$HOST_TESTS" "Host Unit Tests" "Passed" "$HOST_TESTS"
+                    status "$BOOT_TESTS" "Boot Tests" "Passed" "$BOOT_TESTS"
+                    status "$ROOTFS_TESTS" "Rootfs Runtime Tests" "Passed" "$ROOTFS_TESTS"
+                    if [ "$COVERAGE" == "success" ]; then
+                      echo "✅ **Code Coverage**: Report uploaded to Codecov"
+                    else
+                      echo "⚠️ **Code Coverage**: Upload incomplete (non-blocking)"
+                    fi
+                    echo ""
+                    echo "### Build Information"
+                    echo "- **Commit**: $COMMIT_SHA"
+                    echo "- **Branch**: $REF_NAME"
+                    echo "- **Workflow**: $RUN_NUMBER"
+                  } >> "$GITHUB_STEP_SUMMARY"
+                  # Coverage is non-blocking (continue-on-error: true)
+                  for r in "$QUICK_CHECKS" "$BUILD_AND_TEST" "$DOCUMENTATION" "$SECURITY" \
+                           "$HOST_TESTS" "$BOOT_TESTS" "$ROOTFS_TESTS"; do
+                    if [ "$r" != "success" ]; then
+                      exit 1
                     fi
                   done
-                  if [ "${{ needs.coverage.result }}" == "success" ]; then
-                    echo "✅ **Code Coverage**: Report uploaded to Codecov" >> $GITHUB_STEP_SUMMARY
-                  else
-                    echo "⚠️ **Code Coverage**: Upload incomplete (non-blocking)" >> $GITHUB_STEP_SUMMARY
-                  fi
-                  echo "" >> $GITHUB_STEP_SUMMARY
-                  echo "### Build Information" >> $GITHUB_STEP_SUMMARY
-                  echo "- **Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
-                  echo "- **Branch**: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
-                  echo "- **Workflow**: ${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
-                  # Coverage is non-blocking (continue-on-error: true)
-                  if [ "${{ needs.quick-checks.result }}" != "success" ] || \
-                     [ "${{ needs.build-and-test.result }}" != "success" ] || \
-                     [ "${{ needs.documentation.result }}" != "success" ] || \
-                     [ "${{ needs.security.result }}" != "success" ] || \
-                     [ "${{ needs.host-tests.result }}" != "success" ] || \
-                     [ "${{ needs.boot-tests.result }}" != "success" ] || \
-                     [ "${{ needs.rootfs-tests.result }}" != "success" ]; then
-                    exit 1
-                  fi
