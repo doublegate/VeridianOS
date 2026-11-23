@@ -402,7 +402,11 @@ What remains:
   memory mappings, and nothing clears the MNT_EXPIRE mark; each devtmpfs mount is a new
   instance. pivot_root moves roots and working directories but not the paths of files already
   open, so they are looked up by their old paths; after `pivot_root(".", ".")` a working
-  directory inside the parked old root resolves in the new root, and a parked tree is EBUSY to
+  directory inside the parked old root resolves in the new root, a descriptor into a detached
+  tree attached inside the parked old root fails with ENOENT (Linux's still works: its
+  descriptors hold their mounts, while the tree here is keyed by path; all three are fixed by
+  holding places as objects, planned with the v0.29 dentry cache in to-dos/MASTER_TODO.md),
+  and a parked tree is EBUSY to
   umount2 without MNT_DETACH only while mounts are under it; mounts left under put_old's place
   in the new root stay visible there (the tree is keyed by path); MS_BIND with MS_REC does not
   copy parked trees; at most 16 parked roots stack (`MAX_PARKED_DEPTH`; the next pivot_root(".",
@@ -425,7 +429,9 @@ What remains:
   capability's root ID is mapped but no POSIX ACLs exist to map; a
   detached tree's files are named by the tree's id instead of a path (`fs::mount::DETACHED`),
   and a descriptor of an attached tree follows it through move_mount and MS_MOVE, but not
-  through pivot_root. The VFS
+  through pivot_root; the mount calls refuse a descriptor with no path (a pipe, socket or
+  eventfd) with EINVAL, where Linux, which keeps such files in internal pseudo-filesystem
+  mounts, lets open_tree take one. The VFS
   finds open files by path, so a descriptor opened in another mount namespace is looked up by
   its path in the caller's (for fstat's mount id, fchdir and the like) once the two trees
   differ, and sync(2) flushes the filesystems of the initial namespace only. The mount flags are

@@ -11538,6 +11538,19 @@ static void test_mount_api(void)
     else if (code != 0) f |= 4;
     /* None of it is in this namespace. */
     if (t_info_has("/tmp/ma-")) f |= 8;
+    /* A descriptor with no path names no mount: open_tree on a pipe end is
+     * EINVAL, so no O_PATH descriptor with an empty path can be minted to
+     * reopen it (PR #47 review). Needs no privilege. */
+    int pp[2];
+    if (pipe(pp) == 0) {
+        long r = syscall(SYS_open_tree, pp[0], "", 0x1000 /* AT_EMPTY_PATH */);
+        if (!(r == -1 && errno == EINVAL)) {
+            f |= 16;
+            if (r >= 0) close((int)r);
+        }
+        close(pp[0]);
+        close(pp[1]);
+    }
     rmdir("/tmp/ma-a");
     rmdir("/tmp/ma-b");
     rmdir("/tmp/ma-c");
