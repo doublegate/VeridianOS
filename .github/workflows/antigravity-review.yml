@@ -126,7 +126,7 @@ jobs:
           # --- optional overrides (uncomment to change) ---
           # AGY_MODEL: gemini-3-pro        # default: agy's configured model
           AGY_EFFORT: high                 # low|medium|high
-          AGY_PRINT_TIMEOUT: "25m"   # local override, preserved by the 2026-11-22 template re-sync; a pin disables diff-size scaling, so the per-attempt cap below only bounds it
+          AGY_PRINT_TIMEOUT: "25m"   # local override, preserved by the 2026-11-22 template re-sync; a pin is used as given: it disables diff-size scaling, and the per-attempt cap below applies only to a scaled value
           # A large diff goes to agy as a file, and reading it at high effort costs 6-8
           # minutes almost whatever its size (1.15 MB: 465 s; 426 KB timed out three times at
           # 397 s under the old 240 s/MiB scaling). The scaling is now 900 s/MiB (the
