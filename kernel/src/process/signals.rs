@@ -1252,6 +1252,30 @@ pub fn interrupting(process: &Process, thread: &Thread) -> u64 {
     out
 }
 
+/// Whether `thread` of `process` can take a signal that ends the whole
+/// process the moment it is sent on Linux: complete_signal starts group
+/// exit for one whose default action terminates without a core dump, left
+/// at SIG_DFL and not blocked, unless the process is traced (sig_fatal,
+/// !sig_kernel_coredump). Such a signal ends a killable wait as SIGKILL
+/// does; it is then delivered at the call's exit (PR #49 review).
+pub fn group_fatal(process: &Process, thread: &Thread) -> bool {
+    if process.tracer.load(Ordering::Acquire) != 0 {
+        return false;
+    }
+    let mut bits = deliverable(process, thread);
+    while bits != 0 {
+        let sig = bits.trailing_zeros() as usize + 1;
+        bits &= bits - 1;
+        if default_action(sig) == DefaultAction::Terminate
+            && process.get_signal_handler(sig).unwrap_or(SIG_DFL) == SIG_DFL
+            && !init_skips(process, sig)
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Signals `thread` of `process` could take now (pending, not blocked).
 pub fn deliverable(process: &Process, thread: &Thread) -> u64 {
     let pending =

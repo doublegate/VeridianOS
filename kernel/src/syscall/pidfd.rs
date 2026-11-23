@@ -218,8 +218,13 @@ pub fn sys_pidfd_send_signal(pidfd: usize, sig: usize, info: usize, flags: usize
             })
         }
         Scope::Process | Scope::Thread => {
-            // Existence and permission as kill (sig 0 stops there).
-            super::filesystem::kill_one(&caller, pid, 0)?;
+            // Existence and permission as kill (sig 0 stops there), with
+            // the named thread's Landlock domain for PIDFD_SIGNAL_THREAD.
+            let named = match (scope, tid) {
+                (Scope::Thread, Some(tid)) => Some(tid.0),
+                _ => None,
+            };
+            super::filesystem::kill_one_to(&caller, pid, named, 0)?;
             if sig == 0 {
                 return Ok(0);
             }

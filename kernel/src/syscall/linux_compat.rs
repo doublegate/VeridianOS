@@ -75,6 +75,11 @@ pub(crate) fn to_linux_errno(err: super::SyscallError) -> isize {
     const LINUX_EIDRM: isize = -43;
     const LINUX_ENOMSG: isize = -42;
     const LINUX_EMSGSIZE: isize = -90;
+    const LINUX_EBADFD: isize = -77;
+    const LINUX_EDQUOT: isize = -122;
+    const LINUX_ENOKEY: isize = -126;
+    const LINUX_EKEYEXPIRED: isize = -127;
+    const LINUX_EKEYREVOKED: isize = -128;
 
     match err {
         SyscallError::InvalidSyscall => LINUX_ENOSYS,
@@ -145,6 +150,11 @@ pub(crate) fn to_linux_errno(err: super::SyscallError) -> isize {
         SyscallError::IdRemoved => LINUX_EIDRM,
         SyscallError::NoMessage => LINUX_ENOMSG,
         SyscallError::MessageTooLong => LINUX_EMSGSIZE,
+        SyscallError::BadFdState => LINUX_EBADFD,
+        SyscallError::QuotaExceeded => LINUX_EDQUOT,
+        SyscallError::KeyNotAvailable => LINUX_ENOKEY,
+        SyscallError::KeyExpired => LINUX_EKEYEXPIRED,
+        SyscallError::KeyRevoked => LINUX_EKEYREVOKED,
         // Not an errno: the signal return path rewrites it (`restart`).
         SyscallError::RestartBlock => -516,
     }
@@ -169,6 +179,8 @@ pub(crate) fn sys_prctl(
     const PR_GET_NAME: usize = 16;
     const PR_SET_TIMERSLACK: usize = 29;
     const PR_GET_TIMERSLACK: usize = 30;
+    const PR_GET_SECCOMP: usize = 21;
+    const PR_SET_SECCOMP: usize = 22;
     const PR_SET_NO_NEW_PRIVS: usize = 38;
     const PR_GET_NO_NEW_PRIVS: usize = 39;
     const PR_SET_MDWE: usize = 65;
@@ -220,6 +232,8 @@ pub(crate) fn sys_prctl(
         PR_GET_TIMERSLACK => Ok(50_000),
         // exec grants no privilege from now on; one way only, and Linux's
         // argument checks.
+        PR_GET_SECCOMP => super::seccomp::prctl_get(),
+        PR_SET_SECCOMP => super::seccomp::prctl_set(arg2, arg3),
         PR_SET_NO_NEW_PRIVS => {
             if arg2 != 1 || arg3 != 0 || arg4 != 0 || arg5 != 0 {
                 return Err(super::SyscallError::InvalidArgument);

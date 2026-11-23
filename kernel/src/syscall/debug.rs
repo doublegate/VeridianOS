@@ -212,9 +212,24 @@ impl PtraceTarget {
             authorized: crate::cap::authority::current_may_act_on_process(
                 process,
                 crate::cap::Rights::MODIFY,
+            ) && landlock_may_inspect(
+                #[cfg(feature = "alloc")]
+                crate::security::landlock::of_process(process).as_deref(),
             ),
         }
     }
+}
+
+/// Landlock's hook_ptrace_access_check: the target must be in the
+/// caller's domain or below it (EPERM otherwise, as the other refusals).
+#[cfg(feature = "alloc")]
+pub(super) fn landlock_may_inspect(target: Option<&crate::security::landlock::KDomain>) -> bool {
+    crate::security::landlock::current_may_inspect(target)
+}
+
+#[cfg(not(feature = "alloc"))]
+pub(super) fn landlock_may_inspect() -> bool {
+    true
 }
 
 /// The calling thread's permitted set (the caller's side of
@@ -418,6 +433,14 @@ pub fn sys_ptrace(request: usize, pid: usize, addr: usize, data: usize) -> Sysca
                 &caller.pid_ns(),
                 crate::cap::Rights::MODIFY,
             );
+            // Landlock's hook_ptrace_traceme: the caller must be in its
+            // parent's domain or below it.
+            #[cfg(feature = "alloc")]
+            let authorized = authorized
+                && crate::security::landlock::may_inspect(
+                    crate::security::landlock::of_process(&parent).as_deref(),
+                    crate::security::landlock::current().as_deref(),
+                );
             let parent = parent.pid;
             if !authorized
                 || !may_trace_me(

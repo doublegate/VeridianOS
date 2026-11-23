@@ -183,6 +183,19 @@ pub fn probe_extension(extension_id: usize) -> bool {
     ret.value != 0
 }
 
+/// SBI SRST system_reset: `reset_type` 0 shuts down, 1 is a cold reboot, 2
+/// a warm one. Returns only if the firmware lacks the extension or refused.
+pub fn system_reset(reset_type: usize, reason: usize) {
+    if probe_extension(SBI_EXT_SRST) {
+        let _ = sbi_call(SBI_EXT_SRST, 0, reset_type, reason, 0);
+    }
+}
+
+/// The legacy SBI shutdown (extension 8), for firmware without SRST.
+pub fn legacy_shutdown() {
+    let _ = sbi_call(8, 0, 0, 0, 0);
+}
+
 /// Legacy console putchar (for early boot)
 pub fn console_putchar(ch: u8) {
     sbi_call(0x01, 0, ch as usize, 0, 0);

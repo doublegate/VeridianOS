@@ -443,6 +443,12 @@ fn reconfigure(ctx: &mut FsContext) -> SyscallResult {
         ctx.phase = Phase::Failed;
         return Err(e);
     }
+    // Landlock's hook_sb_remount (reconfigure_super).
+    #[cfg(feature = "alloc")]
+    if let Err(e) = crate::security::landlock::may_change_mounts() {
+        ctx.phase = Phase::Failed;
+        return Err(super::map_kernel_error(e));
+    }
     // The picked mount itself, where it is now (not whatever is at the
     // place it was picked at); a detached tree's root, wherever it went.
     let place = match target {
@@ -671,6 +677,10 @@ pub fn sys_move_mount(
     // Sharing groups need shared or slave mounts, which there are none
     // of (do_set_group's "from should not be private"); mounting beneath
     // is not done.
+    // Landlock: no mount changes under a filesystem domain
+    // (hook_move_mount, after the lookups as in do_move_mount).
+    #[cfg(feature = "alloc")]
+    crate::security::landlock::may_change_mounts().map_err(super::map_kernel_error)?;
     if flags & (mm::SET_GROUP | mm::BENEATH) != 0 {
         return Err(SyscallError::InvalidArgument);
     }

@@ -152,6 +152,14 @@ pub fn current_may_change_system() -> bool {
     current_holds(&ObjectRef::System, Rights::MODIFY)
 }
 
+/// Whether the caller may read what the machine keeps as a whole, the
+/// kernel log (ADR 0024): READ on the `System` object, besides the Linux
+/// privilege. Kernel context passes.
+#[cfg(feature = "alloc")]
+pub fn current_may_read_system() -> bool {
+    current_holds(&ObjectRef::System, Rights::READ)
+}
+
 /// Whether `space` may create the namespaces `flags` asks for (ADR 0024,
 /// step 3): CREATE on each namespace a new one is made from -- the one of
 /// that kind in `current`, for PID and time the one for children, below
@@ -525,6 +533,36 @@ pub fn sys_capability_drop(kind: usize, id: usize, rights: usize) -> crate::sysc
         crate::process::current_process().ok_or(crate::syscall::SyscallError::InvalidState)?;
     let space = process.capability_space.lock();
     drop_rights(&space, kind, id, rights).ok_or(crate::syscall::SyscallError::InvalidArgument)
+}
+
+/// The authority entry for the filesystem (ADR 0029): whether `domain`
+/// holds the Landlock rights `access` on the object whose ancestry is
+/// `path`. EACCES if not, as Linux. The VFS and the system calls ask it
+/// where Linux's hooks are; v0.29's directory capabilities answer here too.
+#[cfg(feature = "alloc")]
+pub fn holds_path(
+    domain: &crate::security::landlock::KDomain,
+    path: &veridian_landlock::Ancestry,
+    access: u32,
+) -> Result<(), crate::error::KernelError> {
+    domain
+        .dom
+        .check_path(path, access)
+        .map_err(crate::security::landlock::to_kernel)
+}
+
+/// The authority entry for the network (ADR 0029): whether `domain` holds
+/// `access` on `port`. EACCES if not.
+#[cfg(feature = "alloc")]
+pub fn holds_net(
+    domain: &crate::security::landlock::KDomain,
+    port: u16,
+    access: u32,
+) -> Result<(), crate::error::KernelError> {
+    domain
+        .dom
+        .check_net(port, access)
+        .map_err(crate::security::landlock::to_kernel)
 }
 
 #[cfg(all(test, feature = "alloc", not(target_os = "none")))]

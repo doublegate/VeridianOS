@@ -428,6 +428,23 @@
 #define SYS_cachestat                    451
 #define SYS_file_getattr                 468
 #define SYS_file_setattr                 469
+/* Security (v0.28 item 5, system tier) */
+#define SYS_seccomp                      317
+#define SYS_landlock_create_ruleset      444
+#define SYS_landlock_add_rule            445
+#define SYS_landlock_restrict_self       446
+#define SYS_add_key                      248
+#define SYS_request_key                  249
+#define SYS_keyctl                       250
+#define SYS_lsm_get_self_attr            459
+#define SYS_lsm_set_self_attr            460
+#define SYS_lsm_list_modules             461
+#define SYS_vhangup                      153
+#define SYS_iopl                         172
+#define SYS_ioperm                       173
+#define SYS_acct                         163
+#define SYS_syslog                       103
+#define SYS_reboot                       169
 
 #elif defined(__riscv) && __riscv_xlen == 64
 
@@ -808,6 +825,21 @@
 #define SYS_cachestat                    451
 #define SYS_file_getattr                 468
 #define SYS_file_setattr                 469
+/* Security (v0.28 item 5, system tier) */
+#define SYS_seccomp                      277
+#define SYS_landlock_create_ruleset      444
+#define SYS_landlock_add_rule            445
+#define SYS_landlock_restrict_self       446
+#define SYS_add_key                      217
+#define SYS_request_key                  218
+#define SYS_keyctl                       219
+#define SYS_lsm_get_self_attr            459
+#define SYS_lsm_set_self_attr            460
+#define SYS_lsm_list_modules             461
+#define SYS_vhangup                      58
+#define SYS_acct                         89
+#define SYS_syslog                       116
+#define SYS_reboot                       142
 
 #elif defined(__aarch64__)
 
@@ -1189,6 +1221,21 @@
 #define SYS_cachestat                    451
 #define SYS_file_getattr                 468
 #define SYS_file_setattr                 469
+/* Security (v0.28 item 5, system tier) */
+#define SYS_seccomp                      277
+#define SYS_landlock_create_ruleset      444
+#define SYS_landlock_add_rule            445
+#define SYS_landlock_restrict_self       446
+#define SYS_add_key                      217
+#define SYS_request_key                  218
+#define SYS_keyctl                       219
+#define SYS_lsm_get_self_attr            459
+#define SYS_lsm_set_self_attr            460
+#define SYS_lsm_list_modules             461
+#define SYS_vhangup                      58
+#define SYS_acct                         89
+#define SYS_syslog                       116
+#define SYS_reboot                       142
 
 #else
 #error "<veridian/sysno.h>: no system call numbers for this architecture"

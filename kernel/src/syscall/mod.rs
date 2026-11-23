@@ -115,6 +115,51 @@ fn validate_user_string_ptr(ptr: usize) -> Result<(), SyscallError> {
     validate_user_pointer(ptr, 1)
 }
 
+/// The user instruction pointer of the system call (seccomp_data's
+/// instruction_pointer): just past the system call instruction, 0 where
+/// no frame is saved.
+fn syscall_user_ip() -> u64 {
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    {
+        crate::arch::x86_64::syscall::get_syscall_frame().map_or(0, |f| f.rip)
+    }
+    #[cfg(all(target_arch = "riscv64", target_os = "none"))]
+    {
+        // SAFETY: as in `syscall_arg6`: this CPU's block, a live frame or 0.
+        let frame = unsafe { (*crate::arch::percpu::this_arch_cpu()).syscall_frame }
+            as *const crate::arch::riscv64::switch::UserFrame;
+        if frame.is_null() {
+            0
+        } else {
+            // SAFETY: as above.
+            unsafe { (*frame).sepc }
+        }
+    }
+    #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+    {
+        // SAFETY: as in `syscall_arg6`.
+        let frame = unsafe { (*crate::arch::percpu::this_arch_cpu()).syscall_frame }
+            as *const crate::arch::aarch64::switch::UserFrame;
+        if frame.is_null() {
+            0
+        } else {
+            // SAFETY: as above.
+            unsafe { (*frame).elr }
+        }
+    }
+    #[cfg(not(all(
+        any(
+            target_arch = "x86_64",
+            target_arch = "riscv64",
+            target_arch = "aarch64"
+        ),
+        target_os = "none"
+    )))]
+    {
+        0
+    }
+}
+
 /// The sixth syscall argument, which the 5-argument handlers do not receive.
 /// On x86_64 it is r9, saved in the syscall frame. Elsewhere it is not
 /// captured yet, and callers that need it must fail rather than act on a
@@ -419,6 +464,21 @@ use self::graphics_syscalls::*;
 mod wayland_syscalls;
 use self::wayland_syscalls::*;
 mod network_ext_syscalls;
+// seccomp(2) and the check every call passes (v0.28 item 5)
+#[cfg(feature = "alloc")]
+pub(crate) mod landlock;
+// The key retention service (v0.28 item 5)
+#[cfg(feature = "alloc")]
+pub(crate) mod keys;
+// The security modules' calls (v0.28 item 5)
+mod lsm;
+// The system tier's smaller calls (v0.28 item 5)
+pub(crate) mod system;
+// BSD process accounting (v0.28 item 5)
+#[cfg(feature = "alloc")]
+pub(crate) mod acct;
+#[cfg(feature = "alloc")]
+pub(crate) mod seccomp;
 use self::network_ext_syscalls::*;
 
 // Phase 7.5 Wave 8: Shell/Userland extensions (io_uring, ptrace, core dump,
@@ -564,6 +624,17 @@ pub enum SyscallError {
     /// A message longer than the queue's message size, or a buffer
     /// shorter than it (EMSGSIZE, errno 90).
     MessageTooLong = -143,
+    /// A descriptor of the wrong kind for the call, such as one that is not
+    /// a Landlock ruleset (EBADFD, errno 77).
+    BadFdState = -144,
+    /// The owner's key quota would be exceeded (EDQUOT, errno 122).
+    QuotaExceeded = -145,
+    /// No such key, or a negative one (ENOKEY, errno 126).
+    KeyNotAvailable = -146,
+    /// The key has expired (EKEYEXPIRED, errno 127).
+    KeyExpired = -147,
+    /// The key was revoked (EKEYREVOKED, errno 128).
+    KeyRevoked = -148,
     /// The call was interrupted and left a restart block (`restart`):
     /// Linux -ERESTART_RESTARTBLOCK, turned into EINTR or restart_syscall
     /// on the way back to user mode and never seen there.
@@ -841,6 +912,23 @@ fn dispatch(
     arg4: usize,
     arg5: usize,
 ) -> isize {
+    // seccomp sees every call first, by its raw number, before decoding:
+    // the private VeridianOS calls are filtered too (ADR 0027).
+    #[cfg(feature = "alloc")]
+    if let seccomp::Outcome::Skip(v) = seccomp::check(
+        syscall_num,
+        [
+            arg1 as u64,
+            arg2 as u64,
+            arg3 as u64,
+            arg4 as u64,
+            arg5 as u64,
+            syscall_arg6().unwrap_or(0) as u64,
+        ],
+        syscall_user_ip(),
+    ) {
+        return v;
+    }
     // Caller PID for audit logging (dropped here: exit and exec do not
     // return, so an Arc held across the dispatch would never be released).
     let caller_pid = crate::process::current_process()
@@ -1687,6 +1775,30 @@ fn handle_syscall(
         #[cfg(feature = "alloc")]
         Syscall::Cachestat => memctl::sys_cachestat(arg1, arg2, arg3, arg4),
         #[cfg(feature = "alloc")]
+        Syscall::Seccomp => seccomp::sys_seccomp(arg1, arg2, arg3),
+        Syscall::Vhangup => system::sys_vhangup(),
+        Syscall::Syslog => system::sys_syslog(arg1, arg2, arg3),
+        Syscall::Reboot => system::sys_reboot(arg1, arg2, arg3, arg4),
+        #[cfg(feature = "alloc")]
+        Syscall::Acct => acct::sys_acct(arg1),
+        Syscall::Iopl => system::sys_iopl(arg1),
+        Syscall::Ioperm => system::sys_ioperm(arg1, arg2, arg3),
+        Syscall::LsmListModules => lsm::sys_lsm_list_modules(arg1, arg2, arg3),
+        Syscall::LsmGetSelfAttr => lsm::sys_lsm_get_self_attr(arg1, arg2, arg3, arg4),
+        Syscall::LsmSetSelfAttr => lsm::sys_lsm_set_self_attr(arg1, arg2, arg3, arg4),
+        #[cfg(feature = "alloc")]
+        Syscall::AddKey => keys::sys_add_key(arg1, arg2, arg3, arg4, arg5),
+        #[cfg(feature = "alloc")]
+        Syscall::RequestKey => keys::sys_request_key(arg1, arg2, arg3, arg4),
+        #[cfg(feature = "alloc")]
+        Syscall::Keyctl => keys::sys_keyctl(arg1, arg2, arg3, arg4, arg5),
+        #[cfg(feature = "alloc")]
+        Syscall::LandlockCreateRuleset => landlock::sys_landlock_create_ruleset(arg1, arg2, arg3),
+        #[cfg(feature = "alloc")]
+        Syscall::LandlockAddRule => landlock::sys_landlock_add_rule(arg1, arg2, arg3, arg4),
+        #[cfg(feature = "alloc")]
+        Syscall::LandlockRestrictSelf => landlock::sys_landlock_restrict_self(arg1, arg2),
+        #[cfg(feature = "alloc")]
         Syscall::FileGetattr => fileattr::sys_file_getattr(arg1, arg2, arg3, arg4, arg5),
         #[cfg(feature = "alloc")]
         Syscall::FileSetattr => fileattr::sys_file_setattr(arg1, arg2, arg3, arg4, arg5),
@@ -2492,10 +2604,17 @@ fn sys_get_robust_list(tid: usize, head_out: usize, len_out: usize) -> SyscallRe
                 pid,
                 &pid_ns,
                 crate::cap::Rights::MODIFY,
+            ) && debug::landlock_may_inspect(
+                #[cfg(feature = "alloc")]
+                thread.landlock.get().as_deref(),
             ),
         };
+        // A thread of the caller's own process is always allowed, before
+        // any credential or LSM check (__ptrace_may_access's
+        // same_thread_group test; PR #49 review).
+        let same_process = crate::process::current_process().is_some_and(|me| me.pid == pid);
         let me = crate::process::creds::Caller::current();
-        if !debug::may_access(&me, debug::current_permitted(), &target) {
+        if !same_process && !debug::may_access(&me, debug::current_permitted(), &target) {
             return Err(SyscallError::OperationNotPermitted);
         }
         thread
@@ -2557,11 +2676,38 @@ fn sys_sendmsg(socket_fd: usize, msghdr_ptr: usize, _flags: usize) -> SyscallRes
         None
     };
 
-    with_socket_fd(socket_fd, |s| match s.handle() {
+    // The socket is looked up once: Landlock's check and the send are on
+    // the same one, which a dup2 from another thread between two lookups
+    // could otherwise swap (PR #49 review).
+    let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    let file = process
+        .file_table
+        .lock()
+        .get(socket_fd)
+        .ok_or(SyscallError::BadFileDescriptor)?;
+    let sock = file
+        .node
+        .as_any()
+        .and_then(|a| a.downcast_ref::<SocketNode>())
+        .ok_or(SyscallError::NotASocket)?;
+    // Landlock's hook_socket_sendmsg, with msg_name and msg_namelen.
+    #[cfg(feature = "alloc")]
+    if let SocketHandle::Inet(id) = sock.handle() {
+        let name = if hdr[0] != 0 {
+            Some(network_ext_syscalls::read_sockaddr(
+                hdr[0],
+                hdr[1] & 0xffff_ffff,
+            )?)
+        } else {
+            None
+        };
+        landlock_inet(id, name.as_deref(), NetHook::Send)?;
+    }
+    match sock.handle() {
         // INET sockets cannot pass files.
         SocketHandle::Inet(_) if rights.is_some() => Err(SyscallError::InvalidArgument),
-        _ => s.send(&data, rights).map_err(socket_err),
-    })?
+        _ => sock.send(&data, rights).map_err(socket_err),
+    }
 }
 
 /// An fd from an SCM_RIGHTS array as a table index; a negative fd is EBADF.
@@ -3337,6 +3483,11 @@ const SOCKADDR_UN_LEN: usize = 110;
 /// supported and are rejected. `bind` used to read the name from offset 0,
 /// so every bind registered the family bytes as the path (review of the
 /// v0.26.0 stack, PR #14).
+///
+/// Abstract names, when they come, need Landlock's
+/// LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET checked on connect and send in the
+/// same change (`security::landlock::may_reach`, ADR 0029; MASTER_TODO
+/// item 10), or a sandboxed program reaches sockets outside it.
 fn parse_sockaddr_un(raw: &[u8]) -> Result<alloc::string::String, SyscallError> {
     if raw.len() <= 2 || raw.len() > SOCKADDR_UN_LEN {
         return Err(SyscallError::InvalidArgument);
@@ -3617,7 +3768,10 @@ fn sys_socket_create(domain: usize, sock_type: usize, protocol: usize) -> Syscal
 fn sys_socket_bind(fd: usize, addr_ptr: usize, addr_len: usize) -> SyscallResult {
     match with_socket_fd(fd, SocketNode::handle)? {
         SocketHandle::Inet(id) => {
-            let addr = network_ext_syscalls::parse_sockaddr(addr_ptr, addr_len)?;
+            let raw = network_ext_syscalls::read_sockaddr(addr_ptr, addr_len)?;
+            #[cfg(feature = "alloc")]
+            landlock_inet(id, Some(&raw), NetHook::Bind)?;
+            let addr = network_ext_syscalls::parse_sockaddr_bytes(&raw)?;
             crate::net::socket::with_socket_mut(id, |s| s.bind(addr))
                 .map_err(|_| SyscallError::InvalidState)?
                 .map_err(|e| match e {
@@ -3657,6 +3811,85 @@ fn sys_socket_bind(fd: usize, addr_ptr: usize, addr_len: usize) -> SyscallResult
     }
 }
 
+/// Which Landlock socket hook runs (hook_socket_bind, hook_socket_connect,
+/// hook_socket_sendmsg).
+#[cfg(feature = "alloc")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NetHook {
+    Bind,
+    Connect,
+    Send,
+}
+
+/// Landlock's check of an operation on INET socket `id` with address
+/// `addr` (copied in once by the caller, which parses the same bytes; none
+/// for a send without one), before the address is parsed, as Linux's LSM
+/// hooks run first. Only TCP and UDP sockets are checked; a UDP socket with
+/// no port yet also needs BIND_UDP on port 0, which its connect or send
+/// would take.
+#[cfg(feature = "alloc")]
+fn landlock_inet(id: usize, addr: Option<&[u8]>, hook: NetHook) -> Result<(), SyscallError> {
+    use crate::{
+        net::socket::{SocketDomain, SocketProtocol, SocketType},
+        security::landlock::{self as l, ll::net, NetRefusal},
+    };
+    let Some(d) = l::current() else {
+        return Ok(());
+    };
+    if !d.handles_net() {
+        return Ok(());
+    }
+    let Ok((domain, ty, proto, bound)) = crate::net::socket::with_socket(id, |s| {
+        (
+            s.domain,
+            s.socket_type,
+            s.protocol,
+            s.local_addr.is_some_and(|a| a.port != 0),
+        )
+    }) else {
+        return Ok(());
+    };
+    let family = match domain {
+        SocketDomain::Inet => l::AF_INET,
+        SocketDomain::Inet6 => l::AF_INET6,
+        SocketDomain::Unix => return Ok(()),
+    };
+    let tcp =
+        ty == SocketType::Stream && matches!(proto, SocketProtocol::Tcp | SocketProtocol::Default);
+    let udp =
+        ty == SocketType::Dgram && matches!(proto, SocketProtocol::Udp | SocketProtocol::Default);
+    let access = match (hook, tcp, udp) {
+        (NetHook::Bind, true, _) => net::BIND_TCP,
+        (NetHook::Bind, _, true) => net::BIND_UDP,
+        (NetHook::Connect, true, _) => net::CONNECT_TCP,
+        (NetHook::Connect | NetHook::Send, _, true) => net::CONNECT_SEND_UDP,
+        _ => return Ok(()),
+    };
+    let refused = |r: NetRefusal| match r {
+        NetRefusal::Invalid => SyscallError::InvalidArgument,
+        NetRefusal::AfNotSupported => SyscallError::AddressFamilyNotSupported,
+        NetRefusal::Denied => SyscallError::PermissionDenied,
+    };
+    let mut family_given = None;
+    if let Some(raw) = addr {
+        l::check_sockaddr(&d, family, raw, access, hook == NetHook::Connect).map_err(refused)?;
+        if raw.len() >= 2 {
+            family_given = Some(u16::from_ne_bytes([raw[0], raw[1]]));
+        }
+    } else if hook != NetHook::Send {
+        return Ok(());
+    }
+    let autobind = match hook {
+        NetHook::Connect => udp && family_given.is_some_and(|f| f != l::AF_UNSPEC),
+        NetHook::Send => true,
+        NetHook::Bind => false,
+    };
+    if autobind {
+        l::check_udp_autobind(&d, bound).map_err(refused)?;
+    }
+    Ok(())
+}
+
 /// SYS_listen: Start listening on a bound socket.
 fn sys_socket_listen(fd: usize, backlog: usize) -> SyscallResult {
     match with_socket_fd(fd, SocketNode::handle)? {
@@ -3680,7 +3913,10 @@ fn sys_socket_listen(fd: usize, backlog: usize) -> SyscallResult {
 fn sys_socket_connect(fd: usize, addr_ptr: usize, addr_len: usize) -> SyscallResult {
     match with_socket_fd(fd, SocketNode::handle)? {
         SocketHandle::Inet(id) => {
-            let addr = network_ext_syscalls::parse_sockaddr(addr_ptr, addr_len)?;
+            let raw = network_ext_syscalls::read_sockaddr(addr_ptr, addr_len)?;
+            #[cfg(feature = "alloc")]
+            landlock_inet(id, Some(&raw), NetHook::Connect)?;
+            let addr = network_ext_syscalls::parse_sockaddr_bytes(&raw)?;
             if !crate::net::socket::reachable(id) {
                 return Err(SyscallError::NetworkUnreachable);
             }
@@ -3691,8 +3927,8 @@ fn sys_socket_connect(fd: usize, addr_ptr: usize, addr_len: usize) -> SyscallRes
         }
         SocketHandle::Unix(id) => {
             let name = read_sockaddr_un(addr_ptr, addr_len)?;
-            let file = filesystem::find_socket_file(&name)?;
-            crate::net::unix_socket::socket_connect(id, &file)
+            let (_file, target) = filesystem::find_socket_file(&name)?;
+            crate::net::unix_socket::socket_connect_to(id, target)
                 .map(|()| 0)
                 .map_err(|e| match e {
                     crate::error::KernelError::ResourceExhausted { .. } => SyscallError::WouldBlock,
@@ -5098,7 +5334,7 @@ mod tests {
         // Linux numbers with no call yet, and the gap below the private
         // range, are not decoded.
         assert!(Syscall::try_from(179).is_err()); // quotactl
-        assert!(Syscall::try_from(153).is_err()); // vhangup
+        assert!(Syscall::try_from(174).is_err()); // create_module (removed)
         assert!(Syscall::try_from(500).is_err());
         assert!(Syscall::try_from(1023).is_err());
     }

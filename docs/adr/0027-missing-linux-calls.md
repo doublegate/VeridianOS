@@ -293,6 +293,121 @@ The reference for every behaviour below is the Linux 7.3 source (kernel.org tarb
     - **Not yet** (KNOWN-LIMITATIONS): MOVE_MOUNT_BENEATH, until open files keep the mount they
       were reached through.
 
+### System tier: seccomp
+
+27. seccomp(2) and prctl's PR_SET_SECCOMP/PR_GET_SECCOMP follow Linux 7.3's `kernel/seccomp.c`:
+    - **Strict mode** allows read, write, exit and rt_sigreturn; anything else is SIGKILL.
+    - **Filter mode**: classic BPF programs, checked as bpf_check_classic and
+      seccomp_check_filter, run by the new `veridian-cbpf` crate (no_std, no unsafe), which
+      the user-space Linux runtime will share (Track M) and the Kani harnesses of Track S are
+      to cover. A thread's programs form a chain kept across fork, clone and exec, at most
+      32,768 instructions with four per program (ENOMEM). Installing one needs no_new_privs
+      or CAP_SYS_ADMIN in the caller's user namespace (EACCES); TSYNC gives every thread the
+      chain if each one's is an ancestor of the caller's (else that thread's id, or ESRCH
+      with TSYNC_ESRCH).
+    - **Every call** is checked at the top of dispatch with its raw number, before decoding,
+      so the private VeridianOS calls are filtered as well, with all six arguments and the
+      instruction pointer. The action of highest precedence across the chain wins:
+      KILL_PROCESS and KILL_THREAD end the process or thread by SIGSYS, which no handler sees
+      (unknown actions kill the process); TRAP raises a forced SIGSYS with SYS_SECCOMP, the
+      call, the architecture and the call address, the call skipped; ERRNO returns its errno
+      (at most 4095); LOG logs and allows; TRACE is ENOSYS with no tracer, as on Linux.
+      GET_ACTION_AVAIL and GET_NOTIF_SIZES answer; `/proc/<pid>/status` shows NoNewPrivs,
+      Seccomp and Seccomp_filters.
+    - **Installing** happens under the process's thread map (Linux's siglock), and TSYNC
+      also holds the credential guard, so no thread made meanwhile and no other thread's
+      install escapes it, and no exec decides privileges halfway. A new thread copies its
+      creator's state again under the map. Exiting threads are skipped, and an exiting
+      thread stops using its chain.
+    - **User notification:** NEW_LISTENER returns a close-on-exec listener descriptor
+      (EBUSY if the chain already has one), reserved before the filter is installed and
+      filled after, as Linux's get_unused_fd_flags and fd_install: no other thread sees it
+      halfway, and a failed install gives the number back without closing anything. SECCOMP_RET_USER_NOTIF hands the call to its
+      supervisor; the calling thread waits interruptibly (EINTR, restarted as ERESTARTSYS),
+      or with WAIT_KILLABLE_RECV killably once the supervisor has the call. Ioctls: RECV
+      (zeroed buffer, the caller's PID namespace), SEND (once; CONTINUE runs the call),
+      ID_VALID, SET_FLAGS and ADDFD (SETFD, SEND), whose install the notifying thread
+      carries out in its own descriptor table, as Linux's receive_fd. Poll gives POLLIN,
+      POLLOUT, and POLLHUP once no thread or filter uses the filter (Linux's `users`).
+      Closing the listener answers what is outstanding with ENOSYS. An ERRNO or answer of
+      EINTR is final and never restarted.
+
+### System tier: the key retention service
+
+28. add_key, request_key and keyctl implement Linux 7.3's key retention service core
+    (`security/keys/`): the `user`, `logon` and `keyring` types.
+    - **Placement:** the keys, quotas, permissions, searches and every operation's checks in
+      Linux's order are in the new `veridian-keys` crate (no_std, no unsafe), shared with the
+      user-space Linux runtime later, as `veridian-cbpf` and `veridian-landlock`. The kernel
+      decodes the calls, keeps each thread's keyrings and request_key default (Linux's cred
+      fields), and serves `/proc/keys`, `/proc/key-users` and `/proc/sys/kernel/keys`.
+    - **Keyrings:** thread, process and session keyrings; per user namespace, the user and
+      user-session keyrings in a register, as `look_up_user_keyrings`; persistent keyrings
+      (GET_PERSISTENT, three days, CAP_SETUID for another user); joining by name in the
+      caller's user namespace. fork drops the thread and process keyrings and keeps the
+      session one; CLONE_THREAD shares the process keyring and makes a new thread keyring if
+      the creator has one; exec drops both; a change of fsuid or fsgid moves the thread
+      keyring with it.
+    - **Keys:** random serials from 3; Linux's default permissions; the per-user quotas
+      (200 keys and 20,000 bytes, a million and 25 MB for the initial namespace's root), with
+      4 bytes per keyring link charged to the keyring's owner; possession by search from the
+      thread's keyrings; validity before permission; expiry, revocation and invalidation, and
+      the garbage collector's unlinking at expiry plus `gc_delay` (300 s).
+    - **No usermode helper.** request_key behaves as Linux does with no `/sbin/request-key`:
+      a key it would construct is linked, negated for 60 s, and the caller gets ENOENT; a
+      repeat within the 60 s gets ENOKEY. No instantiation authority is ever handed out, so
+      INSTANTIATE, NEGATE and REJECT are EPERM and ASSUME_AUTHORITY ENOKEY, as for a caller
+      that holds none. A helper can come later without changing the store.
+    - **Outside the core:** Diffie-Hellman, public keys and key notifications are not built
+      in (EOPNOTSUPP, as Linux without them); RESTRICT_KEYRING has only reject-all, a named
+      restriction ENOENT. KEYCTL_CAPABILITIES reports Linux's bytes for this set, 0xe3 0x03.
+
+### System tier: the kernel log, accounting and the machine calls
+
+29. The remaining calls of the tier follow Linux 7.3, with these choices:
+    - **syslog** reads a kernel log ring (`printk`) that keeps every line the kernel prints,
+      in syslog's text form, in 128 KiB that need no heap. The print path never waits for the
+      ring: a print that finds it busy loses its text there, not on the console. The console
+      shows messages below `console_loglevel` (default 7), so CONSOLE_OFF and CONSOLE_LEVEL
+      work. Every action that needs CAP_SYSLOG also needs the `System` object (ADR 0024
+      lists the kernel log under it): READ to read the log, MODIFY to clear it or change the
+      console, both for READ and READ_CLEAR, which return the text and consume or clear it;
+      READ_CLEAR clears only what reached the caller. Only the kernel's
+      own messages go through the ring and the level: what programs
+      write to the console (`/dev/console`, the serial console, a tty echo) goes straight to
+      it (`print::console_write`), as a tty write on Linux, so no program can put lines in the
+      kernel log or be silenced by `dmesg -n`. A panic or a fatal trap first raises the level to 15, as Linux's console_verbose,
+      so a program that lowered it cannot hide a crash; the x86_64 fault report writes to the
+      port directly anyway, and the CPU stall dump is taken by the host through QEMU. **`dmesg_restrict` starts at 1**, where Linux's built-in default is 0: the log
+      names kernel addresses that KASLR is meant to hide, and Debian's and Ubuntu's kernels
+      ship it on. It is a sysctl, so the old behaviour is one write away (CAP_SYS_ADMIN).
+      `/proc/kmsg` and `/dev/kmsg` come with the device and proc work (Track C item 3).
+    - **acct** writes version 3 records per PID namespace when a process's last thread
+      exits, into every accounting namespace from its own up (slow_acct_process), with ids as
+      the opener's user namespace sees them, and with Linux's free-space pause and resume. A
+      namespace's accounting ends when its init's exit has emptied it (acct_exit_ns). Memory and fault counts,
+      ASU and the terminal are 0 until they are counted.
+    - **vhangup** is CAP_SYS_TTY_CONFIG, then the hangup of the caller's controlling
+      terminal, which no process has until the terminal work of v0.29 (Linux returns 0 for
+      such a process too).
+    - **iopl and ioperm** give ports only through IoPort capabilities, which nothing is
+      granted yet (Track M, M2): turning ports on and iopl 3 are EPERM for every caller,
+      levels 1 and 2 (which open no ports) need CAP_SYS_RAWIO, as on Linux.
+    - **reboot** checks CAP_SYS_BOOT in the user namespace owning the caller's PID namespace,
+      then the magic numbers. Inside a PID namespace below the initial one it is Linux's
+      reboot_pid_ns: the namespace's init is killed and reported killed by SIGHUP (restart)
+      or SIGINT (halt, power off); that needs MODIFY on the PID namespace and WRITE over its
+      init too (ADR 0024: the two rights are separate, and killing another process takes
+      WRITE over it). On the machine it also needs
+      MODIFY on the `System` object. The other CPUs are stopped first (each is sent the reschedule interrupt and
+      halts in it); restart is the PCI reset register, then the keyboard controller, then a
+      triple fault on x86_64, PSCI SYSTEM_RESET on AArch64 and SBI SRST on RISC-V; power off
+      is ACPI S5 (with the sleep type the DSDT's `\_S5` gives; QEMU's is 0, not the 7 of
+      Intel chipsets), PSCI SYSTEM_OFF (through the conduit the device tree names, in every
+      build) and SBI SRST (or the legacy shutdown call), halting where it
+      does not take. As on Linux nothing is synced. KEXEC and SW_SUSPEND are EINVAL, as a
+      Linux built without kexec and hibernation; kexec has its plan in MASTER_TODO item 18.
+
 ## Consequences
 
 - LTP's ipc tests (shmget*, shmat*, shmctl*, semget*, semop*, semctl*, msgget*, msgsnd*,

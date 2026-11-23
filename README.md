@@ -59,13 +59,14 @@ VeridianOS intentionally prioritizes architectural clarity over feature velocity
 
 - **Networking** -- Protocol code for TCP/IP dual-stack (IPv4 + IPv6), E1000 and virtio-net drivers, TCP Reno/Cubic/SACK, DNS, DHCP, VLAN, bonding, netfilter firewall with conntrack/NAT, RIP/OSPF routing, WiFi 802.11, Bluetooth L2CAP/RFCOMM, VPN tunnels, TLS 1.3, SSH, HTTP, QUIC, WireGuard, mDNS. User-space INET sockets do not work yet and TCP is incomplete (N-64 to N-76, NET-INC-01); loopback and Unix sockets work
 - **Virtualization** -- Intel VMX hypervisor with VMCS/EPT, KVM API compatibility, QEMU device model with live migration, VFIO PCI passthrough, SR-IOV, CPU/memory/PCI hotplug
-- **Containers** -- Linux namespaces through clone, unshare and setns (ADR 0022, unreleased): UTS, time, mount, user, PID, network and IPC namespaces work (an IPC namespace has its own System V objects and POSIX message queues, ADR 0027), with the gaps listed in docs/KNOWN-LIMITATIONS.md; cgroup namespaces can be made but isolate nothing yet. Also OCI runtime structures, cgroup bookkeeping, overlay filesystem, seccomp BPF and veth code; the in-kernel container runtime does not use the namespaces yet (VIRT-INC-01) and the seccomp filter is never consulted
+- **Containers** -- Linux namespaces through clone, unshare and setns (ADR 0022, unreleased): UTS, time, mount, user, PID, network and IPC namespaces work (an IPC namespace has its own System V objects and POSIX message queues, ADR 0027), with the gaps listed in docs/KNOWN-LIMITATIONS.md; cgroup namespaces can be made but isolate nothing yet. Also OCI runtime structures, cgroup bookkeeping, overlay filesystem, seccomp BPF and veth code; the in-kernel container runtime does not use the namespaces or its own seccomp code yet (VIRT-INC-01), while programs have seccomp(2) itself (see Security)
 - **Cloud-native** -- CRI/CNI/CSI interfaces, service mesh with mTLS and SPIFFE identity, L4/L7 load balancer, cloud-init metadata service
 - **Enterprise** -- LDAP v3, Kerberos v5, NFS v4, SMB2/3, iSCSI initiator, software RAID 0/1/5
 
 ### Security
 
 - **Defense in depth** -- NX/W^X page protections from `mmap`/`mprotect` flags, guarded kernel stacks and a W^X kernel image on all three architectures, checked user-memory access. KPTI, KASLR, stack canaries, SMEP/SMAP and retpoline exist as code but are not active (N-145, N-146, N-15)
+- **Process sandboxing (unreleased)** -- seccomp as Linux 7.3 (strict mode, classic BPF filters on every call, TSYNC, user notification with its ioctls) and Landlock ABI 11 (filesystem, TCP/UDP port and scope rules, up to 16 layers), each through a shared host-tested crate; the key retention service core (add_key, request_key, keyctl). Design in ADR 0027 and ADR 0029
 - **Post-quantum cryptography** -- ML-DSA-65 signature verification (FIPS 204, checked against NIST ACVP vectors); an experimental, non-standard Kyber KEM (N-57); alongside ChaCha20-Poly1305, Ed25519, X25519
 - **Hardware security** -- TPM 2.0 and secure-boot verification code; IOMMU tables are parsed but DMA isolation is not enabled (N-77)
 - **Mandatory access control** -- Policy parser, RBAC/MLS model and audit logging; enforcement is path-blind and partial (N-152)
@@ -286,6 +287,7 @@ Security is a foundational design goal. What is in effect today, and what is not
 
 - **Capability-based access control** -- Fine-grained permissions for IPC, memory sharing and process creation; Linux privilege checks on files, mounts, namespaces, the clocks, other processes and the system as a whole need an object capability as well (ADR 0024)
 - **Memory safety** -- Rust ownership guarantees, NX/W^X page protections and guarded kernel stacks (KPTI, KASLR and SMEP/SMAP are not active yet: N-145, N-146, N-15)
+- **Sandboxing (unreleased)** -- seccomp filters and Landlock rulesets as Linux 7.3, for unmodified Linux programs
 - **Post-quantum cryptography** -- ML-DSA-65 verification (FIPS 204) and an experimental, non-standard Kyber KEM (N-57) alongside classical algorithms
 - **Mandatory access control** -- Policy-driven RBAC and MLS model (enforcement partial, N-152)
 - **Hardware security** -- TPM 2.0 and secure boot chain code; no IOMMU isolation yet (N-77)

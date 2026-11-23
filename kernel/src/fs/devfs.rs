@@ -102,6 +102,10 @@ impl VfsNode for DeviceFile {
         self.inode.metadata()
     }
 
+    fn named_node(&self) -> Option<Arc<dyn VfsNode>> {
+        Some(self.inode.clone())
+    }
+
     fn file_identity(&self) -> Option<(u64, u64)> {
         self.inode.file_identity()
     }
@@ -270,7 +274,7 @@ impl VfsNode for DevNode {
             "console" | "tty0" => {
                 // Write to console
                 for &_byte in data {
-                    crate::print!("{}", _byte as char);
+                    crate::print::console_write(format_args!("{}", _byte as char));
                 }
                 Ok(data.len())
             }

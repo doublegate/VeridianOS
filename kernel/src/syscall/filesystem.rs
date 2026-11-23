@@ -301,15 +301,66 @@ pub(super) fn open_node(
     regular: bool,
     follow: bool,
 ) -> SyscallResult {
+    open_node_in(node, created, canonical, flags, regular, follow, None)
+}
+
+/// [`open_node`] of a file whose path names no entry, `parent` being the
+/// directory it is in (canonical path and node): an O_TMPFILE file, whose
+/// Landlock rights come from that directory, as Linux's from the file's
+/// d_parent (PR #49 review).
+#[allow(clippy::too_many_arguments)]
+fn open_node_in(
+    node: alloc::sync::Arc<dyn crate::fs::VfsNode>,
+    created: bool,
+    canonical: alloc::string::String,
+    flags: usize,
+    regular: bool,
+    follow: bool,
+    parent: Option<(&str, &alloc::sync::Arc<dyn crate::fs::VfsNode>)>,
+) -> SyscallResult {
+    const O_CLOEXEC: usize = 0x8_0000;
+    let process = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let file = open_file_in(node, created, canonical, flags, regular, follow, parent)?;
+    let fd = process
+        .file_table
+        .lock()
+        .open_with_flags(file, flags & O_CLOEXEC != 0)
+        .map_err(super::map_kernel_error);
+    fd
+}
+
+/// [`open_node`]'s open file, every check made, without a descriptor: what
+/// the kernel keeps for itself (acct's file, Linux's file_open_name).
+pub(super) fn open_file(
+    node: alloc::sync::Arc<dyn crate::fs::VfsNode>,
+    created: bool,
+    canonical: alloc::string::String,
+    flags: usize,
+    regular: bool,
+    follow: bool,
+) -> Result<alloc::sync::Arc<crate::fs::file::File>, SyscallError> {
+    open_file_in(node, created, canonical, flags, regular, follow, None)
+}
+
+/// [`open_file`], with the directory a nameless file is in ([`open_node_in`]).
+#[allow(clippy::too_many_arguments)]
+fn open_file_in(
+    node: alloc::sync::Arc<dyn crate::fs::VfsNode>,
+    created: bool,
+    canonical: alloc::string::String,
+    flags: usize,
+    regular: bool,
+    follow: bool,
+    parent: Option<(&str, &alloc::sync::Arc<dyn crate::fs::VfsNode>)>,
+) -> Result<alloc::sync::Arc<crate::fs::file::File>, SyscallError> {
+    #[cfg(not(feature = "alloc"))]
+    let _ = parent;
     #[cfg(target_arch = "aarch64")]
     const O_DIRECTORY: usize = 0x4000;
     #[cfg(not(target_arch = "aarch64"))]
     const O_DIRECTORY: usize = 0x1_0000;
-    const O_CLOEXEC: usize = 0x8_0000;
     use crate::fs::NodeType;
 
-    let process = process::current_process().ok_or(SyscallError::InvalidState)?;
-    let cloexec = flags & O_CLOEXEC != 0;
     let node_type = node.node_type();
     if flags & O_PATH as usize != 0 {
         // An O_PATH open only names the file (Linux's do_o_path): no
@@ -325,11 +376,7 @@ pub(super) fn open_node(
             crate::fs::file::status::PATH,
             core::sync::atomic::Ordering::AcqRel,
         );
-        return process
-            .file_table
-            .lock()
-            .open_with_flags(alloc::sync::Arc::new(file), cloexec)
-            .map_err(super::map_kernel_error);
+        return Ok(alloc::sync::Arc::new(file));
     }
     let open_flags = OpenFlags::from_bits(flags as u32).ok_or(SyscallError::InvalidArgument)?;
     // O_CREAT names a file: an existing directory is EISDIR even read-only.
@@ -387,9 +434,48 @@ pub(super) fn open_node(
     } else {
         None
     };
+    // Landlock (hook_file_open), after the write access as in Linux's
+    // do_dentry_open: the open's own rights, and the ones the file keeps
+    // for later (TRUNCATE; IOCTL_DEV for a device), worked out together.
+    #[cfg(feature = "alloc")]
+    let landlock_allowed = {
+        use crate::security::landlock::ll::fs as llfs;
+        let view = vfs()?;
+        if view.landlock().is_some() {
+            let mut open = 0;
+            if open_flags.read {
+                open |= if node_type == NodeType::Directory {
+                    llfs::READ_DIR
+                } else {
+                    llfs::READ_FILE
+                };
+            }
+            if open_flags.write {
+                open |= llfs::WRITE_FILE;
+            }
+            let optional = llfs::TRUNCATE | if device { llfs::IOCTL_DEV } else { 0 };
+            let allowed = match parent {
+                Some((dir_path, dir)) => {
+                    view.landlock_open_rights_under(dir_path, dir, &node, open | optional)
+                }
+                None => view.landlock_open_rights(&canonical, &node, open | optional),
+            };
+            if open & !allowed != 0 {
+                return Err(SyscallError::PermissionDenied);
+            }
+            Some(allowed & optional)
+        } else {
+            None
+        }
+    };
     let truncated =
         open_flags.truncate && open_flags.write && !created && node_type == NodeType::File;
     if truncated {
+        // hook_file_truncate on the file being opened.
+        #[cfg(feature = "alloc")]
+        if landlock_allowed.is_some_and(|a| a & crate::security::landlock::ll::fs::TRUNCATE == 0) {
+            return Err(SyscallError::PermissionDenied);
+        }
         open_truncate(&*node)?;
     }
     // A special file made by mknod opens what it names; a socket file
@@ -407,8 +493,13 @@ pub(super) fn open_node(
     };
 
     let mut file = crate::fs::file::File::new_with_path(node, open_flags, canonical);
+    file.tmpfile_dir = parent.map(|(_, dir)| dir.clone());
     file.opener = Some(alloc::boxed::Box::new(Caller::current()));
     file.write_access = write_access;
+    #[cfg(feature = "alloc")]
+    if let Some(allowed) = landlock_allowed {
+        *file.landlock_allowed.get_mut() = allowed;
+    }
     file.status
         .fetch_or(open_status(flags), core::sync::atomic::Ordering::AcqRel);
     // IN_OPEN, then O_TRUNC's IN_MODIFY, as Linux's do_open.
@@ -416,10 +507,7 @@ pub(super) fn open_node(
     if truncated {
         crate::fs::inotify::on_file(&file, crate::fs::inotify::IN_MODIFY);
     }
-    let file_table = process.file_table.lock();
-    file_table
-        .open_with_flags(alloc::sync::Arc::new(file), cloexec)
-        .map_err(super::map_kernel_error)
+    Ok(alloc::sync::Arc::new(file))
 }
 
 /// The flags open(2) and openat(2) act on, as Linux's build_open_how:
@@ -509,7 +597,15 @@ fn open_tmpfile(
     let path = alloc::format!("{}/#{}", canonical.trim_end_matches('/'), inode);
     // O_DIRECTORY is part of O_TMPFILE, not a request for a directory.
     let flags = flags & !(O_TMPFILE_BIT | O_DIRECTORY_64) as usize;
-    open_node(node, true, path, flags, false, true)
+    open_node_in(
+        node,
+        true,
+        path,
+        flags,
+        false,
+        true,
+        Some((canonical, &dir)),
+    )
 }
 
 /// Open FIFO `inode` (`fs::fifo`): a blocking open of one end sleeps until
@@ -1007,6 +1103,16 @@ pub fn sys_ftruncate(fd: usize, length: usize) -> SyscallResult {
     // An append-only file cannot be truncated (do_sys_ftruncate: EPERM).
     #[cfg(feature = "alloc")]
     crate::fs::attr::may_open(&*file.node, false, false, true).map_err(super::map_kernel_error)?;
+    // Landlock's hook_file_truncate: the right recorded at open.
+    #[cfg(feature = "alloc")]
+    if file
+        .landlock_allowed
+        .load(core::sync::atomic::Ordering::Relaxed)
+        & crate::security::landlock::ll::fs::TRUNCATE
+        == 0
+    {
+        return Err(SyscallError::PermissionDenied);
+    }
     crate::fs::check_fsize_truncate(&*file.node, length).map_err(super::map_kernel_error)?;
     crate::fs::truncate_removing_privs(&*file.node, length).map_err(super::map_kernel_error)?;
     crate::fs::inotify::on_file(&file, crate::fs::inotify::IN_MODIFY);
@@ -1103,8 +1209,13 @@ pub fn sys_rmdir(path: usize) -> SyscallResult {
 }
 
 /// What the private mount and umount calls check: CAP_SYS_ADMIN and the
-/// mount namespace's object capability with MODIFY, as mount(2) does.
+/// mount namespace's object capability with MODIFY, as mount(2) does, and
+/// no Landlock filesystem domain (ADR 0029).
 fn may_change_mounts() -> bool {
+    #[cfg(feature = "alloc")]
+    if crate::security::landlock::may_change_mounts().is_err() {
+        return false;
+    }
     Caller::current().capable(crate::process::linux_caps::CAP_SYS_ADMIN)
         && crate::cap::authority::current_may_change_mounts()
 }
@@ -2173,6 +2284,24 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
         return Err(SyscallError::BadFileDescriptor);
     }
 
+    // Landlock's hook_file_ioctl, before any command is answered
+    // (security_file_ioctl): a device opened without IOCTL_DEV takes only
+    // the generic commands.
+    #[cfg(feature = "alloc")]
+    if let Some(f) = &file {
+        use crate::security::landlock as l;
+        let allowed = f
+            .landlock_allowed
+            .load(core::sync::atomic::Ordering::Relaxed);
+        let device = matches!(
+            f.node.node_type(),
+            crate::fs::NodeType::CharDevice | crate::fs::NodeType::BlockDevice
+        );
+        if allowed & l::ll::fs::IOCTL_DEV == 0 && device && !l::is_masked_device_ioctl(cmd as u32) {
+            return Err(SyscallError::PermissionDenied);
+        }
+    }
+
     // What every file answers, before its driver sees the command
     // (Linux's do_vfs_ioctl).
     match cmd {
@@ -2194,6 +2323,8 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
         }
         FIOASYNC => {
             let on: i32 = super::userspace::read_user(arg)?;
+            // When files send SIGIO, the signal goes through Landlock's
+            // signal scope (hook_file_send_sigiotask; MASTER_TODO item 10).
             // No file sends SIGIO yet, so none can turn it on: Linux's
             // ENOTTY for a file without fasync. Turning it off is a no-op.
             return if on != 0 {
@@ -2220,6 +2351,16 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
             return Ok(0);
         }
         _ => {}
+    }
+
+    // A seccomp listener answers its own commands, every other one EINVAL
+    // (seccomp_notify_ioctl; an anonymous inode has no attribute flags).
+    #[cfg(feature = "alloc")]
+    if let Some(result) = file
+        .as_ref()
+        .and_then(|f| super::seccomp::notify_ioctl(f, cmd, arg))
+    {
+        return result;
     }
 
     // The attribute-flag ioctls (do_vfs_ioctl's FS_IOC_*), for any file
@@ -2444,6 +2585,7 @@ pub fn sys_kill(pid: usize, signal: usize) -> SyscallResult {
 fn may_signal(
     caller: &crate::process::Process,
     target: &crate::process::Process,
+    thread: Option<u64>,
     sig: i32,
 ) -> bool {
     use core::sync::atomic::Ordering;
@@ -2456,7 +2598,38 @@ fn may_signal(
         sig,
         same_session,
     ) && (caller.pid == target.pid
-        || crate::cap::authority::current_may_act_on_process(target, crate::cap::Rights::WRITE))
+        || (crate::cap::authority::current_may_act_on_process(target, crate::cap::Rights::WRITE)
+            && landlock_may_signal(target, thread)))
+}
+
+/// Landlock's signal scope (hook_task_kill): a domain that sets
+/// LANDLOCK_SCOPE_SIGNAL reaches only processes in it or below it; its own
+/// threads always. The domain checked is the named task's, as
+/// hook_task_kill's: thread `thread` for a thread-directed signal (tkill,
+/// tgkill, rt_tgsigqueueinfo, PIDFD_SIGNAL_THREAD), else the process's
+/// leader. With the leader's domain for a named thread, a sandboxed
+/// process could signal a thread outside its domain whose leader had
+/// restricted itself without TSYNC, which Linux refuses (PR #49
+/// independent review).
+fn landlock_may_signal(target: &crate::process::Process, thread: Option<u64>) -> bool {
+    #[cfg(feature = "alloc")]
+    {
+        use crate::security::landlock as l;
+        let domain = match thread.and_then(|t| target.get_thread(crate::process::ThreadId(t))) {
+            Some(t) => t.landlock.get(),
+            None => l::of_process(target),
+        };
+        l::may_reach(
+            l::current().as_deref(),
+            domain.as_deref(),
+            l::ll::scope::SIGNAL,
+        )
+    }
+    #[cfg(not(feature = "alloc"))]
+    {
+        let _ = (target, thread);
+        true
+    }
 }
 
 /// Linux's kill rule: a process may always signal itself; otherwise the
@@ -2488,8 +2661,19 @@ pub(crate) fn kill_one(
     pid: crate::process::ProcessId,
     sig: i32,
 ) -> SyscallResult {
+    kill_one_to(caller, pid, None, sig)
+}
+
+/// [`kill_one`] for a signal that names thread `thread` of `pid`: the
+/// permission check takes that thread's Landlock domain.
+pub(crate) fn kill_one_to(
+    caller: &crate::process::Process,
+    pid: crate::process::ProcessId,
+    thread: Option<u64>,
+    sig: i32,
+) -> SyscallResult {
     let target = crate::process::table::get_process(pid).ok_or(SyscallError::ProcessNotFound)?;
-    if !may_signal(caller, &target, sig) {
+    if !may_signal(caller, &target, thread, sig) {
         return Err(SyscallError::OperationNotPermitted);
     }
     // A zombie (exited, not yet reaped) takes the signal and discards it,
@@ -2787,6 +2971,43 @@ fn rename_entry(old: &str, new: &str) -> SyscallResult {
         return Err(SyscallError::CrossDevice);
     }
     want_write(&vfs, &old_parent_canon)?;
+    // Lock_rename's traps come before the hook (__start_renaming, then
+    // security_path_rename): the source an ancestor of the target is
+    // EINVAL, the target an ancestor of the source ENOTEMPTY (PR #49
+    // independent review).
+    let join = |dir: &str, name: &str| {
+        if dir == "/" {
+            alloc::format!("/{}", name)
+        } else {
+            alloc::format!("{}/{}", dir, name)
+        }
+    };
+    let src_full = join(&old_parent_canon, &old_name);
+    let dst_full = join(&new_parent_canon, &new_name);
+    if src_full != dst_full {
+        if crate::fs::path_is_under(&new_parent_canon, &src_full) {
+            return Err(SyscallError::InvalidArgument);
+        }
+        if crate::fs::path_is_under(&old_parent_canon, &dst_full) {
+            return Err(SyscallError::DirectoryNotEmpty);
+        }
+    }
+    // Landlock's hook_path_rename, after EXDEV and EROFS and before the
+    // permission checks, as security_path_rename precedes vfs_rename.
+    #[cfg(feature = "alloc")]
+    if vfs.landlock().is_some() {
+        let moved = old_parent.lookup(&old_name).map_err(map_resolve_err)?;
+        let replaced = new_parent.lookup(&new_name).ok();
+        vfs.landlock_refer(
+            &moved,
+            replaced.as_ref(),
+            (&old_parent_canon, &old_parent),
+            (&new_parent_canon, &new_parent),
+            true,
+            false,
+        )
+        .map_err(super::map_kernel_error)?;
+    }
     check_may_remove(&*old_parent, &old_name)?;
     check_dir_write(&*new_parent)?;
     // Replacing an existing `new` removes it, so the sticky rule applies.
@@ -3981,6 +4202,8 @@ pub(crate) fn link_at(
     // Where the old name is (canonical), for the mount check below; `None`
     // for a descriptor without a path.
     let mut old_canonical: Option<alloc::string::String> = None;
+    // The directory a nameless O_TMPFILE file was made in.
+    let mut old_tmp_dir: Option<alloc::sync::Arc<dyn crate::fs::VfsNode>> = None;
     let target = if old.is_empty() {
         if olddirfd as u32 as i32 == AT_FDCWD as u32 as i32 {
             // "." from the working directory, as open_empty_path does, so
@@ -4008,6 +4231,7 @@ pub(crate) fn link_at(
                 return Err(SyscallError::ResourceNotFound);
             }
             old_canonical = file.path.clone();
+            old_tmp_dir = file.tmpfile_dir.clone();
             file.node.clone()
         }
     } else {
@@ -4031,6 +4255,79 @@ pub(crate) fn link_at(
         .is_some_and(|old| vfs.mount_point_of(old) == vfs.mount_point_of(&parent_canonical));
     if !same_mount {
         return Err(SyscallError::CrossDevice);
+    }
+    // Landlock's hook_path_link, after the mount check as in do_linkat.
+    // Renames wait from the check of where the file is until the link is
+    // made, so the directory checked is still the file's when it gets its
+    // new name (PR #49 review).
+    #[cfg(feature = "alloc")]
+    let _rename = vfs
+        .landlock()
+        .is_some()
+        .then(|| crate::fs::RENAME_LOCK.lock());
+    #[cfg(feature = "alloc")]
+    if vfs.landlock().is_some() {
+        // Only a domain that handles a filesystem right checks a link
+        // (landlock_get_applicable_subject): one with network or scope
+        // layers alone is not held to where the names are now.
+        let fs_checked = vfs.landlock().is_some_and(|d| d.handles_fs());
+        // The new name's directory, found before renames were held off:
+        // still where its path says, in the caller's tree or a detached
+        // one, or the check below would use another directory's chain (PR
+        // #49 review).
+        let parent_there = !fs_checked
+            || vfs
+                .landlock_node_at(&parent_canonical)
+                .is_some_and(|n| crate::fs::inode_key(&n) == crate::fs::inode_key(&parent));
+        if !parent_there {
+            return Err(SyscallError::PermissionDenied);
+        }
+        // The directory the file is in, which its recorded path names
+        // only while that path still leads to it: a file moved since (an
+        // O_PATH descriptor's, say) is in some other directory this path
+        // does not tell, so the link is refused rather than checked
+        // against the old one (PR #49 review).
+        // An O_TMPFILE file made to be named has no entry: its path is
+        // `<dir>/#<inode>`, whose directory is the one it was made in.
+        let nameless_tmpfile = target.link_count() == 0 && target.tmpfile_linkable();
+        let still_there = !fs_checked
+            || nameless_tmpfile
+            || old_canonical
+                .as_deref()
+                .and_then(|p| vfs.landlock_node_at(p))
+                .is_some_and(|n| crate::fs::inode_key(&n) == crate::fs::inode_key(&target));
+        if !still_there {
+            return Err(SyscallError::PermissionDenied);
+        }
+        let old_dir = match (&old_tmp_dir, nameless_tmpfile) {
+            // The directory it was made in, under the path's directory
+            // part: moved since, the walk does not reach it and only its
+            // own key counts.
+            (Some(dir), true) => {
+                let path = old_canonical.as_deref().unwrap_or("/");
+                let dir_path = path.rsplit_once('/').map_or("/", |(d, _)| d);
+                let dir_path = if dir_path.is_empty() { "/" } else { dir_path };
+                (alloc::string::String::from(dir_path), dir.clone())
+            }
+            _ if !fs_checked => (alloc::string::String::new(), parent.clone()),
+            _ => old_canonical
+                .as_deref()
+                .and_then(|p| vfs.landlock_parent_at(p))
+                .ok_or(SyscallError::PermissionDenied)?,
+        };
+        // A domain with no filesystem right checks no link (and needs
+        // neither place found above; PR #49 review).
+        if fs_checked {
+            vfs.landlock_refer(
+                &target,
+                None,
+                (&old_dir.0, &old_dir.1),
+                (&parent_canonical, &parent),
+                false,
+                false,
+            )
+            .map_err(super::map_kernel_error)?;
+        }
     }
     // vfs_link: an append-only or immutable file gets no new name (EPERM).
     #[cfg(feature = "alloc")]
@@ -4064,7 +4361,18 @@ pub fn sys_symlink(target_ptr: usize, link_ptr: usize) -> SyscallResult {
 pub(crate) fn symlink_at(target_ptr: usize, newdirfd: usize, link_ptr: usize) -> SyscallResult {
     let target = read_user_path(target_ptr)?;
     let link = read_user_path(link_ptr)?;
-    let (parent, name) = new_entry(newdirfd, &link)?;
+    let (parent, name, canonical) = new_entry_in(newdirfd, &link)?;
+    // Landlock's hook_path_symlink, on the directory.
+    #[cfg(feature = "alloc")]
+    vfs()?
+        .landlock_check(
+            &canonical,
+            Some(&parent),
+            crate::fs::landlock_rights::MAKE_SYM,
+        )
+        .map_err(super::map_kernel_error)?;
+    #[cfg(not(feature = "alloc"))]
+    let _ = canonical;
     let node = parent
         .symlink(&name, &target)
         .map_err(super::map_kernel_error)?;
@@ -4193,6 +4501,14 @@ pub fn sys_truncate(path_ptr: usize, length: usize) -> SyscallResult {
     // vfs_truncate).
     let _writing =
         crate::fs::write_access::WriteAccess::get(&node).map_err(super::map_kernel_error)?;
+    // Landlock's hook_path_truncate.
+    #[cfg(feature = "alloc")]
+    vfs.landlock_check(
+        &canonical,
+        Some(&node),
+        crate::security::landlock::ll::fs::TRUNCATE,
+    )
+    .map_err(super::map_kernel_error)?;
     crate::fs::check_fsize_truncate(&*node, length).map_err(super::map_kernel_error)?;
     crate::fs::truncate_removing_privs(&*node, length).map_err(super::map_kernel_error)?;
     crate::fs::inotify::on_path(&path, &node, crate::fs::inotify::IN_MODIFY);
@@ -4241,6 +4557,7 @@ pub(crate) fn exec_file_at(
             exe_path,
             path_inaccessible: cloexec,
             mnt_flags,
+            canonical: file.path.clone(),
         });
     }
     let lookup = if name.is_empty() {
@@ -4270,6 +4587,7 @@ pub(crate) fn exec_file_at(
         filename,
         path_inaccessible: from_fd && entry().is_ok_and(|(_, cloexec)| cloexec),
         mnt_flags: crate::process::creation::mount_flags(&vfs, &canonical),
+        canonical: Some(canonical),
     })
 }
 
@@ -4757,10 +5075,30 @@ pub fn sys_unlinkat(dirfd: usize, path_ptr: usize, flags: usize) -> SyscallResul
         .resolve_path_no_follow(&abs_path)
         .map_err(map_resolve_err)?;
     let is_dir = node.node_type() == crate::fs::NodeType::Directory;
+    // A trailing slash on a non-directory fails in the lookup itself, before
+    // any hook (do_unlinkat's "slashes").
+    if !remove_dir && !is_dir && trailing_slash {
+        return Err(SyscallError::NotADirectory);
+    }
+    // Landlock's hook_path_unlink and hook_path_rmdir, on the directory,
+    // before vfs_unlink's and vfs_rmdir's own checks (security_path_unlink
+    // then may_delete's EISDIR and ENOTDIR): REMOVE_FILE for unlink and
+    // REMOVE_DIR for rmdir, whatever the object is (PR #49 independent
+    // review).
+    #[cfg(feature = "alloc")]
+    vfs.landlock_check(
+        &dir_canonical,
+        Some(&dir),
+        crate::fs::landlock_rights::remove(if remove_dir {
+            crate::fs::NodeType::Directory
+        } else {
+            crate::fs::NodeType::File
+        }),
+    )
+    .map_err(super::map_kernel_error)?;
     match (remove_dir, is_dir) {
         (true, false) => return Err(SyscallError::NotADirectory),
         (false, true) => return Err(SyscallError::IsADirectory),
-        (false, false) if trailing_slash => return Err(SyscallError::NotADirectory),
         _ => {}
     }
     check_may_remove(&*dir, &name)?;
@@ -5234,14 +5572,41 @@ pub(crate) fn make_socket_file(
 /// anything but a socket file is ECONNREFUSED.
 pub(crate) fn find_socket_file(
     name: &str,
-) -> Result<alloc::sync::Arc<dyn crate::fs::VfsNode>, SyscallError> {
+) -> Result<(alloc::sync::Arc<dyn crate::fs::VfsNode>, u64), SyscallError> {
     let path = resolve_at_path(AT_FDCWD, name)?;
-    let file = vfs()?.resolve_path(&path).map_err(map_resolve_err)?;
+    let view = vfs()?;
+    let (file, canonical) = view
+        .resolve_path_canonical(&path)
+        .map_err(map_resolve_err)?;
     require_open_access(&file, &OpenFlags::write_only())?;
     if file.node_type() != crate::fs::NodeType::Socket {
         return Err(SyscallError::ConnectionRefused);
     }
-    Ok(file)
+    // The socket bound to it, found once: none is ECONNREFUSED. Then
+    // Landlock's hook_unix_find on that socket: RESOLVE_UNIX, which the
+    // layers shared with its maker grant. The caller connects to this
+    // socket by its id (PR #49 review).
+    #[cfg(feature = "alloc")]
+    {
+        let (id, server) =
+            crate::net::unix_socket::bound_socket(&file).ok_or(SyscallError::ConnectionRefused)?;
+        if let Some(d) = view.landlock() {
+            d.dom
+                .check_path_scoped(
+                    &view.landlock_ancestry(&canonical, Some(&file)),
+                    crate::security::landlock::ll::fs::RESOLVE_UNIX,
+                    server.as_deref().map(|s| &s.dom),
+                )
+                .map_err(|_| SyscallError::PermissionDenied)?;
+        }
+        Ok((file, id))
+    }
+    #[cfg(not(feature = "alloc"))]
+    {
+        let _ = canonical;
+        let id = crate::net::unix_socket::bound_id(&file).ok_or(SyscallError::ConnectionRefused)?;
+        Ok((file, id))
+    }
 }
 
 #[cfg(test)]

@@ -157,9 +157,9 @@ impl FadtPmInfo {
             pm1_evt_len: 0,
             pm1_cnt_len: 0,
             slp_typ_s1: 0,
-            slp_typ_s3: 5, // QEMU default for S3
-            slp_typ_s4: 6, // QEMU default for S4
-            slp_typ_s5: 7, // QEMU default for S5
+            slp_typ_s3: 5, // Intel ICH's S3 (QEMU's is 1: the PIIX4 fallback sets it)
+            slp_typ_s4: 6, // Intel ICH's S4 (QEMU's is 2)
+            slp_typ_s5: 7, // Intel ICH's S5 (QEMU's is 0); the DSDT's \_S5 replaces it
             sci_int: 9,
             smi_cmd: 0,
             acpi_enable: 0,
@@ -395,6 +395,13 @@ pub fn acpi_pm_init() -> KernelResult<()> {
         info.smi_cmd = 0x00B2;
         info.gpe0_blk = 0x0620;
         info.gpe0_blk_len = 8;
+        // QEMU's sleep types, as its DSDT gives them (hw/i386/acpi-build.c:
+        // _S3 1, _S4 its s4_val, 2 by default, _S5 0): these ports are
+        // QEMU's, so the Intel-chipset types would not power it off (PR #49
+        // review).
+        info.slp_typ_s3 = 1;
+        info.slp_typ_s4 = 2;
+        info.slp_typ_s5 = 0;
         println!("[ACPI-PM] Using QEMU/PIIX4 PM defaults");
     }
 
@@ -602,8 +609,78 @@ fn try_parse_fadt(vaddr: usize) -> Option<FadtPmInfo> {
     info.acpi_disable = fadt.acpi_disable;
     info.gpe0_blk = fadt.gpe0_blk as u16;
     info.gpe0_blk_len = fadt.gpe0_blk_len;
+    // S5's sleep type is the firmware's, from `\_S5` in the DSDT, as Linux
+    // reads it (acpi_get_sleep_type_data). The fallback of 7 is Intel ICH
+    // hardware's; QEMU's `_S5` is 0, and its PM1 control handler powers off
+    // only for 0, so with the fallback reboot's POWER_OFF halted instead
+    // (PR #49 review).
+    if let Some(typ) = dsdt_s5_type(fadt.dsdt as usize) {
+        info.slp_typ_s5 = typ;
+    }
 
     Some(info)
+}
+
+/// The DSDT at physical `pa`'s `\_S5` SLP_TYPa, if it has one.
+fn dsdt_s5_type(pa: usize) -> Option<u16> {
+    if pa == 0 {
+        return None;
+    }
+    let vaddr = super::msr::phys_to_virt(pa)?;
+    // SAFETY: the FADT names the DSDT's physical address, and the physical
+    // map covers it, as it covers the FADT; the header is read first and
+    // the body only up to the length it gives, bounded below.
+    let sdt = unsafe { &*(vaddr as *const SdtHeader) };
+    if &{ sdt.signature } != b"DSDT" {
+        return None;
+    }
+    let len = { sdt.length } as usize;
+    let header = core::mem::size_of::<SdtHeader>();
+    if !(header..=(4 << 20)).contains(&len) {
+        return None;
+    }
+    // SAFETY: as above, `len` bytes from the header's start are the table.
+    let aml = unsafe { core::slice::from_raw_parts((vaddr + header) as *const u8, len - header) };
+    s5_sleep_type(aml).map(u16::from)
+}
+
+/// SLP_TYPa from AML's `Name (_S5_, Package () { a, b, ... })`, found by its
+/// encoding (NameOp, optionally a root prefix, `_S5_`, PackageOp): enough
+/// for the one object a power-off needs, without an AML interpreter. The
+/// value is ZeroOp, OneOp or a BytePrefix constant, as firmware writes it.
+fn s5_sleep_type(aml: &[u8]) -> Option<u8> {
+    // Every occurrence is tried: an earlier one may be a reference or a
+    // string, not the definition (PR #49 review).
+    aml.windows(4)
+        .enumerate()
+        .filter(|(_, w)| *w == b"_S5_")
+        .find_map(|(at, _)| s5_definition_at(aml, at))
+}
+
+/// [`s5_sleep_type`] for the `_S5_` at byte `at`, if it is the definition.
+fn s5_definition_at(aml: &[u8], at: usize) -> Option<u8> {
+    let named = match at {
+        0 => false,
+        _ if aml[at - 1] == 0x08 => true,
+        _ => at >= 2 && aml[at - 1] == b'\\' && aml[at - 2] == 0x08,
+    };
+    if !named {
+        return None;
+    }
+    let rest = aml.get(at + 4..)?;
+    if *rest.first()? != 0x12 {
+        return None;
+    }
+    // PkgLength: its lead byte's top two bits count the bytes after it.
+    let pkg_len_bytes = 1 + (*rest.get(1)? >> 6) as usize;
+    // Then NumElements, then the first element.
+    let first = rest.get(1 + pkg_len_bytes + 1..)?;
+    match *first.first()? {
+        0x00 => Some(0),
+        0x01 => Some(1),
+        0x0A => first.get(1).copied(),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1028,6 +1105,34 @@ pub fn acpi_hibernate_s4() -> KernelResult<()> {
 ///
 /// Writes the S5 SLP_TYP value with SLP_EN to PM1a_CNT. The system
 /// should power off; this function does not return on success.
+/// The S5 register writes, read while their lock can still be taken:
+/// reboot's power off reads them before it stops the other CPUs, then
+/// [`S5::enter`] only writes ports (PR #49 review).
+#[derive(Clone, Copy)]
+pub struct S5 {
+    info: FadtPmInfo,
+}
+
+/// The S5 writes, if ACPI PM is set up.
+pub fn prepare_s5() -> Option<S5> {
+    if !PM_INITIALIZED.load(Ordering::Acquire) {
+        return None;
+    }
+    Some(S5 {
+        info: *FADT_PM_INFO.lock(),
+    })
+}
+
+impl S5 {
+    /// Request S5: port writes only, no lock and no output, so it works
+    /// with the other CPUs stopped wherever they were.
+    pub fn enter(&self) {
+        let slp_value = (self.info.slp_typ_s5 << 10) | SLP_EN;
+        write_pm1a_cnt(&self.info, slp_value);
+        write_pm1b_cnt(&self.info, slp_value);
+    }
+}
+
 pub fn acpi_shutdown_s5() -> KernelResult<()> {
     if !PM_INITIALIZED.load(Ordering::Acquire) {
         return Err(KernelError::NotInitialized {
@@ -1274,6 +1379,44 @@ mod tests {
             alloc::format!("{}", AcpiSleepState::S5SoftOff),
             "S5 (Soft Off)"
         );
+    }
+
+    #[test]
+    fn s5_sleep_type_from_aml() {
+        // QEMU's: Name (_S5, Package (4) { Zero, Zero, Zero, Zero }).
+        let qemu = [
+            0x10, 0x08, 0x08, 0x5F, 0x53, 0x35, 0x5F, 0x12, 0x06, 0x04, 0x00, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(s5_sleep_type(&qemu), Some(0));
+        // An Intel board's: \_S5 with byte constants 7, 7.
+        let ich = [
+            0x08, b'\\', 0x5F, 0x53, 0x35, 0x5F, 0x12, 0x0A, 0x04, 0x0A, 0x07, 0x0A, 0x07, 0x00,
+            0x00,
+        ];
+        assert_eq!(s5_sleep_type(&ich), Some(7));
+        // OneOp, and a two-byte PkgLength.
+        let one = [0x08, 0x5F, 0x53, 0x35, 0x5F, 0x12, 0x40, 0x01, 0x04, 0x01];
+        assert_eq!(s5_sleep_type(&one), Some(1));
+        // Not a Name, no package, truncated: nothing.
+        assert_eq!(
+            s5_sleep_type(&[0x5F, 0x53, 0x35, 0x5F, 0x12, 0x06, 0x04, 0x00]),
+            None
+        );
+        assert_eq!(
+            s5_sleep_type(&[0x14, 0x5F, 0x53, 0x35, 0x5F, 0x12, 0x06, 0x04, 0x00]),
+            None
+        );
+        assert_eq!(
+            s5_sleep_type(&[0x08, 0x5F, 0x53, 0x35, 0x5F, 0x12, 0x06]),
+            None
+        );
+        assert_eq!(s5_sleep_type(b"no sleep states"), None);
+        // A reference before the definition: the definition still counts.
+        let later = [
+            0x70, 0x5F, 0x53, 0x35, 0x5F, 0x60, 0x08, 0x5F, 0x53, 0x35, 0x5F, 0x12, 0x06, 0x04,
+            0x0A, 0x05,
+        ];
+        assert_eq!(s5_sleep_type(&later), Some(5));
     }
 
     #[test]

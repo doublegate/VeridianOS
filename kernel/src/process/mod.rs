@@ -40,6 +40,7 @@ pub mod pidns;
 pub mod posix_timer;
 pub mod rlimit;
 pub mod robust_list;
+pub mod seccomp;
 pub mod session;
 pub mod signals;
 pub mod table;
@@ -779,6 +780,24 @@ pub fn wait_interrupted() -> bool {
     }
 }
 
+/// [`wait_interrupted`] for killable waits: only a fatal signal (or another
+/// thread's exec) ends them, not a signal a handler catches. Fatal includes
+/// one left at a default action that ends the process, which Linux turns
+/// into group exit when it is sent (`signals::group_fatal`; PR #49 review).
+pub fn wait_killed() -> bool {
+    if dispatched_context().is_none() {
+        return false;
+    }
+    let (Some(process), Some(thread)) = (current_process(), current_thread()) else {
+        return false;
+    };
+    match process.kill_pending.load(Ordering::Acquire) {
+        0 => signals::group_fatal(&process, &thread),
+        exit::EXEC_PENDING => process.exec_tid.load(Ordering::Acquire) != thread.tid.0,
+        _ => true,
+    }
+}
+
 /// Run on every return to user mode of a dispatched thread: a thread whose
 /// process received a fatal signal exits here instead (the signal is acted
 /// on by the process's own threads, never torn down under them).
@@ -910,19 +929,41 @@ pub fn create_thread(
                     creator.no_new_privs.load(Ordering::Acquire),
                     Ordering::Release,
                 );
+                thread.seccomp.copy_from(&creator.seccomp);
+                #[cfg(feature = "alloc")]
+                thread.landlock.copy_from(&creator.landlock);
                 let sets = *creator.caps.lock();
                 *thread.caps.lock() = sets;
             }
 
             // Add thread to process
             let thread = process.add_thread(thread)?;
+            // A thread of the process: its keyrings shared, a thread
+            // keyring of its own if the creator has one. Taken once the
+            // thread is in the process, whose cleanup gives them back: a
+            // failed add left them held (PR #49 review).
+            #[cfg(feature = "alloc")]
+            if let Some(creator) = &creator {
+                let keys = crate::syscall::keys::thread_keys(&creator.keys.lock());
+                *thread.keys.lock() = keys;
+            }
             // Copied again under the thread map, which a set*id call on
             // another thread fixes every thread's sets under
             // (`Process::change_uids`), as clone does.
+            // The seccomp state too: TSYNC checks and changes every
+            // thread's under the same lock, so the new thread either was
+            // in the map for it or copies a creator it already changed.
             if let Some(creator) = &creator {
                 let _threads = process.threads.lock();
                 let sets = *creator.caps.lock();
                 *thread.caps.lock() = sets;
+                thread.seccomp.copy_from(&creator.seccomp);
+                #[cfg(feature = "alloc")]
+                thread.landlock.copy_from(&creator.landlock);
+                thread.no_new_privs.store(
+                    creator.no_new_privs.load(Ordering::Acquire),
+                    Ordering::Release,
+                );
             }
 
             Ok(tid)

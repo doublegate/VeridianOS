@@ -302,6 +302,10 @@ pub fn note_ipi() {
             .ipis
             .fetch_add(1, core::sync::atomic::Ordering::Release)
     };
+    // A restart, halt or power-off stops every CPU it interrupts.
+    if crate::arch::power::stopping() {
+        crate::arch::power::stop_this_cpu();
+    }
 }
 
 /// How many IPIs CPU `cpu` has taken (another CPU's view, for

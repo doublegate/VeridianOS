@@ -1172,6 +1172,15 @@ fn kick_cpu(cpu: usize) {
     let _ = cpu;
 }
 
+/// Interrupt every other online CPU once (the reschedule IPI), as stopping
+/// the machine needs (`arch::power`).
+pub fn kick_others() {
+    let online = (crate::arch::smp_boot::online_cpus() as usize).min(crate::sched::smp::MAX_CPUS);
+    for cpu in 0..online {
+        kick_cpu(cpu);
+    }
+}
+
 /// membarrier's expedited barrier: interrupt every other online CPU and wait
 /// until each has taken the interrupt, whose handler runs a full barrier
 /// before counting it (`arch::percpu::note_ipi`), and, returning, a core
@@ -1551,12 +1560,31 @@ pub fn clock_ns() -> u64 {
 pub fn wait_event(
     wq: &WaitQueue,
     deadline: Option<u64>,
+    cond: impl FnMut() -> bool,
+) -> Result<(), WaitError> {
+    wait_event_until(wq, deadline, cond, crate::process::wait_interrupted)
+}
+
+/// [`wait_event`] that only a fatal signal ends (Linux's killable waits):
+/// a signal with a handler waits until the call is done.
+pub fn wait_event_killable(
+    wq: &WaitQueue,
+    deadline: Option<u64>,
+    cond: impl FnMut() -> bool,
+) -> Result<(), WaitError> {
+    wait_event_until(wq, deadline, cond, crate::process::wait_killed)
+}
+
+fn wait_event_until(
+    wq: &WaitQueue,
+    deadline: Option<u64>,
     mut cond: impl FnMut() -> bool,
+    interrupted: fn() -> bool,
 ) -> Result<(), WaitError> {
     let check = |cond: &mut dyn FnMut() -> bool| {
         if cond() {
             Some(Ok(()))
-        } else if crate::process::wait_interrupted() {
+        } else if interrupted() {
             Some(Err(WaitError::Interrupted))
         } else if deadline.is_some_and(|d| deadline_now() >= d) {
             Some(Err(WaitError::TimedOut))

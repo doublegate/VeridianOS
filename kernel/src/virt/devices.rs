@@ -57,7 +57,9 @@ impl VirtualUart {
         if !self.output_buffer.is_empty() {
             for &b in &self.output_buffer {
                 if b.is_ascii() {
-                    crate::print!("{}", b as char);
+                    // A guest's serial output: the console's, not the
+                    // kernel log's (`print::console_write`).
+                    crate::print::console_write(format_args!("{}", b as char));
                 }
             }
             self.output_buffer.clear();

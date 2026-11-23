@@ -118,6 +118,76 @@
 
 ### Added
 
+- seccomp (v0.28 item 5 system tier, ADR 0027 decision 27): seccomp(2) and PR_SET_SECCOMP with
+  strict mode and classic BPF filters checked and run as Linux does, by the new shared
+  `veridian-cbpf` crate; every call, private ones included, is filtered before it is decoded;
+  KILL_PROCESS, KILL_THREAD, TRAP (SIGSYS with SYS_SECCOMP), ERRNO, LOG and TRACE (ENOSYS
+  without a tracer), TSYNC, GET_ACTION_AVAIL and GET_NOTIF_SIZES; `/proc/<pid>/status` shows
+  NoNewPrivs, Seccomp and Seccomp_filters. User notification: the listener descriptor
+  (NEW_LISTENER, WAIT_KILLABLE_RECV), RET_USER_NOTIF and the RECV, SEND (with CONTINUE),
+  ID_VALID, SET_FLAGS and ADDFD ioctls, POLLHUP once no thread uses the filter. Filters are
+  installed under the thread map (TSYNC also under the credential guard) and freed without
+  recursion. Runtime tests seccomp and seccomp_notify.
+- Landlock (v0.28 item 5 system tier, ADR 0029): landlock_create_ruleset, landlock_add_rule and
+  landlock_restrict_self as Linux 7.3, ABI 11 with errata 1 to 4, through the new shared
+  `veridian-landlock` crate and one authority entry (`cap::authority::holds_path` and
+  `holds_net`). Up to 16 stacked layers, kept across fork, clone and exec; TSYNC and
+  NO_NEW_PRIVS. Rules name objects, not paths, so they follow renames and bind mounts.
+  Filesystem checks where Linux makes them: open (READ_FILE, WRITE_FILE, READ_DIR, with
+  TRUNCATE and IOCTL_DEV kept on the open file), exec of the program and its interpreter
+  (EXECUTE), creating each kind of node, removal, link and rename (REFER, EXDEV when a move
+  would gain rights), truncate and ftruncate, device ioctls, and connecting to a pathname UNIX
+  socket (RESOLVE_UNIX, free within the maker's domain). No mount changes under a filesystem
+  domain. TCP and UDP bind, connect and send by port, with Linux's address checks. Signal
+  scoping (a signal sent to one thread by the domain of that thread), and ptrace, process_vm,
+  pidfd_getfd and kcmp limited to the caller's domain and below. Files on the kernel's internal
+  filesystems (namespace files, memfd) are always allowed and cannot anchor a rule, as Linux's
+  internal mounts. CONFIG_SECURITY_LANDLOCK is set. Runtime test landlock.
+- The key retention service core (v0.28 item 5 system tier, ADR 0027 decision 28): add_key,
+  request_key and keyctl as Linux 7.3's `security/keys/`, through the new shared `veridian-keys`
+  crate. User, logon and keyring keys; thread, process, session, user, user-session and
+  persistent keyrings, inherited as Linux's credentials; quotas, permissions with possession,
+  searches, links with cycle checks, MOVE, reject-all restriction, timeouts, revocation,
+  invalidation and garbage collection; `/proc/keys`, `/proc/key-users` and
+  `/proc/sys/kernel/keys`. request_key with no usermode helper behaves as Linux without
+  `/sbin/request-key` (ENOENT, a 60 s negative key). CONFIG_KEYS and CONFIG_PERSISTENT_KEYRINGS
+  are set. Runtime test keyrings.
+- lsm_list_modules, lsm_get_self_attr and lsm_set_self_attr (Linux 7.3): the modules are the
+  capability module and Landlock; neither has process attributes, so after Linux's argument
+  checks getting or setting one is EOPNOTSUPP. Runtime test lsm_calls.
+- The syscall coverage reports count the calls that return ENOSYS by a recorded decision
+  (modules, kexec, swap, uprobes, NUMA, disk quotas, perf_event_open, bpf) as `declined`, each
+  with its reason and the release planned to bring it in (MASTER_TODO item 18), apart from
+  the `missing` ones still to be written: 19 missing on x86_64, 17 on AArch64, 19 on RISC-V.
+- syslog(2) and the kernel log ring (ADR 0027 decision 29): every line the kernel prints is
+  kept in syslog's form in a 128 KiB ring; READ (waiting), READ_ALL, READ_CLEAR, CLEAR,
+  CONSOLE_OFF, CONSOLE_ON, CONSOLE_LEVEL, SIZE_UNREAD and SIZE_BUFFER, each that needs
+  CAP_SYSLOG also needing the `System` object (ADR 0024), and READ_CLEAR clearing only what
+  reached the caller; kernel messages on the
+  console follow `console_loglevel`, while what programs write to the console goes straight to
+  it, as a tty write, and never enters the log; `/proc/sys/kernel/printk` and
+  `dmesg_restrict`, which starts at 1.
+- acct(2) (Linux 7.3 `kernel/acct.c`): BSD process accounting with version 3 records, per PID
+  namespace, written when a process's last thread exits into every namespace from its own up
+  that accounts, with ids as each opener's user namespace sees them; a namespace's accounting
+  ends once its init's exit has emptied it, so the processes that exit kills are recorded
+  there; paused below 2 % free space and resumed above 4 %, checked from the first record; a
+  file on procfs is refused (EINVAL). CONFIG_BSD_PROCESS_ACCT and _V3 set. Runtime test acct.
+- vhangup (EPERM without CAP_SYS_TTY_CONFIG, else nothing to hang up, as a Linux process
+  without a controlling terminal) and iopl and ioperm, whose ports come only from IoPort
+  capabilities, of which none is granted yet: turning ports on is EPERM, iopl 3 EPERM.
+- reboot(2) (Linux 7.3 `kernel/reboot.c`, ADR 0027 decision 29): CAP_SYS_BOOT and the magic
+  numbers; inside a PID namespace (which also needs MODIFY on that namespace and WRITE over
+  its init) the
+  namespace's init is killed and reported killed by SIGHUP or SIGINT; on the machine (which
+  also needs the `System` object) restart, halt and power off on all three architectures
+  after stopping the other CPUs, and CAD_ON/CAD_OFF. ACPI power-off uses the DSDT's `\_S5`
+  sleep type, and PSCI the device tree's conduit in every build.
+  Runtime test reboot.
+- BlockFS does not give a deleted file's inode number to a new file while a node in memory
+  still names it (an open file, a working directory, a Landlock rule), as Linux keeps an
+  inode until its last reference goes. A rule, FIFO or socket binding on the old file can no
+  longer come to name the new one.
 - The new mount API (Linux 7.3 `fs/fsopen.c`, `fs/namespace.c`): fsopen, fsconfig, fsmount and
   fspick make and reconfigure a filesystem through a context descriptor, whose parameters are
   checked one at a time as Linux checks them and whose refusals read back from it (`e tmpfs:
